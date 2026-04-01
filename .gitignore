@@ -1,0 +1,39 @@
+build/
+bin/
+out/
+.cache/
+
+*.o
+*.a
+*.so
+*.lib
+*.dll
+*.dylib
+
+*.ll
+*.bc
+*.s
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+Makefile
+install_manifest.txt
+compile_commands.json
+
+# VS Code
+.vscode/*
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/tasks.json
+
+# CLion / JetBrains
+.idea/
+cmake-build-*/
+
+# Others
+*.swp
+*~
+.DS_Store

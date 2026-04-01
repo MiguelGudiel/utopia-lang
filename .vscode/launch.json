@@ -1,0 +1,18 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug Utopia: Archivo Actual",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/tools/utopia/utopia",
+      "args": [
+        "${file}",
+        "--run",
+        "-O2"
+      ],
+      "cwd": "${workspaceFolder}",
+      //"preLaunchTask": "utopia-compile-project"
+    }
+  ]
+}

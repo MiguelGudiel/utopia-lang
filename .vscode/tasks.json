@@ -1,0 +1,19 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "utopia-compile-project",
+      "type": "shell",
+      "command": "${workspaceFolder}/build/tools/utopia/utopia",
+      "args": [
+        "${file}",
+        "--run"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": []
+    }
+  ]
+}
