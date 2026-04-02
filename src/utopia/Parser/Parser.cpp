@@ -1,4 +1,5 @@
 #include "utopia/Parser/Parser.hpp"
+#include "utopia/Lexer/Lexer.hpp"
 #include <memory>
 #include <stdexcept>
 
@@ -46,13 +47,113 @@ bool Parser::isTypeToken() const {
          t == TokenType::KW_UINT || t == TokenType::KW_VOID;
 }
 
-std::string Parser::consumeType() {
-  if (!isTypeToken()) {
-    throw std::runtime_error("Syntax Error: Expected a data type.");
+// Unified modifier pipeline. Extracts all metadata before declarations.
+DeclPreamble Parser::parsePreamble() {
+  DeclPreamble preamble;
+  while (true) {
+    if (match(TokenType::AT)) {
+      std::string decName = currentToken().value;
+      expect(TokenType::IDENTIFIER, "Expected decorator name");
+      preamble.decorators.push_back(decName);
+      // Fast forward over parenthesis for future parameterized decorators (e.g.
+      // @export("DLL"))
+      if (match(TokenType::LPAREN)) {
+        int depth = 1;
+        while (depth > 0 && currentToken().type != TokenType::EOF_TOK) {
+          if (currentToken().type == TokenType::LPAREN)
+            depth++;
+          else if (currentToken().type == TokenType::RPAREN)
+            depth--;
+          advance();
+        }
+      }
+    } else if (match(TokenType::KW_PUBLIC)) {
+      preamble.access = AccessModifier::Public;
+    } else if (match(TokenType::KW_PRIVATE)) {
+      preamble.access = AccessModifier::Private;
+    } else if (match(TokenType::KW_INLINE)) {
+      preamble.inlineState = InlineState::Inline;
+    } else if (match(TokenType::KW_FORCE_INLINE)) {
+      preamble.inlineState = InlineState::ForceInline;
+    } else if (match(TokenType::KW_CONST)) {
+      preamble.isConst = true;
+    } else {
+      break;
+    }
   }
-  std::string typeName = currentToken().value;
-  advance();
-  return typeName;
+  return preamble;
+}
+
+// Safe lookahead bypassing all preamble metadata.
+bool Parser::isVarDeclaration() const {
+  size_t tempCursor = cursor;
+
+  while (tempCursor < tokens.size()) {
+    TokenType t = tokens[tempCursor].type;
+    if (t == TokenType::KW_CONST || t == TokenType::KW_PUBLIC ||
+        t == TokenType::KW_PRIVATE || t == TokenType::KW_INLINE ||
+        t == TokenType::KW_FORCE_INLINE) {
+      tempCursor++;
+    } else if (t == TokenType::AT) {
+      tempCursor++;
+      if (tempCursor < tokens.size() &&
+          tokens[tempCursor].type == TokenType::IDENTIFIER) {
+        tempCursor++;
+        if (tempCursor < tokens.size() &&
+            tokens[tempCursor].type == TokenType::LPAREN) {
+          int depth = 1;
+          tempCursor++;
+          while (depth > 0 && tempCursor < tokens.size()) {
+            if (tokens[tempCursor].type == TokenType::LPAREN)
+              depth++;
+            else if (tokens[tempCursor].type == TokenType::RPAREN)
+              depth--;
+            tempCursor++;
+          }
+        }
+      }
+    } else {
+      break;
+    }
+  }
+
+  TokenType t = tokens[tempCursor].type;
+
+  if (t == TokenType::KW_INT || t == TokenType::KW_FLOAT ||
+      t == TokenType::KW_STRING_TYPE || t == TokenType::KW_BOOL ||
+      t == TokenType::KW_UINT || t == TokenType::KW_VOID) {
+    return true;
+  }
+
+  if (t == TokenType::IDENTIFIER) {
+    tempCursor++;
+    while (tempCursor < tokens.size()) {
+      TokenType next = tokens[tempCursor].type;
+      if (next == TokenType::STAR || next == TokenType::QUESTION) {
+        tempCursor++;
+      } else if (next == TokenType::IDENTIFIER) {
+        return true;
+      } else {
+        return false;
+      }
+    }
+  }
+  return false;
+}
+
+std::string Parser::consumeType() {
+  TokenType t = currentToken().type;
+
+  if (isTypeToken() || t == TokenType::IDENTIFIER) {
+    std::string typeName = currentToken().value;
+    advance();
+    return typeName;
+  }
+
+  const Token &tok = currentToken();
+  throw std::runtime_error(
+      std::to_string(tok.line) + ":" + std::to_string(tok.column) +
+      "|Syntax Error: Expected a data type. (Found: '" + tok.value + "')");
 }
 
 std::string Parser::parseTypeName() {
@@ -65,10 +166,46 @@ std::string Parser::parseTypeName() {
 }
 
 bool Parser::isFunctionStart() const {
+  // Preamble already consumed modifiers. Current token is strictly type or
+  // identifier.
   TokenType t = currentToken().type;
-  // A function begins with a type or a modifier
-  return isTypeToken() || t == TokenType::KW_INLINE ||
-         t == TokenType::KW_FORCE_INLINE;
+  size_t tempCursor = cursor;
+
+  if (t == TokenType::TILDE) {
+    tempCursor++;
+    if (tempCursor < tokens.size() &&
+        tokens[tempCursor].type == TokenType::IDENTIFIER) {
+      tempCursor++;
+      if (tempCursor < tokens.size() &&
+          tokens[tempCursor].type == TokenType::LPAREN) {
+        return true;
+      }
+    }
+  }
+
+  if (t == TokenType::IDENTIFIER && tempCursor + 1 < tokens.size()) {
+    if (tokens[tempCursor + 1].type == TokenType::LPAREN) {
+      return true;
+    }
+  }
+
+  if (isTypeToken() || t == TokenType::IDENTIFIER) {
+    tempCursor++;
+    while (tempCursor < tokens.size() &&
+           (tokens[tempCursor].type == TokenType::STAR ||
+            tokens[tempCursor].type == TokenType::QUESTION)) {
+      tempCursor++;
+    }
+    if (tempCursor < tokens.size() &&
+        tokens[tempCursor].type == TokenType::IDENTIFIER) {
+      tempCursor++;
+      if (tempCursor < tokens.size() &&
+          tokens[tempCursor].type == TokenType::LPAREN) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 std::unique_ptr<ProgramNode> Parser::parseProgram() {
@@ -76,8 +213,18 @@ std::unique_ptr<ProgramNode> Parser::parseProgram() {
   while (currentToken().type != TokenType::EOF_TOK) {
     if (currentToken().type == TokenType::KW_IMPORT) {
       parseImport();
+      continue;
+    }
+
+    // Pull payload before routing
+    DeclPreamble preamble = parsePreamble();
+
+    if (match(TokenType::KW_STRUCT)) {
+      program->structs.push_back(parseStructDecl(false, preamble));
+    } else if (match(TokenType::KW_CLASS)) {
+      program->structs.push_back(parseStructDecl(true, preamble));
     } else if (isFunctionStart()) {
-      program->functions.push_back(parseFunction());
+      program->functions.push_back(parseFunction(preamble));
     } else {
       const Token &stray = currentToken();
       throw std::runtime_error(
@@ -88,41 +235,175 @@ std::unique_ptr<ProgramNode> Parser::parseProgram() {
   return program;
 }
 
-void Parser::parseImport() {
-  expect(TokenType::KW_IMPORT, "Expected 'import'");
-  expect(TokenType::STRING, "Expected cadena");
-  expect(TokenType::SEMICOLON, "Expected ';'");
-}
-
-std::unique_ptr<FunctionNode> Parser::parseFunction() {
+std::unique_ptr<StructDeclNode>
+Parser::parseStructDecl(bool isClass, const DeclPreamble &structPreamble) {
   Token startTok = currentToken();
+  std::string name = currentToken().value;
+  expect(TokenType::IDENTIFIER, "The name was expected");
+  expect(TokenType::LBRACE, "Expected '{'");
 
-  InlineState inlineState = InlineState::None;
-  if (match(TokenType::KW_INLINE)) {
-    inlineState = InlineState::Inline;
-  } else if (match(TokenType::KW_FORCE_INLINE)) {
-    inlineState = InlineState::ForceInline;
+  std::vector<StructField> fields;
+  std::vector<std::unique_ptr<FunctionNode>> methods;
+
+  while (currentToken().type != TokenType::RBRACE &&
+         currentToken().type != TokenType::EOF_TOK) {
+
+    DeclPreamble memberPreamble = parsePreamble();
+
+    if (isFunctionStart() || currentToken().value == name ||
+        currentToken().type == TokenType::TILDE) {
+      auto method = parseMethod(name, memberPreamble);
+      methods.push_back(std::move(method));
+      continue;
+    }
+
+    std::string typeName = parseTypeName();
+    std::string fieldName = currentToken().value;
+    expect(TokenType::IDENTIFIER, "The name of the field was expected.");
+
+    std::unique_ptr<ExprNode> fieldInit = nullptr;
+    if (match(TokenType::ASSIGN)) {
+      fieldInit = parseExpression();
+    }
+
+    expect(TokenType::SEMICOLON, "Expected ';'");
+
+    fields.push_back({memberPreamble.access, typeName, fieldName,
+                      memberPreamble.decorators, std::move(fieldInit)});
+  }
+  expect(TokenType::RBRACE, "Expected '}'");
+
+  bool hasCtor = false;
+  bool hasDtor = false;
+  for (const auto &m : methods) {
+    if (m->isConstructor)
+      hasCtor = true;
+    if (m->isDestructor)
+      hasDtor = true;
   }
 
-  std::string retType = parseTypeName();
-  std::string funcName = currentToken().value;
-  expect(TokenType::IDENTIFIER, "Expected el nombre");
+  // blind AST injection for missing lifecycle methods
+  if (!hasCtor) {
+    auto defCtor = std::make_unique<FunctionNode>(
+        structPreamble.inlineState, structPreamble.access,
+        structPreamble.decorators, "void", name, std::vector<FunctionParam>{},
+        true, true, false, name);
+    finalizeNode(defCtor.get(), startTok);
+    methods.push_back(std::move(defCtor));
+  }
+
+  if (!hasDtor) {
+    auto defDtor = std::make_unique<FunctionNode>(
+        structPreamble.inlineState, structPreamble.access,
+        structPreamble.decorators, "void", "~" + name,
+        std::vector<FunctionParam>{}, true, false, true, name);
+    finalizeNode(defDtor.get(), startTok);
+    methods.push_back(std::move(defDtor));
+  }
+
+  auto node =
+      std::make_unique<StructDeclNode>(name, isClass, std::move(fields));
+  node->methods = std::move(methods);
+  node->decorators = structPreamble.decorators;
+  finalizeNode(node.get(), startTok);
+  return node;
+}
+
+std::unique_ptr<FunctionNode>
+Parser::parseMethod(const std::string &className,
+                    const DeclPreamble &preamble) {
+  Token startTok = currentToken();
+
+  bool isConstructor = false;
+  bool isDestructor = false;
+  std::string retType = "void";
+  std::string funcName;
+
+  if (match(TokenType::TILDE)) {
+    isDestructor = true;
+    std::string n = currentToken().value;
+    expect(TokenType::IDENTIFIER, "Expected class name for destructor");
+    funcName = "~" + n;
+  } else if (currentToken().value == className &&
+             peekNextToken().type == TokenType::LPAREN) {
+    isConstructor = true;
+    funcName = currentToken().value;
+    advance();
+  } else {
+    retType = parseTypeName();
+    funcName = currentToken().value;
+    expect(TokenType::IDENTIFIER, "Expected method name");
+  }
+
   expect(TokenType::LPAREN, "Expected '('");
 
-  std::vector<std::pair<std::string, std::string>> args;
+  std::vector<FunctionParam> args;
   while (currentToken().type != TokenType::RPAREN) {
-    std::string argType = parseTypeName();
-    std::string argName = currentToken().value;
-    expect(TokenType::IDENTIFIER, "Expected nombre del arg");
-    args.push_back({argType, argName});
+    bool isReq = match(TokenType::KW_REQUIRED);
+
+    if (match(TokenType::KW_THIS)) {
+      expect(TokenType::DOT, "Expected '.' after this in constructor param");
+      std::string argName = currentToken().value;
+      expect(TokenType::IDENTIFIER, "Expected field name");
+      args.push_back({"", argName, isReq, true});
+    } else {
+      std::string argType = parseTypeName();
+      std::string argName = currentToken().value;
+      expect(TokenType::IDENTIFIER, "Expected param name");
+      args.push_back({argType, argName, isReq, false});
+    }
+
     if (currentToken().type == TokenType::COMMA)
       advance();
   }
   expect(TokenType::RPAREN, "Expected ')'");
   expect(TokenType::LBRACE, "Expected '{'");
 
-  auto funcNode =
-      std::make_unique<FunctionNode>(inlineState, retType, funcName, args);
+  auto funcNode = std::make_unique<FunctionNode>(
+      preamble.inlineState, preamble.access, preamble.decorators, retType,
+      funcName, args, true, isConstructor, isDestructor, className);
+
+  while (currentToken().type != TokenType::RBRACE &&
+         currentToken().type != TokenType::EOF_TOK) {
+    funcNode->body.push_back(parseStatement());
+  }
+  expect(TokenType::RBRACE, "Expected '}'");
+  finalizeNode(funcNode.get(), startTok);
+  return funcNode;
+}
+
+void Parser::parseImport() {
+  expect(TokenType::KW_IMPORT, "Expected 'import'");
+  expect(TokenType::STRING, "Expected cadena");
+  expect(TokenType::SEMICOLON, "Expected ';'");
+}
+
+std::unique_ptr<FunctionNode>
+Parser::parseFunction(const DeclPreamble &preamble) {
+  Token startTok = currentToken();
+
+  std::string retType = parseTypeName();
+  std::string funcName = currentToken().value;
+  expect(TokenType::IDENTIFIER, "Expected name");
+  expect(TokenType::LPAREN, "Expected '('");
+
+  std::vector<FunctionParam> args;
+
+  while (currentToken().type != TokenType::RPAREN) {
+    std::string argType = parseTypeName();
+    std::string argName = currentToken().value;
+    expect(TokenType::IDENTIFIER, "Expected arg name");
+    args.push_back({argType, argName, false, false});
+    if (currentToken().type == TokenType::COMMA)
+      advance();
+  }
+  expect(TokenType::RPAREN, "Expected ')'");
+  expect(TokenType::LBRACE, "Expected '{'");
+
+  auto funcNode = std::make_unique<FunctionNode>(
+      preamble.inlineState, preamble.access, preamble.decorators, retType,
+      funcName, args);
+
   while (currentToken().type != TokenType::RBRACE &&
          currentToken().type != TokenType::EOF_TOK) {
     funcNode->body.push_back(parseStatement());
@@ -216,34 +497,80 @@ std::unique_ptr<ExprNode> Parser::parseTerm() {
 }
 
 std::unique_ptr<ExprNode> Parser::parsePrimary() {
+  auto node = parsePrimaryBase();
+
+  while (match(TokenType::DOT)) {
+    Token startTok = currentToken();
+    std::string fieldName = currentToken().value;
+    expect(TokenType::IDENTIFIER,
+           "The name of the field was expected after the '.'");
+
+    if (match(TokenType::LPAREN)) {
+      std::vector<std::unique_ptr<ExprNode>> args;
+      while (currentToken().type != TokenType::RPAREN &&
+             currentToken().type != TokenType::EOF_TOK) {
+        args.push_back(parseExpression());
+        if (currentToken().type == TokenType::COMMA)
+          advance();
+      }
+      expect(TokenType::RPAREN, "Expected ')'");
+
+      // dynamic method AST promotion
+      auto callNode = std::make_unique<CallNode>(fieldName, std::move(args),
+                                                 std::move(node));
+      node = std::move(callNode);
+      finalizeNode(node.get(), startTok);
+    } else {
+      node = std::make_unique<MemberAccessNode>(std::move(node), fieldName);
+      finalizeNode(node.get(), startTok);
+    }
+  }
+
+  return node;
+}
+
+std::unique_ptr<ExprNode> Parser::parsePrimaryBase() {
   Token startTok = currentToken();
 
   if (match(TokenType::LPAREN)) {
     auto expr = parseExpression();
-    expect(TokenType::RPAREN,
-           "Expected ')' para cerrar la expresion agrupada");
+    expect(TokenType::RPAREN, "Expected ')' to close the grouped expression");
     return expr;
   }
 
   if (match(TokenType::AMPERSAND))
-    return std::make_unique<AddressOfNode>(parsePrimary());
+    return std::make_unique<AddressOfNode>(parsePrimaryBase());
   if (match(TokenType::STAR))
-    return std::make_unique<DerefNode>(parsePrimary());
+    return std::make_unique<DerefNode>(parsePrimaryBase());
+
+  if (match(TokenType::MINUS))
+    return std::make_unique<UnaryMinusNode>(parsePrimaryBase());
+
   if (match(TokenType::KW_NULL))
     return std::make_unique<NullLiteralNode>();
 
   if (match(TokenType::BANG)) {
-    return std::make_unique<NullAssertNode>(parsePrimary());
+    return std::make_unique<NullAssertNode>(parsePrimaryBase());
   }
+
+  if (match(TokenType::KW_THIS))
+    return std::make_unique<ThisNode>();
 
   if (match(TokenType::KW_NEW)) {
     std::string typeName = consumeType();
-    std::unique_ptr<ExprNode> init = nullptr;
+    std::vector<std::unique_ptr<ExprNode>> args;
+
     if (match(TokenType::LPAREN)) {
-      init = parseExpression();
-      expect(TokenType::RPAREN, "Expected ')'");
+      // 0xdeadbeef: fast parameter list resolution
+      while (currentToken().type != TokenType::RPAREN &&
+             currentToken().type != TokenType::EOF_TOK) {
+        args.push_back(parseExpression());
+        if (currentToken().type == TokenType::COMMA)
+          advance();
+      }
+      expect(TokenType::RPAREN, "Expected ')' after constructor arguments");
     }
-    return std::make_unique<NewNode>(typeName, std::move(init));
+    return std::make_unique<NewNode>(typeName, std::move(args));
   }
 
   if (isTypeToken()) {
@@ -331,7 +658,6 @@ std::unique_ptr<ASTNode> Parser::parseStatement() {
     std::vector<std::unique_ptr<ASTNode>> elseBody;
     if (match(TokenType::KW_ELSE)) {
       if (currentToken().type == TokenType::KW_IF) {
-        // Recursive support for 'else if'
         elseBody.push_back(parseStatement());
       } else {
         expect(TokenType::LBRACE, "Expected '{' after else");
@@ -349,7 +675,6 @@ std::unique_ptr<ASTNode> Parser::parseStatement() {
     return node;
   }
 
-  // WHILE
   if (match(TokenType::KW_WHILE)) {
     expect(TokenType::LPAREN, "Expected '(' despues de 'while'");
     auto condition = parseExpression();
@@ -368,7 +693,6 @@ std::unique_ptr<ASTNode> Parser::parseStatement() {
     return node;
   }
 
-  // FOR
   if (match(TokenType::KW_FOR)) {
     expect(TokenType::LPAREN, "Expected '(' despues de 'for'");
 
@@ -377,7 +701,6 @@ std::unique_ptr<ASTNode> Parser::parseStatement() {
       init = parseStatement();
     }
 
-    // Condition (Ej: i < 10)
     std::unique_ptr<ExprNode> cond = nullptr;
     if (currentToken().type != TokenType::SEMICOLON) {
       cond = parseExpression();
@@ -398,7 +721,6 @@ std::unique_ptr<ASTNode> Parser::parseStatement() {
     expect(TokenType::RPAREN,
            "Expected ')' despues de la actualizacion del for");
 
-    // for body
     expect(TokenType::LBRACE, "Expected '{'");
     std::vector<std::unique_ptr<ASTNode>> body;
     while (!match(TokenType::RBRACE) &&
@@ -426,20 +748,20 @@ std::unique_ptr<ASTNode> Parser::parseStatement() {
     return node;
   }
 
-  bool isConst = match(TokenType::KW_CONST);
-  if (isConst || isTypeToken()) {
+  if (isVarDeclaration()) {
+    DeclPreamble preamble = parsePreamble();
     std::string typeName = parseTypeName();
     std::string varName = currentToken().value;
-    expect(TokenType::IDENTIFIER, "Expected el nombre de la variable");
+    expect(TokenType::IDENTIFIER, "Expected the variable name");
 
     std::unique_ptr<ExprNode> init = nullptr;
     if (match(TokenType::ASSIGN)) {
       init = parseExpression();
-    } else {
-      init = std::make_unique<NumberNode>(0);
     }
-    auto node = std::make_unique<VarDeclNode>(typeName, varName, isConst,
-                                              std::move(init));
+
+    auto node = std::make_unique<VarDeclNode>(
+        typeName, varName, preamble.isConst, std::move(init));
+    node->decorators = preamble.decorators;
     expect(TokenType::SEMICOLON, "Expected ';'");
     finalizeNode(node.get(), startTok);
     return node;
@@ -455,7 +777,6 @@ std::unique_ptr<ASTNode> Parser::parseStatement() {
 
   if (match(TokenType::KW_RETURN)) {
     std::unique_ptr<ExprNode> expr = nullptr;
-    // Support for early return in void functions: return;
     if (currentToken().type != TokenType::SEMICOLON) {
       expr = parseExpression();
     }

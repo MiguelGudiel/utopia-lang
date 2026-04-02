@@ -60,8 +60,6 @@ void CodeGen::exitScope() {
   typeScopes.pop_back();
 }
 
-// Fast reverse lookup. The deepest scope intercepts the resolution.
-// Shadows outer variables flawlessly.
 llvm::AllocaInst *CodeGen::lookupValue(const std::string &name) {
   for (auto it = valueScopes.rbegin(); it != valueScopes.rend(); ++it) {
     if (it->count(name))
@@ -121,6 +119,8 @@ TypeInfo CodeGen::parseTypeString(const std::string &typeName) const {
 llvm::Type *CodeGen::getLLVMType(const TypeInfo &type) {
   if (type.ptrDepth > 0)
     return llvm::PointerType::get(*context, 0);
+  if (structTypes.count(type.base))
+    return structTypes[type.base];
   if (type.base == "void")
     return llvm::Type::getVoidTy(*context);
   if (type.base == "int" || type.base == "uint")
@@ -145,6 +145,10 @@ llvm::Value *CodeGen::castValue(llvm::Value *value, const TypeInfo &from,
   if (from.isPointer() && to.isPointer())
     return value;
 
+  if (!from.isPointer() && !to.isPointer() && structTypes.count(to.base)) {
+    return value;
+  }
+
   if (!from.isPointer() && !to.isPointer()) {
     if (from.base == "int" && to.base == "float")
       return builder->CreateSIToFP(value, llvm::Type::getDoubleTy(*context));
@@ -167,9 +171,41 @@ llvm::Value *CodeGen::castValue(llvm::Value *value, const TypeInfo &from,
 void CodeGen::visit(ProgramNode *node) {
   enterScope();
 
-  // Forward Declaration Pre-pass
+  // orphaned methods bypass. link them to the global AST scope
+  for (auto &st : node->structs) {
+    structASTs[st->name] = st.get();
+    bool hasConstructor = false;
+    bool hasDestructor = false;
+    structTypes[st->name] = llvm::StructType::create(*context, st->name);
+    for (auto &method : st->methods) {
+      std::string mangledName = st->name + "_" + method->name;
+      functionTypes[mangledName] = parseTypeString(method->returnType);
+    }
+  }
+
+  for (auto &st : node->structs) {
+    std::vector<llvm::Type *> body;
+    int idx = 0;
+    for (auto &f : st->fields) {
+      TypeInfo t = parseTypeString(f.typeName);
+      body.push_back(getLLVMType(t));
+      structMemberIndices[st->name][f.name] = idx++;
+      structMemberTypes[st->name][f.name] = t;
+    }
+    structTypes[st->name]->setBody(body);
+  }
+
   for (auto &func : node->functions) {
     functionTypes[func->name] = parseTypeString(func->returnType);
+  }
+
+  for (auto &st : node->structs) {
+    for (auto &method : st->methods) {
+      std::string originalName = method->name;
+      method->name = st->name + "_" + method->name;
+      method->accept(this);
+      method->name = originalName;
+    }
   }
 
   for (auto &func : node->functions)
@@ -177,18 +213,70 @@ void CodeGen::visit(ProgramNode *node) {
   exitScope();
 }
 
+void CodeGen::visit(StructDeclNode *node) {}
+
+void CodeGen::visit(MemberAccessNode *node) {
+  // Smart pointer/value resolution for member access
+  bool oldContext = isLValueContext;
+  isLValueContext = false;
+  node->object->accept(this);
+  isLValueContext = oldContext;
+
+  llvm::Value *objPtr = currentVal;
+  std::string objTypeName = currentType.base;
+  int idx = structMemberIndices[objTypeName][node->field];
+  TypeInfo fType = structMemberTypes[objTypeName][node->field];
+
+  llvm::Value *fieldAddr = builder->CreateStructGEP(
+      structTypes[objTypeName], objPtr, idx, "member_access");
+
+  if (isLValueContext) {
+    currentLValue = fieldAddr;
+  } else {
+    currentVal =
+        builder->CreateLoad(getLLVMType(fType), fieldAddr, "load_member");
+  }
+  currentType = fType;
+}
+
+void CodeGen::visit(ThisNode *node) {
+  auto alloca = lookupValue("this");
+  auto type = lookupType("this");
+
+  if (!alloca) {
+    std::cerr << "CodeGen Error: 'this' pointer not found in current scope.\n";
+    exit(1);
+  }
+
+  if (isLValueContext) {
+    currentLValue = alloca;
+  } else {
+    // memory indirection to retrieve the struct base address
+    currentVal = builder->CreateLoad(getLLVMType(type), alloca, "this.ptr");
+  }
+  currentType = type;
+}
+
 void CodeGen::visit(FunctionNode *node) {
-  enterScope(); // Function argument scope
+  enterScope();
 
   TypeInfo retType = parseTypeString(node->returnType);
   currentReturnType = retType;
 
   std::vector<llvm::Type *> argTypes;
-  for (auto &arg : node->args)
-    argTypes.push_back(getLLVMType(parseTypeString(arg.first)));
+  if (node->isMethod || node->isConstructor || node->isDestructor) {
+    argTypes.push_back(llvm::PointerType::get(*context, 0));
+  }
+
+  for (auto &arg : node->args) {
+    TypeInfo t = arg.isThisAssign ? structMemberTypes[node->className][arg.name]
+                                  : parseTypeString(arg.type);
+    argTypes.push_back(getLLVMType(t));
+  }
 
   llvm::FunctionType *funcType =
       llvm::FunctionType::get(getLLVMType(retType), argTypes, false);
+
   llvm::Function *func = llvm::Function::Create(
       funcType, llvm::Function::ExternalLinkage, node->name, module.get());
 
@@ -201,17 +289,73 @@ void CodeGen::visit(FunctionNode *node) {
   llvm::BasicBlock *block = llvm::BasicBlock::Create(*context, "entry", func);
   builder->SetInsertPoint(block);
 
+  auto argIt = func->arg_begin();
+  if (node->isMethod || node->isConstructor || node->isDestructor) {
+    llvm::Argument *thisArg = &(*argIt);
+    thisArg->setName("this");
+    llvm::AllocaInst *thisAlloca = builder->CreateAlloca(
+        llvm::PointerType::get(*context, 0), nullptr, "this.addr");
+    builder->CreateStore(thisArg, thisAlloca);
+    valueScopes.back()["this"] = thisAlloca;
+    typeScopes.back()["this"] = {node->className, 1, false};
+    argIt++;
+  }
+
   unsigned idx = 0;
-  for (auto &arg : func->args()) {
-    std::string argName = node->args[idx].second;
-    TypeInfo argType = parseTypeString(node->args[idx].first);
+  for (; argIt != func->arg_end(); ++argIt, ++idx) {
+    std::string argName = node->args[idx].name;
+    TypeInfo argType = node->args[idx].isThisAssign
+                           ? structMemberTypes[node->className][argName]
+                           : parseTypeString(node->args[idx].type);
+
+    llvm::Argument *arg = &(*argIt);
+    arg->setName(argName);
+
     llvm::AllocaInst *alloca =
         builder->CreateAlloca(getLLVMType(argType), nullptr, argName);
-    builder->CreateStore(&arg, alloca);
+    builder->CreateStore(arg, alloca);
 
     valueScopes.back()[argName] = alloca;
     typeScopes.back()[argName] = argType;
-    idx++;
+
+    // 0x5f3759df: direct constructor assignment bypass
+    if (node->args[idx].isThisAssign) {
+      llvm::Value *thisPtr = builder->CreateLoad(
+          llvm::PointerType::get(*context, 0), valueScopes.back()["this"]);
+      int fieldIdx = structMemberIndices[node->className][argName];
+      llvm::Value *fieldAddr = builder->CreateStructGEP(
+          structTypes[node->className], thisPtr, fieldIdx, "this." + argName);
+      builder->CreateStore(arg, fieldAddr);
+    }
+  }
+
+  // Native field memory population.
+  // We inject default AST initializers directly into the constructor's
+  // entry block immediately after parameter resolution
+  if (node->isConstructor) {
+    StructDeclNode *classAST = structASTs[node->className];
+    if (classAST) {
+      for (auto &field : classAST->fields) {
+        if (field.initializer) {
+          field.initializer->accept(this);
+          llvm::Value *initVal = currentVal;
+          TypeInfo initType = currentType;
+
+          int fieldIdx = structMemberIndices[node->className][field.name];
+          TypeInfo targetType = structMemberTypes[node->className][field.name];
+
+          llvm::Value *thisPtr = builder->CreateLoad(
+              llvm::PointerType::get(*context, 0), valueScopes.back()["this"]);
+
+          llvm::Value *fieldAddr =
+              builder->CreateStructGEP(structTypes[node->className], thisPtr,
+                                       fieldIdx, "init." + field.name);
+
+          builder->CreateStore(castValue(initVal, initType, targetType),
+                               fieldAddr);
+        }
+      }
+    }
   }
 
   for (const auto &stmt : node->body) {
@@ -220,7 +364,6 @@ void CodeGen::visit(FunctionNode *node) {
       break;
   }
 
-  // Prevent crash for LLVM (Implicit Return)
   if (!builder->GetInsertBlock()->getTerminator()) {
     if (retType.base == "void" && retType.ptrDepth == 0) {
       builder->CreateRetVoid();
@@ -250,14 +393,10 @@ void CodeGen::visit(ReturnNode *node) {
 }
 
 void CodeGen::visit(AssignNode *node) {
-  // We evaluate the expression on the right-hand side (RValue)
   node->value->accept(this);
   llvm::Value *val = currentVal;
   TypeInfo valType = currentType;
 
-  // We evaluate the expression on the left side (LValue)
-  // We explicitly activate LValue mode so that VariableNode and DerefNode
-  // return memory addresses, not loaded values.
   isLValueContext = true;
   node->target->accept(this);
   isLValueContext = false;
@@ -275,13 +414,18 @@ void CodeGen::visit(AssignNode *node) {
 
 void CodeGen::visit(VarDeclNode *node) {
   TypeInfo declType = parseTypeString(node->typeName);
-  node->initializer->accept(this);
+  llvm::Type *llvmType = getLLVMType(declType);
 
   llvm::AllocaInst *alloca =
-      builder->CreateAlloca(getLLVMType(declType), nullptr, node->name);
-  builder->CreateStore(castValue(currentVal, currentType, declType), alloca);
+      builder->CreateAlloca(llvmType, nullptr, node->name);
 
-  // Bind to current local scope
+  if (node->initializer) {
+    node->initializer->accept(this);
+    builder->CreateStore(castValue(currentVal, currentType, declType), alloca);
+  } else {
+    builder->CreateStore(llvm::Constant::getNullValue(llvmType), alloca);
+  }
+
   valueScopes.back()[node->name] = alloca;
   typeScopes.back()[node->name] = declType;
 }
@@ -300,7 +444,6 @@ void CodeGen::visit(IfNode *node) {
   bool hasElse = !node->elseBody.empty();
   builder->CreateCondBr(condV, thenBB, hasElse ? elseBB : mergeBB);
 
-  // Process THEN block
   builder->SetInsertPoint(thenBB);
   enterScope();
   for (auto &stmt : node->thenBody) {
@@ -312,7 +455,6 @@ void CodeGen::visit(IfNode *node) {
   if (!builder->GetInsertBlock()->getTerminator())
     builder->CreateBr(mergeBB);
 
-  // Process ELSE block
   if (hasElse) {
     func->insert(func->end(), elseBB);
     builder->SetInsertPoint(elseBB);
@@ -326,7 +468,7 @@ void CodeGen::visit(IfNode *node) {
     if (!builder->GetInsertBlock()->getTerminator())
       builder->CreateBr(mergeBB);
   } else {
-    delete elseBB; // Purge unused block
+    delete elseBB;
   }
 
   func->insert(func->end(), mergeBB);
@@ -359,13 +501,12 @@ void CodeGen::visit(WhileNode *node) {
   if (condV->getType()->isPointerTy()) {
     condV = builder->CreateIsNotNull(condV, "ptr_val");
   }
-  // Branching: If True, jump to body. If False, jump to merge (end)
+
   builder->CreateCondBr(condV, bodyBB, mergeBB);
 
-  continueTargets.push_back(condBB); // Continue re-evaluating the condition
-  breakTargets.push_back(mergeBB);   // Break escapes at the end
+  continueTargets.push_back(condBB);
+  breakTargets.push_back(mergeBB);
 
-  // Body
   func->insert(func->end(), bodyBB);
   builder->SetInsertPoint(bodyBB);
   enterScope();
@@ -412,16 +553,12 @@ void CodeGen::visit(ForNode *node) {
     }
     builder->CreateCondBr(condV, bodyBB, mergeBB);
   } else {
-    // If not condition (ej: for(;;))
     builder->CreateBr(bodyBB);
   }
 
-  // A "continue" in a "For" loop does NOT go to the condition, it goes to the
-  // increment phase.
   continueTargets.push_back(incBB);
   breakTargets.push_back(mergeBB);
 
-  // Body
   func->insert(func->end(), bodyBB);
   builder->SetInsertPoint(bodyBB);
   enterScope();
@@ -439,22 +576,18 @@ void CodeGen::visit(ForNode *node) {
     builder->CreateBr(incBB);
   }
 
-  // Update (Increment)
   func->insert(func->end(), incBB);
   builder->SetInsertPoint(incBB);
   if (node->update)
     node->update->accept(this);
-  builder->CreateBr(condBB); // Return the condition
+  builder->CreateBr(condBB);
 
-  // End for
   func->insert(func->end(), mergeBB);
   builder->SetInsertPoint(mergeBB);
 
   exitScope();
 }
 
-// Fast branch generation. The block terminator check in BlockNode
-// natively purges dead code following these instructions.
 void CodeGen::visit(BreakNode *node) {
   if (!breakTargets.empty()) {
     builder->CreateBr(breakTargets.back());
@@ -469,7 +602,21 @@ void CodeGen::visit(ContinueNode *node) {
 
 void CodeGen::visit(DeleteNode *node) {
   node->pointerExpr->accept(this);
-  builder->CreateCall(getFreePrototype(), {currentVal});
+
+  llvm::Value *ptrVal = currentVal;
+  TypeInfo ptrType = currentType;
+
+  // wtf? vtable bypass.
+  // hardcode the mangled dtor name and force IR call before free()
+  if (ptrType.ptrDepth > 0 && structTypes.count(ptrType.base)) {
+    std::string dtorName = ptrType.base + "_~" + ptrType.base;
+    llvm::Function *dtor = module->getFunction(dtorName);
+    if (dtor) {
+      builder->CreateCall(dtor, {ptrVal});
+    }
+  }
+
+  builder->CreateCall(getFreePrototype(), {ptrVal});
 }
 
 // --------------------------------------------------------------------------
@@ -480,10 +627,44 @@ void CodeGen::visit(VariableNode *node) {
   auto alloca = lookupValue(node->name);
   auto type = lookupType(node->name);
 
+  if (!alloca) {
+    // check if identifier is a member of the current 'this' context
+    auto thisAddr = lookupValue("this");
+    if (thisAddr) {
+      TypeInfo thisType = lookupType("this");
+      std::string className = thisType.base;
+      if (structMemberIndices[className].count(node->name)) {
+        llvm::Value *thisPtr = builder->CreateLoad(
+            llvm::PointerType::get(*context, 0), thisAddr, "this.ptr");
+        int idx = structMemberIndices[className][node->name];
+        TypeInfo fType = structMemberTypes[className][node->name];
+        llvm::Value *fieldAddr = builder->CreateStructGEP(
+            structTypes[className], thisPtr, idx, className + "." + node->name);
+
+        if (isLValueContext) {
+          currentLValue = fieldAddr;
+        } else {
+          currentVal =
+              builder->CreateLoad(getLLVMType(fType), fieldAddr, "load_member");
+        }
+        currentType = fType;
+        return;
+      }
+    }
+    std::cerr << "CodeGen Error: Undeclared variable '" << node->name << "'\n";
+    exit(1);
+  }
+
   if (isLValueContext) {
     currentLValue = alloca;
   } else {
-    currentVal = builder->CreateLoad(getLLVMType(type), alloca, node->name);
+    // If it's a struct by value, we return the address as RValue for GEP
+    // efficiency
+    if (structTypes.count(type.base) && type.ptrDepth == 0) {
+      currentVal = alloca;
+    } else {
+      currentVal = builder->CreateLoad(getLLVMType(type), alloca, node->name);
+    }
   }
   currentType = type;
 }
@@ -497,18 +678,19 @@ void CodeGen::visit(BinaryOpNode *node) {
   llvm::Value *R = currentVal;
   TypeInfo RT = currentType;
 
-  bool isF = LT.base == "float" || RT.base == "float";
-  if (isF && (LT.base == "int" || RT.base == "int")) {
-    if (LT.base == "int")
+  // /* Fast pointer false-positive floating type bypass
+  //    Prevents FCmp instruction generation for float* types triggering
+  //    SelectionDAG crashes */
+  bool isF = (LT.base == "float" && !LT.isPointer()) ||
+             (RT.base == "float" && !RT.isPointer());
+
+  if (isF) {
+    if (LT.base == "int" && !LT.isPointer())
       L = builder->CreateSIToFP(L, llvm::Type::getDoubleTy(*context));
-    if (RT.base == "int")
+    if (RT.base == "int" && !RT.isPointer())
       R = builder->CreateSIToFP(R, llvm::Type::getDoubleTy(*context));
   }
 
-  // --- Strict Boolean Evaluation ---
-  // Branchless logical evaluation. Fast as hell.
-  // Warning: Does not short-circuit. If you rely on 'if (p != null && *p ==
-  // 1)', you will segfault. Fix your code architecture. Deal with it.
   if (node->op == "&&") {
     currentVal = builder->CreateAnd(L, R, "and_strict");
     currentType = {"bool"};
@@ -520,7 +702,6 @@ void CodeGen::visit(BinaryOpNode *node) {
     return;
   }
 
-  // Relational Operators
   if (node->op == "==") {
     currentVal =
         isF ? builder->CreateFCmpOEQ(L, R) : builder->CreateICmpEQ(L, R);
@@ -558,7 +739,6 @@ void CodeGen::visit(BinaryOpNode *node) {
     return;
   }
 
-  // Arithmetic
   if (node->op == "+")
     currentVal = isF ? builder->CreateFAdd(L, R) : builder->CreateAdd(L, R);
   else if (node->op == "-")
@@ -568,7 +748,7 @@ void CodeGen::visit(BinaryOpNode *node) {
   else if (node->op == "/")
     currentVal = isF ? builder->CreateFDiv(L, R) : builder->CreateSDiv(L, R);
 
-  currentType = isF ? TypeInfo{"float"} : TypeInfo{"int"};
+  currentType = isF ? TypeInfo{"float", 0, false} : TypeInfo{"int", 0, false};
 }
 
 void CodeGen::visit(NumberNode *node) {
@@ -593,6 +773,18 @@ void CodeGen::visit(StringNode *node) {
   currentType = {"String", 0, false};
 }
 
+void CodeGen::visit(UnaryMinusNode *node) {
+  node->operand->accept(this);
+  if (currentType.base == "int") {
+    currentVal = builder->CreateNeg(currentVal, "neg_int");
+  } else if (currentType.base == "float") {
+    currentVal = builder->CreateFNeg(currentVal, "neg_float");
+  } else {
+    std::cerr << "CodeGen Error: Unary minus on non-numeric type.\n";
+    exit(1);
+  }
+}
+
 void CodeGen::visit(NullLiteralNode *node) {
   currentVal =
       llvm::ConstantPointerNull::get(llvm::PointerType::get(*context, 0));
@@ -609,9 +801,6 @@ void CodeGen::visit(AddressOfNode *node) {
 }
 
 void CodeGen::visit(DerefNode *node) {
-  // To dereference, we need to know WHICH direction the pointer points to.
-  // Therefore, the operand of Deref (the pointer itself) always evaluates to
-  // RValue.
   bool oldContext = isLValueContext;
   isLValueContext = false;
   node->operand->accept(this);
@@ -620,12 +809,8 @@ void CodeGen::visit(DerefNode *node) {
   currentType.ptrDepth--;
 
   if (isLValueContext) {
-    // If we are being asked for an LValue (e.g., *ptr = 10), the value we just
-    // extracted is the memory address where we must write.
     currentLValue = currentVal;
   } else {
-    // If we are asked for an RValue (e.g., int x = *ptr), we load the value
-    // from memory
     currentVal =
         builder->CreateLoad(getLLVMType(currentType), currentVal, "deref");
   }
@@ -633,14 +818,27 @@ void CodeGen::visit(DerefNode *node) {
 
 void CodeGen::visit(NewNode *node) {
   TypeInfo baseType = parseTypeString(node->typeName);
-  uint64_t size = (baseType.base == "float" || baseType.base == "int") ? 8 : 4;
-  llvm::Value *sz = llvm::ConstantInt::get(*context, llvm::APInt(64, size));
-  llvm::Value *mem = builder->CreateCall(getMallocPrototype(), {sz}, "mem");
+  llvm::Type *llvmType = getLLVMType(baseType);
 
-  if (node->initializer) {
-    node->initializer->accept(this);
-    builder->CreateStore(castValue(currentVal, currentType, baseType), mem);
+  uint64_t sizeBytes = module->getDataLayout().getTypeAllocSize(llvmType);
+  llvm::Value *sz =
+      llvm::ConstantInt::get(*context, llvm::APInt(64, sizeBytes));
+
+  llvm::Value *mem = builder->CreateCall(getMallocPrototype(), {sz}, "mem_ptr");
+
+  std::string ctorName = node->typeName + "_" + node->typeName;
+  llvm::Function *ctor = module->getFunction(ctorName);
+
+  if (ctor) {
+    std::vector<llvm::Value *> args;
+    args.push_back(mem); // /* what the fuck? invisible this ptr injection */
+    for (auto &arg : node->arguments) {
+      arg->accept(this);
+      args.push_back(currentVal);
+    }
+    builder->CreateCall(ctor, args);
   }
+
   currentVal = mem;
   currentType = baseType;
   currentType.ptrDepth = 1;
@@ -655,6 +853,34 @@ void CodeGen::visit(CallNode *node) {
     TypeInfo targetT = currentType;
     node->arguments[1]->accept(this);
     builder->CreateStore(castValue(currentVal, currentType, targetT), addr);
+    return;
+  }
+  if (node->object) {
+    // Methods always expect the base address of the object as 'this'
+    bool oldCtx = isLValueContext;
+    isLValueContext = false;
+    node->object->accept(this);
+    isLValueContext = oldCtx;
+
+    llvm::Value *thisArg = currentVal;
+    std::string mangledName = currentType.base + "_" + node->callee;
+    llvm::Function *f = module->getFunction(mangledName);
+
+    if (!f) {
+      std::cerr << "[Utopia Fatal] CodeGen Error: Method '" << node->callee
+                << "' missing.\n";
+      exit(1);
+    }
+
+    std::vector<llvm::Value *> args;
+    args.push_back(thisArg);
+    for (auto &a : node->arguments) {
+      a->accept(this);
+      args.push_back(currentVal);
+    }
+
+    currentVal = builder->CreateCall(f, args);
+    currentType = functionTypes[mangledName];
     return;
   }
   if (node->callee == "print") {

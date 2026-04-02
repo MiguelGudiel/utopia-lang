@@ -1,21 +1,52 @@
-force_inline int computeFastHash(int val) {
-    return (val * 13) + 7;
+// ---------------------------------------------------------
+// Utopia Language - Preamble & Metadata Test
+// Testing decorator chains and modifier coupling
+// ---------------------------------------------------------
+
+@SystemModule
+@Author("MiguelGudiel")
+class PhysicsEngine {
+    
+    @NoAlias
+    private float gravity = -9.81;
+
+    PhysicsEngine() {
+        this.gravity = -9.81;
+    }
+
+    ~PhysicsEngine() {
+        print("Physics Engine destruido");
+    }
+
+    // Combine access, inline hints and metadata
+    @FastMath
+    force_inline public void applyGravity(float* velocity, float deltaTime) {
+        if (velocity != null) {
+            // Standard pointer offset arithmetic
+            *velocity = *velocity + (gravity * deltaTime);
+        }
+    }
+
+    @Internal
+    private void reset() {
+        gravity = -9.81;
+    }
 }
 
-int main() {
-    print("Testing Break, Continue and Inline");
+@EntryPoint
+public int main() {
+    PhysicsEngine* engine = new PhysicsEngine();
+    
+    float v = 0.0;
+    
+    print("--- Simulating Fall ---");
     
     for (int i = 0; i < 10; i = i + 1) {
-        if (i == 3) {
-            continue; // Skip printing 3
-        }
-        if (i == 7) {
-            break;    // Abort loop
-        }
-        
-        int hash = computeFastHash(i);
-        print("Val: ", i, " Hash: ", hash);
+        // Method dispatch with complex preamble support
+        engine.applyGravity(&v, 0.1);
+        print("Velocity at T+", i, ": ", v);
     }
-    
+
+    delete engine;
     return 0;
 }

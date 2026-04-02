@@ -51,7 +51,7 @@ Token Lexer::nextToken() {
     return std::isalnum(c) || c >= 128;
   };
 
-  if (isUtf8Alpha(static_cast<unsigned char>(c))) {
+  if (isUtf8Alpha(static_cast<unsigned char>(c)) || c == '_') {
     std::string val;
     while (cursor < source.length() &&
            (isUtf8Alnum(static_cast<unsigned char>(source[cursor])) ||
@@ -103,6 +103,18 @@ Token Lexer::nextToken() {
       return {TokenType::KW_INLINE, val, startLine, startCol};
     if (val == "force_inline")
       return {TokenType::KW_FORCE_INLINE, val, startLine, startCol};
+    if (val == "struct")
+      return {TokenType::KW_STRUCT, val, startLine, startCol};
+    if (val == "class")
+      return {TokenType::KW_CLASS, val, startLine, startCol};
+    if (val == "public")
+      return {TokenType::KW_PUBLIC, val, startLine, startCol};
+    if (val == "private")
+      return {TokenType::KW_PRIVATE, val, startLine, startCol};
+    if (val == "this")
+      return {TokenType::KW_THIS, val, startLine, startCol};
+    if (val == "required")
+      return {TokenType::KW_REQUIRED, val, startLine, startCol};
     return {TokenType::IDENTIFIER, val, startLine, startCol};
   }
 
@@ -198,6 +210,12 @@ Token Lexer::nextToken() {
       return {TokenType::OR, "||", startLine, startCol};
     }
     return {TokenType::UNKNOWN, "|", startLine, startCol};
+  case '.':
+    return {TokenType::DOT, ".", startLine, startCol};
+  case '@':
+    return {TokenType::AT, "@", startLine, startCol};
+  case '~':
+    return {TokenType::TILDE, "~", startLine, startCol};
   default:
     return {TokenType::UNKNOWN, std::string(1, c), startLine, startCol};
   }
