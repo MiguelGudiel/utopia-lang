@@ -8,6 +8,9 @@ namespace utopia {
 // Bypasses RTTI overhead by allowing the compiler to implicitly
 // resolve the vtable pointer of the calling object. Do not touch.
 
+void ThisNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
+void StructDeclNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
+void MemberAccessNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void BlockNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void NullLiteralNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void IfNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
@@ -20,6 +23,7 @@ void NumberNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void FloatNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void BoolNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void StringNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
+void UnaryMinusNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void VariableNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void AddressOfNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void DerefNode::accept(ASTVisitor *visitor) { visitor->visit(this); }

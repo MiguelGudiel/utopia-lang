@@ -7,6 +7,8 @@ namespace utopia {
 
 class ASTVisitor;
 
+enum class AccessModifier { Implicit, Public, Private };
+
 class ASTNode {
 public:
   int line = 0;
@@ -32,6 +34,30 @@ class ExprNode : public ASTNode {};
 
 // Statements execute an action but yield no value
 class StmtNode : public ASTNode {};
+
+class ThisNode : public ExprNode {
+public:
+  void accept(ASTVisitor *visitor) override;
+};
+
+class MemberAccessNode : public ExprNode {
+public:
+  std::unique_ptr<ExprNode> object;
+  std::string field;
+
+  MemberAccessNode(std::unique_ptr<ExprNode> obj, std::string f)
+      : object(std::move(obj)), field(std::move(f)) {}
+
+  void accept(ASTVisitor *visitor) override;
+};
+
+struct StructField {
+  AccessModifier modifier;
+  std::string typeName;
+  std::string name;
+  std::vector<std::string> decorators;
+  std::unique_ptr<ExprNode> initializer = nullptr;
+};
 
 class BlockNode : public StmtNode {
 public:
@@ -123,6 +149,14 @@ public:
   void accept(ASTVisitor *visitor) override;
 };
 
+class UnaryMinusNode : public ExprNode {
+public:
+  std::unique_ptr<ExprNode> operand;
+  explicit UnaryMinusNode(std::unique_ptr<ExprNode> op)
+      : operand(std::move(op)) {}
+  void accept(ASTVisitor *visitor) override;
+};
+
 class VariableNode : public ExprNode {
 public:
   std::string name;
@@ -148,10 +182,11 @@ public:
 class NewNode : public ExprNode {
 public:
   std::string typeName;
-  std::unique_ptr<ExprNode> initializer;
+  std::vector<std::unique_ptr<ExprNode>> arguments;
 
-  explicit NewNode(std::string tName, std::unique_ptr<ExprNode> init = nullptr)
-      : typeName(std::move(tName)), initializer(std::move(init)) {}
+  explicit NewNode(std::string tName,
+                   std::vector<std::unique_ptr<ExprNode>> args = {})
+      : typeName(std::move(tName)), arguments(std::move(args)) {}
 
   void accept(ASTVisitor *visitor) override;
 };
@@ -194,9 +229,12 @@ class CallNode : public ExprNode {
 public:
   std::string callee;
   std::vector<std::unique_ptr<ExprNode>> arguments;
+  std::unique_ptr<ExprNode> object;
 
-  CallNode(std::string name, std::vector<std::unique_ptr<ExprNode>> args)
-      : callee(std::move(name)), arguments(std::move(args)) {}
+  CallNode(std::string name, std::vector<std::unique_ptr<ExprNode>> args,
+           std::unique_ptr<ExprNode> obj = nullptr)
+      : callee(std::move(name)), arguments(std::move(args)),
+        object(std::move(obj)) {}
 
   void accept(ASTVisitor *visitor) override;
 };
@@ -217,6 +255,7 @@ public:
   std::string typeName;
   std::string name;
   bool isConst;
+  std::vector<std::string> decorators;
   std::unique_ptr<ExprNode> initializer;
 
   VarDeclNode(std::string t, std::string n, bool c,
@@ -236,24 +275,57 @@ public:
   void accept(ASTVisitor *visitor) override;
 };
 
+struct FunctionParam {
+  std::string type;
+  std::string name;
+  bool isRequired = false;
+  bool isThisAssign = false;
+};
+
 class FunctionNode : public ASTNode {
 public:
   InlineState inlineState;
+  AccessModifier access;
+  std::vector<std::string> decorators;
   std::string returnType;
   std::string name;
-  std::vector<std::pair<std::string, std::string>> args;
+  std::vector<FunctionParam> args;
   std::vector<std::unique_ptr<ASTNode>> body;
 
-  FunctionNode(InlineState is, std::string retT, std::string n,
-               std::vector<std::pair<std::string, std::string>> a)
-      : inlineState(is), returnType(std::move(retT)), name(std::move(n)),
-        args(std::move(a)) {}
+  bool isMethod;
+  bool isConstructor;
+  bool isDestructor = false;
+  std::string className;
+
+  FunctionNode(InlineState is, AccessModifier acc,
+               std::vector<std::string> decs, std::string retT, std::string n,
+               std::vector<FunctionParam> a, bool isMeth = false,
+               bool isCtor = false, bool isDtor = false, std::string cName = "")
+      : inlineState(is), access(acc), decorators(std::move(decs)),
+        returnType(std::move(retT)), name(std::move(n)), args(std::move(a)),
+        isMethod(isMeth), isConstructor(isCtor), isDestructor(isDtor),
+        className(std::move(cName)) {}
+
+  void accept(ASTVisitor *visitor) override;
+};
+
+class StructDeclNode : public ASTNode {
+public:
+  std::string name;
+  bool isClass;
+  std::vector<std::string> decorators;
+  std::vector<StructField> fields;
+  std::vector<std::unique_ptr<FunctionNode>> methods;
+
+  StructDeclNode(std::string n, bool c, std::vector<StructField> f)
+      : name(std::move(n)), isClass(c), fields(std::move(f)) {}
 
   void accept(ASTVisitor *visitor) override;
 };
 
 class ProgramNode : public ASTNode {
 public:
+  std::vector<std::unique_ptr<StructDeclNode>> structs;
   std::vector<std::unique_ptr<FunctionNode>> functions;
 
   void accept(ASTVisitor *visitor) override;

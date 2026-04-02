@@ -39,6 +39,8 @@ enum class TokenType {
   AMPERSAND,
   QUESTION,
   BANG,
+  AT, // @
+  TILDE, // ~
   KW_NULL,
   KW_IF,
   KW_ELSE,
@@ -48,6 +50,13 @@ enum class TokenType {
   KW_CONTINUE,
   KW_INLINE,
   KW_FORCE_INLINE,
+  KW_STRUCT,
+  KW_CLASS,
+  KW_PUBLIC,
+  KW_PRIVATE,
+  KW_THIS,
+  KW_REQUIRED,
+  DOT, // .
   NEQ, // !=
   EQ,  // ==
   LT,  // <

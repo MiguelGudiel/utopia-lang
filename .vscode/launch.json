@@ -9,6 +9,19 @@
       "args": [
         "${file}",
         "--run",
+        "-O0"
+      ],
+      "cwd": "${workspaceFolder}",
+      //"preLaunchTask": "utopia-compile-project"
+    },
+    {
+      "name": "Release Utopia: Archivo Actual",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/tools/utopia/utopia",
+      "args": [
+        "${file}",
+        "--run",
         "-O2"
       ],
       "cwd": "${workspaceFolder}",

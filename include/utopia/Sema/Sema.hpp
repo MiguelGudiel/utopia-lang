@@ -19,13 +19,24 @@ private:
     bool isConst;
   };
 
-  // Stack of scopes to handle variable shadowing
+  struct StructDef {
+    bool isClass;
+    struct Field {
+      TypeInfo type;
+      AccessModifier mod;
+      int index;
+    };
+    std::map<std::string, Field> fields;
+  };
+  std::map<std::string, StructDef> customStructs;
+
   std::vector<std::map<std::string, Symbol>> scopeStack;
   std::vector<ErrorInfo> errors;
 
   std::map<std::string, TypeInfo> functionTypes;
   TypeInfo currentExprType;
   TypeInfo currentReturnType;
+  std::string currentClass;
 
   int loopDepth = 0;
 
@@ -38,6 +49,9 @@ private:
   bool checkAssignment(const TypeInfo &target, const TypeInfo &source,
                        ASTNode *node);
 
+  void visit(ThisNode *node) override;
+  void visit(StructDeclNode *node) override;
+  void visit(MemberAccessNode *node) override;
   void visit(BlockNode *node) override;
   void visit(NullLiteralNode *node) override;
   void visit(IfNode *node) override;
@@ -50,6 +64,7 @@ private:
   void visit(FloatNode *node) override;
   void visit(BoolNode *node) override;
   void visit(StringNode *node) override;
+  void visit(UnaryMinusNode *node) override;
   void visit(VariableNode *node) override;
   void visit(AddressOfNode *node) override;
   void visit(DerefNode *node) override;

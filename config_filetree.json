@@ -1,0 +1,8 @@
+{
+    "include_ext": "",
+    "exclude_ext": ".exe, .dll, .bin, .jpg, .png, .gif, .mp4, .zip, .pdf, .pyc, .o, .obj",
+    "exclude_folders": "__pycache__, .git, node_modules, venv, .idea",
+    "include_path": true,
+    "format_index": 0,
+    "geometry": "900x691+208+-25"
+}
