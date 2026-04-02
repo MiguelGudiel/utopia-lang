@@ -37,6 +37,11 @@ private:
 
   std::map<std::string, TypeInfo> functionTypes;
 
+  std::map<std::string, StructDeclNode *> structASTs;
+  std::map<std::string, llvm::StructType *> structTypes;
+  std::map<std::string, std::map<std::string, int>> structMemberIndices;
+  std::map<std::string, std::map<std::string, TypeInfo>> structMemberTypes;
+
   llvm::Value *currentVal = nullptr;
   TypeInfo currentType;
   TypeInfo currentReturnType;
@@ -60,6 +65,9 @@ private:
   llvm::FunctionCallee getFreePrototype();
   llvm::FunctionCallee getPrintfPrototype();
 
+  void visit(ThisNode *node) override;
+  void visit(StructDeclNode *node) override;
+  void visit(MemberAccessNode *node) override;
   void visit(BlockNode *node) override;
   void visit(NullLiteralNode *node) override;
   void visit(IfNode *node) override;
@@ -72,6 +80,7 @@ private:
   void visit(FloatNode *node) override;
   void visit(BoolNode *node) override;
   void visit(StringNode *node) override;
+  void visit(UnaryMinusNode *node) override;
   void visit(VariableNode *node) override;
   void visit(AddressOfNode *node) override;
   void visit(DerefNode *node) override;

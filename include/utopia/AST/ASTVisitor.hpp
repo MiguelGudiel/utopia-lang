@@ -1,8 +1,12 @@
 #pragma once
 
+#include "utopia/AST/AST.hpp"
 namespace utopia {
 
 // Forward declarations for the vtable mapping
+class ThisNode;
+class StructDeclNode;
+class MemberAccessNode;
 class BlockNode;
 class NullLiteralNode;
 class IfNode;
@@ -32,6 +36,9 @@ class ASTVisitor {
 public:
   virtual ~ASTVisitor() = default;
 
+  virtual void visit(ThisNode *node) = 0;
+  virtual void visit(StructDeclNode *node) = 0;
+  virtual void visit(MemberAccessNode *node) = 0;
   virtual void visit(BlockNode *node) = 0;
   virtual void visit(NullLiteralNode *node) = 0;
   virtual void visit(IfNode *node) = 0;
@@ -44,6 +51,7 @@ public:
   virtual void visit(FloatNode *node) = 0;
   virtual void visit(BoolNode *node) = 0;
   virtual void visit(StringNode *node) = 0;
+  virtual void visit(UnaryMinusNode *node) = 0;
   virtual void visit(VariableNode *node) = 0;
   virtual void visit(AddressOfNode *node) = 0;
   virtual void visit(DerefNode *node) = 0;
