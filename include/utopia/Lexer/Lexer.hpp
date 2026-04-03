@@ -35,12 +35,20 @@ enum class TokenType {
   STAR,
   SLASH,
   PERCENT,
+  PLUS_PLUS,
+  MINUS_MINUS,
+  PLUS_EQ,
+  MINUS_EQ,
+  STAR_EQ,
+  SLASH_EQ,
   COMMA,
   AMPERSAND,
   QUESTION,
   BANG,
-  AT, // @
-  TILDE, // ~
+  AT,       // @
+  TILDE,    // ~
+  LBRACKET, // [
+  RBRACKET, // ]
   KW_NULL,
   KW_IF,
   KW_ELSE,

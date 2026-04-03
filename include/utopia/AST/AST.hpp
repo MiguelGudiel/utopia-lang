@@ -183,10 +183,12 @@ class NewNode : public ExprNode {
 public:
   std::string typeName;
   std::vector<std::unique_ptr<ExprNode>> arguments;
+  std::unique_ptr<ExprNode> arraySize;
 
   explicit NewNode(std::string tName,
                    std::vector<std::unique_ptr<ExprNode>> args = {})
-      : typeName(std::move(tName)), arguments(std::move(args)) {}
+      : typeName(std::move(tName)), arguments(std::move(args)),
+        arraySize(nullptr) {}
 
   void accept(ASTVisitor *visitor) override;
 };
@@ -194,8 +196,10 @@ public:
 class DeleteNode : public StmtNode {
 public:
   std::unique_ptr<ExprNode> pointerExpr;
-  explicit DeleteNode(std::unique_ptr<ExprNode> ptr)
-      : pointerExpr(std::move(ptr)) {}
+  bool isArray;
+
+  explicit DeleteNode(std::unique_ptr<ExprNode> ptr, bool isArr = false)
+      : pointerExpr(std::move(ptr)), isArray(isArr) {}
 
   void accept(ASTVisitor *visitor) override;
 };
@@ -243,9 +247,22 @@ class AssignNode : public StmtNode {
 public:
   std::unique_ptr<ExprNode> target;
   std::unique_ptr<ExprNode> value;
+  std::string op;
 
-  AssignNode(std::unique_ptr<ExprNode> t, std::unique_ptr<ExprNode> v)
-      : target(std::move(t)), value(std::move(v)) {}
+  AssignNode(std::unique_ptr<ExprNode> t, std::unique_ptr<ExprNode> v,
+             std::string o = "=")
+      : target(std::move(t)), value(std::move(v)), op(std::move(o)) {}
+
+  void accept(ASTVisitor *visitor) override;
+};
+
+class SubscriptNode : public ExprNode {
+public:
+  std::unique_ptr<ExprNode> object;
+  std::unique_ptr<ExprNode> index;
+
+  SubscriptNode(std::unique_ptr<ExprNode> obj, std::unique_ptr<ExprNode> idx)
+      : object(std::move(obj)), index(std::move(idx)) {}
 
   void accept(ASTVisitor *visitor) override;
 };
@@ -257,11 +274,12 @@ public:
   bool isConst;
   std::vector<std::string> decorators;
   std::unique_ptr<ExprNode> initializer;
+  std::unique_ptr<ExprNode> arraySize;
 
   VarDeclNode(std::string t, std::string n, bool c,
               std::unique_ptr<ExprNode> init)
       : typeName(std::move(t)), name(std::move(n)), isConst(c),
-        initializer(std::move(init)) {}
+        initializer(std::move(init)), arraySize(nullptr) {}
 
   void accept(ASTVisitor *visitor) override;
 };

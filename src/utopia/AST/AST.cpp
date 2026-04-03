@@ -24,6 +24,7 @@ void FloatNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void BoolNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void StringNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void UnaryMinusNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
+void SubscriptNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void VariableNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void AddressOfNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void DerefNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
