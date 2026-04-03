@@ -1,6 +1,7 @@
 #include "utopia/CodeGen/CodeGen.hpp"
 #include "utopia/Lexer/Lexer.hpp"
 #include "utopia/Parser/Parser.hpp"
+#include "utopia/Sema/Sema.hpp"
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -120,16 +121,31 @@ int main(int argc, char **argv) {
   try {
     utopia::Lexer lexer(sourceCode);
     auto tokens = lexer.tokenize();
+
     utopia::Parser parser(tokens);
     auto mainAst = parser.parseProgram();
 
+    utopia::Sema sema;
+    bool isSemanticallyValid = sema.analyze(mainAst.get());
+
+    if (!sema.analyze(mainAst.get())) {
+      std::cerr << "\nCompilation failed due to semantic errors:\n";
+      for (const auto &err : sema.getErrors()) {
+        // Formatting: file:line:col: error: message
+        std::cerr << sourceFilePath << ":" << err.line << ":" << err.col << ": "
+                  << err.message << "\n";
+      }
+      return 1; // Exit before CodeGen
+    }
+
+    std::cout << "[CodeGen] Generating LLVM IR...\n";
     utopia::CodeGen codegen;
     codegen.generate(mainAst.get());
     codegen.optimize(optLevel);
     codegen.saveToFile(llPath.string());
     codegen.emitObjectFile(objPath.string());
   } catch (const std::exception &e) {
-    std::cerr << "\n[Compilation Error] " << e.what() << "\n";
+    std::cerr << "\nfatal error: " << e.what() << "\ncompilation terminated.\n";
     return 1;
   }
   auto endCompile = std::chrono::high_resolution_clock::now();

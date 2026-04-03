@@ -52,6 +52,7 @@ public:
   virtual void visit(BoolNode *node) = 0;
   virtual void visit(StringNode *node) = 0;
   virtual void visit(UnaryMinusNode *node) = 0;
+  virtual void visit(SubscriptNode *node) = 0;
   virtual void visit(VariableNode *node) = 0;
   virtual void visit(AddressOfNode *node) = 0;
   virtual void visit(DerefNode *node) = 0;

@@ -273,34 +273,6 @@ Parser::parseStructDecl(bool isClass, const DeclPreamble &structPreamble) {
   }
   expect(TokenType::RBRACE, "Expected '}'");
 
-  bool hasCtor = false;
-  bool hasDtor = false;
-  for (const auto &m : methods) {
-    if (m->isConstructor)
-      hasCtor = true;
-    if (m->isDestructor)
-      hasDtor = true;
-  }
-
-  // blind AST injection for missing lifecycle methods
-  if (!hasCtor) {
-    auto defCtor = std::make_unique<FunctionNode>(
-        structPreamble.inlineState, structPreamble.access,
-        structPreamble.decorators, "void", name, std::vector<FunctionParam>{},
-        true, true, false, name);
-    finalizeNode(defCtor.get(), startTok);
-    methods.push_back(std::move(defCtor));
-  }
-
-  if (!hasDtor) {
-    auto defDtor = std::make_unique<FunctionNode>(
-        structPreamble.inlineState, structPreamble.access,
-        structPreamble.decorators, "void", "~" + name,
-        std::vector<FunctionParam>{}, true, false, true, name);
-    finalizeNode(defDtor.get(), startTok);
-    methods.push_back(std::move(defDtor));
-  }
-
   auto node =
       std::make_unique<StructDeclNode>(name, isClass, std::move(fields));
   node->methods = std::move(methods);
@@ -499,30 +471,42 @@ std::unique_ptr<ExprNode> Parser::parseTerm() {
 std::unique_ptr<ExprNode> Parser::parsePrimary() {
   auto node = parsePrimaryBase();
 
-  while (match(TokenType::DOT)) {
-    Token startTok = currentToken();
-    std::string fieldName = currentToken().value;
-    expect(TokenType::IDENTIFIER,
-           "The name of the field was expected after the '.'");
+  while (true) {
+    if (match(TokenType::DOT)) {
+      Token startTok = currentToken();
+      std::string fieldName = currentToken().value;
+      expect(TokenType::IDENTIFIER,
+             "The name of the field was expected after the '.'");
 
-    if (match(TokenType::LPAREN)) {
-      std::vector<std::unique_ptr<ExprNode>> args;
-      while (currentToken().type != TokenType::RPAREN &&
-             currentToken().type != TokenType::EOF_TOK) {
-        args.push_back(parseExpression());
-        if (currentToken().type == TokenType::COMMA)
-          advance();
+      if (match(TokenType::LPAREN)) {
+        std::vector<std::unique_ptr<ExprNode>> args;
+        while (currentToken().type != TokenType::RPAREN &&
+               currentToken().type != TokenType::EOF_TOK) {
+          args.push_back(parseExpression());
+          if (currentToken().type == TokenType::COMMA)
+            advance();
+        }
+        expect(TokenType::RPAREN, "Expected ')'");
+
+        // dynamic method AST promotion
+        auto callNode = std::make_unique<CallNode>(fieldName, std::move(args),
+                                                   std::move(node));
+        node = std::move(callNode);
+        finalizeNode(node.get(), startTok);
+      } else {
+        node = std::make_unique<MemberAccessNode>(std::move(node), fieldName);
+        finalizeNode(node.get(), startTok);
       }
-      expect(TokenType::RPAREN, "Expected ')'");
-
-      // dynamic method AST promotion
-      auto callNode = std::make_unique<CallNode>(fieldName, std::move(args),
-                                                 std::move(node));
-      node = std::move(callNode);
-      finalizeNode(node.get(), startTok);
+    } else if (match(TokenType::LBRACKET)) { // INDEX ACCESS
+      Token startTok = currentToken();
+      auto index = parseExpression();
+      expect(TokenType::RBRACKET, "Expected ']' after array index.");
+      auto subNode =
+          std::make_unique<SubscriptNode>(std::move(node), std::move(index));
+      finalizeNode(subNode.get(), startTok);
+      node = std::move(subNode);
     } else {
-      node = std::make_unique<MemberAccessNode>(std::move(node), fieldName);
-      finalizeNode(node.get(), startTok);
+      break;
     }
   }
 
@@ -558,10 +542,15 @@ std::unique_ptr<ExprNode> Parser::parsePrimaryBase() {
 
   if (match(TokenType::KW_NEW)) {
     std::string typeName = consumeType();
+    std::unique_ptr<ExprNode> arrSize = nullptr;
     std::vector<std::unique_ptr<ExprNode>> args;
 
+    if (match(TokenType::LBRACKET)) {
+      arrSize = parseExpression();
+      expect(TokenType::RBRACKET, "Expected ']' after array size");
+    }
+
     if (match(TokenType::LPAREN)) {
-      // 0xdeadbeef: fast parameter list resolution
       while (currentToken().type != TokenType::RPAREN &&
              currentToken().type != TokenType::EOF_TOK) {
         args.push_back(parseExpression());
@@ -570,7 +559,9 @@ std::unique_ptr<ExprNode> Parser::parsePrimaryBase() {
       }
       expect(TokenType::RPAREN, "Expected ')' after constructor arguments");
     }
-    return std::make_unique<NewNode>(typeName, std::move(args));
+    auto node = std::make_unique<NewNode>(typeName, std::move(args));
+    node->arraySize = std::move(arrSize);
+    return node;
   }
 
   if (isTypeToken()) {
@@ -711,9 +702,22 @@ std::unique_ptr<ASTNode> Parser::parseStatement() {
     std::unique_ptr<ASTNode> update = nullptr;
     if (currentToken().type != TokenType::RPAREN) {
       auto expr = parseExpression();
-      if (match(TokenType::ASSIGN)) {
+      if (match(TokenType::PLUS_PLUS)) {
+        update = std::make_unique<AssignNode>(
+            std::move(expr), std::make_unique<NumberNode>(1), "+=");
+      } else if (match(TokenType::MINUS_MINUS)) {
+        update = std::make_unique<AssignNode>(
+            std::move(expr), std::make_unique<NumberNode>(1), "-=");
+      } else if (currentToken().type == TokenType::ASSIGN ||
+                 currentToken().type == TokenType::PLUS_EQ ||
+                 currentToken().type == TokenType::MINUS_EQ ||
+                 currentToken().type == TokenType::STAR_EQ ||
+                 currentToken().type == TokenType::SLASH_EQ) {
+        std::string op = currentToken().value;
+        advance();
         auto val = parseExpression();
-        update = std::make_unique<AssignNode>(std::move(expr), std::move(val));
+        update =
+            std::make_unique<AssignNode>(std::move(expr), std::move(val), op);
       } else {
         update = std::move(expr);
       }
@@ -754,6 +758,12 @@ std::unique_ptr<ASTNode> Parser::parseStatement() {
     std::string varName = currentToken().value;
     expect(TokenType::IDENTIFIER, "Expected the variable name");
 
+    std::unique_ptr<ExprNode> arrSize = nullptr;
+    if (match(TokenType::LBRACKET)) {
+      arrSize = parseExpression();
+      expect(TokenType::RBRACKET, "Expected ']' after array size");
+    }
+
     std::unique_ptr<ExprNode> init = nullptr;
     if (match(TokenType::ASSIGN)) {
       init = parseExpression();
@@ -761,6 +771,7 @@ std::unique_ptr<ASTNode> Parser::parseStatement() {
 
     auto node = std::make_unique<VarDeclNode>(
         typeName, varName, preamble.isConst, std::move(init));
+    node->arraySize = std::move(arrSize);
     node->decorators = preamble.decorators;
     expect(TokenType::SEMICOLON, "Expected ';'");
     finalizeNode(node.get(), startTok);
@@ -768,8 +779,13 @@ std::unique_ptr<ASTNode> Parser::parseStatement() {
   }
 
   if (match(TokenType::KW_DELETE)) {
+    bool isArr = false;
+    if (match(TokenType::LBRACKET)) {
+      expect(TokenType::RBRACKET, "Expected ']' for array delete");
+      isArr = true;
+    }
     auto ptrExpr = parseExpression();
-    auto node = std::make_unique<DeleteNode>(std::move(ptrExpr));
+    auto node = std::make_unique<DeleteNode>(std::move(ptrExpr), isArr);
     expect(TokenType::SEMICOLON, "Expected ';'");
     finalizeNode(node.get(), startTok);
     return node;
@@ -787,12 +803,34 @@ std::unique_ptr<ASTNode> Parser::parseStatement() {
   }
 
   auto expr = parseExpression();
-  if (match(TokenType::ASSIGN)) {
+  if (match(TokenType::PLUS_PLUS)) {
+    // evil syntax sugar: a++ is just a += 1
+    auto node = std::make_unique<AssignNode>(
+        std::move(expr), std::make_unique<NumberNode>(1), "+=");
+    expect(TokenType::SEMICOLON, "Expected ';'");
+    finalizeNode(node.get(), startTok);
+    return node;
+  }
+  if (match(TokenType::MINUS_MINUS)) {
+    auto node = std::make_unique<AssignNode>(
+        std::move(expr), std::make_unique<NumberNode>(1), "-=");
+    expect(TokenType::SEMICOLON, "Expected ';'");
+    finalizeNode(node.get(), startTok);
+    return node;
+  }
+
+  if (currentToken().type == TokenType::ASSIGN ||
+      currentToken().type == TokenType::PLUS_EQ ||
+      currentToken().type == TokenType::MINUS_EQ ||
+      currentToken().type == TokenType::STAR_EQ ||
+      currentToken().type == TokenType::SLASH_EQ) {
+    std::string op = currentToken().value;
+    advance();
     auto valueExpr = parseExpression();
     expect(TokenType::SEMICOLON, "Expected ';'");
 
     auto node =
-        std::make_unique<AssignNode>(std::move(expr), std::move(valueExpr));
+        std::make_unique<AssignNode>(std::move(expr), std::move(valueExpr), op);
     finalizeNode(node.get(), startTok);
     return node;
   }

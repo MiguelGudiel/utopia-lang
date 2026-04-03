@@ -161,15 +161,37 @@ Token Lexer::nextToken() {
   case ';':
     return {TokenType::SEMICOLON, ";", startLine, startCol};
   case '+':
+    if (cursor < source.length() && source[cursor] == '+') {
+      advanceCursor();
+      return {TokenType::PLUS_PLUS, "++", startLine, startCol};
+    }
+    if (cursor < source.length() && source[cursor] == '=') {
+      advanceCursor();
+      return {TokenType::PLUS_EQ, "+=", startLine, startCol};
+    }
     return {TokenType::PLUS, "+", startLine, startCol};
   case '-':
+    if (cursor < source.length() && source[cursor] == '-') {
+      advanceCursor();
+      return {TokenType::MINUS_MINUS, "--", startLine, startCol};
+    }
+    if (cursor < source.length() && source[cursor] == '=') {
+      advanceCursor();
+      return {TokenType::MINUS_EQ, "-=", startLine, startCol};
+    }
     return {TokenType::MINUS, "-", startLine, startCol};
   case '*':
+    if (cursor < source.length() && source[cursor] == '=') {
+      advanceCursor();
+      return {TokenType::STAR_EQ, "*=", startLine, startCol};
+    }
     return {TokenType::STAR, "*", startLine, startCol};
   case '/':
+    if (cursor < source.length() && source[cursor] == '=') {
+      advanceCursor();
+      return {TokenType::SLASH_EQ, "/=", startLine, startCol};
+    }
     return {TokenType::SLASH, "/", startLine, startCol};
-  case '%':
-    return {TokenType::PERCENT, "%", startLine, startCol};
   case ',':
     return {TokenType::COMMA, ",", startLine, startCol};
   case '?':
@@ -216,6 +238,10 @@ Token Lexer::nextToken() {
     return {TokenType::AT, "@", startLine, startCol};
   case '~':
     return {TokenType::TILDE, "~", startLine, startCol};
+  case '[':
+    return {TokenType::LBRACKET, "[", startLine, startCol};
+  case ']':
+    return {TokenType::RBRACKET, "]", startLine, startCol};
   default:
     return {TokenType::UNKNOWN, std::string(1, c), startLine, startCol};
   }

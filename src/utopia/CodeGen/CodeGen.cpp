@@ -164,6 +164,95 @@ llvm::Value *CodeGen::castValue(llvm::Value *value, const TypeInfo &from,
   return value;
 }
 
+void CodeGen::emitLifecycleLoop(llvm::Value *basePtr, llvm::Value *size,
+                                const std::string &typeName,
+                                bool isDestructor) {
+  if (!structTypes.count(typeName))
+    return;
+
+  std::string funcName =
+      isDestructor ? typeName + "_~" + typeName : typeName + "_" + typeName;
+  llvm::Function *lifecycleFunc = module->getFunction(funcName);
+  if (!lifecycleFunc)
+    return;
+
+  llvm::Function *currentFunc = builder->GetInsertBlock()->getParent();
+
+  if (size->getType()->isIntegerTy(32)) {
+    size = builder->CreateZExt(size, llvm::Type::getInt64Ty(*context));
+  }
+
+  // Create loop blocks
+  llvm::BasicBlock *condBB =
+      llvm::BasicBlock::Create(*context, "loop.cond", currentFunc);
+  llvm::BasicBlock *bodyBB =
+      llvm::BasicBlock::Create(*context, "loop.body", currentFunc);
+  llvm::BasicBlock *endBB =
+      llvm::BasicBlock::Create(*context, "loop.end", currentFunc);
+
+  // Counter allocation
+  llvm::AllocaInst *indexPtr = builder->CreateAlloca(
+      llvm::Type::getInt64Ty(*context), nullptr, "loop.idx");
+  if (isDestructor) {
+    // Evil pointer math: reverse iteration (LIFO) for array destruction
+    builder->CreateStore(size, indexPtr);
+  } else {
+    builder->CreateStore(
+        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0), indexPtr);
+  }
+  builder->CreateBr(condBB);
+
+  // Condition: index < size
+  builder->SetInsertPoint(condBB);
+  llvm::Value *currentIndex =
+      builder->CreateLoad(llvm::Type::getInt64Ty(*context), indexPtr);
+
+  llvm::Value *cond;
+  if (isDestructor) {
+    cond = builder->CreateICmpUGT(
+        currentIndex,
+        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0), "cmp.gt");
+  } else {
+    cond = builder->CreateICmpULT(currentIndex, size, "cmp.lt");
+  }
+
+  builder->CreateCondBr(cond, bodyBB, endBB);
+
+  // Body: Calculate address and call
+  builder->SetInsertPoint(bodyBB);
+
+  llvm::Value *actualIndex;
+  if (isDestructor) {
+    actualIndex = builder->CreateSub(
+        currentIndex,
+        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 1), "idx.sub");
+  } else {
+    actualIndex = currentIndex;
+  }
+
+  // GEP to get the address of the current element
+  llvm::Value *elementAddr = builder->CreateInBoundsGEP(
+      structTypes[typeName], basePtr, actualIndex, "elem.addr");
+
+  // Call the constructor or destructor
+  builder->CreateCall(lifecycleFunc, {elementAddr});
+
+  llvm::Value *nextIndex;
+  if (isDestructor) {
+    nextIndex = builder->CreateSub(
+        currentIndex,
+        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 1));
+  } else {
+    nextIndex = builder->CreateAdd(
+        currentIndex,
+        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 1));
+  }
+  builder->CreateStore(nextIndex, indexPtr);
+  builder->CreateBr(condBB);
+
+  builder->SetInsertPoint(endBB);
+}
+
 // --------------------------------------------------------------------------
 // Visitor Implementations (Double Dispatch Payload)
 // --------------------------------------------------------------------------
@@ -174,11 +263,14 @@ void CodeGen::visit(ProgramNode *node) {
   // orphaned methods bypass. link them to the global AST scope
   for (auto &st : node->structs) {
     structASTs[st->name] = st.get();
-    bool hasConstructor = false;
-    bool hasDestructor = false;
     structTypes[st->name] = llvm::StructType::create(*context, st->name);
     for (auto &method : st->methods) {
       std::string mangledName = st->name + "_" + method->name;
+      for (auto &arg : method->args) {
+        TypeInfo t = arg.isThisAssign ? structMemberTypes[st->name][arg.name]
+                                      : parseTypeString(arg.type);
+        mangledName += "_" + getMangledType(t);
+      }
       functionTypes[mangledName] = parseTypeString(method->returnType);
     }
   }
@@ -196,20 +288,33 @@ void CodeGen::visit(ProgramNode *node) {
   }
 
   for (auto &func : node->functions) {
-    functionTypes[func->name] = parseTypeString(func->returnType);
+    std::string mangledName = func->name;
+    for (auto &arg : func->args)
+      mangledName += "_" + getMangledType(parseTypeString(arg.type));
+    functionTypes[mangledName] = parseTypeString(func->returnType);
   }
 
   for (auto &st : node->structs) {
     for (auto &method : st->methods) {
       std::string originalName = method->name;
       method->name = st->name + "_" + method->name;
+      for (auto &arg : method->args) {
+        TypeInfo t = arg.isThisAssign ? structMemberTypes[st->name][arg.name]
+                                      : parseTypeString(arg.type);
+        method->name += "_" + getMangledType(t);
+      }
       method->accept(this);
       method->name = originalName;
     }
   }
 
-  for (auto &func : node->functions)
+  for (auto &func : node->functions) {
+    std::string originalName = func->name;
+    for (auto &arg : func->args)
+      func->name += "_" + getMangledType(parseTypeString(arg.type));
     func->accept(this);
+    func->name = originalName;
+  }
   exitScope();
 }
 
@@ -393,14 +498,9 @@ void CodeGen::visit(ReturnNode *node) {
 }
 
 void CodeGen::visit(AssignNode *node) {
-  node->value->accept(this);
-  llvm::Value *val = currentVal;
-  TypeInfo valType = currentType;
-
   isLValueContext = true;
   node->target->accept(this);
   isLValueContext = false;
-
   llvm::Value *destAddr = currentLValue;
   TypeInfo targetType = currentType;
 
@@ -409,25 +509,100 @@ void CodeGen::visit(AssignNode *node) {
     exit(1);
   }
 
-  builder->CreateStore(castValue(val, valType, targetType), destAddr);
+  node->value->accept(this);
+  llvm::Value *val = currentVal;
+  TypeInfo valType = currentType;
+
+  val = castValue(val, valType, targetType);
+
+  if (node->op != "=") {
+    llvm::Value *curVal =
+        builder->CreateLoad(getLLVMType(targetType), destAddr, "cur_val");
+    bool isF = (targetType.base == "float");
+    if (node->op == "+=")
+      val = isF ? builder->CreateFAdd(curVal, val)
+                : builder->CreateAdd(curVal, val);
+    else if (node->op == "-=")
+      val = isF ? builder->CreateFSub(curVal, val)
+                : builder->CreateSub(curVal, val);
+    else if (node->op == "*=")
+      val = isF ? builder->CreateFMul(curVal, val)
+                : builder->CreateMul(curVal, val);
+    else if (node->op == "/=")
+      val = isF ? builder->CreateFDiv(curVal, val)
+                : builder->CreateSDiv(curVal, val);
+  }
+
+  builder->CreateStore(val, destAddr);
+}
+
+void CodeGen::visit(SubscriptNode *node) {
+  bool oldCtx = isLValueContext;
+  isLValueContext = false;
+  node->object->accept(this);
+  llvm::Value *objPtr = currentVal;
+  TypeInfo objType = currentType;
+
+  node->index->accept(this);
+  llvm::Value *idx = currentVal;
+  isLValueContext = oldCtx;
+
+  TypeInfo elemType = objType;
+  elemType.ptrDepth--;
+
+  // Native IR for optimized indexing
+  llvm::Value *elemAddr = builder->CreateInBoundsGEP(getLLVMType(elemType),
+                                                     objPtr, idx, "array_idx");
+
+  if (isLValueContext) {
+    currentLValue = elemAddr;
+  } else {
+    if (structTypes.count(elemType.base) && elemType.ptrDepth == 0) {
+      // return pointer as value to bypass LLVM struct copy
+      currentVal = elemAddr;
+    } else {
+      currentVal =
+          builder->CreateLoad(getLLVMType(elemType), elemAddr, "load_idx");
+    }
+  }
+  currentType = elemType;
 }
 
 void CodeGen::visit(VarDeclNode *node) {
   TypeInfo declType = parseTypeString(node->typeName);
-  llvm::Type *llvmType = getLLVMType(declType);
 
-  llvm::AllocaInst *alloca =
-      builder->CreateAlloca(llvmType, nullptr, node->name);
+  if (node->arraySize) {
+    node->arraySize->accept(this);
+    llvm::Value *sizeVal = currentVal;
+    llvm::Type *llvmType = getLLVMType(declType);
 
-  if (node->initializer) {
-    node->initializer->accept(this);
-    builder->CreateStore(castValue(currentVal, currentType, declType), alloca);
+    // Allocate contiguous stack memory
+    llvm::AllocaInst *alloca =
+        builder->CreateAlloca(llvmType, sizeVal, node->name);
+
+    // Construct all stack elements
+    emitLifecycleLoop(alloca, sizeVal, node->typeName, false);
+
+    declType.isArray = true;
+    valueScopes.back()[node->name] = alloca;
+    typeScopes.back()[node->name] = declType;
   } else {
-    builder->CreateStore(llvm::Constant::getNullValue(llvmType), alloca);
-  }
+    llvm::Type *llvmType = getLLVMType(declType);
 
-  valueScopes.back()[node->name] = alloca;
-  typeScopes.back()[node->name] = declType;
+    llvm::AllocaInst *alloca =
+        builder->CreateAlloca(llvmType, nullptr, node->name);
+
+    if (node->initializer) {
+      node->initializer->accept(this);
+      builder->CreateStore(castValue(currentVal, currentType, declType),
+                           alloca);
+    } else {
+      builder->CreateStore(llvm::Constant::getNullValue(llvmType), alloca);
+    }
+
+    valueScopes.back()[node->name] = alloca;
+    typeScopes.back()[node->name] = declType;
+  }
 }
 
 void CodeGen::visit(IfNode *node) {
@@ -602,21 +777,38 @@ void CodeGen::visit(ContinueNode *node) {
 
 void CodeGen::visit(DeleteNode *node) {
   node->pointerExpr->accept(this);
-
   llvm::Value *ptrVal = currentVal;
   TypeInfo ptrType = currentType;
 
-  // wtf? vtable bypass.
-  // hardcode the mangled dtor name and force IR call before free()
-  if (ptrType.ptrDepth > 0 && structTypes.count(ptrType.base)) {
+  if (node->isArray) {
     std::string dtorName = ptrType.base + "_~" + ptrType.base;
-    llvm::Function *dtor = module->getFunction(dtorName);
-    if (dtor) {
-      builder->CreateCall(dtor, {ptrVal});
-    }
-  }
+    bool hasDtor = (module->getFunction(dtorName) != nullptr);
 
-  builder->CreateCall(getFreePrototype(), {ptrVal});
+    if (hasDtor) {
+      // Shift pointer -8 bytes to retrieve the cookie
+      llvm::Value *rawMem = builder->CreateInBoundsGEP(
+          llvm::Type::getInt8Ty(*context), ptrVal,
+          llvm::ConstantInt::get(*context, llvm::APInt(64, -8)), "raw_mem");
+
+      llvm::Value *sizeVal = builder->CreateLoad(
+          llvm::Type::getInt64Ty(*context), rawMem, "array_size");
+
+      emitLifecycleLoop(ptrVal, sizeVal, ptrType.base, true);
+      builder->CreateCall(getFreePrototype(), {rawMem});
+    } else {
+      // If there's no destructor, the pointer IS the raw block
+      // Nuke it instantly.
+      builder->CreateCall(getFreePrototype(), {ptrVal});
+    }
+  } else {
+    if (ptrType.ptrDepth > 0 && structTypes.count(ptrType.base)) {
+      std::string dtorName = ptrType.base + "_~" + ptrType.base;
+      llvm::Function *dtor = module->getFunction(dtorName);
+      if (dtor)
+        builder->CreateCall(dtor, {ptrVal});
+    }
+    builder->CreateCall(getFreePrototype(), {ptrVal});
+  }
 }
 
 // --------------------------------------------------------------------------
@@ -658,15 +850,21 @@ void CodeGen::visit(VariableNode *node) {
   if (isLValueContext) {
     currentLValue = alloca;
   } else {
-    // If it's a struct by value, we return the address as RValue for GEP
-    // efficiency
     if (structTypes.count(type.base) && type.ptrDepth == 0) {
+      currentVal = alloca;
+    } else if (type.isArray) {
+      // We do not CreateLoad
+      // Since it is an array, its AllocaInst IS ALREADY the pointer to its base
       currentVal = alloca;
     } else {
       currentVal = builder->CreateLoad(getLLVMType(type), alloca, node->name);
     }
   }
   currentType = type;
+  if (currentType.isArray) { // Decay
+    currentType.isArray = false;
+    currentType.ptrDepth++;
+  }
 }
 
 void CodeGen::visit(BinaryOpNode *node) {
@@ -820,26 +1018,76 @@ void CodeGen::visit(NewNode *node) {
   TypeInfo baseType = parseTypeString(node->typeName);
   llvm::Type *llvmType = getLLVMType(baseType);
 
-  uint64_t sizeBytes = module->getDataLayout().getTypeAllocSize(llvmType);
-  llvm::Value *sz =
-      llvm::ConstantInt::get(*context, llvm::APInt(64, sizeBytes));
-
-  llvm::Value *mem = builder->CreateCall(getMallocPrototype(), {sz}, "mem_ptr");
-
-  std::string ctorName = node->typeName + "_" + node->typeName;
-  llvm::Function *ctor = module->getFunction(ctorName);
-
-  if (ctor) {
-    std::vector<llvm::Value *> args;
-    args.push_back(mem); // /* what the fuck? invisible this ptr injection */
-    for (auto &arg : node->arguments) {
-      arg->accept(this);
-      args.push_back(currentVal);
+  llvm::Value *sizeVal = nullptr;
+  if (node->arraySize) {
+    node->arraySize->accept(this);
+    sizeVal = currentVal;
+    if (sizeVal->getType()->isIntegerTy(32)) {
+      sizeVal = builder->CreateZExt(sizeVal, llvm::Type::getInt64Ty(*context));
     }
-    builder->CreateCall(ctor, args);
   }
 
-  currentVal = mem;
+  uint64_t typeBytes = module->getDataLayout().getTypeAllocSize(llvmType);
+  llvm::Value *typeSz =
+      llvm::ConstantInt::get(*context, llvm::APInt(64, typeBytes));
+
+  llvm::Value *totalSz = typeSz;
+  bool needsCookie = false;
+
+  if (sizeVal) {
+    // Fast path: Only allocate a metadata cookie if the type requires
+    // destruction. Primitives and pure structs bypass this entirely.
+    std::string dtorName = node->typeName + "_~" + node->typeName;
+    needsCookie = (module->getFunction(dtorName) != nullptr);
+
+    llvm::Value *arrayBytes =
+        builder->CreateMul(typeSz, sizeVal, "array_bytes");
+
+    if (needsCookie) {
+      totalSz = builder->CreateAdd(
+          arrayBytes, llvm::ConstantInt::get(*context, llvm::APInt(64, 8)),
+          "total_sz_with_cookie");
+    } else {
+      totalSz = arrayBytes;
+    }
+  }
+
+  llvm::Value *rawMem =
+      builder->CreateCall(getMallocPrototype(), {totalSz}, "raw_mem");
+
+  if (sizeVal) {
+    if (needsCookie) {
+      builder->CreateStore(sizeVal, rawMem);
+      llvm::Value *arrayBase = builder->CreateInBoundsGEP(
+          llvm::Type::getInt8Ty(*context), rawMem,
+          llvm::ConstantInt::get(*context, llvm::APInt(64, 8)), "array_base");
+
+      emitLifecycleLoop(arrayBase, sizeVal, node->typeName, false);
+      currentVal = arrayBase;
+    } else {
+      // Raw memory spray, Carmack style. No headers, no bloat.
+      emitLifecycleLoop(rawMem, sizeVal, node->typeName, false);
+      currentVal = rawMem;
+    }
+  } else {
+    std::vector<llvm::Value *> callArgs;
+    callArgs.push_back(rawMem);
+
+    std::string mangledSig = "";
+    for (auto &arg : node->arguments) {
+      arg->accept(this);
+      callArgs.push_back(currentVal);
+      mangledSig += "_" + getMangledType(currentType);
+    }
+
+    std::string ctorName = node->typeName + "_" + node->typeName + mangledSig;
+    llvm::Function *ctor = module->getFunction(ctorName);
+    if (ctor)
+      builder->CreateCall(ctor, callArgs);
+
+    currentVal = rawMem;
+  }
+
   currentType = baseType;
   currentType.ptrDepth = 1;
 }
@@ -863,20 +1111,28 @@ void CodeGen::visit(CallNode *node) {
     isLValueContext = oldCtx;
 
     llvm::Value *thisArg = currentVal;
-    std::string mangledName = currentType.base + "_" + node->callee;
+
+    // Almacenar la base antes de corromper currentType en la evaluación de
+    // argumentos
+    std::string objBase = currentType.base;
+
+    std::vector<llvm::Value *> args;
+    args.push_back(thisArg);
+
+    std::string mangledSig = "";
+    for (auto &a : node->arguments) {
+      a->accept(this);
+      args.push_back(currentVal);
+      mangledSig += "_" + getMangledType(currentType);
+    }
+
+    std::string mangledName = objBase + "_" + node->callee + mangledSig;
     llvm::Function *f = module->getFunction(mangledName);
 
     if (!f) {
       std::cerr << "[Utopia Fatal] CodeGen Error: Method '" << node->callee
                 << "' missing.\n";
       exit(1);
-    }
-
-    std::vector<llvm::Value *> args;
-    args.push_back(thisArg);
-    for (auto &a : node->arguments) {
-      a->accept(this);
-      args.push_back(currentVal);
     }
 
     currentVal = builder->CreateCall(f, args);
@@ -914,24 +1170,32 @@ void CodeGen::visit(CallNode *node) {
     return;
   }
 
-  llvm::Function *f = module->getFunction(node->callee);
-
-  if (!f) {
-    std::cerr << "[Utopia Fatal] CodeGen Error: Call to undefined function '"
-              << node->callee << "'.\n"
-              << "Make sure the function is defined before it is called.\n";
-    exit(1);
-  }
-
   std::vector<llvm::Value *> args;
+  std::string mangledSig = "";
   for (auto &a : node->arguments) {
     a->accept(this);
     args.push_back(currentVal);
+    mangledSig += "_" + getMangledType(currentType);
   }
+
+  std::string mangledName = node->callee + mangledSig;
+  llvm::Function *f = module->getFunction(mangledName);
+
+  if (!f) {
+    f = module->getFunction(node->callee);
+    mangledName = node->callee;
+  }
+
+  if (!f) {
+    std::cerr << "[Utopia Fatal] CodeGen Error: Call to undefined function '"
+              << node->callee << "'.\n";
+    exit(1);
+  }
+
   currentVal = builder->CreateCall(f, args);
 
-  if (functionTypes.count(node->callee)) {
-    currentType = functionTypes[node->callee];
+  if (functionTypes.count(mangledName)) {
+    currentType = functionTypes[mangledName];
   } else {
     currentType = {"int"};
   }

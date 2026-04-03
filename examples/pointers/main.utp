@@ -2,6 +2,10 @@
 class Person {
   String name = "José";
 
+  Person() {
+
+  }
+
   Person(String name) {
     this.name = name;
   }
@@ -13,14 +17,30 @@ class Person {
   inline void Greet() {
     print("Hello, my name is ", name);
   }
+
+  inline void Greet(String name) {
+    print("Hello, ", name, ". My name is ", this.name);
+  }
+}
+
+int sum(int a, int b) {
+  return a+b;
 }
 
 int main() {
-  Person* instance = new Person("XD");
-
+  Person* instance = new Person("Mario");
+  
   //instance.name = "Michael";
   instance.Greet();
 
+  Person* group = new Person[5];
+  
+  for(int i=0; i<5; i++) {
+    group[i].name("XD");
+    group[i].Greet("Carlos");
+  }
+
   delete instance;
+  delete[] group;
   return 0;
 }

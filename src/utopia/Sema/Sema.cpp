@@ -1,3 +1,4 @@
+// File: src/utopia/Sema/Sema.cpp
 #include "utopia/Sema/Sema.hpp"
 
 namespace utopia {
@@ -33,19 +34,38 @@ TypeInfo Sema::parseType(const std::string &typeName) {
   return t;
 }
 
+std::string typeToString(const TypeInfo &t) {
+  std::string s = t.base;
+  for (unsigned i = 0; i < t.ptrDepth; ++i)
+    s += "*";
+  if (t.isNullable)
+    s += "?";
+  return s;
+}
+
 bool Sema::checkAssignment(const TypeInfo &target, const TypeInfo &source,
                            ASTNode *node) {
   if (!target.isNullable && source.isNullable) {
-    reportError(node,
-                "Type Mismatch: Cannot assign nullable type to non-nullable '" +
-                    target.base + "'");
+    reportError(node, "error: nullable value assigned to non-nullable type '" +
+                          typeToString(target) + "'");
     return false;
   }
+
   if (target.ptrDepth != source.ptrDepth && source.base != "null") {
     reportError(node,
-                "Type Mismatch: Pointer indirection level does not match");
+                "error: incompatible pointer indirection levels (expected '" +
+                    typeToString(target) + "', found '" + typeToString(source) +
+                    "')");
     return false;
   }
+
+  if (target.base != source.base && source.base != "null" &&
+      target.ptrDepth == source.ptrDepth) {
+    reportError(node, "error: cannot convert '" + typeToString(source) +
+                          "' to '" + typeToString(target) + "'");
+    return false;
+  }
+
   return true;
 }
 
@@ -58,7 +78,10 @@ bool Sema::analyze(ProgramNode *program) {
   loopDepth = 0;
 
   for (auto &func : program->functions) {
-    functionTypes[func->name] = parseType(func->returnType);
+    std::string mangledName = func->name;
+    for (auto &arg : func->args)
+      mangledName += "_" + getMangledType(parseType(arg.type));
+    functionTypes[mangledName] = parseType(func->returnType);
   }
 
   for (auto &st : program->structs) {
@@ -70,10 +93,14 @@ bool Sema::analyze(ProgramNode *program) {
     }
     customStructs[st->name] = def;
 
-    // register methods into global scope so the symbol table doesn't shit
-    // itself on 'this' dispatches
+    // register methods into global scope
     for (auto &m : st->methods) {
       std::string mangledName = st->name + "_" + m->name;
+      for (auto &arg : m->args) {
+        TypeInfo t =
+            arg.isThisAssign ? def.fields[arg.name].type : parseType(arg.type);
+        mangledName += "_" + getMangledType(t);
+      }
       functionTypes[mangledName] = parseType(m->returnType);
     }
   }
@@ -87,45 +114,34 @@ void Sema::visit(StructDeclNode *node) {}
 void Sema::visit(MemberAccessNode *node) {
   node->object->accept(this);
 
-  if (currentExprType.ptrDepth > 0) {
-    reportError(
-        node,
-        "The '.' operator requires an object by value. Use '(*obj).field'.");
-    return;
-  }
+  // Auto-deref: LLVM se encarga de que ambos (valores y punteros)
+  // sean accesibles vía CreateStructGEP, así que solo validamos la base.
 
   if (!customStructs.count(currentExprType.base)) {
-    reportError(node, "Type '" + currentExprType.base +
-                          "' has no fields or does not exist.");
+    reportError(node, "error: type '" + currentExprType.base +
+                          "' is not a class or struct");
     currentExprType = {"error", 0, false};
     return;
   }
 
   auto &def = customStructs[currentExprType.base];
   if (!def.fields.count(node->field)) {
-    reportError(node, "Field '" + node->field + "' does not exist.");
+    reportError(node, "error: no member named '" + node->field + "' in '" +
+                          currentExprType.base + "'");
     currentExprType = {"error", 0, false};
     return;
   }
 
   auto &field = def.fields[node->field];
 
-  bool isPub = false;
-  if (field.mod == AccessModifier::Public) {
-    isPub = true;
-  } else if (field.mod == AccessModifier::Private) {
-    isPub = false;
-  } else {
-    if (!node->field.empty() && node->field[0] == '_') {
-      isPub = false;
-    } else {
-      isPub = !def.isClass;
-    }
-  }
+  // Implicit access resolution: Public by default unless it starts with '_'
+  bool isPub = (field.mod == AccessModifier::Public) ||
+               (field.mod == AccessModifier::Implicit &&
+                (node->field.empty() || node->field[0] != '_'));
 
-  if (!isPub) {
-    reportError(node,
-                "Access Violation: Field '" + node->field + "' is private.");
+  if (!isPub && currentClass != currentExprType.base) {
+    reportError(node, "error: '" + node->field + "' is a private member of '" +
+                          currentExprType.base + "'");
   }
 
   currentExprType = field.type;
@@ -157,8 +173,7 @@ void Sema::visit(ProgramNode *node) {
 
 void Sema::visit(ThisNode *node) {
   if (currentClass.empty()) {
-    reportError(
-        node, "Context Error: 'this' can only be used inside a class method.");
+    reportError(node, "error: 'this' used outside of class context");
     currentExprType = {"error", 0, false};
     return;
   }
@@ -173,10 +188,16 @@ void Sema::visit(FunctionNode *node) {
     currentClass = node->className;
   }
 
-  // /* Recover mangled identity to prevent return type mismatches */
+  // Recover mangled identity to prevent return type mismatches
   std::string lookupName = node->name;
   if (node->isMethod || node->isConstructor || node->isDestructor) {
     lookupName = node->className + "_" + node->name;
+  }
+  for (auto &arg : node->args) {
+    TypeInfo t = arg.isThisAssign
+                     ? customStructs[node->className].fields[arg.name].type
+                     : parseType(arg.type);
+    lookupName += "_" + getMangledType(t);
   }
   currentReturnType = functionTypes[lookupName];
 
@@ -289,6 +310,10 @@ void Sema::visit(AssignNode *node) {
        targetType.ptrDepth == 0)) {
   }
 
+  // R-Value validation: Check if we are trying to assign to something that
+  // isn't an identifier or member This is a simple version, in the future we'll
+  // need a proper isLValue flag
+
   node->value->accept(this);
   TypeInfo valueType = currentExprType;
 
@@ -302,16 +327,52 @@ void Sema::visit(VarDeclNode *node) {
   }
 
   TypeInfo declType = parseType(node->typeName);
-  node->initializer->accept(this);
 
-  checkAssignment(declType, currentExprType, node);
+  if (node->arraySize) {
+    node->arraySize->accept(this);
+    if (currentExprType.base != "int") {
+      reportError(node, "Array size must evaluate to an integer.");
+    }
+    declType.isArray = true;
+  }
+
+  if (node->initializer) {
+    node->initializer->accept(this);
+    checkAssignment(declType, currentExprType, node);
+  }
+
   scopeStack.back()[node->name] = {declType, node->isConst};
+}
+
+void Sema::visit(SubscriptNode *node) {
+  node->object->accept(this);
+  TypeInfo objType = currentExprType;
+
+  // Como VariableNode ya hizo el decay, objType ya es un puntero (ptrDepth > 0)
+  if (objType.ptrDepth == 0) {
+    reportError(node, "Subscript operator [] requires a pointer or array.");
+    currentExprType = {"error", 0, false};
+    return;
+  }
+
+  node->index->accept(this);
+  if (currentExprType.base != "int") {
+    reportError(node, "Array index must be an integer.");
+  }
+
+  currentExprType = objType;
+  currentExprType.ptrDepth--; // El tipo resultante es el base extraído
 }
 
 void Sema::visit(VariableNode *node) {
   Symbol *sym = lookup(node->name);
   if (sym) {
     currentExprType = sym->type;
+    // Native Array-to-Pointer Decay
+    if (currentExprType.isArray) {
+      currentExprType.isArray = false;
+      currentExprType.ptrDepth++;
+    }
     return;
   }
 
@@ -324,7 +385,7 @@ void Sema::visit(VariableNode *node) {
     }
   }
 
-  reportError(node, "Use of undeclared identifier '" + node->name + "'");
+  reportError(node, "error: use of undeclared identifier '" + node->name + "'");
   currentExprType = {"error", 0, false};
 }
 
@@ -384,49 +445,58 @@ void Sema::visit(UnaryMinusNode *node) {
 void Sema::visit(ReturnNode *node) {
   if (node->returnValue) {
     if (currentReturnType.base == "void" && currentReturnType.ptrDepth == 0) {
-      reportError(
-          node,
-          "Void return mismatch: Cannot return a value from a void function.");
+      reportError(node, "error: void function should not return a value");
     } else {
       node->returnValue->accept(this);
       checkAssignment(currentReturnType, currentExprType, node);
     }
-  } else {
-    if (currentReturnType.base != "void" || currentReturnType.ptrDepth > 0) {
-      reportError(node, "Missing return value: Expected '" +
-                            currentReturnType.base + "'.");
-    }
+  } else if (currentReturnType.base != "void" ||
+             currentReturnType.ptrDepth > 0) {
+    reportError(node,
+                "error: non-void function must return a value (expected '" +
+                    typeToString(currentReturnType) + "')");
   }
 }
 
 void Sema::visit(CallNode *node) {
-  for (auto &a : node->arguments)
+  std::string mangledSig = "";
+  for (auto &a : node->arguments) {
     a->accept(this);
+    mangledSig += "_" + getMangledType(currentExprType);
+  }
 
   if (node->object) {
     node->object->accept(this);
-    std::string objType = currentExprType.base;
-    std::string mangledName = objType + "_" + node->callee;
+    TypeInfo objType = currentExprType;
 
+    std::string mangledName = objType.base + "_" + node->callee + mangledSig;
     if (functionTypes.count(mangledName)) {
       currentExprType = functionTypes[mangledName];
     } else {
-      reportError(node, "Method '" + node->callee + "' not found in class '" +
-                            objType + "'.");
+      reportError(node, "error: no member function matching '" + node->callee +
+                            "' in '" + objType.base + "'");
       currentExprType = {"error", 0, false};
     }
     return;
   }
 
+  // Global scope calls
   if (node->callee == "print") {
-    currentExprType = {"void", 0};
-    return;
-  }
-
-  if (functionTypes.count(node->callee)) {
-    currentExprType = functionTypes[node->callee];
+    currentExprType = {"void", 0, false};
+  } else if (node->callee == "int" || node->callee == "float" ||
+             node->callee == "bool") {
+    currentExprType = {node->callee, 0, false};
   } else {
-    currentExprType = {"int", 0};
+    std::string mangledName = node->callee + mangledSig;
+    if (functionTypes.count(mangledName)) {
+      currentExprType = functionTypes[mangledName];
+    } else if (functionTypes.count(node->callee)) {
+      currentExprType = functionTypes[node->callee]; // Fallback externals
+    } else {
+      reportError(node,
+                  "error: call to undeclared function '" + node->callee + "'");
+      currentExprType = {"error", 0, false};
+    }
   }
 }
 
@@ -447,17 +517,30 @@ void Sema::visit(DerefNode *node) {
 }
 
 void Sema::visit(NewNode *node) {
-  currentExprType = parseType(node->typeName);
-  currentExprType.ptrDepth = 1;
+  TypeInfo resultType = parseType(node->typeName);
+  resultType.ptrDepth = 1; // Heap allocation always returns a pointer
 
+  // Check constructor arguments
   for (auto &a : node->arguments)
     a->accept(this);
 
-  std::string ctorName = node->typeName + "_" + node->typeName;
-  if (!functionTypes.count(ctorName) && !node->arguments.empty()) {
-    reportError(node,
-                "No matching constructor found for '" + node->typeName + "'.");
+  // Check constructor arguments and mutate signature
+  std::string mangledSig = "";
+  for (auto &a : node->arguments) {
+    a->accept(this);
+    mangledSig += "_" + getMangledType(currentExprType);
   }
+
+  if (customStructs.count(node->typeName)) {
+    std::string expectedCtor = node->typeName + "_" + node->typeName +
+                               (node->arraySize ? "" : mangledSig);
+    if (!functionTypes.count(expectedCtor)) {
+      reportError(node, "error: no matching constructor found for '" +
+                            node->typeName + "'");
+    }
+  }
+
+  currentExprType = resultType;
 }
 
 void Sema::visit(DeleteNode *node) { node->pointerExpr->accept(this); }

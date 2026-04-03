@@ -59,6 +59,8 @@ private:
 
   llvm::Value *castValue(llvm::Value *value, const TypeInfo &from,
                          const TypeInfo &to);
+  void emitLifecycleLoop(llvm::Value *basePtr, llvm::Value *size,
+                         const std::string &typeName, bool isDestructor);
   llvm::Value *getOrCreateString(const std::string &str);
 
   llvm::FunctionCallee getMallocPrototype();
@@ -81,6 +83,7 @@ private:
   void visit(BoolNode *node) override;
   void visit(StringNode *node) override;
   void visit(UnaryMinusNode *node) override;
+  void visit(SubscriptNode *node) override;
   void visit(VariableNode *node) override;
   void visit(AddressOfNode *node) override;
   void visit(DerefNode *node) override;
