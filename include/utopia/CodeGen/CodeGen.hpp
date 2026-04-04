@@ -34,6 +34,7 @@ private:
   // LIFO stacks for loop jumping
   std::vector<llvm::BasicBlock *> breakTargets;
   std::vector<llvm::BasicBlock *> continueTargets;
+  std::vector<size_t> loopScopeDepths;
 
   std::map<std::string, TypeInfo> functionTypes;
 
@@ -48,6 +49,8 @@ private:
   llvm::Value *currentLValue = nullptr;
   bool isLValueContext = false;
 
+  llvm::Value *rvoTarget = nullptr;
+
   void enterScope();
   void exitScope();
   llvm::AllocaInst *lookupValue(const std::string &name);
@@ -59,8 +62,11 @@ private:
 
   llvm::Value *castValue(llvm::Value *value, const TypeInfo &from,
                          const TypeInfo &to);
+  void emitCopyOrStore(llvm::Value *destAddr, llvm::Value *srcVal,
+                       const TypeInfo &targetType, const TypeInfo &srcType);
   void emitLifecycleLoop(llvm::Value *basePtr, llvm::Value *size,
                          const std::string &typeName, bool isDestructor);
+  void emitScopeCleanup(size_t targetDepth);
   llvm::Value *getOrCreateString(const std::string &str);
 
   llvm::FunctionCallee getMallocPrototype();
@@ -78,6 +84,7 @@ private:
   void visit(BreakNode *node) override;
   void visit(ContinueNode *node) override;
   void visit(NullAssertNode *node) override;
+  void visit(LogicalNotNode *node) override;
   void visit(NumberNode *node) override;
   void visit(FloatNode *node) override;
   void visit(BoolNode *node) override;
@@ -89,6 +96,7 @@ private:
   void visit(DerefNode *node) override;
   void visit(NewNode *node) override;
   void visit(DeleteNode *node) override;
+  void visit(MoveNode *node) override;
   void visit(BinaryOpNode *node) override;
   void visit(CallNode *node) override;
   void visit(AssignNode *node) override;

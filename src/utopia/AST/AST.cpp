@@ -19,6 +19,7 @@ void ForNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void BreakNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void ContinueNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void NullAssertNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
+void LogicalNotNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void NumberNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void FloatNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void BoolNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
@@ -30,6 +31,7 @@ void AddressOfNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void DerefNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void NewNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void DeleteNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
+void MoveNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void BinaryOpNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void CallNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void AssignNode::accept(ASTVisitor *visitor) { visitor->visit(this); }

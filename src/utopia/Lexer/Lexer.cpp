@@ -71,6 +71,8 @@ Token Lexer::nextToken() {
       return {TokenType::KW_BOOL, val, startLine, startCol};
     if (val == "uint")
       return {TokenType::KW_UINT, val, startLine, startCol};
+    if (val == "char")
+      return {TokenType::KW_CHAR, val, startLine, startCol};
     if (val == "void")
       return {TokenType::KW_VOID, val, startLine, startCol};
     if (val == "return")
@@ -85,6 +87,8 @@ Token Lexer::nextToken() {
       return {TokenType::KW_NEW, val, startLine, startCol};
     if (val == "delete")
       return {TokenType::KW_DELETE, val, startLine, startCol};
+    if (val == "move")
+      return {TokenType::KW_MOVE, val, startLine, startCol};
     if (val == "null")
       return {TokenType::KW_NULL, val, startLine, startCol};
     if (val == "if")

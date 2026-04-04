@@ -149,6 +149,14 @@ public:
   void accept(ASTVisitor *visitor) override;
 };
 
+class LogicalNotNode : public ExprNode {
+public:
+  std::unique_ptr<ExprNode> operand;
+  explicit LogicalNotNode(std::unique_ptr<ExprNode> op)
+      : operand(std::move(op)) {}
+  void accept(ASTVisitor *visitor) override;
+};
+
 class UnaryMinusNode : public ExprNode {
 public:
   std::unique_ptr<ExprNode> operand;
@@ -200,6 +208,14 @@ public:
 
   explicit DeleteNode(std::unique_ptr<ExprNode> ptr, bool isArr = false)
       : pointerExpr(std::move(ptr)), isArray(isArr) {}
+
+  void accept(ASTVisitor *visitor) override;
+};
+
+class MoveNode : public ExprNode {
+public:
+  std::unique_ptr<ExprNode> operand;
+  explicit MoveNode(std::unique_ptr<ExprNode> op) : operand(std::move(op)) {}
 
   void accept(ASTVisitor *visitor) override;
 };

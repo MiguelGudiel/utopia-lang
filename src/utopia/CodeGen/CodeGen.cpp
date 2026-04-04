@@ -56,6 +56,7 @@ void CodeGen::enterScope() {
 }
 
 void CodeGen::exitScope() {
+  emitScopeCleanup(valueScopes.size() - 1);
   valueScopes.pop_back();
   typeScopes.pop_back();
 }
@@ -108,6 +109,13 @@ TypeInfo CodeGen::parseTypeString(const std::string &typeName) const {
     t.isNullable = true;
     temp.pop_back();
   }
+  if (temp.length() >= 2 && temp.substr(temp.length() - 2) == "&&") {
+    t.isRValueRef = true;
+    temp.erase(temp.length() - 2);
+  } else if (!temp.empty() && temp.back() == '&') {
+    t.isReference = true;
+    temp.pop_back();
+  }
   while (!temp.empty() && temp.back() == '*') {
     t.ptrDepth++;
     temp.pop_back();
@@ -117,7 +125,7 @@ TypeInfo CodeGen::parseTypeString(const std::string &typeName) const {
 }
 
 llvm::Type *CodeGen::getLLVMType(const TypeInfo &type) {
-  if (type.ptrDepth > 0)
+  if (type.ptrDepth > 0 || type.isReference || type.isRValueRef)
     return llvm::PointerType::get(*context, 0);
   if (structTypes.count(type.base))
     return structTypes[type.base];
@@ -164,6 +172,45 @@ llvm::Value *CodeGen::castValue(llvm::Value *value, const TypeInfo &from,
   return value;
 }
 
+void CodeGen::emitCopyOrStore(llvm::Value *destAddr, llvm::Value *srcVal,
+                              const TypeInfo &targetType,
+                              const TypeInfo &srcType) {
+  if (targetType.ptrDepth == 0 && !targetType.isReference &&
+      structTypes.count(targetType.base)) {
+
+    std::string mangledCtor = "";
+
+    // --- MOVE SEMANTICS HIJACK ---
+    // The source memory is marked for death (r-value). We bypass the deep copy
+    // and call the move constructor to steal its pointers.
+    // "What is yours is now mine."
+    if (srcType.isRValueRef) {
+      mangledCtor = targetType.base + "_" + targetType.base + "_" +
+                    targetType.base + "rrf";
+    }
+
+    llvm::Function *ctor =
+        mangledCtor.empty() ? nullptr : module->getFunction(mangledCtor);
+
+    // Fallback a Copy-Ctor si no existe Move-Ctor o no es un r-value
+    if (!ctor) {
+      mangledCtor = targetType.base + "_" + targetType.base + "_" +
+                    targetType.base + "ref";
+      ctor = module->getFunction(mangledCtor);
+    }
+
+    if (ctor) {
+      builder->CreateCall(ctor, {destAddr, srcVal});
+    } else {
+      llvm::Value *loadedStruct =
+          builder->CreateLoad(getLLVMType(targetType), srcVal, "shallow.load");
+      builder->CreateStore(loadedStruct, destAddr);
+    }
+  } else {
+    builder->CreateStore(srcVal, destAddr);
+  }
+}
+
 void CodeGen::emitLifecycleLoop(llvm::Value *basePtr, llvm::Value *size,
                                 const std::string &typeName,
                                 bool isDestructor) {
@@ -182,7 +229,6 @@ void CodeGen::emitLifecycleLoop(llvm::Value *basePtr, llvm::Value *size,
     size = builder->CreateZExt(size, llvm::Type::getInt64Ty(*context));
   }
 
-  // Create loop blocks
   llvm::BasicBlock *condBB =
       llvm::BasicBlock::Create(*context, "loop.cond", currentFunc);
   llvm::BasicBlock *bodyBB =
@@ -190,11 +236,9 @@ void CodeGen::emitLifecycleLoop(llvm::Value *basePtr, llvm::Value *size,
   llvm::BasicBlock *endBB =
       llvm::BasicBlock::Create(*context, "loop.end", currentFunc);
 
-  // Counter allocation
   llvm::AllocaInst *indexPtr = builder->CreateAlloca(
       llvm::Type::getInt64Ty(*context), nullptr, "loop.idx");
   if (isDestructor) {
-    // Evil pointer math: reverse iteration (LIFO) for array destruction
     builder->CreateStore(size, indexPtr);
   } else {
     builder->CreateStore(
@@ -202,7 +246,6 @@ void CodeGen::emitLifecycleLoop(llvm::Value *basePtr, llvm::Value *size,
   }
   builder->CreateBr(condBB);
 
-  // Condition: index < size
   builder->SetInsertPoint(condBB);
   llvm::Value *currentIndex =
       builder->CreateLoad(llvm::Type::getInt64Ty(*context), indexPtr);
@@ -218,7 +261,6 @@ void CodeGen::emitLifecycleLoop(llvm::Value *basePtr, llvm::Value *size,
 
   builder->CreateCondBr(cond, bodyBB, endBB);
 
-  // Body: Calculate address and call
   builder->SetInsertPoint(bodyBB);
 
   llvm::Value *actualIndex;
@@ -230,11 +272,9 @@ void CodeGen::emitLifecycleLoop(llvm::Value *basePtr, llvm::Value *size,
     actualIndex = currentIndex;
   }
 
-  // GEP to get the address of the current element
   llvm::Value *elementAddr = builder->CreateInBoundsGEP(
       structTypes[typeName], basePtr, actualIndex, "elem.addr");
 
-  // Call the constructor or destructor
   builder->CreateCall(lifecycleFunc, {elementAddr});
 
   llvm::Value *nextIndex;
@@ -253,6 +293,35 @@ void CodeGen::emitLifecycleLoop(llvm::Value *basePtr, llvm::Value *size,
   builder->SetInsertPoint(endBB);
 }
 
+void CodeGen::emitScopeCleanup(size_t targetDepth) {
+  /*
+   * WTF? LLVM will SIGILL if we insert instructions after a terminator.
+   * Evil basic block solution: bail out if the block is already sealed.
+   */
+  if (builder->GetInsertBlock()->getTerminator()) {
+    return;
+  }
+
+  for (size_t i = valueScopes.size(); i > targetDepth; --i) {
+    auto &currentScopeValues = valueScopes[i - 1];
+    auto &currentScopeTypes = typeScopes[i - 1];
+
+    for (auto const &[name, allocaInst] : currentScopeValues) {
+      TypeInfo type = currentScopeTypes[name];
+
+      if (type.ptrDepth == 0 && !type.isReference &&
+          structTypes.count(type.base)) {
+        std::string dtorName = type.base + "_~" + type.base;
+        llvm::Function *dtorFunc = module->getFunction(dtorName);
+
+        if (dtorFunc) {
+          builder->CreateCall(dtorFunc, {allocaInst});
+        }
+      }
+    }
+  }
+}
+
 // --------------------------------------------------------------------------
 // Visitor Implementations (Double Dispatch Payload)
 // --------------------------------------------------------------------------
@@ -260,7 +329,6 @@ void CodeGen::emitLifecycleLoop(llvm::Value *basePtr, llvm::Value *size,
 void CodeGen::visit(ProgramNode *node) {
   enterScope();
 
-  // orphaned methods bypass. link them to the global AST scope
   for (auto &st : node->structs) {
     structASTs[st->name] = st.get();
     structTypes[st->name] = llvm::StructType::create(*context, st->name);
@@ -321,7 +389,6 @@ void CodeGen::visit(ProgramNode *node) {
 void CodeGen::visit(StructDeclNode *node) {}
 
 void CodeGen::visit(MemberAccessNode *node) {
-  // Smart pointer/value resolution for member access
   bool oldContext = isLValueContext;
   isLValueContext = false;
   node->object->accept(this);
@@ -356,7 +423,6 @@ void CodeGen::visit(ThisNode *node) {
   if (isLValueContext) {
     currentLValue = alloca;
   } else {
-    // memory indirection to retrieve the struct base address
     currentVal = builder->CreateLoad(getLLVMType(type), alloca, "this.ptr");
   }
   currentType = type;
@@ -423,7 +489,6 @@ void CodeGen::visit(FunctionNode *node) {
     valueScopes.back()[argName] = alloca;
     typeScopes.back()[argName] = argType;
 
-    // 0x5f3759df: direct constructor assignment bypass
     if (node->args[idx].isThisAssign) {
       llvm::Value *thisPtr = builder->CreateLoad(
           llvm::PointerType::get(*context, 0), valueScopes.back()["this"]);
@@ -434,9 +499,6 @@ void CodeGen::visit(FunctionNode *node) {
     }
   }
 
-  // Native field memory population.
-  // We inject default AST initializers directly into the constructor's
-  // entry block immediately after parameter resolution
   if (node->isConstructor) {
     StructDeclNode *classAST = structASTs[node->className];
     if (classAST) {
@@ -470,6 +532,8 @@ void CodeGen::visit(FunctionNode *node) {
   }
 
   if (!builder->GetInsertBlock()->getTerminator()) {
+    emitScopeCleanup(valueScopes.size() - 1);
+
     if (retType.base == "void" && retType.ptrDepth == 0) {
       builder->CreateRetVoid();
     } else {
@@ -489,9 +553,20 @@ void CodeGen::visit(FunctionNode *node) {
 }
 
 void CodeGen::visit(ReturnNode *node) {
+  llvm::Value *retVal = nullptr;
   if (node->returnValue) {
     node->returnValue->accept(this);
-    builder->CreateRet(castValue(currentVal, currentType, currentReturnType));
+    retVal = castValue(currentVal, currentType, currentReturnType);
+  }
+
+  /*
+   * Critical path: Burn all local scopes down to the function root
+   * (depth 1) before firing the return instruction.
+   */
+  emitScopeCleanup(1);
+
+  if (retVal) {
+    builder->CreateRet(retVal);
   } else {
     builder->CreateRetVoid();
   }
@@ -533,7 +608,7 @@ void CodeGen::visit(AssignNode *node) {
                 : builder->CreateSDiv(curVal, val);
   }
 
-  builder->CreateStore(val, destAddr);
+  emitCopyOrStore(destAddr, val, targetType, valType);
 }
 
 void CodeGen::visit(SubscriptNode *node) {
@@ -550,7 +625,6 @@ void CodeGen::visit(SubscriptNode *node) {
   TypeInfo elemType = objType;
   elemType.ptrDepth--;
 
-  // Native IR for optimized indexing
   llvm::Value *elemAddr = builder->CreateInBoundsGEP(getLLVMType(elemType),
                                                      objPtr, idx, "array_idx");
 
@@ -558,7 +632,6 @@ void CodeGen::visit(SubscriptNode *node) {
     currentLValue = elemAddr;
   } else {
     if (structTypes.count(elemType.base) && elemType.ptrDepth == 0) {
-      // return pointer as value to bypass LLVM struct copy
       currentVal = elemAddr;
     } else {
       currentVal =
@@ -576,11 +649,9 @@ void CodeGen::visit(VarDeclNode *node) {
     llvm::Value *sizeVal = currentVal;
     llvm::Type *llvmType = getLLVMType(declType);
 
-    // Allocate contiguous stack memory
     llvm::AllocaInst *alloca =
         builder->CreateAlloca(llvmType, sizeVal, node->name);
 
-    // Construct all stack elements
     emitLifecycleLoop(alloca, sizeVal, node->typeName, false);
 
     declType.isArray = true;
@@ -588,14 +659,43 @@ void CodeGen::visit(VarDeclNode *node) {
     typeScopes.back()[node->name] = declType;
   } else {
     llvm::Type *llvmType = getLLVMType(declType);
-
     llvm::AllocaInst *alloca =
         builder->CreateAlloca(llvmType, nullptr, node->name);
 
     if (node->initializer) {
+      bool isRef = declType.isReference;
+      bool canRVO =
+          !isRef && declType.ptrDepth == 0 && structTypes.count(declType.base);
+
+      if (isRef)
+        isLValueContext = true;
+
+      // Set the RVO trap. We tell the child expression exactly where to build.
+      if (canRVO) {
+        rvoTarget = alloca;
+      }
+
       node->initializer->accept(this);
-      builder->CreateStore(castValue(currentVal, currentType, declType),
-                           alloca);
+
+      // Disarm the trap in case the child node didn't consume it.
+      rvoTarget = nullptr;
+
+      if (isRef)
+        isLValueContext = false;
+
+      llvm::Value *initVal = currentVal;
+
+      if (isRef) {
+        llvm::Value *refTarget = currentLValue ? currentLValue : currentVal;
+        builder->CreateStore(refTarget, alloca);
+      } else {
+        // RVO Verification: If the returned value IS our allocated address,
+        // the constructor executed in-place. We bypass the copy constructor.
+        if (initVal != alloca) {
+          emitCopyOrStore(alloca, castValue(initVal, currentType, declType),
+                          declType, currentType);
+        }
+      }
     } else {
       builder->CreateStore(llvm::Constant::getNullValue(llvmType), alloca);
     }
@@ -681,6 +781,7 @@ void CodeGen::visit(WhileNode *node) {
 
   continueTargets.push_back(condBB);
   breakTargets.push_back(mergeBB);
+  loopScopeDepths.push_back(valueScopes.size());
 
   func->insert(func->end(), bodyBB);
   builder->SetInsertPoint(bodyBB);
@@ -694,6 +795,7 @@ void CodeGen::visit(WhileNode *node) {
 
   continueTargets.pop_back();
   breakTargets.pop_back();
+  loopScopeDepths.pop_back();
 
   if (!builder->GetInsertBlock()->getTerminator()) {
     builder->CreateBr(condBB);
@@ -733,6 +835,7 @@ void CodeGen::visit(ForNode *node) {
 
   continueTargets.push_back(incBB);
   breakTargets.push_back(mergeBB);
+  loopScopeDepths.push_back(valueScopes.size());
 
   func->insert(func->end(), bodyBB);
   builder->SetInsertPoint(bodyBB);
@@ -746,6 +849,7 @@ void CodeGen::visit(ForNode *node) {
 
   continueTargets.pop_back();
   breakTargets.pop_back();
+  loopScopeDepths.pop_back();
 
   if (!builder->GetInsertBlock()->getTerminator()) {
     builder->CreateBr(incBB);
@@ -765,12 +869,14 @@ void CodeGen::visit(ForNode *node) {
 
 void CodeGen::visit(BreakNode *node) {
   if (!breakTargets.empty()) {
+    emitScopeCleanup(loopScopeDepths.back());
     builder->CreateBr(breakTargets.back());
   }
 }
 
 void CodeGen::visit(ContinueNode *node) {
   if (!continueTargets.empty()) {
+    emitScopeCleanup(loopScopeDepths.back());
     builder->CreateBr(continueTargets.back());
   }
 }
@@ -785,7 +891,6 @@ void CodeGen::visit(DeleteNode *node) {
     bool hasDtor = (module->getFunction(dtorName) != nullptr);
 
     if (hasDtor) {
-      // Shift pointer -8 bytes to retrieve the cookie
       llvm::Value *rawMem = builder->CreateInBoundsGEP(
           llvm::Type::getInt8Ty(*context), ptrVal,
           llvm::ConstantInt::get(*context, llvm::APInt(64, -8)), "raw_mem");
@@ -796,8 +901,6 @@ void CodeGen::visit(DeleteNode *node) {
       emitLifecycleLoop(ptrVal, sizeVal, ptrType.base, true);
       builder->CreateCall(getFreePrototype(), {rawMem});
     } else {
-      // If there's no destructor, the pointer IS the raw block
-      // Nuke it instantly.
       builder->CreateCall(getFreePrototype(), {ptrVal});
     }
   } else {
@@ -811,6 +914,20 @@ void CodeGen::visit(DeleteNode *node) {
   }
 }
 
+void CodeGen::visit(MoveNode *node) {
+  // Evil pointer manipulation: Force LValue evaluation to extract the raw
+  // memory address, but tag it as an RValue reference so the caller
+  // knows it's safe to gut it.
+  bool oldCtx = isLValueContext;
+  isLValueContext = true;
+  node->operand->accept(this);
+  isLValueContext = oldCtx;
+
+  currentVal = currentLValue;
+  currentType.isRValueRef = true;
+  currentType.isReference = false;
+}
+
 // --------------------------------------------------------------------------
 // Expression Visitors
 // --------------------------------------------------------------------------
@@ -820,7 +937,6 @@ void CodeGen::visit(VariableNode *node) {
   auto type = lookupType(node->name);
 
   if (!alloca) {
-    // check if identifier is a member of the current 'this' context
     auto thisAddr = lookupValue("this");
     if (thisAddr) {
       TypeInfo thisType = lookupType("this");
@@ -847,21 +963,31 @@ void CodeGen::visit(VariableNode *node) {
     exit(1);
   }
 
+  llvm::Value *baseAddr = alloca;
+  if (type.isReference || type.isRValueRef) {
+    baseAddr = builder->CreateLoad(llvm::PointerType::get(*context, 0), alloca,
+                                   node->name + ".ref");
+  }
+
   if (isLValueContext) {
-    currentLValue = alloca;
+    currentLValue = baseAddr;
   } else {
     if (structTypes.count(type.base) && type.ptrDepth == 0) {
-      currentVal = alloca;
+      currentVal = baseAddr;
     } else if (type.isArray) {
-      // We do not CreateLoad
-      // Since it is an array, its AllocaInst IS ALREADY the pointer to its base
-      currentVal = alloca;
+      currentVal = baseAddr;
     } else {
-      currentVal = builder->CreateLoad(getLLVMType(type), alloca, node->name);
+      // strip reference flag. if we don't, getLLVMType returns ptr
+      // and we double-load garbage directly into the stack.
+      TypeInfo valType = type;
+      valType.isReference = false;
+      currentVal =
+          builder->CreateLoad(getLLVMType(valType), baseAddr, node->name);
     }
   }
+
   currentType = type;
-  if (currentType.isArray) { // Decay
+  if (currentType.isArray) {
     currentType.isArray = false;
     currentType.ptrDepth++;
   }
@@ -876,9 +1002,6 @@ void CodeGen::visit(BinaryOpNode *node) {
   llvm::Value *R = currentVal;
   TypeInfo RT = currentType;
 
-  // /* Fast pointer false-positive floating type bypass
-  //    Prevents FCmp instruction generation for float* types triggering
-  //    SelectionDAG crashes */
   bool isF = (LT.base == "float" && !LT.isPointer()) ||
              (RT.base == "float" && !RT.isPointer());
 
@@ -1035,8 +1158,6 @@ void CodeGen::visit(NewNode *node) {
   bool needsCookie = false;
 
   if (sizeVal) {
-    // Fast path: Only allocate a metadata cookie if the type requires
-    // destruction. Primitives and pure structs bypass this entirely.
     std::string dtorName = node->typeName + "_~" + node->typeName;
     needsCookie = (module->getFunction(dtorName) != nullptr);
 
@@ -1065,7 +1186,6 @@ void CodeGen::visit(NewNode *node) {
       emitLifecycleLoop(arrayBase, sizeVal, node->typeName, false);
       currentVal = arrayBase;
     } else {
-      // Raw memory spray, Carmack style. No headers, no bloat.
       emitLifecycleLoop(rawMem, sizeVal, node->typeName, false);
       currentVal = rawMem;
     }
@@ -1100,58 +1220,24 @@ void CodeGen::visit(CallNode *node) {
     llvm::Value *addr = currentLValue;
     TypeInfo targetT = currentType;
     node->arguments[1]->accept(this);
-    builder->CreateStore(castValue(currentVal, currentType, targetT), addr);
+    emitCopyOrStore(addr, castValue(currentVal, currentType, targetT), targetT,
+                    currentType);
     return;
   }
-  if (node->object) {
-    // Methods always expect the base address of the object as 'this'
-    bool oldCtx = isLValueContext;
-    isLValueContext = false;
-    node->object->accept(this);
-    isLValueContext = oldCtx;
 
-    llvm::Value *thisArg = currentVal;
-
-    // Almacenar la base antes de corromper currentType en la evaluación de
-    // argumentos
-    std::string objBase = currentType.base;
-
-    std::vector<llvm::Value *> args;
-    args.push_back(thisArg);
-
-    std::string mangledSig = "";
-    for (auto &a : node->arguments) {
-      a->accept(this);
-      args.push_back(currentVal);
-      mangledSig += "_" + getMangledType(currentType);
-    }
-
-    std::string mangledName = objBase + "_" + node->callee + mangledSig;
-    llvm::Function *f = module->getFunction(mangledName);
-
-    if (!f) {
-      std::cerr << "[Utopia Fatal] CodeGen Error: Method '" << node->callee
-                << "' missing.\n";
-      exit(1);
-    }
-
-    currentVal = builder->CreateCall(f, args);
-    currentType = functionTypes[mangledName];
-    return;
-  }
   if (node->callee == "print") {
     std::string fmt = "";
     std::vector<llvm::Value *> args = {nullptr};
     for (auto &arg : node->arguments) {
       arg->accept(this);
       if (currentType.base == "int") {
-        fmt += "%d";
+        fmt += "%d ";
         args.push_back(currentVal);
       } else if (currentType.base == "float") {
-        fmt += "%f";
+        fmt += "%f ";
         args.push_back(currentVal);
       } else {
-        fmt += "%s";
+        fmt += "%s ";
         args.push_back(currentVal);
       }
     }
@@ -1170,40 +1256,185 @@ void CodeGen::visit(CallNode *node) {
     return;
   }
 
-  std::vector<llvm::Value *> args;
-  std::string mangledSig = "";
-  for (auto &a : node->arguments) {
-    a->accept(this);
-    args.push_back(currentVal);
-    mangledSig += "_" + getMangledType(currentType);
+  if (!node->object && structTypes.count(node->callee)) {
+    llvm::Value *target = nullptr;
+
+    // RVO Intercept: Inject directly into the caller's memory address
+    // Bypasses the 'stack.obj' temporary alloca and eliminates a copy cycle.
+    if (rvoTarget) {
+      target = rvoTarget;
+      rvoTarget = nullptr; // Payload consumed.
+    } else {
+      target = builder->CreateAlloca(structTypes[node->callee], nullptr,
+                                     "stack.obj");
+    }
+
+    std::vector<llvm::Value *> ctorArgs;
+    ctorArgs.push_back(target);
+    std::string mSig = "";
+    for (auto &a : node->arguments) {
+      a->accept(this);
+      ctorArgs.push_back(currentVal);
+      mSig += "_" + getMangledType(currentType);
+    }
+    llvm::Function *ctor =
+        module->getFunction(node->callee + "_" + node->callee + mSig);
+    if (ctor)
+      builder->CreateCall(ctor, ctorArgs);
+
+    currentVal = target;
+    currentType = {node->callee, 0, false};
+    return;
   }
 
-  std::string mangledName = node->callee + mangledSig;
-  llvm::Function *f = module->getFunction(mangledName);
+  llvm::Value *thisArg = nullptr;
+  std::string baseName = node->callee;
+
+  if (node->object) {
+    bool oldCtx = isLValueContext;
+    isLValueContext = false;
+    node->object->accept(this);
+    isLValueContext = oldCtx;
+    thisArg = currentVal;
+    baseName = currentType.base + "_" + node->callee;
+  }
+
+  llvm::Function *f = module->getFunction(baseName);
+  std::string finalMangled = baseName;
 
   if (!f) {
-    f = module->getFunction(node->callee);
-    mangledName = node->callee;
+    for (auto &func : module->getFunctionList()) {
+      std::string fnName = func.getName().str();
+      if (fnName.find(baseName + "_") == 0) {
+        size_t expectedArgs = node->arguments.size() + (node->object ? 1 : 0);
+        if (func.arg_size() == expectedArgs) {
+          f = &func;
+          finalMangled = fnName;
+          break;
+        }
+      }
+    }
   }
 
   if (!f) {
-    std::cerr << "[Utopia Fatal] CodeGen Error: Call to undefined function '"
-              << node->callee << "'.\n";
+    std::cerr << "[Utopia Fatal] CodeGen Error: Undefined function '"
+              << baseName << "'.\n";
     exit(1);
   }
 
-  currentVal = builder->CreateCall(f, args);
+  std::vector<llvm::Value *> args;
+  int argOffset = 0;
 
-  if (functionTypes.count(mangledName)) {
-    currentType = functionTypes[mangledName];
-  } else {
-    currentType = {"int"};
+  if (thisArg) {
+    args.push_back(thisArg);
+    argOffset = 1;
   }
+
+  for (size_t i = 0; i < node->arguments.size(); ++i) {
+    // Get param type safely. getArg() on raw functions is risky business.
+    bool expectsRef =
+        f->getFunctionType()->getParamType(i + argOffset)->isPointerTy();
+
+    bool oldCtx = isLValueContext;
+    isLValueContext = expectsRef;
+    currentLValue = nullptr;
+    node->arguments[i]->accept(this);
+    isLValueContext = oldCtx;
+
+    llvm::Value *argVal = currentVal;
+
+    if (expectsRef && currentLValue) {
+      argVal = currentLValue;
+    } else if (!expectsRef && currentLValue) {
+      if (structTypes.count(currentType.base) && currentType.ptrDepth == 0 &&
+          !currentType.isReference) {
+        argVal = currentLValue;
+      } else {
+        argVal = builder->CreateLoad(getLLVMType(currentType), currentLValue);
+      }
+    }
+
+    /* Isolated temporal memory for pass-by-value structs */
+    if (!expectsRef && currentType.ptrDepth == 0 && !currentType.isReference &&
+        structTypes.count(currentType.base)) {
+      llvm::AllocaInst *temp =
+          builder->CreateAlloca(getLLVMType(currentType), nullptr, "arg.temp");
+
+      TypeInfo targetType = currentType;
+      targetType.isRValueRef = false;
+      targetType.isReference = false;
+
+      emitCopyOrStore(temp, argVal, targetType, currentType);
+
+      /*
+       * CORE DUMP PREVENTION:
+       * Load raw bytes into SSA struct value before call.
+       */
+      argVal = builder->CreateLoad(getLLVMType(targetType), temp, "val.load");
+    }
+
+    args.push_back(argVal);
+  }
+
+  currentVal = builder->CreateCall(f, args);
+  currentType = functionTypes.count(finalMangled) ? functionTypes[finalMangled]
+                                                  : TypeInfo{"int"};
 }
 
 void CodeGen::visit(NullAssertNode *node) {
+  // Se evalua el operando. Preservamos isLValueContext por si estamos afirmando
+  // un l-value (ej. un puntero en una estructura).
   node->operand->accept(this);
+  llvm::Value *ptrVal = currentVal;
+  llvm::Value *preservedLValue = currentLValue;
+
+  /*
+   * Fast-path hardware validation.
+   * Branch prediction assumes the valid block. Cost is effectively 0 cycles
+   * on modern superscalar CPUs due to speculative execution.
+   */
+  llvm::Function *func = builder->GetInsertBlock()->getParent();
+  llvm::BasicBlock *validBB =
+      llvm::BasicBlock::Create(*context, "assert.valid", func);
+  llvm::BasicBlock *panicBB =
+      llvm::BasicBlock::Create(*context, "assert.panic", func);
+
+  llvm::Value *isNull = builder->CreateIsNull(ptrVal, "is_null_check");
+  builder->CreateCondBr(isNull, panicBB, validBB);
+
+  // --- PANIC BLOCK ---
+  builder->SetInsertPoint(panicBB);
+  llvm::FunctionCallee printfFunc = getPrintfPrototype();
+  llvm::Value *panicMsg =
+      getOrCreateString("Utopia Runtime Panic: Attempted to dereference a null "
+                        "pointer via '!' assertion.\n");
+  builder->CreateCall(printfFunc, {panicMsg});
+
+  llvm::FunctionCallee exitFunc = module->getOrInsertFunction(
+      "exit",
+      llvm::FunctionType::get(llvm::Type::getVoidTy(*context),
+                              {llvm::Type::getInt32Ty(*context)}, false));
+  builder->CreateCall(
+      exitFunc, {llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1)});
+
+  // Optimizer hint: Let LLVM know execution terminates here to avoid CFG
+  // corruption.
+  builder->CreateUnreachable();
+
+  // --- VALID BLOCK ---
+  builder->SetInsertPoint(validBB);
+
   currentType.isNullable = false;
+  currentVal = ptrVal;
+  currentLValue = preservedLValue;
+}
+
+void CodeGen::visit(LogicalNotNode *node) {
+  node->operand->accept(this);
+
+  // Flip the bit.
+  currentVal = builder->CreateNot(currentVal, "log_not");
+  currentType = {"bool", 0, false};
 }
 
 // --------------------------------------------------------------------------
