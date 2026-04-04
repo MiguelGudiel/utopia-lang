@@ -47,7 +47,6 @@ bool Parser::isTypeToken() const {
          t == TokenType::KW_UINT || t == TokenType::KW_VOID;
 }
 
-// Unified modifier pipeline. Extracts all metadata before declarations.
 DeclPreamble Parser::parsePreamble() {
   DeclPreamble preamble;
   while (true) {
@@ -55,8 +54,6 @@ DeclPreamble Parser::parsePreamble() {
       std::string decName = currentToken().value;
       expect(TokenType::IDENTIFIER, "Expected decorator name");
       preamble.decorators.push_back(decName);
-      // Fast forward over parenthesis for future parameterized decorators (e.g.
-      // @export("DLL"))
       if (match(TokenType::LPAREN)) {
         int depth = 1;
         while (depth > 0 && currentToken().type != TokenType::EOF_TOK) {
@@ -84,7 +81,6 @@ DeclPreamble Parser::parsePreamble() {
   return preamble;
 }
 
-// Safe lookahead bypassing all preamble metadata.
 bool Parser::isVarDeclaration() const {
   size_t tempCursor = cursor;
 
@@ -162,12 +158,14 @@ std::string Parser::parseTypeName() {
     typeName += "*";
   if (match(TokenType::QUESTION))
     typeName += "?";
+  if (match(TokenType::AND))
+    typeName += "&&";
+  if (match(TokenType::AMPERSAND))
+    typeName += "&";
   return typeName;
 }
 
 bool Parser::isFunctionStart() const {
-  // Preamble already consumed modifiers. Current token is strictly type or
-  // identifier.
   TokenType t = currentToken().type;
   size_t tempCursor = cursor;
 
@@ -216,7 +214,6 @@ std::unique_ptr<ProgramNode> Parser::parseProgram() {
       continue;
     }
 
-    // Pull payload before routing
     DeclPreamble preamble = parsePreamble();
 
     if (match(TokenType::KW_STRUCT)) {
@@ -472,6 +469,13 @@ std::unique_ptr<ExprNode> Parser::parsePrimary() {
   auto node = parsePrimaryBase();
 
   while (true) {
+    if (match(TokenType::BANG)) {
+      Token startTok = currentToken();
+      node = std::make_unique<NullAssertNode>(std::move(node));
+      finalizeNode(node.get(), startTok);
+      continue;
+    }
+
     if (match(TokenType::DOT)) {
       Token startTok = currentToken();
       std::string fieldName = currentToken().value;
@@ -488,7 +492,6 @@ std::unique_ptr<ExprNode> Parser::parsePrimary() {
         }
         expect(TokenType::RPAREN, "Expected ')'");
 
-        // dynamic method AST promotion
         auto callNode = std::make_unique<CallNode>(fieldName, std::move(args),
                                                    std::move(node));
         node = std::move(callNode);
@@ -497,7 +500,7 @@ std::unique_ptr<ExprNode> Parser::parsePrimary() {
         node = std::make_unique<MemberAccessNode>(std::move(node), fieldName);
         finalizeNode(node.get(), startTok);
       }
-    } else if (match(TokenType::LBRACKET)) { // INDEX ACCESS
+    } else if (match(TokenType::LBRACKET)) {
       Token startTok = currentToken();
       auto index = parseExpression();
       expect(TokenType::RBRACKET, "Expected ']' after array index.");
@@ -522,19 +525,24 @@ std::unique_ptr<ExprNode> Parser::parsePrimaryBase() {
     return expr;
   }
 
+  if (match(TokenType::KW_MOVE)) {
+    auto expr = std::make_unique<MoveNode>(parseExpression());
+    finalizeNode(expr.get(), startTok);
+    return expr;
+  }
+
   if (match(TokenType::AMPERSAND))
-    return std::make_unique<AddressOfNode>(parsePrimaryBase());
+    return std::make_unique<AddressOfNode>(parsePrimary());
   if (match(TokenType::STAR))
-    return std::make_unique<DerefNode>(parsePrimaryBase());
-
+    return std::make_unique<DerefNode>(parsePrimary());
   if (match(TokenType::MINUS))
-    return std::make_unique<UnaryMinusNode>(parsePrimaryBase());
-
+    return std::make_unique<UnaryMinusNode>(parsePrimary());
   if (match(TokenType::KW_NULL))
     return std::make_unique<NullLiteralNode>();
 
   if (match(TokenType::BANG)) {
-    return std::make_unique<NullAssertNode>(parsePrimaryBase());
+    // Prefix '!': Logical Negation.
+    return std::make_unique<LogicalNotNode>(parsePrimary());
   }
 
   if (match(TokenType::KW_THIS))
@@ -767,6 +775,22 @@ std::unique_ptr<ASTNode> Parser::parseStatement() {
     std::unique_ptr<ExprNode> init = nullptr;
     if (match(TokenType::ASSIGN)) {
       init = parseExpression();
+    } else if (match(TokenType::LPAREN)) {
+      /*
+       * STACK ALLOCATION SYNTAX SUGAR
+       * Intercepts "SmartArray arr(5);" and transparently desugars it to
+       * "SmartArray arr = SmartArray(5);" by forcing a CallNode into the
+       * initializer.
+       */
+      std::vector<std::unique_ptr<ExprNode>> args;
+      while (currentToken().type != TokenType::RPAREN &&
+             currentToken().type != TokenType::EOF_TOK) {
+        args.push_back(parseExpression());
+        if (currentToken().type == TokenType::COMMA)
+          advance();
+      }
+      expect(TokenType::RPAREN, "Expected ')'");
+      init = std::make_unique<CallNode>(typeName, std::move(args));
     }
 
     auto node = std::make_unique<VarDeclNode>(
@@ -804,7 +828,6 @@ std::unique_ptr<ASTNode> Parser::parseStatement() {
 
   auto expr = parseExpression();
   if (match(TokenType::PLUS_PLUS)) {
-    // evil syntax sugar: a++ is just a += 1
     auto node = std::make_unique<AssignNode>(
         std::move(expr), std::make_unique<NumberNode>(1), "+=");
     expect(TokenType::SEMICOLON, "Expected ';'");

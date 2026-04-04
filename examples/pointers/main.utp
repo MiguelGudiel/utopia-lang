@@ -1,46 +1,109 @@
+class SmartArray {
+    int*? data;
+    int size;
 
-class Person {
-  String name = "José";
+    // Constructor regular
+    SmartArray(int s) {
+        this.size = s;
+        this.data = new int[s];
+        
+        // Initialize with sequence
+        for (int i = 0; i < s; i++) {
+            this.data![i] = i * 10;
+        }
+    }
 
-  Person() {
+    // Constructor de copia (Deep Copy)
+    // Este es el corazon de la prueba. Si falla, habra Double-Free.
+    SmartArray(SmartArray& other) {
+        this.size = other.size;
+        this.data = new int[this.size];
+        
+        for (int i = 0; i < this.size; i++) {
+            this.data![i] = other.data![i];
+        }
+    }
 
-  }
+    SmartArray(SmartArray&& other) {
+        this.size = other.size;
+        this.data = other.data;  // Secuestramos la memoria
+        
+        other.size = 0;
+        other.data = null;       // Anulamos la victima para que su destructor no libere
+    }
 
-  Person(String name) {
-    this.name = name;
-  }
-  
-  ~Person () {
-    print("Good bye.");
-  }
+    // Destructor
+    ~SmartArray() {
+        if (this.data != null) {
+            delete[] this.data;
+        }
+    }
 
-  inline void Greet() {
-    print("Hello, my name is ", name);
-  }
+    void set(int index, int val) {
+        if (index >= 0 && index < this.size) {
+            this.data![index] = val;
+        }
+    }
 
-  inline void Greet(String name) {
-    print("Hello, ", name, ". My name is ", this.name);
-  }
+    int get(int index) {
+        return this.data![index];
+    }
+
+    bool isValid() {
+        return this.data != null;
+    }
 }
 
-int sum(int a, int b) {
-  return a+b;
+// PRUEBA 1: Paso por valor (Debe disparar el Copy-Ctor)
+void processByValue(SmartArray arr) {
+    // Al entrar aqui, arr es una copia clonada. 
+    // Si modificamos esto, el original afuera no debe cambiar.
+    arr.set(0, 999);
+}
+
+// PRUEBA 2: Paso por referencia (No debe haber copia)
+void processByRef(SmartArray& arr) {
+    // Aqui operamos directamente sobre el original.
+    arr.set(1, 888);
+}
+
+// PRUEBA 3: Uso de punteros puros
+void processByPtr(SmartArray* arr) {
+    // Acceso via puntero
+    arr.set(2, 777);
 }
 
 int main() {
-  Person* instance = new Person("Mario");
-  
-  //instance.name = "Michael";
-  instance.Greet();
+    // 1. Creamos el objeto original con datos
+    SmartArray original(10);
+    original.set(0, 123);
+    
+    print("--- Antes del movimiento ---");
+    // Verificamos que tiene datos (debería imprimir 123)
+    print("Original[0]:", original.get(0)); 
 
-  Person* group = new Person[5];
-  
-  for(int i=0; i<5; i++) {
-    group[i].name("XD");
-    group[i].Greet("Carlos");
-  }
+    // 2. DISPARO DE MOVE SEMANTICS
+    // Aquí el CodeGen debe detectar el RValueRef (gracias al keyword move)
+    // y llamar a SmartArray_SmartArray_SmartArrayrrf en lugar del CopyCtor.
+    SmartArray movido = move(original);
 
-  delete instance;
-  delete[] group;
-  return 0;
+    print("--- Despues del movimiento ---");
+
+    // 3. Verificamos que 'movido' tiene los datos que eran de 'original'
+    print("Movido[0]:", movido.get(0)); // Debe imprimir 123
+
+    // 4. PRUEBA DE FUEGO: ¿Qué pasó con el original?
+    // En el Move-Ctor pusimos original.data = null.
+    // Si intentamos acceder, el programa debería dar SegFault (comportamiento esperado de un puntero nulo)
+    // o podemos verificarlo si tuvieramos un método isEmpty().
+    
+    if (original.isValid()) {
+        print("ERROR: La copia sigue viva. Move Semantics falló.");
+    } else {
+        // Nota: En un lenguaje real, acceder a un objeto movido es UB, 
+        // pero aquí confirmamos que el puntero fue "limpiado".
+        print("EXITO: El objeto original fue saqueado correctamente.");
+    }
+
+    return 0;
 }

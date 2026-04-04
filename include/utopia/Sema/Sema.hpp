@@ -30,6 +30,8 @@ private:
     std::vector<int> constructorArities;
   };
   std::map<std::string, StructDef> customStructs;
+  std::map<std::string, std::string>
+      copyConstructors; // ClassName -> MangledName
 
   std::vector<std::map<std::string, Symbol>> scopeStack;
   std::vector<ErrorInfo> errors;
@@ -46,7 +48,7 @@ private:
   Symbol *lookup(const std::string &name);
 
   void reportError(ASTNode *node, const std::string &message);
-  TypeInfo parseType(const std::string &typeName);
+  TypeInfo parseType(const std::string &typeName, ASTNode *node = nullptr);
   bool checkAssignment(const TypeInfo &target, const TypeInfo &source,
                        ASTNode *node);
 
@@ -61,6 +63,7 @@ private:
   void visit(BreakNode *node) override;
   void visit(ContinueNode *node) override;
   void visit(NullAssertNode *node) override;
+  void visit(LogicalNotNode *node) override;
   void visit(NumberNode *node) override;
   void visit(FloatNode *node) override;
   void visit(BoolNode *node) override;
@@ -72,6 +75,7 @@ private:
   void visit(DerefNode *node) override;
   void visit(NewNode *node) override;
   void visit(DeleteNode *node) override;
+  void visit(MoveNode *node) override;
   void visit(BinaryOpNode *node) override;
   void visit(CallNode *node) override;
   void visit(AssignNode *node) override;

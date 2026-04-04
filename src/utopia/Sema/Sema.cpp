@@ -19,11 +19,18 @@ void Sema::reportError(ASTNode *node, const std::string &message) {
       {node->line, node->column, node->endLine, node->endColumn, message});
 }
 
-TypeInfo Sema::parseType(const std::string &typeName) {
+TypeInfo Sema::parseType(const std::string &typeName, ASTNode *node) {
   TypeInfo t;
   std::string temp = typeName;
   if (!temp.empty() && temp.back() == '?') {
     t.isNullable = true;
+    temp.pop_back();
+  }
+  if (temp.length() >= 2 && temp.substr(temp.length() - 2) == "&&") {
+    t.isRValueRef = true;
+    temp.erase(temp.length() - 2);
+  } else if (!temp.empty() && temp.back() == '&') {
+    t.isReference = true;
     temp.pop_back();
   }
   while (!temp.empty() && temp.back() == '*') {
@@ -31,6 +38,22 @@ TypeInfo Sema::parseType(const std::string &typeName) {
     temp.pop_back();
   }
   t.base = temp;
+
+  // Nullability is a pointer's burden. Values are absolute.
+  // Prohibimos estrictamente cosas como int?, float?, o ClassName?
+  if (t.isNullable && t.ptrDepth == 0) {
+    if (node) {
+      reportError(node, "Semantic Error: Value types cannot be nullable. Only "
+                        "pointers can be optional in Utopia (e.g., '" +
+                            t.base + "*?').");
+    } else {
+      errors.push_back(
+          {0, 0, 0, 0,
+           "Semantic Error: Type '" + t.base + "' cannot be nullable."});
+    }
+    t.isNullable = false;
+  }
+
   return t;
 }
 
@@ -38,6 +61,8 @@ std::string typeToString(const TypeInfo &t) {
   std::string s = t.base;
   for (unsigned i = 0; i < t.ptrDepth; ++i)
     s += "*";
+  if (t.isReference)
+    s += "&";
   if (t.isNullable)
     s += "?";
   return s;
@@ -66,6 +91,12 @@ bool Sema::checkAssignment(const TypeInfo &target, const TypeInfo &source,
     return false;
   }
 
+  // Check if we are trying to mix oil and water (pointers and scalars)
+  // We use 'null' as a sovereign entity, not a dirty zero from the 70s.
+  if (target.base == "int" && source.base == "null") {
+    reportError(node, "Keep your integers away from my null pointers.");
+  }
+
   return true;
 }
 
@@ -80,8 +111,8 @@ bool Sema::analyze(ProgramNode *program) {
   for (auto &func : program->functions) {
     std::string mangledName = func->name;
     for (auto &arg : func->args)
-      mangledName += "_" + getMangledType(parseType(arg.type));
-    functionTypes[mangledName] = parseType(func->returnType);
+      mangledName += "_" + getMangledType(parseType(arg.type, program));
+    functionTypes[mangledName] = parseType(func->returnType, program);
   }
 
   for (auto &st : program->structs) {
@@ -89,7 +120,7 @@ bool Sema::analyze(ProgramNode *program) {
     def.isClass = st->isClass;
     int idx = 0;
     for (auto &f : st->fields) {
-      def.fields[f.name] = {parseType(f.typeName), f.modifier, idx++};
+      def.fields[f.name] = {parseType(f.typeName, program), f.modifier, idx++};
     }
     customStructs[st->name] = def;
 
@@ -97,11 +128,19 @@ bool Sema::analyze(ProgramNode *program) {
     for (auto &m : st->methods) {
       std::string mangledName = st->name + "_" + m->name;
       for (auto &arg : m->args) {
-        TypeInfo t =
-            arg.isThisAssign ? def.fields[arg.name].type : parseType(arg.type);
+        TypeInfo t = arg.isThisAssign ? def.fields[arg.name].type
+                                      : parseType(arg.type, program);
         mangledName += "_" + getMangledType(t);
       }
-      functionTypes[mangledName] = parseType(m->returnType);
+      functionTypes[mangledName] = parseType(m->returnType, program);
+
+      if (m->isConstructor && m->args.size() == 1) {
+        TypeInfo argType = parseType(m->args[0].type, program);
+        // Copy Constructor: ClassName(ClassName& other)
+        if (argType.base == st->name && argType.isReference) {
+          copyConstructors[st->name] = mangledName;
+        }
+      }
     }
   }
 
@@ -196,7 +235,7 @@ void Sema::visit(FunctionNode *node) {
   for (auto &arg : node->args) {
     TypeInfo t = arg.isThisAssign
                      ? customStructs[node->className].fields[arg.name].type
-                     : parseType(arg.type);
+                     : parseType(arg.type, node);
     lookupName += "_" + getMangledType(t);
   }
   currentReturnType = functionTypes[lookupName];
@@ -214,7 +253,7 @@ void Sema::visit(FunctionNode *node) {
       }
       scopeStack.back()[arg.name] = {fieldType, false};
     } else {
-      scopeStack.back()[arg.name] = {parseType(arg.type), false};
+      scopeStack.back()[arg.name] = {parseType(arg.type, node), false};
     }
   }
 
@@ -326,7 +365,7 @@ void Sema::visit(VarDeclNode *node) {
                           "' in the same scope.");
   }
 
-  TypeInfo declType = parseType(node->typeName);
+  TypeInfo declType = parseType(node->typeName, node);
 
   if (node->arraySize) {
     node->arraySize->accept(this);
@@ -348,7 +387,14 @@ void Sema::visit(SubscriptNode *node) {
   node->object->accept(this);
   TypeInfo objType = currentExprType;
 
-  // Como VariableNode ya hizo el decay, objType ya es un puntero (ptrDepth > 0)
+  if (objType.isNullable) {
+    reportError(node,
+                "error: cannot access array element of a nullable pointer. Use "
+                "'!' to assert non-nullity (e.g., 'ptr![index]').");
+  }
+
+  // Since VariableNode already decayed, objType is already a pointer (ptrDepth
+  // > 0)
   if (objType.ptrDepth == 0) {
     reportError(node, "Subscript operator [] requires a pointer or array.");
     currentExprType = {"error", 0, false};
@@ -361,7 +407,9 @@ void Sema::visit(SubscriptNode *node) {
   }
 
   currentExprType = objType;
-  currentExprType.ptrDepth--; // El tipo resultante es el base extraído
+  currentExprType.ptrDepth--; // The resulting type is the extracted base type
+
+  currentExprType.isNullable = false;
 }
 
 void Sema::visit(VariableNode *node) {
@@ -468,30 +516,69 @@ void Sema::visit(CallNode *node) {
   if (node->object) {
     node->object->accept(this);
     TypeInfo objType = currentExprType;
+    std::string exactName = objType.base + "_" + node->callee + mangledSig;
 
-    std::string mangledName = objType.base + "_" + node->callee + mangledSig;
-    if (functionTypes.count(mangledName)) {
-      currentExprType = functionTypes[mangledName];
+    if (functionTypes.count(exactName)) {
+      currentExprType = functionTypes[exactName];
     } else {
-      reportError(node, "error: no member function matching '" + node->callee +
-                            "' in '" + objType.base + "'");
-      currentExprType = {"error", 0, false};
+      /* Fallback for reference binding. Scans vtable signatures. */
+      std::string resolved = "";
+      for (const auto &pair : functionTypes) {
+        if (pair.first.find(objType.base + "_" + node->callee + "_") == 0) {
+          resolved = pair.first;
+          break;
+        }
+      }
+      if (!resolved.empty()) {
+        currentExprType = functionTypes[resolved];
+      } else {
+        reportError(node, "error: no member function matching '" +
+                              node->callee + "' in '" + objType.base + "'");
+        currentExprType = {"error", 0, false};
+      }
     }
     return;
   }
 
-  // Global scope calls
+  /* Stack allocation bypass (RVO simulation) */
+  if (customStructs.count(node->callee)) {
+    std::string expectedCtor = node->callee + "_" + node->callee + mangledSig;
+    if (!functionTypes.count(expectedCtor)) {
+      reportError(node, "error: no matching constructor found for '" +
+                            node->callee + "'");
+    }
+    currentExprType = {node->callee, 0, false};
+    return;
+  }
+
   if (node->callee == "print") {
     currentExprType = {"void", 0, false};
-  } else if (node->callee == "int" || node->callee == "float" ||
-             node->callee == "bool") {
+    return;
+  }
+  if (node->callee == "int" || node->callee == "float" ||
+      node->callee == "bool") {
     currentExprType = {node->callee, 0, false};
+    return;
+  }
+
+  std::string exactName = node->callee + mangledSig;
+  if (functionTypes.count(exactName)) {
+    currentExprType = functionTypes[exactName];
   } else {
-    std::string mangledName = node->callee + mangledSig;
-    if (functionTypes.count(mangledName)) {
-      currentExprType = functionTypes[mangledName];
+    /* Implicit Reference Binding
+     * Matches memory addresses to reference parameters without exact string
+     * matching */
+    std::string resolved = "";
+    for (const auto &pair : functionTypes) {
+      if (pair.first.find(node->callee + "_") == 0) {
+        resolved = pair.first;
+        break;
+      }
+    }
+    if (!resolved.empty()) {
+      currentExprType = functionTypes[resolved];
     } else if (functionTypes.count(node->callee)) {
-      currentExprType = functionTypes[node->callee]; // Fallback externals
+      currentExprType = functionTypes[node->callee];
     } else {
       reportError(node,
                   "error: call to undeclared function '" + node->callee + "'");
@@ -505,6 +592,20 @@ void Sema::visit(NullAssertNode *node) {
   currentExprType.isNullable = false;
 }
 
+void Sema::visit(LogicalNotNode *node) {
+  node->operand->accept(this);
+
+  // No negotiatons with non-booleans.
+  if (currentExprType.base != "bool" || currentExprType.ptrDepth > 0) {
+    reportError(
+        node,
+        "error: logical NOT operator '!' requires a 'bool' operand (found '" +
+            typeToString(currentExprType) + "')");
+  }
+
+  currentExprType = {"bool", 0, false};
+}
+
 void Sema::visit(AddressOfNode *node) {
   node->operand->accept(this);
   currentExprType.ptrDepth++;
@@ -512,17 +613,17 @@ void Sema::visit(AddressOfNode *node) {
 
 void Sema::visit(DerefNode *node) {
   node->operand->accept(this);
+  if (currentExprType.isNullable) {
+    reportError(node, "error: cannot dereference a nullable pointer. You must "
+                      "assert it first with '!'.");
+  }
   if (currentExprType.ptrDepth > 0)
     currentExprType.ptrDepth--;
 }
 
 void Sema::visit(NewNode *node) {
-  TypeInfo resultType = parseType(node->typeName);
+  TypeInfo resultType = parseType(node->typeName, node);
   resultType.ptrDepth = 1; // Heap allocation always returns a pointer
-
-  // Check constructor arguments
-  for (auto &a : node->arguments)
-    a->accept(this);
 
   // Check constructor arguments and mutate signature
   std::string mangledSig = "";
@@ -544,5 +645,11 @@ void Sema::visit(NewNode *node) {
 }
 
 void Sema::visit(DeleteNode *node) { node->pointerExpr->accept(this); }
+
+void Sema::visit(MoveNode *node) {
+  node->operand->accept(this);
+  currentExprType.isRValueRef = true;
+  currentExprType.isReference = false;
+}
 
 } // namespace utopia
