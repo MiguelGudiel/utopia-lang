@@ -53,6 +53,7 @@ public:
 
 struct StructField {
   AccessModifier modifier;
+  bool isStatic = false;
   std::string typeName;
   std::string name;
   std::vector<std::string> decorators;
@@ -288,13 +289,14 @@ public:
   std::string typeName;
   std::string name;
   bool isConst;
+  bool isStatic;
   std::vector<std::string> decorators;
   std::unique_ptr<ExprNode> initializer;
   std::unique_ptr<ExprNode> arraySize;
 
-  VarDeclNode(std::string t, std::string n, bool c,
+  VarDeclNode(std::string t, std::string n, bool c, bool st,
               std::unique_ptr<ExprNode> init)
-      : typeName(std::move(t)), name(std::move(n)), isConst(c),
+      : typeName(std::move(t)), name(std::move(n)), isConst(c), isStatic(st),
         initializer(std::move(init)), arraySize(nullptr) {}
 
   void accept(ASTVisitor *visitor) override;
@@ -327,6 +329,7 @@ public:
   std::vector<std::unique_ptr<ASTNode>> body;
 
   bool isMethod;
+  bool isStatic;
   bool isConstructor;
   bool isDestructor = false;
   std::string className;
@@ -334,11 +337,12 @@ public:
   FunctionNode(InlineState is, AccessModifier acc,
                std::vector<std::string> decs, std::string retT, std::string n,
                std::vector<FunctionParam> a, bool isMeth = false,
-               bool isCtor = false, bool isDtor = false, std::string cName = "")
+               bool isStat = false, bool isCtor = false, bool isDtor = false,
+               std::string cName = "")
       : inlineState(is), access(acc), decorators(std::move(decs)),
         returnType(std::move(retT)), name(std::move(n)), args(std::move(a)),
-        isMethod(isMeth), isConstructor(isCtor), isDestructor(isDtor),
-        className(std::move(cName)) {}
+        isMethod(isMeth), isStatic(isStat), isConstructor(isCtor),
+        isDestructor(isDtor), className(std::move(cName)) {}
 
   void accept(ASTVisitor *visitor) override;
 };

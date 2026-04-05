@@ -119,6 +119,8 @@ Token Lexer::nextToken() {
       return {TokenType::KW_THIS, val, startLine, startCol};
     if (val == "required")
       return {TokenType::KW_REQUIRED, val, startLine, startCol};
+    if (val == "static")
+      return {TokenType::KW_STATIC, val, startLine, startCol};
     return {TokenType::IDENTIFIER, val, startLine, startCol};
   }
 

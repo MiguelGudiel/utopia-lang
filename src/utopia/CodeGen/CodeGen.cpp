@@ -1,4 +1,5 @@
 #include "utopia/CodeGen/CodeGen.hpp"
+#include <filesystem>
 #include <iostream>
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/IR/Verifier.h>
@@ -12,7 +13,8 @@
 
 namespace utopia {
 
-CodeGen::CodeGen() {
+CodeGen::CodeGen(const std::string &sourceFile, bool isDebug)
+    : isDebug(isDebug) {
   context = std::make_unique<llvm::LLVMContext>();
   module = std::make_unique<llvm::Module>("UtopiaModule", *context);
   builder = std::make_unique<llvm::IRBuilder<>>(*context);
@@ -44,6 +46,25 @@ CodeGen::CodeGen() {
           targetTriple, cpu, features, opt, relocModel));
 
   module->setDataLayout(targetMachine->createDataLayout());
+
+  if (this->isDebug) {
+    // Le decimos a LLVM qué versión de DWARF usar (La 4 es muy compatible con
+    // VS Code/LLDB)
+    module->addModuleFlag(llvm::Module::Warning, "Debug Info Version",
+                          llvm::DEBUG_METADATA_VERSION);
+    module->addModuleFlag(llvm::Module::Warning, "Dwarf Version", 4);
+
+    dbgBuilder = std::make_unique<llvm::DIBuilder>(*module);
+
+    std::filesystem::path p(sourceFile);
+    dbgFile =
+        dbgBuilder->createFile(p.filename().string(), p.parent_path().string());
+
+    // Crea la unidad de compilación (DW_LANG_C es un truco seguro para
+    // lenguajes custom)
+    dbgCU = dbgBuilder->createCompileUnit(llvm::dwarf::DW_LANG_C, dbgFile,
+                                          "Utopia Compiler", false, "", 0);
+  }
 }
 
 // --------------------------------------------------------------------------
@@ -61,10 +82,12 @@ void CodeGen::exitScope() {
   typeScopes.pop_back();
 }
 
-llvm::AllocaInst *CodeGen::lookupValue(const std::string &name) {
+llvm::Value *CodeGen::lookupValue(const std::string &name) {
   for (auto it = valueScopes.rbegin(); it != valueScopes.rend(); ++it) {
-    if (it->count(name))
-      return (*it)[name];
+    for (auto rit = it->rbegin(); rit != it->rend(); ++rit) {
+      if (rit->first == name)
+        return rit->second;
+    }
   }
   return nullptr;
 }
@@ -75,6 +98,97 @@ TypeInfo CodeGen::lookupType(const std::string &name) {
       return (*it)[name];
   }
   return {"error"};
+}
+
+void CodeGen::emitLocation(ASTNode *node) {
+  if (!isDebug || !node) {
+    builder->SetCurrentDebugLocation(llvm::DebugLoc());
+    return;
+  }
+  llvm::DIScope *scope = dbgScopes.empty() ? dbgFile : dbgScopes.back();
+  builder->SetCurrentDebugLocation(
+      llvm::DILocation::get(*context, node->line, node->column, scope));
+}
+
+llvm::DIType *CodeGen::getDebugType(const TypeInfo &type) {
+  if (!isDebug)
+    return nullptr;
+
+  if (type.isPointer()) {
+    /* * Pointer unwrapping
+     * Pelamos un nivel de indirección y referenciamos el tipo base
+     * para que LLDB pueda expandir los punteros.
+     */
+    TypeInfo pointee = type;
+    pointee.ptrDepth = 0;
+    pointee.isArray = false;
+    pointee.isReference = false;
+    pointee.isRValueRef = false;
+    return dbgBuilder->createPointerType(getDebugType(pointee), 64);
+  }
+
+  if (type.base == "int" || type.base == "uint")
+    return dbgBuilder->createBasicType("int", 32, llvm::dwarf::DW_ATE_signed);
+  if (type.base == "float")
+    return dbgBuilder->createBasicType("float", 64, llvm::dwarf::DW_ATE_float);
+  if (type.base == "bool")
+    return dbgBuilder->createBasicType("bool", 8, llvm::dwarf::DW_ATE_boolean);
+  if (type.base == "String")
+    return dbgBuilder->createPointerType(
+        dbgBuilder->createBasicType("char", 8, llvm::dwarf::DW_ATE_signed_char),
+        64);
+
+  if (structTypes.count(type.base)) {
+    // Retornamos el caché si ya fue construido para evitar recursión infinita
+    if (debugTypes.count(type.base))
+      return debugTypes[type.base];
+
+    llvm::StructType *llStruct = structTypes[type.base];
+    uint64_t sizeInBits =
+        module->getDataLayout().getTypeAllocSizeInBits(llStruct);
+
+    /*
+     * FORWARD DECLARATION HACK
+     * Registramos la estructura opaca de inmediato en el caché.
+     * Luego inyectaremos los miembros usando replaceArrays.
+     */
+    llvm::DICompositeType *structDbgType = dbgBuilder->createStructType(
+        dbgFile, type.base, dbgFile, 0, sizeInBits, 8, llvm::DINode::FlagZero,
+        nullptr, llvm::DINodeArray());
+
+    debugTypes[type.base] = structDbgType;
+
+    std::vector<llvm::Metadata *> elements;
+    auto layout = module->getDataLayout().getStructLayout(llStruct);
+
+    // Mapeo inverso: Garantiza que los campos DWARF se registren en el
+    // orden exacto de memoria que definió LLVM.
+    std::map<int, std::string> orderedFields;
+    for (const auto &[fName, fIdx] : structMemberIndices[type.base]) {
+      orderedFields[fIdx] = fName;
+    }
+
+    for (const auto &[fIdx, fName] : orderedFields) {
+      TypeInfo fType = structMemberTypes[type.base][fName];
+      llvm::DIType *fieldDbgType = getDebugType(fType);
+
+      uint64_t fieldSize =
+          module->getDataLayout().getTypeAllocSizeInBits(getLLVMType(fType));
+      uint64_t fieldOffset = layout->getElementOffsetInBits(fIdx);
+
+      elements.push_back(dbgBuilder->createMemberType(
+          structDbgType, fName, dbgFile, 0, fieldSize, 8, fieldOffset,
+          llvm::DINode::FlagZero, fieldDbgType));
+    }
+
+    dbgBuilder->replaceArrays(structDbgType,
+                              dbgBuilder->getOrCreateArray(elements));
+    return structDbgType;
+  }
+
+  // Fallback seguro
+  return dbgBuilder->createBasicType(type.base, 64,
+                                     llvm::dwarf::DW_ATE_address);
 }
 
 // --------------------------------------------------------------------------
@@ -294,10 +408,6 @@ void CodeGen::emitLifecycleLoop(llvm::Value *basePtr, llvm::Value *size,
 }
 
 void CodeGen::emitScopeCleanup(size_t targetDepth) {
-  /*
-   * WTF? LLVM will SIGILL if we insert instructions after a terminator.
-   * Evil basic block solution: bail out if the block is already sealed.
-   */
   if (builder->GetInsertBlock()->getTerminator()) {
     return;
   }
@@ -306,16 +416,26 @@ void CodeGen::emitScopeCleanup(size_t targetDepth) {
     auto &currentScopeValues = valueScopes[i - 1];
     auto &currentScopeTypes = typeScopes[i - 1];
 
-    for (auto const &[name, allocaInst] : currentScopeValues) {
+    // We iterate in reverse (Reverse Declaration Order) to comply with RAII.
+    for (auto rit = currentScopeValues.rbegin();
+         rit != currentScopeValues.rend(); ++rit) {
+      const std::string &name = rit->first;
+      llvm::Value *valInst = rit->second;
       TypeInfo type = currentScopeTypes[name];
 
-      if (type.ptrDepth == 0 && !type.isReference &&
+      if (llvm::isa<llvm::GlobalVariable>(valInst)) {
+        continue;
+      }
+
+      // We explicitly exclude isRValueRef. We do not own that memory
+      if (type.ptrDepth == 0 && !type.isReference && !type.isRValueRef &&
           structTypes.count(type.base)) {
+
         std::string dtorName = type.base + "_~" + type.base;
         llvm::Function *dtorFunc = module->getFunction(dtorName);
 
         if (dtorFunc) {
-          builder->CreateCall(dtorFunc, {allocaInst});
+          builder->CreateCall(dtorFunc, {valInst});
         }
       }
     }
@@ -330,6 +450,7 @@ void CodeGen::visit(ProgramNode *node) {
   enterScope();
 
   for (auto &st : node->structs) {
+    currentClass = st->name;
     structASTs[st->name] = st.get();
     structTypes[st->name] = llvm::StructType::create(*context, st->name);
     for (auto &method : st->methods) {
@@ -353,7 +474,20 @@ void CodeGen::visit(ProgramNode *node) {
       structMemberTypes[st->name][f.name] = t;
     }
     structTypes[st->name]->setBody(body);
+
+    for (auto &f : st->fields) {
+      if (f.isStatic) {
+        std::string globalName = st->name + "_" + f.name;
+        llvm::Type *llvmType = getLLVMType(structMemberTypes[st->name][f.name]);
+        module->getOrInsertGlobal(globalName, llvmType);
+        llvm::GlobalVariable *gVar = module->getNamedGlobal(globalName);
+        gVar->setLinkage(llvm::GlobalValue::InternalLinkage);
+        gVar->setInitializer(llvm::Constant::getNullValue(llvmType));
+      }
+    }
   }
+
+  currentClass = "";
 
   for (auto &func : node->functions) {
     std::string mangledName = func->name;
@@ -376,6 +510,16 @@ void CodeGen::visit(ProgramNode *node) {
     }
   }
 
+  // If 'main' is visited first, getOrInsertFunction injects an external
+  // declaration. When we try to define it later, LLVM avoids collision by
+  // silently renaming ours to '__utopia_global_init.1', breaking the linker.
+  // Claim the namespace early.
+  llvm::FunctionType *initTy =
+      llvm::FunctionType::get(llvm::Type::getVoidTy(*context), false);
+  llvm::Function *staticInitF =
+      llvm::Function::Create(initTy, llvm::Function::InternalLinkage,
+                             "__utopia_global_init", module.get());
+
   for (auto &func : node->functions) {
     std::string originalName = func->name;
     for (auto &arg : func->args)
@@ -383,12 +527,56 @@ void CodeGen::visit(ProgramNode *node) {
     func->accept(this);
     func->name = originalName;
   }
+
+  // Evaluate static initializing expressions
+  llvm::BasicBlock *initBB =
+      llvm::BasicBlock::Create(*context, "entry", staticInitF);
+  builder->SetInsertPoint(initBB);
+
+  for (auto &st : node->structs) {
+    for (auto &f : st->fields) {
+      if (f.isStatic && f.initializer) {
+        f.initializer->accept(this);
+        llvm::Value *initVal = currentVal;
+        std::string globalName = st->name + "_" + f.name;
+        llvm::GlobalVariable *gVar = module->getNamedGlobal(globalName);
+        TypeInfo t = parseTypeString(f.typeName);
+        emitCopyOrStore(gVar, castValue(initVal, currentType, t), t,
+                        currentType);
+      }
+    }
+  }
+  builder->CreateRetVoid();
+
   exitScope();
 }
 
 void CodeGen::visit(StructDeclNode *node) {}
 
 void CodeGen::visit(MemberAccessNode *node) {
+  // Access via the Class Symbol (Counter.globalCount)
+  if (auto varNode = dynamic_cast<VariableNode *>(node->object.get())) {
+    if (structTypes.count(varNode->name) && !lookupValue(varNode->name)) {
+      std::string globalName = varNode->name + "_" + node->field;
+      TypeInfo fType = structMemberTypes[varNode->name][node->field];
+      llvm::Value *globalVar = module->getNamedGlobal(globalName);
+
+      if (!globalVar) {
+        std::cerr << "CodeGen Error: Static field " << globalName
+                  << " not found.\n";
+        exit(1);
+      }
+      if (isLValueContext) {
+        currentLValue = globalVar;
+      } else {
+        currentVal =
+            builder->CreateLoad(getLLVMType(fType), globalVar, "load_static");
+      }
+      currentType = fType;
+      return;
+    }
+  }
+
   bool oldContext = isLValueContext;
   isLValueContext = false;
   node->object->accept(this);
@@ -396,9 +584,24 @@ void CodeGen::visit(MemberAccessNode *node) {
 
   llvm::Value *objPtr = currentVal;
   std::string objTypeName = currentType.base;
-  int idx = structMemberIndices[objTypeName][node->field];
   TypeInfo fType = structMemberTypes[objTypeName][node->field];
 
+  // Access to static but through an Instance (c1.globalCount)
+  if (structMemberIndices[objTypeName].count(node->field) == 0) {
+    std::string globalName = objTypeName + "_" + node->field;
+    llvm::Value *globalVar = module->getNamedGlobal(globalName);
+    if (isLValueContext) {
+      currentLValue = globalVar;
+    } else {
+      currentVal =
+          builder->CreateLoad(getLLVMType(fType), globalVar, "load_static");
+    }
+    currentType = fType;
+    return;
+  }
+
+  // Access to normal instance variable (c1.instanceCount)
+  int idx = structMemberIndices[objTypeName][node->field];
   llvm::Value *fieldAddr = builder->CreateStructGEP(
       structTypes[objTypeName], objPtr, idx, "member_access");
 
@@ -435,7 +638,8 @@ void CodeGen::visit(FunctionNode *node) {
   currentReturnType = retType;
 
   std::vector<llvm::Type *> argTypes;
-  if (node->isMethod || node->isConstructor || node->isDestructor) {
+  if ((node->isMethod && !node->isStatic) || node->isConstructor ||
+      node->isDestructor) {
     argTypes.push_back(llvm::PointerType::get(*context, 0));
   }
 
@@ -451,24 +655,69 @@ void CodeGen::visit(FunctionNode *node) {
   llvm::Function *func = llvm::Function::Create(
       funcType, llvm::Function::ExternalLinkage, node->name, module.get());
 
-  if (node->inlineState == InlineState::Inline) {
-    func->addFnAttr(llvm::Attribute::InlineHint);
-  } else if (node->inlineState == InlineState::ForceInline) {
-    func->addFnAttr(llvm::Attribute::AlwaysInline);
+  if (isDebug) {
+    func->addFnAttr(llvm::Attribute::NoInline);
+    func->addFnAttr(llvm::Attribute::OptimizeNone);
+  } else {
+    if (node->inlineState == InlineState::Inline) {
+      func->addFnAttr(llvm::Attribute::InlineHint);
+    } else if (node->inlineState == InlineState::ForceInline) {
+      func->addFnAttr(llvm::Attribute::AlwaysInline);
+    }
   }
 
   llvm::BasicBlock *block = llvm::BasicBlock::Create(*context, "entry", func);
   builder->SetInsertPoint(block);
 
+  if (node->name == "main") {
+    llvm::FunctionCallee initF = module->getOrInsertFunction(
+        "__utopia_global_init",
+        llvm::FunctionType::get(llvm::Type::getVoidTy(*context), false));
+    builder->CreateCall(initF);
+  }
+
+  if (isDebug) {
+    llvm::DISubroutineType *dbgFuncType =
+        dbgBuilder->createSubroutineType(dbgBuilder->getOrCreateTypeArray({}));
+
+    llvm::DISubprogram *dbgFunc = dbgBuilder->createFunction(
+        dbgFile, node->name, func->getName(), dbgFile, node->line, dbgFuncType,
+        node->line, llvm::DINode::FlagPrototyped,
+        llvm::DISubprogram::SPFlagDefinition);
+
+    func->setSubprogram(dbgFunc);
+    dbgScopes.push_back(dbgFunc);
+  }
+
+  emitLocation(node);
+
+  int paramOffset = 1;
   auto argIt = func->arg_begin();
-  if (node->isMethod || node->isConstructor || node->isDestructor) {
+  if ((node->isMethod && !node->isStatic) || node->isConstructor ||
+      node->isDestructor) {
     llvm::Argument *thisArg = &(*argIt);
     thisArg->setName("this");
     llvm::AllocaInst *thisAlloca = builder->CreateAlloca(
         llvm::PointerType::get(*context, 0), nullptr, "this.addr");
     builder->CreateStore(thisArg, thisAlloca);
-    valueScopes.back()["this"] = thisAlloca;
+
+    /* Order matters for RAII: push 'this' into the scope stack. */
+    valueScopes.back().push_back({"this", thisAlloca});
     typeScopes.back()["this"] = {node->className, 1, false};
+
+    if (isDebug && !dbgScopes.empty()) {
+      llvm::DILocalVariable *dbgThis = dbgBuilder->createParameterVariable(
+          dbgScopes.back(), "this", paramOffset, dbgFile, node->line,
+          getDebugType({node->className, 1, false}), true);
+
+      dbgBuilder->insertDeclare(
+          thisAlloca, dbgThis, dbgBuilder->createExpression(),
+          llvm::DILocation::get(*context, node->line, node->column,
+                                dbgScopes.back()),
+          builder->GetInsertBlock());
+    }
+
+    paramOffset++;
     argIt++;
   }
 
@@ -486,12 +735,25 @@ void CodeGen::visit(FunctionNode *node) {
         builder->CreateAlloca(getLLVMType(argType), nullptr, argName);
     builder->CreateStore(arg, alloca);
 
-    valueScopes.back()[argName] = alloca;
+    valueScopes.back().push_back({argName, alloca});
     typeScopes.back()[argName] = argType;
 
+    if (isDebug && !dbgScopes.empty()) {
+      llvm::DILocalVariable *dbgParam = dbgBuilder->createParameterVariable(
+          dbgScopes.back(), argName, paramOffset + idx, dbgFile, node->line,
+          getDebugType(argType), true);
+
+      dbgBuilder->insertDeclare(
+          alloca, dbgParam, dbgBuilder->createExpression(),
+          llvm::DILocation::get(*context, node->line, node->column,
+                                dbgScopes.back()),
+          builder->GetInsertBlock());
+    }
+
     if (node->args[idx].isThisAssign) {
+      /* Extract 'this' from the stack to bind field-assign arguments. */
       llvm::Value *thisPtr = builder->CreateLoad(
-          llvm::PointerType::get(*context, 0), valueScopes.back()["this"]);
+          llvm::PointerType::get(*context, 0), lookupValue("this"));
       int fieldIdx = structMemberIndices[node->className][argName];
       llvm::Value *fieldAddr = builder->CreateStructGEP(
           structTypes[node->className], thisPtr, fieldIdx, "this." + argName);
@@ -502,6 +764,10 @@ void CodeGen::visit(FunctionNode *node) {
   if (node->isConstructor) {
     StructDeclNode *classAST = structASTs[node->className];
     if (classAST) {
+      /* Cache 'this' for the field initialization massacre. */
+      llvm::Value *thisPtr = builder->CreateLoad(
+          llvm::PointerType::get(*context, 0), lookupValue("this"));
+
       for (auto &field : classAST->fields) {
         if (field.initializer) {
           field.initializer->accept(this);
@@ -510,9 +776,6 @@ void CodeGen::visit(FunctionNode *node) {
 
           int fieldIdx = structMemberIndices[node->className][field.name];
           TypeInfo targetType = structMemberTypes[node->className][field.name];
-
-          llvm::Value *thisPtr = builder->CreateLoad(
-              llvm::PointerType::get(*context, 0), valueScopes.back()["this"]);
 
           llvm::Value *fieldAddr =
               builder->CreateStructGEP(structTypes[node->className], thisPtr,
@@ -531,6 +794,7 @@ void CodeGen::visit(FunctionNode *node) {
       break;
   }
 
+  /* Function epilogue: scope cleanup and default return handling. */
   if (!builder->GetInsertBlock()->getTerminator()) {
     emitScopeCleanup(valueScopes.size() - 1);
 
@@ -549,10 +813,15 @@ void CodeGen::visit(FunctionNode *node) {
     }
   }
 
+  if (isDebug && !dbgScopes.empty()) {
+    dbgScopes.pop_back();
+  }
+
   exitScope();
 }
 
 void CodeGen::visit(ReturnNode *node) {
+  emitLocation(node);
   llvm::Value *retVal = nullptr;
   if (node->returnValue) {
     node->returnValue->accept(this);
@@ -573,6 +842,7 @@ void CodeGen::visit(ReturnNode *node) {
 }
 
 void CodeGen::visit(AssignNode *node) {
+  emitLocation(node);
   isLValueContext = true;
   node->target->accept(this);
   isLValueContext = false;
@@ -642,25 +912,98 @@ void CodeGen::visit(SubscriptNode *node) {
 }
 
 void CodeGen::visit(VarDeclNode *node) {
+  emitLocation(node);
   TypeInfo declType = parseTypeString(node->typeName);
+  llvm::Type *llvmType = getLLVMType(declType);
+
+  if (node->isStatic) {
+    std::string globalName =
+        currentClass.empty()
+            ? builder->GetInsertBlock()->getParent()->getName().str() + "." +
+                  node->name
+            : currentClass + "_" + node->name;
+
+    module->getOrInsertGlobal(globalName, llvmType);
+    llvm::GlobalVariable *gVar = module->getNamedGlobal(globalName);
+    gVar->setLinkage(llvm::GlobalValue::InternalLinkage);
+    gVar->setInitializer(llvm::Constant::getNullValue(llvmType));
+
+    if (node->initializer) {
+      llvm::Function *currentFunc = builder->GetInsertBlock()->getParent();
+
+      std::string guardName = globalName + ".guard";
+      module->getOrInsertGlobal(guardName, builder->getInt1Ty());
+      llvm::GlobalVariable *guard = module->getNamedGlobal(guardName);
+      guard->setLinkage(llvm::GlobalValue::InternalLinkage);
+      guard->setInitializer(llvm::ConstantInt::getFalse(*context));
+
+      llvm::BasicBlock *initBB =
+          llvm::BasicBlock::Create(*context, "static.init", currentFunc);
+      llvm::BasicBlock *contBB =
+          llvm::BasicBlock::Create(*context, "static.cont", currentFunc);
+
+      llvm::Value *isInit =
+          builder->CreateLoad(builder->getInt1Ty(), guard, "guard_load");
+      builder->CreateCondBr(isInit, contBB, initBB);
+
+      builder->SetInsertPoint(initBB);
+
+      node->initializer->accept(this);
+      llvm::Value *initVal = currentVal;
+      emitCopyOrStore(gVar, castValue(initVal, currentType, declType), declType,
+                      currentType);
+
+      builder->CreateStore(builder->getTrue(), guard);
+      builder->CreateBr(contBB);
+
+      builder->SetInsertPoint(contBB);
+    }
+
+    valueScopes.back().push_back({node->name, gVar});
+    typeScopes.back()[node->name] = declType;
+    return;
+  }
 
   if (node->arraySize) {
     node->arraySize->accept(this);
     llvm::Value *sizeVal = currentVal;
-    llvm::Type *llvmType = getLLVMType(declType);
 
     llvm::AllocaInst *alloca =
         builder->CreateAlloca(llvmType, sizeVal, node->name);
 
+    if (isDebug && !dbgScopes.empty()) {
+      llvm::DILocalVariable *dbgVar =
+          dbgBuilder->createAutoVariable(dbgScopes.back(), node->name, dbgFile,
+                                         node->line, getDebugType(declType));
+
+      dbgBuilder->insertDeclare(alloca, dbgVar, dbgBuilder->createExpression(),
+                                llvm::DILocation::get(*context, node->line,
+                                                      node->column,
+                                                      dbgScopes.back()),
+                                builder->GetInsertBlock());
+    }
+
     emitLifecycleLoop(alloca, sizeVal, node->typeName, false);
 
     declType.isArray = true;
-    valueScopes.back()[node->name] = alloca;
+    valueScopes.back().push_back({node->name, alloca});
     typeScopes.back()[node->name] = declType;
   } else {
     llvm::Type *llvmType = getLLVMType(declType);
     llvm::AllocaInst *alloca =
         builder->CreateAlloca(llvmType, nullptr, node->name);
+
+    if (isDebug && !dbgScopes.empty()) {
+      llvm::DILocalVariable *dbgVar =
+          dbgBuilder->createAutoVariable(dbgScopes.back(), node->name, dbgFile,
+                                         node->line, getDebugType(declType));
+
+      dbgBuilder->insertDeclare(alloca, dbgVar, dbgBuilder->createExpression(),
+                                llvm::DILocation::get(*context, node->line,
+                                                      node->column,
+                                                      dbgScopes.back()),
+                                builder->GetInsertBlock());
+    }
 
     if (node->initializer) {
       bool isRef = declType.isReference;
@@ -700,12 +1043,13 @@ void CodeGen::visit(VarDeclNode *node) {
       builder->CreateStore(llvm::Constant::getNullValue(llvmType), alloca);
     }
 
-    valueScopes.back()[node->name] = alloca;
+    valueScopes.back().push_back({node->name, alloca});
     typeScopes.back()[node->name] = declType;
   }
 }
 
 void CodeGen::visit(IfNode *node) {
+  emitLocation(node);
   node->condition->accept(this);
   llvm::Value *condV = currentVal;
   if (condV->getType()->isPointerTy())
@@ -751,6 +1095,12 @@ void CodeGen::visit(IfNode *node) {
 }
 
 void CodeGen::visit(BlockNode *node) {
+  if (isDebug && !dbgScopes.empty()) {
+    llvm::DILexicalBlock *dbgBlock = dbgBuilder->createLexicalBlock(
+        dbgScopes.back(), dbgFile, node->line, node->column);
+    dbgScopes.push_back(dbgBlock);
+  }
+
   enterScope();
   for (auto &stmt : node->statements) {
     stmt->accept(this);
@@ -758,9 +1108,14 @@ void CodeGen::visit(BlockNode *node) {
       break;
   }
   exitScope();
+
+  if (isDebug && !dbgScopes.empty()) {
+    dbgScopes.pop_back();
+  }
 }
 
 void CodeGen::visit(WhileNode *node) {
+  emitLocation(node);
   llvm::Function *func = builder->GetInsertBlock()->getParent();
 
   llvm::BasicBlock *condBB =
@@ -806,6 +1161,7 @@ void CodeGen::visit(WhileNode *node) {
 }
 
 void CodeGen::visit(ForNode *node) {
+  emitLocation(node);
   llvm::Function *func = builder->GetInsertBlock()->getParent();
 
   enterScope();
@@ -1213,6 +1569,7 @@ void CodeGen::visit(NewNode *node) {
 }
 
 void CodeGen::visit(CallNode *node) {
+  emitLocation(node);
   if (node->callee == "@assign_deref") {
     isLValueContext = true;
     node->arguments[0]->accept(this);
@@ -1306,14 +1663,27 @@ void CodeGen::visit(CallNode *node) {
     for (auto &func : module->getFunctionList()) {
       std::string fnName = func.getName().str();
       if (fnName.find(baseName + "_") == 0) {
-        size_t expectedArgs = node->arguments.size() + (node->object ? 1 : 0);
+        size_t expectedArgs = node->arguments.size() + (thisArg ? 1 : 0);
         if (func.arg_size() == expectedArgs) {
           f = &func;
           finalMangled = fnName;
           break;
+        } else if (thisArg && func.arg_size() == node->arguments.size()) {
+          // Static method called through an instance
+          // (c1.fallar())
+          f = &func;
+          finalMangled = fnName;
+          thisArg = nullptr; // We threw the 'this' in the trash
+          break;
         }
       }
     }
+  }
+
+  // Make sure to clean up the `thisArg` for direct resolutions (static methods
+  // without mangling)
+  if (f && thisArg && f->arg_size() == node->arguments.size()) {
+    thisArg = nullptr;
   }
 
   if (!f) {
@@ -1441,7 +1811,12 @@ void CodeGen::visit(LogicalNotNode *node) {
 // External Entrypoints (generate, optimize, emit)
 // --------------------------------------------------------------------------
 
-void CodeGen::generate(ProgramNode *program) { program->accept(this); }
+void CodeGen::generate(ProgramNode *program) {
+  program->accept(this);
+  if (isDebug) {
+    dbgBuilder->finalize();
+  }
+}
 
 void CodeGen::optimize(int level) {
   if (level == 0)

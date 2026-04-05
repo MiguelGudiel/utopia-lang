@@ -104,7 +104,7 @@ int main() {
           utopia::Parser parser(tokens);
           auto ast = parser.parseProgram();
 
-          utopia::CodeGen validator;
+          utopia::CodeGen validator(uri, false);
           validator.generate(ast.get());
         } catch (const std::exception &e) {
           std::string errStr = e.what();

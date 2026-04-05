@@ -16,7 +16,8 @@ struct TypeInfo {
   bool isRValueRef = false;
 
   bool isPointer() const {
-    return ptrDepth > 0 || isArray || isReference || isRValueRef;
+    return ptrDepth > 0 || isArray || isReference || isRValueRef ||
+           base == "null";
   }
 };
 

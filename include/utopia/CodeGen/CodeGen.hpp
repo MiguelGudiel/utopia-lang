@@ -1,6 +1,7 @@
 #pragma once
 #include "utopia/AST/AST.hpp"
 #include "utopia/AST/ASTVisitor.hpp"
+#include <llvm/IR/DIBuilder.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
@@ -14,7 +15,7 @@ namespace utopia {
 
 class CodeGen : public ASTVisitor {
 public:
-  CodeGen();
+  CodeGen(const std::string &sourceFile, bool isDebug);
   void generate(ProgramNode *program);
   void optimize(int level);
   void saveToFile(const std::string &filename);
@@ -27,7 +28,7 @@ private:
   std::unique_ptr<llvm::TargetMachine> targetMachine;
 
   // LIFO Stack for Variable Scoping
-  std::vector<std::map<std::string, llvm::AllocaInst *>> valueScopes;
+  std::vector<std::vector<std::pair<std::string, llvm::Value *>>> valueScopes;
   std::vector<std::map<std::string, TypeInfo>> typeScopes;
   std::map<std::string, llvm::Value *> stringPool;
 
@@ -45,15 +46,23 @@ private:
 
   llvm::Value *currentVal = nullptr;
   TypeInfo currentType;
+  std::string currentClass;
   TypeInfo currentReturnType;
   llvm::Value *currentLValue = nullptr;
   bool isLValueContext = false;
 
   llvm::Value *rvoTarget = nullptr;
 
+  bool isDebug;
+  std::unique_ptr<llvm::DIBuilder> dbgBuilder;
+  llvm::DICompileUnit *dbgCU = nullptr;
+  llvm::DIFile *dbgFile = nullptr;
+  std::vector<llvm::DIScope *> dbgScopes;
+  std::map<std::string, llvm::DIType *> debugTypes;
+
   void enterScope();
   void exitScope();
-  llvm::AllocaInst *lookupValue(const std::string &name);
+  llvm::Value *lookupValue(const std::string &name);
   TypeInfo lookupType(const std::string &name);
 
   TypeInfo parseTypeString(const std::string &typeName) const;
@@ -72,6 +81,9 @@ private:
   llvm::FunctionCallee getMallocPrototype();
   llvm::FunctionCallee getFreePrototype();
   llvm::FunctionCallee getPrintfPrototype();
+
+  void emitLocation(ASTNode *node);
+  llvm::DIType *getDebugType(const TypeInfo &type);
 
   void visit(ThisNode *node) override;
   void visit(StructDeclNode *node) override;
