@@ -74,6 +74,8 @@ DeclPreamble Parser::parsePreamble() {
       preamble.inlineState = InlineState::ForceInline;
     } else if (match(TokenType::KW_CONST)) {
       preamble.isConst = true;
+    } else if (match(TokenType::KW_STATIC)) {
+      preamble.isStatic = true;
     } else {
       break;
     }
@@ -88,7 +90,7 @@ bool Parser::isVarDeclaration() const {
     TokenType t = tokens[tempCursor].type;
     if (t == TokenType::KW_CONST || t == TokenType::KW_PUBLIC ||
         t == TokenType::KW_PRIVATE || t == TokenType::KW_INLINE ||
-        t == TokenType::KW_FORCE_INLINE) {
+        t == TokenType::KW_FORCE_INLINE || t == TokenType::KW_STATIC) {
       tempCursor++;
     } else if (t == TokenType::AT) {
       tempCursor++;
@@ -265,8 +267,9 @@ Parser::parseStructDecl(bool isClass, const DeclPreamble &structPreamble) {
 
     expect(TokenType::SEMICOLON, "Expected ';'");
 
-    fields.push_back({memberPreamble.access, typeName, fieldName,
-                      memberPreamble.decorators, std::move(fieldInit)});
+    fields.push_back({memberPreamble.access, memberPreamble.isStatic, typeName,
+                      fieldName, memberPreamble.decorators,
+                      std::move(fieldInit)});
   }
   expect(TokenType::RBRACE, "Expected '}'");
 
@@ -330,7 +333,8 @@ Parser::parseMethod(const std::string &className,
 
   auto funcNode = std::make_unique<FunctionNode>(
       preamble.inlineState, preamble.access, preamble.decorators, retType,
-      funcName, args, true, isConstructor, isDestructor, className);
+      funcName, args, true, preamble.isStatic, isConstructor, isDestructor,
+      className);
 
   while (currentToken().type != TokenType::RBRACE &&
          currentToken().type != TokenType::EOF_TOK) {
@@ -371,7 +375,7 @@ Parser::parseFunction(const DeclPreamble &preamble) {
 
   auto funcNode = std::make_unique<FunctionNode>(
       preamble.inlineState, preamble.access, preamble.decorators, retType,
-      funcName, args);
+      funcName, args, false, preamble.isStatic);
 
   while (currentToken().type != TokenType::RBRACE &&
          currentToken().type != TokenType::EOF_TOK) {
@@ -793,8 +797,9 @@ std::unique_ptr<ASTNode> Parser::parseStatement() {
       init = std::make_unique<CallNode>(typeName, std::move(args));
     }
 
-    auto node = std::make_unique<VarDeclNode>(
-        typeName, varName, preamble.isConst, std::move(init));
+    auto node =
+        std::make_unique<VarDeclNode>(typeName, varName, preamble.isConst,
+                                      preamble.isStatic, std::move(init));
     node->arraySize = std::move(arrSize);
     node->decorators = preamble.decorators;
     expect(TokenType::SEMICOLON, "Expected ';'");

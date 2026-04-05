@@ -25,6 +25,7 @@ private:
       TypeInfo type;
       AccessModifier mod;
       int index;
+      bool isStatic;
     };
     std::map<std::string, Field> fields;
     std::vector<int> constructorArities;
@@ -42,6 +43,7 @@ private:
   std::string currentClass;
 
   int loopDepth = 0;
+  bool inStaticMethod = false;
 
   void enterScope();
   void exitScope();

@@ -11,6 +11,7 @@ struct DeclPreamble {
   InlineState inlineState = InlineState::None;
   std::vector<std::string> decorators;
   bool isConst = false;
+  bool isStatic = false;
 };
 
 class Parser {

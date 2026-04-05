@@ -66,6 +66,7 @@ enum class TokenType {
   KW_PRIVATE,
   KW_THIS,
   KW_REQUIRED,
+  KW_STATIC,
   DOT, // .
   NEQ, // !=
   EQ,  // ==

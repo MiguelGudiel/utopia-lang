@@ -2,30 +2,14 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Debug Utopia: Archivo Actual",
+      "name": "Debug Utopia Binary",
       "type": "lldb",
       "request": "launch",
-      "program": "${workspaceFolder}/build/tools/utopia/utopia",
-      "args": [
-        "${file}",
-        "--run",
-        "-O0"
-      ],
-      "cwd": "${workspaceFolder}",
-      //"preLaunchTask": "utopia-compile-project"
-    },
-    {
-      "name": "Release Utopia: Archivo Actual",
-      "type": "lldb",
-      "request": "launch",
-      "program": "${workspaceFolder}/build/tools/utopia/utopia",
-      "args": [
-        "${file}",
-        "--run",
-        "-O2"
-      ],
-      "cwd": "${workspaceFolder}",
-      //"preLaunchTask": "utopia-compile-project"
+      "program": "${fileDirname}/build/${fileBasenameNoExtension}",
+      "args": [],
+      "cwd": "${fileDirname}",
+      "preLaunchTask": "compile-utopia",
+      "stopOnEntry": false
     }
   ]
 }

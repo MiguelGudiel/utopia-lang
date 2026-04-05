@@ -139,7 +139,8 @@ int main(int argc, char **argv) {
     }
 
     std::cout << "[CodeGen] Generating LLVM IR...\n";
-    utopia::CodeGen codegen;
+    bool isDebug = (optLevel == 0); 
+    utopia::CodeGen codegen(srcPath.string(), isDebug);
     codegen.generate(mainAst.get());
     codegen.optimize(optLevel);
     codegen.saveToFile(llPath.string());
@@ -154,7 +155,7 @@ int main(int argc, char **argv) {
   auto startLink = std::chrono::high_resolution_clock::now();
 
   std::string linkCommand =
-      "clang " + objPath.string() + " -o " + finalOutPath.string();
+      "clang -g " + objPath.string() + " -o " + finalOutPath.string();
   int linkResult = std::system(linkCommand.c_str());
 
   auto endLink = std::chrono::high_resolution_clock::now();

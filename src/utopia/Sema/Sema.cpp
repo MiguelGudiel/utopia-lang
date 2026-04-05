@@ -93,8 +93,9 @@ bool Sema::checkAssignment(const TypeInfo &target, const TypeInfo &source,
 
   // Check if we are trying to mix oil and water (pointers and scalars)
   // We use 'null' as a sovereign entity, not a dirty zero from the 70s.
-  if (target.base == "int" && source.base == "null") {
+  if (target.base == "int" && target.ptrDepth == 0 && source.base == "null") {
     reportError(node, "Keep your integers away from my null pointers.");
+    return false;
   }
 
   return true;
@@ -120,7 +121,8 @@ bool Sema::analyze(ProgramNode *program) {
     def.isClass = st->isClass;
     int idx = 0;
     for (auto &f : st->fields) {
-      def.fields[f.name] = {parseType(f.typeName, program), f.modifier, idx++};
+      def.fields[f.name] = {parseType(f.typeName, program), f.modifier,
+                            f.isStatic ? -1 : idx++, f.isStatic};
     }
     customStructs[st->name] = def;
 
@@ -163,6 +165,13 @@ void Sema::visit(MemberAccessNode *node) {
     return;
   }
 
+  bool isClassSymbol = false;
+  if (auto varNode = dynamic_cast<VariableNode *>(node->object.get())) {
+    if (customStructs.count(varNode->name) && !lookup(varNode->name)) {
+      isClassSymbol = true;
+    }
+  }
+
   auto &def = customStructs[currentExprType.base];
   if (!def.fields.count(node->field)) {
     reportError(node, "error: no member named '" + node->field + "' in '" +
@@ -172,6 +181,13 @@ void Sema::visit(MemberAccessNode *node) {
   }
 
   auto &field = def.fields[node->field];
+
+  if (isClassSymbol && !field.isStatic) {
+    reportError(node, "error: invalid use of non-static member '" +
+                          node->field + "' via class name");
+    currentExprType = {"error", 0, false};
+    return;
+  }
 
   // Implicit access resolution: Public by default unless it starts with '_'
   bool isPub = (field.mod == AccessModifier::Public) ||
@@ -211,8 +227,10 @@ void Sema::visit(ProgramNode *node) {
 }
 
 void Sema::visit(ThisNode *node) {
-  if (currentClass.empty()) {
-    reportError(node, "error: 'this' used outside of class context");
+  if (currentClass.empty() || inStaticMethod) {
+    reportError(
+        node,
+        "error: invalid use of 'this' outside of a non-static member function");
     currentExprType = {"error", 0, false};
     return;
   }
@@ -222,9 +240,11 @@ void Sema::visit(ThisNode *node) {
 void Sema::visit(FunctionNode *node) {
   enterScope();
   std::string previousClassContext = currentClass;
+  bool previousStaticContext = inStaticMethod;
 
   if (node->isMethod || node->isConstructor || node->isDestructor) {
     currentClass = node->className;
+    inStaticMethod = node->isStatic;
   }
 
   // Recover mangled identity to prevent return type mismatches
@@ -242,6 +262,12 @@ void Sema::visit(FunctionNode *node) {
 
   for (auto &arg : node->args) {
     if (arg.isThisAssign) {
+      if (node->isStatic) {
+        reportError(
+            node,
+            "error: static methods cannot use 'this.' field assignment syntax");
+      }
+
       TypeInfo fieldType = {"error", 0, false};
       if (!currentClass.empty() && customStructs.count(currentClass)) {
         if (customStructs[currentClass].fields.count(arg.name)) {
@@ -261,6 +287,7 @@ void Sema::visit(FunctionNode *node) {
     stmt->accept(this);
 
   currentClass = previousClassContext;
+  inStaticMethod = previousStaticContext;
   exitScope();
 }
 
@@ -431,6 +458,11 @@ void Sema::visit(VariableNode *node) {
       currentExprType = def.fields[node->name].type;
       return;
     }
+  }
+
+  if (customStructs.count(node->name)) {
+    currentExprType = {node->name, 0, false};
+    return;
   }
 
   reportError(node, "error: use of undeclared identifier '" + node->name + "'");
