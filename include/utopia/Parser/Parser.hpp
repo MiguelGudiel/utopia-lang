@@ -50,6 +50,7 @@ private:
   std::unique_ptr<ExprNode> parseTerm();
   std::unique_ptr<ExprNode> parsePrimary();
   std::unique_ptr<StructDeclNode> parseStructDecl(bool isClass);
+  std::unique_ptr<ExtensionNode> parseExtension();
   std::unique_ptr<ExprNode> parsePrimaryBase();
   DeclPreamble parsePreamble();
   std::unique_ptr<StructDeclNode> parseStructDecl(bool isClass,

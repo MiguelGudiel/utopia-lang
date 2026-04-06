@@ -10,6 +10,7 @@
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/TargetParser/Host.h>
 #include <optional>
+#include <unordered_set>
 
 namespace utopia {
 
@@ -254,6 +255,10 @@ llvm::Type *CodeGen::getLLVMType(const TypeInfo &type) {
   return llvm::PointerType::get(*context, 0);
 }
 
+llvm::Type *CodeGen::getLLVMType(const std::string &typeName) {
+  return getLLVMType(parseTypeString(typeName));
+}
+
 llvm::Value *CodeGen::getOrCreateString(const std::string &str) {
   if (!stringPool.count(str))
     stringPool[str] = builder->CreateGlobalString(str);
@@ -450,29 +455,29 @@ void CodeGen::visit(ProgramNode *node) {
   enterScope();
 
   for (auto &st : node->structs) {
-    currentClass = st->name;
     structASTs[st->name] = st.get();
     structTypes[st->name] = llvm::StructType::create(*context, st->name);
-    for (auto &method : st->methods) {
-      std::string mangledName = st->name + "_" + method->name;
-      for (auto &arg : method->args) {
-        TypeInfo t = arg.isThisAssign ? structMemberTypes[st->name][arg.name]
-                                      : parseTypeString(arg.type);
-        mangledName += "_" + getMangledType(t);
-      }
-      functionTypes[mangledName] = parseTypeString(method->returnType);
-    }
   }
 
   for (auto &st : node->structs) {
     std::vector<llvm::Type *> body;
     int idx = 0;
-    for (auto &f : st->fields) {
-      TypeInfo t = parseTypeString(f.typeName);
-      body.push_back(getLLVMType(t));
-      structMemberIndices[st->name][f.name] = idx++;
-      structMemberTypes[st->name][f.name] = t;
-    }
+
+    auto buildMemoryLayout = [&](std::string className, auto &self) -> void {
+      StructDeclNode *currentAST = structASTs[className];
+      if (!currentAST->baseClass.empty() &&
+          structASTs.count(currentAST->baseClass)) {
+        self(currentAST->baseClass, self);
+      }
+      for (auto &f : currentAST->fields) {
+        TypeInfo t = parseTypeString(f.typeName);
+        body.push_back(getLLVMType(t));
+        structMemberIndices[st->name][f.name] = idx++;
+        structMemberTypes[st->name][f.name] = t;
+      }
+    };
+
+    buildMemoryLayout(st->name, buildMemoryLayout);
     structTypes[st->name]->setBody(body);
 
     for (auto &f : st->fields) {
@@ -489,24 +494,113 @@ void CodeGen::visit(ProgramNode *node) {
 
   currentClass = "";
 
-  for (auto &func : node->functions) {
-    std::string mangledName = func->name;
-    for (auto &arg : func->args)
-      mangledName += "_" + getMangledType(parseTypeString(arg.type));
-    functionTypes[mangledName] = parseTypeString(func->returnType);
-  }
-
   for (auto &st : node->structs) {
     for (auto &method : st->methods) {
       std::string originalName = method->name;
       method->name = st->name + "_" + method->name;
+
+      if (!method->isStatic && !method->isConstructor) {
+        TypeInfo thisType = {st->name, 1, false};
+        method->name += "_" + getMangledType(thisType);
+      }
       for (auto &arg : method->args) {
         TypeInfo t = arg.isThisAssign ? structMemberTypes[st->name][arg.name]
                                       : parseTypeString(arg.type);
         method->name += "_" + getMangledType(t);
       }
+
       method->accept(this);
       method->name = originalName;
+    }
+  }
+
+  /*
+   * Extension methods.
+   * We mangle the target type manually because these bastards live outside the
+   * struct scope. Forcing the target into the signature so the linker doesn't
+   * shit itself.
+   */
+  for (auto &ext : node->extensions) {
+    for (auto &method : ext->methods) {
+      std::string originalName = method->name;
+      method->name = "ext_" + ext->targetTypedef + "_" + method->name;
+
+      TypeInfo targetType = parseTypeString(ext->targetTypedef);
+      method->name += "_" + getMangledType(targetType);
+
+      for (auto &arg : method->args) {
+        TypeInfo t = arg.isThisAssign
+                         ? structMemberTypes[ext->targetTypedef][arg.name]
+                         : parseTypeString(arg.type);
+        method->name += "_" + getMangledType(t);
+      }
+
+      method->accept(this);
+      method->name = originalName;
+    }
+  }
+
+  for (auto &func : node->functions) {
+    std::string mangledName = func->name;
+    std::vector<TypeInfo> paramTypes;
+    for (auto &arg : func->args) {
+      paramTypes.push_back(parseTypeString(arg.type));
+      mangledName += "_" + getMangledType(paramTypes.back());
+    }
+    functionParamTypes[mangledName] = paramTypes;
+  }
+
+  for (auto &st : node->structs) {
+    for (auto &method : st->methods) {
+      std::string mangledName = st->name + "_" + method->name;
+      std::vector<TypeInfo> paramTypes;
+
+      // Inject 'this' pointer to match Sema's mangled signature
+      if (!method->isStatic && !method->isConstructor) {
+        TypeInfo thisType = {st->name, 1, false}; // pointer
+        paramTypes.push_back(thisType);
+        mangledName += "_" + getMangledType(thisType);
+      }
+
+      if (method->isConstructor) {
+        TypeInfo thisType = {st->name, 1, false}; // pointer
+        paramTypes.push_back(thisType);
+        mangledName += "_" + getMangledType(thisType);
+      }
+
+      for (auto &arg : method->args) {
+        TypeInfo t = arg.isThisAssign ? structMemberTypes[st->name][arg.name]
+                                      : parseTypeString(arg.type);
+        paramTypes.push_back(t);
+        mangledName += "_" + getMangledType(t);
+      }
+      functionParamTypes[mangledName] = paramTypes;
+    }
+  }
+
+  /*
+   * Extension parameter types registration.
+   * If we don't do this, CallNode resolves the arguments as raw ints and burns
+   * the stack. WTF.
+   */
+  for (auto &ext : node->extensions) {
+    for (auto &method : ext->methods) {
+      std::string mangledName =
+          "ext_" + ext->targetTypedef + "_" + method->name;
+      std::vector<TypeInfo> paramTypes;
+
+      TypeInfo targetType = parseTypeString(ext->targetTypedef);
+      paramTypes.push_back(targetType);
+      mangledName += "_" + getMangledType(targetType);
+
+      for (auto &arg : method->args) {
+        TypeInfo t = arg.isThisAssign
+                         ? structMemberTypes[ext->targetTypedef][arg.name]
+                         : parseTypeString(arg.type);
+        paramTypes.push_back(t);
+        mangledName += "_" + getMangledType(t);
+      }
+      functionParamTypes[mangledName] = paramTypes;
     }
   }
 
@@ -532,26 +626,14 @@ void CodeGen::visit(ProgramNode *node) {
   llvm::BasicBlock *initBB =
       llvm::BasicBlock::Create(*context, "entry", staticInitF);
   builder->SetInsertPoint(initBB);
-
-  for (auto &st : node->structs) {
-    for (auto &f : st->fields) {
-      if (f.isStatic && f.initializer) {
-        f.initializer->accept(this);
-        llvm::Value *initVal = currentVal;
-        std::string globalName = st->name + "_" + f.name;
-        llvm::GlobalVariable *gVar = module->getNamedGlobal(globalName);
-        TypeInfo t = parseTypeString(f.typeName);
-        emitCopyOrStore(gVar, castValue(initVal, currentType, t), t,
-                        currentType);
-      }
-    }
-  }
   builder->CreateRetVoid();
 
   exitScope();
 }
 
 void CodeGen::visit(StructDeclNode *node) {}
+
+void CodeGen::visit(ExtensionNode *node) {}
 
 void CodeGen::visit(MemberAccessNode *node) {
   // Access via the Class Symbol (Counter.globalCount)
@@ -623,12 +705,32 @@ void CodeGen::visit(ThisNode *node) {
     exit(1);
   }
 
-  if (isLValueContext) {
-    currentLValue = alloca;
+  if (type.ptrDepth == 0) {
+    currentVal =
+        builder->CreateLoad(getLLVMType(type.base), alloca, "this.val");
+    currentType = type;
   } else {
-    currentVal = builder->CreateLoad(getLLVMType(type), alloca, "this.ptr");
+    llvm::Value *ptr = builder->CreateLoad(llvm::PointerType::get(*context, 0),
+                                           alloca, "this.ptr");
+
+    if (isLValueContext) {
+      currentLValue = ptr;
+    } else {
+      // If the object is an int/float, load it. We cannot do math with
+      // addresses
+      static const std::unordered_set<std::string> primitives = {
+          "int", "float", "bool", "uint", "char"};
+      if (primitives.count(type.base) && type.ptrDepth == 1) {
+        currentVal =
+            builder->CreateLoad(getLLVMType(type.base), ptr, "this.val");
+        currentType = type;
+        currentType.ptrDepth = 0;
+      } else {
+        currentVal = ptr;
+        currentType = type;
+      }
+    }
   }
-  currentType = type;
 }
 
 void CodeGen::visit(FunctionNode *node) {
@@ -638,9 +740,21 @@ void CodeGen::visit(FunctionNode *node) {
   currentReturnType = retType;
 
   std::vector<llvm::Type *> argTypes;
+  bool isPrimitiveExtension = false;
+
+  static const std::unordered_set<std::string> primitives = {
+      "int", "float", "bool", "uint", "char"};
+
   if ((node->isMethod && !node->isStatic) || node->isConstructor ||
       node->isDestructor) {
-    argTypes.push_back(llvm::PointerType::get(*context, 0));
+    if (primitives.count(node->className)) {
+      // If it's an extension of int/float, 'this' is the direct value, not a
+      // pointer.
+      argTypes.push_back(getLLVMType(node->className));
+      isPrimitiveExtension = true;
+    } else {
+      argTypes.push_back(llvm::PointerType::get(*context, 0));
+    }
   }
 
   for (auto &arg : node->args) {
@@ -697,13 +811,18 @@ void CodeGen::visit(FunctionNode *node) {
       node->isDestructor) {
     llvm::Argument *thisArg = &(*argIt);
     thisArg->setName("this");
+
+    llvm::Type *allocType = isPrimitiveExtension
+                                ? getLLVMType(node->className)
+                                : llvm::PointerType::get(*context, 0);
     llvm::AllocaInst *thisAlloca = builder->CreateAlloca(
         llvm::PointerType::get(*context, 0), nullptr, "this.addr");
     builder->CreateStore(thisArg, thisAlloca);
 
     /* Order matters for RAII: push 'this' into the scope stack. */
     valueScopes.back().push_back({"this", thisAlloca});
-    typeScopes.back()["this"] = {node->className, 1, false};
+    typeScopes.back()["this"] = {node->className,
+                                 isPrimitiveExtension ? 0u : 1u, false};
 
     if (isDebug && !dbgScopes.empty()) {
       llvm::DILocalVariable *dbgThis = dbgBuilder->createParameterVariable(
@@ -1280,6 +1399,10 @@ void CodeGen::visit(MoveNode *node) {
   isLValueContext = oldCtx;
 
   currentVal = currentLValue;
+
+  // Burn the evidence. We own this address now.
+  currentLValue = nullptr;
+
   currentType.isRValueRef = true;
   currentType.isReference = false;
 }
@@ -1293,6 +1416,15 @@ void CodeGen::visit(VariableNode *node) {
   auto type = lookupType(node->name);
 
   if (!alloca) {
+    static const std::unordered_set<std::string> primitives = {
+        "int", "float", "bool", "uint", "char", "String", "void"};
+
+    if (primitives.count(node->name)) {
+      currentVal = nullptr;
+      currentType = {node->name, 0, false};
+      return;
+    }
+
     auto thisAddr = lookupValue("this");
     if (thisAddr) {
       TypeInfo thisType = lookupType("this");
@@ -1315,6 +1447,17 @@ void CodeGen::visit(VariableNode *node) {
         return;
       }
     }
+    // We hit a naked symbol that isn't mapped to an address.
+    // If it's a known struct, the AST is likely resolving a static method call
+    // (e.g., Entity.create()) and evaluated the class symbol as an object.
+    // Yield a null pointer and the type identity, CallNode will take it from
+    // here.
+    if (structTypes.count(node->name)) {
+      currentVal = nullptr;
+      currentType = {node->name, 0, false};
+      return;
+    }
+
     std::cerr << "CodeGen Error: Undeclared variable '" << node->name << "'\n";
     exit(1);
   }
@@ -1366,15 +1509,36 @@ void CodeGen::visit(BinaryOpNode *node) {
       L = builder->CreateSIToFP(L, llvm::Type::getDoubleTy(*context));
     if (RT.base == "int" && !RT.isPointer())
       R = builder->CreateSIToFP(R, llvm::Type::getDoubleTy(*context));
+  } else {
+    // If we are comparing a pointer to an integer (common in null checks), or
+    // if the widths of the integers do not match, we force equality.
+    if (L->getType() != R->getType()) {
+      if (L->getType()->isPointerTy() && !R->getType()->isPointerTy()) {
+        R = builder->CreateIntToPtr(R, L->getType());
+      } else if (!L->getType()->isPointerTy() && R->getType()->isPointerTy()) {
+        L = builder->CreateIntToPtr(L, R->getType());
+      } else {
+        // If we arrive here with integers of different sizes, we scale the
+        // smallest to the size of the largest.
+        uint64_t LBits =
+            module->getDataLayout().getTypeSizeInBits(L->getType());
+        uint64_t RBits =
+            module->getDataLayout().getTypeSizeInBits(R->getType());
+        if (LBits < RBits)
+          L = builder->CreateZExt(L, R->getType());
+        else if (RBits < LBits)
+          R = builder->CreateZExt(R, L->getType());
+      }
+    }
   }
 
   if (node->op == "&&") {
-    currentVal = builder->CreateAnd(L, R, "and_strict");
+    currentVal = builder->CreateAnd(L, R, "and_tmp");
     currentType = {"bool"};
     return;
   }
   if (node->op == "||") {
-    currentVal = builder->CreateOr(L, R, "or_strict");
+    currentVal = builder->CreateOr(L, R, "or_tmp");
     currentType = {"bool"};
     return;
   }
@@ -1424,6 +1588,12 @@ void CodeGen::visit(BinaryOpNode *node) {
     currentVal = isF ? builder->CreateFMul(L, R) : builder->CreateMul(L, R);
   else if (node->op == "/")
     currentVal = isF ? builder->CreateFDiv(L, R) : builder->CreateSDiv(L, R);
+  else if (node->op == "%") {
+    // LLVM handles remainder strictly according to the underlying architecture
+    // type: FRem for IEEE-754 floating-point numbers and SRem for two's
+    // complement signed integers.
+    currentVal = isF ? builder->CreateFRem(L, R) : builder->CreateSRem(L, R);
+  }
 
   currentType = isF ? TypeInfo{"float", 0, false} : TypeInfo{"int", 0, false};
 }
@@ -1474,6 +1644,12 @@ void CodeGen::visit(AddressOfNode *node) {
   node->operand->accept(this);
   isLValueContext = old;
   currentVal = currentLValue;
+
+  // Wipe the L-value tag. If left alive, CallNode assumes a memory
+  // location and executes a 64-bit pointer load over adjacent 32-bit
+  // array elements. 0x0000000A00000000
+  currentLValue = nullptr;
+
   currentType.ptrDepth++;
 }
 
@@ -1549,18 +1725,22 @@ void CodeGen::visit(NewNode *node) {
     std::vector<llvm::Value *> callArgs;
     callArgs.push_back(rawMem);
 
-    std::string mangledSig = "";
     for (auto &arg : node->arguments) {
       arg->accept(this);
       callArgs.push_back(currentVal);
-      mangledSig += "_" + getMangledType(currentType);
     }
 
-    std::string ctorName = node->typeName + "_" + node->typeName + mangledSig;
-    llvm::Function *ctor = module->getFunction(ctorName);
-    if (ctor)
+    // Retrieve the pre-computed constructor overload.
+    llvm::Function *ctor = module->getFunction(node->resolvedMangledName);
+    if (ctor) {
       builder->CreateCall(ctor, callArgs);
-
+    } else if (!node->arguments.empty()) {
+      // If there is no constructor but there are arguments (like 'new
+      // float(50.5)') We take the first argument and store it directly in
+      // memory.
+      node->arguments[0]->accept(this);
+      builder->CreateStore(currentVal, rawMem);
+    }
     currentVal = rawMem;
   }
 
@@ -1570,6 +1750,9 @@ void CodeGen::visit(NewNode *node) {
 
 void CodeGen::visit(CallNode *node) {
   emitLocation(node);
+
+  // Intrinsic: @assign_deref
+  // Manual pointer surgery for cases where the high-level syntax is too polite.
   if (node->callee == "@assign_deref") {
     isLValueContext = true;
     node->arguments[0]->accept(this);
@@ -1582,6 +1765,8 @@ void CodeGen::visit(CallNode *node) {
     return;
   }
 
+  // Intrinsic: print
+  // Because calling printf manually every time is a crime against humanity.
   if (node->callee == "print") {
     std::string fmt = "";
     std::vector<llvm::Value *> args = {nullptr};
@@ -1604,6 +1789,7 @@ void CodeGen::visit(CallNode *node) {
     return;
   }
 
+  // Built-in type casts
   if (node->callee == "int" || node->callee == "float" ||
       node->callee == "bool") {
     node->arguments[0]->accept(this);
@@ -1613,10 +1799,11 @@ void CodeGen::visit(CallNode *node) {
     return;
   }
 
+  // Stack Allocation / RVO Simulation
   if (!node->object && structTypes.count(node->callee)) {
     llvm::Value *target = nullptr;
 
-    // RVO Intercept: Inject directly into the caller's memory address
+    // RVO Intercept: Inject directly into the caller's memory address.
     // Bypasses the 'stack.obj' temporary alloca and eliminates a copy cycle.
     if (rvoTarget) {
       target = rvoTarget;
@@ -1629,13 +1816,14 @@ void CodeGen::visit(CallNode *node) {
     std::vector<llvm::Value *> ctorArgs;
     ctorArgs.push_back(target);
     std::string mSig = "";
+
     for (auto &a : node->arguments) {
       a->accept(this);
       ctorArgs.push_back(currentVal);
-      mSig += "_" + getMangledType(currentType);
     }
-    llvm::Function *ctor =
-        module->getFunction(node->callee + "_" + node->callee + mSig);
+
+    // Trust the Sema's resolved constructor overload. We already did the math.
+    llvm::Function *ctor = module->getFunction(node->resolvedMangledName);
     if (ctor)
       builder->CreateCall(ctor, ctorArgs);
 
@@ -1649,47 +1837,41 @@ void CodeGen::visit(CallNode *node) {
 
   if (node->object) {
     bool oldCtx = isLValueContext;
-    isLValueContext = false;
+    isLValueContext = true;
     node->object->accept(this);
     isLValueContext = oldCtx;
     thisArg = currentVal;
     baseName = currentType.base + "_" + node->callee;
   }
 
-  llvm::Function *f = module->getFunction(baseName);
-  std::string finalMangled = baseName;
+  // Use the exact mangled name resolved by Sema.
+  // We were ignoring Sema's resolution and guessing the symbol via prefix
+  // matching.
+  std::string finalMangled = node->resolvedMangledName;
+  llvm::Function *f = module->getFunction(finalMangled);
 
   if (!f) {
-    for (auto &func : module->getFunctionList()) {
-      std::string fnName = func.getName().str();
-      if (fnName.find(baseName + "_") == 0) {
-        size_t expectedArgs = node->arguments.size() + (thisArg ? 1 : 0);
-        if (func.arg_size() == expectedArgs) {
-          f = &func;
-          finalMangled = fnName;
-          break;
-        } else if (thisArg && func.arg_size() == node->arguments.size()) {
-          // Static method called through an instance
-          // (c1.fallar())
-          f = &func;
-          finalMangled = fnName;
-          thisArg = nullptr; // We threw the 'this' in the trash
-          break;
-        }
-      }
-    }
+    std::cerr << "[Utopia Fatal] CodeGen Error: Undefined function or "
+                 "unresolved overload '"
+              << finalMangled << "'.\n";
+    exit(1);
   }
 
-  // Make sure to clean up the `thisArg` for direct resolutions (static methods
-  // without mangling)
-  if (f && thisArg && f->arg_size() == node->arguments.size()) {
+  // Discard 'this' if the resolved function is static (doesn't expect it).
+  // Burn the pointer. It's a static call routed through an instance.
+  if (thisArg && f->arg_size() == node->arguments.size()) {
     thisArg = nullptr;
   }
 
-  if (!f) {
-    std::cerr << "[Utopia Fatal] CodeGen Error: Undefined function '"
-              << baseName << "'.\n";
-    exit(1);
+  /*
+   * We invoked a pseudo-static method on a primitive type (like int.max()).
+   * VariableNode("int") evaluates to a null pointer, so thisArg is empty.
+   * But Sema registers ALL extension methods as instance methods, meaning LLVM
+   * expects a 'this' parameter. Feed it a zeroed artifact to keep CreateCall
+   * from panicking.
+   */
+  if (!thisArg && node->object && f->arg_size() > node->arguments.size()) {
+    thisArg = llvm::Constant::getNullValue(getLLVMType(currentType));
   }
 
   std::vector<llvm::Value *> args;
@@ -1700,47 +1882,80 @@ void CodeGen::visit(CallNode *node) {
     argOffset = 1;
   }
 
-  for (size_t i = 0; i < node->arguments.size(); ++i) {
-    // Get param type safely. getArg() on raw functions is risky business.
-    bool expectsRef =
-        f->getFunctionType()->getParamType(i + argOffset)->isPointerTy();
+  std::vector<TypeInfo> paramTypes;
+  auto it = functionParamTypes.find(finalMangled);
+  if (it != functionParamTypes.end()) {
+    paramTypes = it->second;
+  } else {
+    // Fallback: assume all parameters are pointers, not references (old
+    // behavior, but shouldn't happen)
+    for (size_t j = 0; j < node->arguments.size() + argOffset; ++j) {
+      paramTypes.push_back(TypeInfo{"int", 0, false}); // dummy
+    }
+  }
 
+  for (size_t i = 0; i < node->arguments.size(); ++i) {
+    size_t paramIdx = i + argOffset;
+    bool isRefParam = (paramIdx < paramTypes.size())
+                          ? paramTypes[paramIdx].isReference
+                          : false;
+    bool isPointerParam = (paramIdx < paramTypes.size())
+                              ? (paramTypes[paramIdx].ptrDepth > 0)
+                              : false;
+
+    // Decide on the evaluation method:
+    // - If the parameter is a reference (isReference == true) -> LValue mode
+    // (address)
+    // - If the parameter is a normal pointer (ptrDepth > 0 && !isReference) ->
+    // value mode (load the pointer)
+    // - If the parameter is a value type (ptrDepth == 0) -> normal value mode
+    bool expectsLValue = isRefParam;
     bool oldCtx = isLValueContext;
-    isLValueContext = expectsRef;
+    isLValueContext = expectsLValue;
     currentLValue = nullptr;
     node->arguments[i]->accept(this);
     isLValueContext = oldCtx;
 
     llvm::Value *argVal = currentVal;
 
-    if (expectsRef && currentLValue) {
-      argVal = currentLValue;
-    } else if (!expectsRef && currentLValue) {
-      if (structTypes.count(currentType.base) && currentType.ptrDepth == 0 &&
-          !currentType.isReference) {
+    if (expectsLValue) {
+      // An address is expected: use currentLValue if available, otherwise use
+      // currentVal (e.g., &expr)
+      if (currentLValue) {
         argVal = currentLValue;
       } else {
-        argVal = builder->CreateLoad(getLLVMType(currentType), currentLValue);
+        // If there is no LValue, we assume that currentVal is already the
+        // address (e.g., the result of AddressOfNode).
+        argVal = currentVal;
       }
+    } else {
+      // A value is expected: load if we have LValue and it is not a struct
+      if (currentLValue) {
+        if (structTypes.count(currentType.base) && currentType.ptrDepth == 0 &&
+            !currentType.isReference) {
+          // For structs passed by value, we pass the address (it will be copied
+          // to the temp below)
+          argVal = currentLValue;
+        } else {
+          argVal = builder->CreateLoad(getLLVMType(currentType), currentLValue);
+        }
+      }
+      // If we already have currentVal (because accept loaded the value), we use
+      // it directly
     }
 
-    /* Isolated temporal memory for pass-by-value structs */
-    if (!expectsRef && currentType.ptrDepth == 0 && !currentType.isReference &&
-        structTypes.count(currentType.base)) {
+    // Special treatment for structs passed by value (create a temporary copy)
+    if (!expectsLValue && currentType.ptrDepth == 0 &&
+        !currentType.isReference && structTypes.count(currentType.base)) {
+      // Create a temporary copy on the stack
       llvm::AllocaInst *temp =
           builder->CreateAlloca(getLLVMType(currentType), nullptr, "arg.temp");
-
       TypeInfo targetType = currentType;
       targetType.isRValueRef = false;
       targetType.isReference = false;
-
       emitCopyOrStore(temp, argVal, targetType, currentType);
-
-      /*
-       * CORE DUMP PREVENTION:
-       * Load raw bytes into SSA struct value before call.
-       */
-      argVal = builder->CreateLoad(getLLVMType(targetType), temp, "val.load");
+      // Pass the copy address (the function expects a pointer to a struct)
+      argVal = temp;
     }
 
     args.push_back(argVal);

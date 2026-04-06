@@ -1,5 +1,6 @@
-// File: src/utopia/Sema/Sema.cpp
 #include "utopia/Sema/Sema.hpp"
+#include <llvm/IR/Function.h>
+#include <unordered_set>
 
 namespace utopia {
 
@@ -107,16 +108,28 @@ bool Sema::analyze(ProgramNode *program) {
   functionTypes.clear();
   customStructs.clear();
   currentClass.clear();
+  structASTs.clear();
   loopDepth = 0;
 
   for (auto &func : program->functions) {
     std::string mangledName = func->name;
-    for (auto &arg : func->args)
-      mangledName += "_" + getMangledType(parseType(arg.type, program));
-    functionTypes[mangledName] = parseType(func->returnType, program);
+    std::vector<TypeInfo> params;
+
+    for (auto &arg : func->args) {
+      TypeInfo t = parseType(arg.type, program);
+      params.push_back(t);
+      mangledName += "_" + getMangledType(t);
+    }
+
+    TypeInfo ret = parseType(func->returnType, program);
+    functionTypes[mangledName] = ret;
+
+    registerOverload(func->name, mangledName, params, ret);
   }
 
   for (auto &st : program->structs) {
+    structASTs[st->name] = st.get();
+
     StructDef def;
     def.isClass = st->isClass;
     int idx = 0;
@@ -128,12 +141,31 @@ bool Sema::analyze(ProgramNode *program) {
 
     // register methods into global scope
     for (auto &m : st->methods) {
-      std::string mangledName = st->name + "_" + m->name;
+      std::string baseName = st->name + "_" + m->name;
+      std::string mangledName = baseName;
+      std::vector<TypeInfo> params;
+
+      if (!m->isStatic && !m->isConstructor) {
+        TypeInfo thisType = {st->name, 1, false};
+        params.push_back(thisType);
+        mangledName += "_" + getMangledType(thisType);
+      }
+
       for (auto &arg : m->args) {
-        TypeInfo t = arg.isThisAssign ? def.fields[arg.name].type
-                                      : parseType(arg.type, program);
+        TypeInfo t;
+        if (arg.isThisAssign) {
+          t = def.fields.count(arg.name) ? def.fields[arg.name].type
+                                         : TypeInfo{"error"};
+          arg.type = t.base;
+        } else {
+          t = parseType(arg.type, program);
+        }
+        params.push_back(t);
         mangledName += "_" + getMangledType(t);
       }
+      TypeInfo ret = parseType(m->returnType, program);
+      registerOverload(baseName, mangledName, params, ret);
+
       functionTypes[mangledName] = parseType(m->returnType, program);
 
       if (m->isConstructor && m->args.size() == 1) {
@@ -146,17 +178,242 @@ bool Sema::analyze(ProgramNode *program) {
     }
   }
 
+  for (auto &ext : program->extensions) {
+    for (auto &m : ext->methods) {
+      std::string baseName = "ext_" + ext->targetTypedef + "_" + m->name;
+      std::string mangledName = baseName;
+      std::vector<TypeInfo> params;
+
+      // The first parameter of an extension is always the target (this)
+      TypeInfo targetType = parseType(ext->targetTypedef, program);
+      params.push_back(targetType);
+      mangledName += "_" + getMangledType(targetType);
+
+      for (auto &arg : m->args) {
+        TypeInfo t = arg.isThisAssign ? parseType(ext->targetTypedef, program)
+                                      : parseType(arg.type, program);
+        params.push_back(t);
+        mangledName += "_" + getMangledType(t);
+      }
+
+      // We record it in the table so that resolveOverload can work its magic
+      registerOverload(baseName, mangledName, params,
+                       parseType(m->returnType, program));
+      functionTypes[mangledName] = parseType(m->returnType, program);
+    }
+  }
+
   program->accept(this);
   return errors.empty();
 }
 
-void Sema::visit(StructDeclNode *node) {}
+bool Sema::methodExistsInClass(const std::string &className,
+                               const std::string &methodName) {
+  std::string prefix = className + "_" + methodName;
+  for (const auto &pair : functionTypes) {
+    if (pair.first.find(prefix) == 0)
+      return true;
+  }
+  return false;
+}
+
+void Sema::validateInterfaceCompliance(StructDeclNode *node,
+                                       const std::string &interfaceName) {
+  if (!structASTs.count(interfaceName)) {
+    reportError(node, "Semantic Error: Interface '" + interfaceName +
+                          "' is not defined.");
+    return;
+  }
+
+  StructDeclNode *ifaceAST = structASTs[interfaceName];
+
+  for (const auto &f : ifaceAST->fields) {
+    if (f.isStatic)
+      continue;
+    if (!hasClassField(node, f.name, f.typeName)) {
+      reportError(node, "Semantic Error: Class '" + node->name +
+                            "' fails to implement interface '" + interfaceName +
+                            "'. Missing field '" + f.name + "' of type '" +
+                            f.typeName + "'.");
+    }
+  }
+
+  for (const auto &m : ifaceAST->methods) {
+    if (m->isStatic || m->isConstructor || m->isDestructor)
+      continue;
+    if (!hasClassMethod(node, m.get())) {
+      reportError(node, "Semantic Error: Class '" + node->name +
+                            "' fails to implement interface '" + interfaceName +
+                            "'. Missing method '" + m->name + "'.");
+    }
+  }
+}
+
+std::string Sema::resolveParamType(StructDeclNode *node,
+                                   const FunctionParam &param) {
+  if (!param.isThisAssign)
+    return param.type;
+
+  StructDeclNode *curr = node;
+  while (curr) {
+    for (const auto &f : curr->fields) {
+      if (f.name == param.name)
+        return f.typeName;
+    }
+    if (!curr->baseClass.empty() && structASTs.count(curr->baseClass)) {
+      curr = structASTs[curr->baseClass];
+    } else {
+      curr = nullptr;
+    }
+  }
+  return "error";
+}
+
+bool Sema::hasClassField(StructDeclNode *node, const std::string &name,
+                         const std::string &type) {
+  for (const auto &f : node->fields) {
+    if (!f.isStatic && f.name == name && f.typeName == type)
+      return true;
+  }
+  // If we don't find it, traverse the bloodline. Pray there are no circular
+  // inheritance chains here.
+  if (!node->baseClass.empty() && structASTs.count(node->baseClass)) {
+    return hasClassField(structASTs[node->baseClass], name, type);
+  }
+  return false;
+}
+
+bool Sema::hasClassMethod(StructDeclNode *node, FunctionNode *m) {
+  for (const auto &nm : node->methods) {
+    if (!nm->isStatic && nm->name == m->name &&
+        nm->args.size() == m->args.size()) {
+      bool argsMatch = true;
+      for (size_t i = 0; i < m->args.size(); ++i) {
+        std::string nmType = resolveParamType(node, nm->args[i]);
+        std::string mType = resolveParamType(node, m->args[i]);
+        if (nmType != mType) {
+          argsMatch = false;
+          break;
+        }
+      }
+      if (argsMatch && nm->returnType == m->returnType) {
+        return true;
+      }
+    }
+  }
+
+  if (!node->baseClass.empty() && structASTs.count(node->baseClass)) {
+    return hasClassMethod(structASTs[node->baseClass], m);
+  }
+  return false;
+}
+
+void Sema::registerOverload(const std::string &baseName,
+                            const std::string &mangledName,
+                            const std::vector<TypeInfo> &params,
+                            const TypeInfo &ret) {
+  // Capture the candidate in the overload table
+  overloadTable[baseName].push_back({mangledName, params, ret});
+}
+
+int Sema::getConversionCost(const TypeInfo &target, const TypeInfo &source) {
+  if (target.base == source.base && target.ptrDepth == source.ptrDepth &&
+      target.isReference == source.isReference &&
+      target.isRValueRef == source.isRValueRef)
+    return 0;
+
+  // Descent into the hell of L-value
+  // If the variable is of the same type but the destination requires a
+  // reference, we let it pass without penalty. The compiler will do the rest.
+  if (target.isReference && !source.isReference && !source.isRValueRef &&
+      target.base == source.base && target.ptrDepth == source.ptrDepth)
+    return 0;
+
+  // Mismatch in pointer levels. We are not attempting to fix this
+  if (target.ptrDepth != source.ptrDepth)
+    return 100;
+
+  // Implicit promotion: int to float is an acceptable compromise.
+  if (target.base == "float" && source.base == "int" && !target.isReference)
+    return 1;
+
+  // The null constant is a universal donor for any direction
+  if (target.ptrDepth > 0 && source.base == "null")
+    return 1;
+
+  return 1000; // The type system says no
+}
+
+std::string Sema::resolveOverload(const std::string &baseName,
+                                  const std::vector<TypeInfo> &argTypes,
+                                  ASTNode *node, TypeInfo &outReturnType) {
+  if (!overloadTable.count(baseName))
+    return "";
+
+  std::string bestMangled = "";
+  int minCost = 1000;
+
+  for (const auto &cand : overloadTable[baseName]) {
+    if (cand.paramTypes.size() != argTypes.size())
+      continue;
+
+    int currentCost = 0;
+    bool possible = true;
+    for (size_t i = 0; i < argTypes.size(); ++i) {
+      int cost = getConversionCost(cand.paramTypes[i], argTypes[i]);
+      if (cost >= 1000) {
+        possible = false;
+        break;
+      }
+      currentCost += cost;
+    }
+
+    // Select the candidate who requires the least amount of butchery.
+    if (possible && currentCost < minCost) {
+      minCost = currentCost;
+      bestMangled = cand.mangledName;
+      outReturnType = cand.returnType;
+    }
+  }
+
+  if (bestMangled.empty() && node) {
+    reportError(node,
+                "error: no matching function for call to '" + baseName + "'");
+  }
+
+  return bestMangled;
+}
+
+void Sema::visit(StructDeclNode *node) {
+  for (const auto &interfaceName : node->interfaces) {
+    validateInterfaceCompliance(node, interfaceName);
+  }
+}
+
+void Sema::visit(ExtensionNode *node) {
+  bool oldState = isProcessingExtension;
+  isProcessingExtension = true;
+  for (auto &method : node->methods) {
+    method->accept(this);
+  }
+  isProcessingExtension = oldState;
+}
 
 void Sema::visit(MemberAccessNode *node) {
+  static const std::unordered_set<std::string> primitiveTypes = {
+      "int", "float", "bool", "uint", "char", "String"};
+
   node->object->accept(this);
 
-  // Auto-deref: LLVM se encarga de que ambos (valores y punteros)
-  // sean accesibles vía CreateStructGEP, así que solo validamos la base.
+  bool isPrimitive = primitiveTypes.count(currentExprType.base) > 0;
+
+  if (isPrimitive) {
+    // We do nothing else, currentExprType is already the type of the object
+    return;
+  }
+
+  // Auto-deref: LLVM takes care of making both (values ​​and pointers)
+  // accessible via CreateStructGEP, so we only validate the base
 
   if (!customStructs.count(currentExprType.base)) {
     reportError(node, "error: type '" + currentExprType.base +
@@ -172,34 +429,53 @@ void Sema::visit(MemberAccessNode *node) {
     }
   }
 
-  auto &def = customStructs[currentExprType.base];
-  if (!def.fields.count(node->field)) {
-    reportError(node, "error: no member named '" + node->field + "' in '" +
-                          currentExprType.base + "'");
-    currentExprType = {"error", 0, false};
-    return;
+  std::string currObjName = currentExprType.base;
+  bool fieldFound = false;
+  StructDef::Field foundField;
+  std::string classDefiningField;
+
+  while (!currObjName.empty() && customStructs.count(currObjName)) {
+    auto &def = customStructs[currObjName];
+    if (def.fields.count(node->field)) {
+      foundField = def.fields[node->field];
+      classDefiningField = currObjName;
+      fieldFound = true;
+      break;
+    }
+
+    // Ascend to the ancestor if one exists
+    if (structASTs.count(currObjName) &&
+        !structASTs[currObjName]->baseClass.empty()) {
+      currObjName = structASTs[currObjName]->baseClass;
+    } else {
+      break;
+    }
   }
 
-  auto &field = def.fields[node->field];
+  if (fieldFound) {
+    // Access and static validations
+    if (isClassSymbol && !foundField.isStatic) {
+      reportError(node, "error: invalid use of non-static member '" +
+                            node->field + "' via class name");
+      currentExprType = {"error", 0, false};
+      return;
+    }
 
-  if (isClassSymbol && !field.isStatic) {
-    reportError(node, "error: invalid use of non-static member '" +
-                          node->field + "' via class name");
-    currentExprType = {"error", 0, false};
-    return;
+    bool isPub = (foundField.mod == AccessModifier::Public) ||
+                 (foundField.mod == AccessModifier::Implicit &&
+                  (node->field.empty() || node->field[0] != '_'));
+
+    if (!isPub && currentClass != classDefiningField) {
+      reportError(node, "error: '" + node->field +
+                            "' is a private member of '" + classDefiningField +
+                            "'");
+    }
+
+    currentExprType = foundField.type;
+  } else {
+    // No field was found. We do nothing; we let CallNode attempt to resolve it
+    // as a method. currentExprType is already the object's type
   }
-
-  // Implicit access resolution: Public by default unless it starts with '_'
-  bool isPub = (field.mod == AccessModifier::Public) ||
-               (field.mod == AccessModifier::Implicit &&
-                (node->field.empty() || node->field[0] != '_'));
-
-  if (!isPub && currentClass != currentExprType.base) {
-    reportError(node, "error: '" + node->field + "' is a private member of '" +
-                          currentExprType.base + "'");
-  }
-
-  currentExprType = field.type;
 }
 
 void Sema::visit(ProgramNode *node) {
@@ -220,6 +496,9 @@ void Sema::visit(ProgramNode *node) {
     for (auto &method : st->methods) {
       method->accept(this);
     }
+  }
+  for (auto &ext : node->extensions) {
+    ext->accept(this);
   }
   for (auto &func : node->functions)
     func->accept(this);
@@ -247,18 +526,38 @@ void Sema::visit(FunctionNode *node) {
     inStaticMethod = node->isStatic;
   }
 
-  // Recover mangled identity to prevent return type mismatches
+  // Recover mangled identity. Name mangling is unforgiving.
+  // We must manually inject the implicit 'this' parameter back into the
+  // signature. If we skip this, the lookup fails, we fallback to an 'error'
+  // return type, and the semantic pass bleeds out on valid returns.
   std::string lookupName = node->name;
   if (node->isMethod || node->isConstructor || node->isDestructor) {
-    lookupName = node->className + "_" + node->name;
+    lookupName = (isProcessingExtension ? "ext_" : "") + node->className + "_" +
+                 node->name;
+
+    if (isProcessingExtension) {
+      TypeInfo targetType = parseType(node->className, node);
+      lookupName += "_" + getMangledType(targetType);
+    } else if (!node->isStatic && !node->isConstructor) {
+      TypeInfo thisType = {node->className, 1, false};
+      lookupName += "_" + getMangledType(thisType);
+    }
   }
+
   for (auto &arg : node->args) {
     TypeInfo t = arg.isThisAssign
                      ? customStructs[node->className].fields[arg.name].type
                      : parseType(arg.type, node);
     lookupName += "_" + getMangledType(t);
   }
-  currentReturnType = functionTypes[lookupName];
+
+  if (functionTypes.count(lookupName)) {
+    currentReturnType = functionTypes[lookupName];
+  } else {
+    // If we got here, something went seriously wrong in the previous
+    // registration
+    currentReturnType = {"error", 0, false};
+  }
 
   for (auto &arg : node->args) {
     if (arg.isThisAssign) {
@@ -370,15 +669,19 @@ void Sema::visit(AssignNode *node) {
   node->target->accept(this);
   TypeInfo targetType = currentExprType;
 
-  if (targetType.base == "error" ||
-      (targetType.base != "String" && targetType.base != "int" &&
-       targetType.base != "float" && targetType.base != "bool" &&
-       targetType.ptrDepth == 0)) {
-  }
+  // R-Value validation: We enforce strict L-Value semantics.
+  // The target must be an entity capable of holding memory (variables, fields,
+  // pointers, array indices).
+  bool isValidLValue = dynamic_cast<VariableNode *>(node->target.get()) ||
+                       dynamic_cast<MemberAccessNode *>(node->target.get()) ||
+                       dynamic_cast<SubscriptNode *>(node->target.get()) ||
+                       dynamic_cast<DerefNode *>(node->target.get());
 
-  // R-Value validation: Check if we are trying to assign to something that
-  // isn't an identifier or member This is a simple version, in the future we'll
-  // need a proper isLValue flag
+  if (!isValidLValue) {
+    reportError(
+        node,
+        "error: expression is not assignable (requires a valid l-value).");
+  }
 
   node->value->accept(this);
   TypeInfo valueType = currentExprType;
@@ -451,12 +754,27 @@ void Sema::visit(VariableNode *node) {
     return;
   }
 
+  static const std::unordered_set<std::string> primitives = {
+      "int", "float", "bool", "uint", "char", "String", "void"};
+
+  if (primitives.count(node->name)) {
+    currentExprType = {node->name, 0, false};
+    return;
+  }
+
   // Fallback to implicit 'this' member lookup
   if (!currentClass.empty() && customStructs.count(currentClass)) {
-    auto &def = customStructs[currentClass];
-    if (def.fields.count(node->name)) {
-      currentExprType = def.fields[node->name].type;
-      return;
+    std::string curr = currentClass;
+    while (!curr.empty() && customStructs.count(curr)) {
+      if (customStructs[curr].fields.count(node->name)) {
+        currentExprType = customStructs[curr].fields[node->name].type;
+        return;
+      }
+      if (structASTs.count(curr) && !structASTs[curr]->baseClass.empty()) {
+        curr = structASTs[curr]->baseClass;
+      } else {
+        break;
+      }
     }
   }
 
@@ -539,45 +857,74 @@ void Sema::visit(ReturnNode *node) {
 }
 
 void Sema::visit(CallNode *node) {
-  std::string mangledSig = "";
+  std::vector<TypeInfo> argTypes;
   for (auto &a : node->arguments) {
     a->accept(this);
-    mangledSig += "_" + getMangledType(currentExprType);
+    argTypes.push_back(currentExprType);
   }
 
   if (node->object) {
     node->object->accept(this);
     TypeInfo objType = currentExprType;
-    std::string exactName = objType.base + "_" + node->callee + mangledSig;
 
-    if (functionTypes.count(exactName)) {
-      currentExprType = functionTypes[exactName];
+    bool isStaticCall = false;
+    if (auto varNode = dynamic_cast<VariableNode *>(node->object.get())) {
+      if (customStructs.count(varNode->name) && !lookup(varNode->name)) {
+        isStaticCall = true;
+      }
+    }
+
+    /* * Primitive type safety bypass.
+     * Extensions for primitives are compiled to receive the direct value, not a
+     * pointer. If we blindly increase ptrDepth, Sema resolves int* instead of
+     * int and fails the overload lookup.
+     */
+    static const std::unordered_set<std::string> primitives = {
+        "int", "float", "bool", "uint", "char", "String"};
+    bool isPrimitive = primitives.count(objType.base) > 0;
+
+    if (!isStaticCall && !isPrimitive && objType.ptrDepth == 0 &&
+        !objType.isReference) {
+      objType.ptrDepth = 1;
+    }
+
+    std::string baseName = objType.base + "_" + node->callee;
+    TypeInfo outRet;
+
+    std::vector<TypeInfo> resolutionArgs = argTypes;
+    if (!isStaticCall) {
+      resolutionArgs.insert(resolutionArgs.begin(), objType);
+    }
+
+    // Bruteforcing the vtable because name mangling is a bitch
+    std::string resolved =
+        resolveOverload(baseName, resolutionArgs, nullptr, outRet);
+    if (resolved.empty()) {
+      std::string extensionName = "ext_" + objType.base + "_" + node->callee;
+      std::vector<TypeInfo> extArgs = argTypes;
+      extArgs.insert(extArgs.begin(), objType);
+      resolved = resolveOverload(extensionName, extArgs, node, outRet);
+    }
+
+    if (!resolved.empty()) {
+      currentExprType = outRet;
+      node->resolvedMangledName = resolved;
     } else {
-      /* Fallback for reference binding. Scans vtable signatures. */
-      std::string resolved = "";
-      for (const auto &pair : functionTypes) {
-        if (pair.first.find(objType.base + "_" + node->callee + "_") == 0) {
-          resolved = pair.first;
-          break;
-        }
-      }
-      if (!resolved.empty()) {
-        currentExprType = functionTypes[resolved];
-      } else {
-        reportError(node, "error: no member function matching '" +
-                              node->callee + "' in '" + objType.base + "'");
-        currentExprType = {"error", 0, false};
-      }
+      reportError(node, "error: no member function matching '" + node->callee +
+                            "' in '" + objType.base + "'");
+      currentExprType = {"error", 0, false};
     }
     return;
   }
 
-  /* Stack allocation bypass (RVO simulation) */
+  // Stack allocation bypass (RVO simulation)
   if (customStructs.count(node->callee)) {
-    std::string expectedCtor = node->callee + "_" + node->callee + mangledSig;
-    if (!functionTypes.count(expectedCtor)) {
-      reportError(node, "error: no matching constructor found for '" +
-                            node->callee + "'");
+    std::string baseName = node->callee + "_" + node->callee;
+    TypeInfo outRet;
+    std::string resolved = resolveOverload(baseName, argTypes, node, outRet);
+
+    if (!resolved.empty()) {
+      node->resolvedMangledName = resolved;
     }
     currentExprType = {node->callee, 0, false};
     return;
@@ -593,29 +940,17 @@ void Sema::visit(CallNode *node) {
     return;
   }
 
-  std::string exactName = node->callee + mangledSig;
-  if (functionTypes.count(exactName)) {
-    currentExprType = functionTypes[exactName];
+  TypeInfo outRet;
+  std::string resolved =
+      resolveOverload(node->callee, argTypes, nullptr, outRet);
+  if (!resolved.empty()) {
+    currentExprType = outRet;
+    node->resolvedMangledName = resolved;
   } else {
-    /* Implicit Reference Binding
-     * Matches memory addresses to reference parameters without exact string
-     * matching */
-    std::string resolved = "";
-    for (const auto &pair : functionTypes) {
-      if (pair.first.find(node->callee + "_") == 0) {
-        resolved = pair.first;
-        break;
-      }
-    }
-    if (!resolved.empty()) {
-      currentExprType = functionTypes[resolved];
-    } else if (functionTypes.count(node->callee)) {
-      currentExprType = functionTypes[node->callee];
-    } else {
-      reportError(node,
-                  "error: call to undeclared function '" + node->callee + "'");
-      currentExprType = {"error", 0, false};
-    }
+    reportError(node,
+                "error: call to undeclared function or unresolved overload '" +
+                    node->callee + "'");
+    currentExprType = {"error", 0, false};
   }
 }
 
@@ -657,19 +992,24 @@ void Sema::visit(NewNode *node) {
   TypeInfo resultType = parseType(node->typeName, node);
   resultType.ptrDepth = 1; // Heap allocation always returns a pointer
 
-  // Check constructor arguments and mutate signature
-  std::string mangledSig = "";
+  std::vector<TypeInfo> argTypes;
   for (auto &a : node->arguments) {
     a->accept(this);
-    mangledSig += "_" + getMangledType(currentExprType);
+    argTypes.push_back(currentExprType);
   }
 
   if (customStructs.count(node->typeName)) {
-    std::string expectedCtor = node->typeName + "_" + node->typeName +
-                               (node->arraySize ? "" : mangledSig);
-    if (!functionTypes.count(expectedCtor)) {
-      reportError(node, "error: no matching constructor found for '" +
-                            node->typeName + "'");
+    if (!node->arraySize) {
+      std::string baseName = node->typeName + "_" + node->typeName;
+      TypeInfo outRet;
+      std::string resolved = resolveOverload(baseName, argTypes, node, outRet);
+
+      if (resolved.empty()) {
+        reportError(node, "error: no matching constructor found for '" +
+                              node->typeName + "'");
+      } else {
+        node->resolvedMangledName = resolved;
+      }
     }
   }
 

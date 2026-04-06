@@ -222,6 +222,8 @@ std::unique_ptr<ProgramNode> Parser::parseProgram() {
       program->structs.push_back(parseStructDecl(false, preamble));
     } else if (match(TokenType::KW_CLASS)) {
       program->structs.push_back(parseStructDecl(true, preamble));
+    } else if (match(TokenType::KW_EXTENSION)) {
+      program->extensions.push_back(parseExtension());
     } else if (isFunctionStart()) {
       program->functions.push_back(parseFunction(preamble));
     } else {
@@ -235,10 +237,24 @@ std::unique_ptr<ProgramNode> Parser::parseProgram() {
 }
 
 std::unique_ptr<StructDeclNode>
-Parser::parseStructDecl(bool isClass, const DeclPreamble &structPreamble) {
+Parser::parseStructDecl(bool isClass, const DeclPreamble &preamble) {
   Token startTok = currentToken();
   std::string name = currentToken().value;
   expect(TokenType::IDENTIFIER, "The name was expected");
+
+  auto node = std::make_unique<StructDeclNode>(name, isClass);
+
+  // Support for inheritance (extends) and interfaces (implements)
+  if (match(TokenType::KW_EXTENDS)) {
+    node->baseClass = parseTypeName();
+  }
+
+  if (match(TokenType::KW_IMPLEMENTS)) {
+    do {
+      node->interfaces.push_back(parseTypeName());
+    } while (match(TokenType::COMMA));
+  }
+
   expect(TokenType::LBRACE, "Expected '{'");
 
   std::vector<StructField> fields;
@@ -273,11 +289,29 @@ Parser::parseStructDecl(bool isClass, const DeclPreamble &structPreamble) {
   }
   expect(TokenType::RBRACE, "Expected '}'");
 
-  auto node =
-      std::make_unique<StructDeclNode>(name, isClass, std::move(fields));
   node->methods = std::move(methods);
-  node->decorators = structPreamble.decorators;
+  node->fields = std::move(fields);
+  node->decorators = preamble.decorators;
   finalizeNode(node.get(), startTok);
+  return node;
+}
+
+std::unique_ptr<ExtensionNode> Parser::parseExtension() {
+  Token startTok = currentToken();
+  std::string extName;
+  if (currentToken().type == TokenType::IDENTIFIER) {
+    extName = currentToken().value;
+    advance();
+  }
+
+  expect(TokenType::KW_ON, "Expected 'on' keyword");
+  std::string target = parseTypeName();
+
+  auto node = std::make_unique<ExtensionNode>(target, extName);
+  expect(TokenType::LBRACE, "Expected '{'");
+  while (!match(TokenType::RBRACE)) {
+    node->methods.push_back(parseMethod(target, parsePreamble()));
+  }
   return node;
 }
 
@@ -329,17 +363,23 @@ Parser::parseMethod(const std::string &className,
       advance();
   }
   expect(TokenType::RPAREN, "Expected ')'");
-  expect(TokenType::LBRACE, "Expected '{'");
-
   auto funcNode = std::make_unique<FunctionNode>(
       preamble.inlineState, preamble.access, preamble.decorators, retType,
       funcName, args, true, preamble.isStatic, isConstructor, isDestructor,
       className);
 
+  if (match(TokenType::SEMICOLON)) {
+    finalizeNode(funcNode.get(), startTok);
+    return funcNode;
+  }
+
+  expect(TokenType::LBRACE, "Expected '{'");
+
   while (currentToken().type != TokenType::RBRACE &&
          currentToken().type != TokenType::EOF_TOK) {
     funcNode->body.push_back(parseStatement());
   }
+
   expect(TokenType::RBRACE, "Expected '}'");
   finalizeNode(funcNode.get(), startTok);
   return funcNode;
@@ -578,6 +618,9 @@ std::unique_ptr<ExprNode> Parser::parsePrimaryBase() {
 
   if (isTypeToken()) {
     std::string typeName = consumeType();
+    if (currentToken().type == TokenType::DOT) {
+      return std::make_unique<VariableNode>(typeName);
+    }
     expect(TokenType::LPAREN, "Expected '(' para cast");
     std::vector<std::unique_ptr<ExprNode>> args;
     args.push_back(parseExpression());

@@ -1,52 +1,166 @@
-// ---------------------------------------------------------
-// Utopia Language - Preamble & Metadata Test
-// Testing decorator chains and modifier coupling
-// ---------------------------------------------------------
+// File: tests/stress_test.utp
+// Un recorrido completo por las entrañas de Utopia.
 
-@SystemModule
-@Author("MiguelGudiel")
-class PhysicsEngine {
-    
-    @NoAlias
-    private float gravity = -9.81;
+import "std.io";
 
-    PhysicsEngine() {
-        this.gravity = -9.81;
+@Interface
+class IDrawable {
+    void draw();
+}
+
+@Reflectable
+class Entity {
+    public int id;
+    static int entityCount = 0;
+
+    // Constructor con asignación directa (this.id)
+    Entity(this.id) {
+        Entity.entityCount++;
     }
 
-    ~PhysicsEngine() {
-        print("Physics Engine destruido");
+    ~Entity() {
+        Entity.entityCount--;
     }
 
-    // Combine access, inline hints and metadata
-    @FastMath
-    force_inline public void applyGravity(float* velocity, float deltaTime) {
-        if (velocity != null) {
-            // Standard pointer offset arithmetic
-            *velocity = *velocity + (gravity * deltaTime);
-        }
+    static int getCount() {
+        return Entity.entityCount;
     }
 
-    @Internal
-    private void reset() {
-        gravity = -9.81;
+    void update() {
+        print("Entity updating...");
     }
 }
 
-@EntryPoint
-public int main() {
-    PhysicsEngine* engine = new PhysicsEngine();
-    
-    float v = 0.0;
-    
-    print("--- Simulating Fall ---");
-    
-    for (int i = 0; i < 10; i = i + 1) {
-        // Method dispatch with complex preamble support
-        engine.applyGravity(&v, 0.1);
-        print("Velocity at T+", i, ": ", v);
+// Herencia, Implementación e Inicializadores de campo
+class Player extends Entity implements IDrawable {
+    String name;
+    float* health;
+    private bool _isDead = false;
+
+    // Constructor complejo: inicializa base, usa required y asignación directa
+    Player(int id, required String name, float initialHealth) {
+        this.id = id;
+        this.name = name;
+        this.health = new float(initialHealth);
     }
 
-    delete engine;
+    ~Player() {
+        // Limpieza manual. Aquí no hay recolector de basura que nos salve.
+        delete health;
+    }
+
+    void draw() {
+        print("Drawing player:", name, "ID:", id);
+    }
+
+    void update() {
+        if (health == null) { 
+            return; 
+        }
+        
+        if (*health <= 0.0) {
+            _isDead = true;
+        }
+    }
+
+    bool isDead() { return _isDead; }
+}
+
+// Extensiones: inyectando lógica en tipos existentes
+extension StringUtils on String {
+    void shout() {
+        print(this, "!!!");
+    }
+}
+
+// Prueba de Move Semantics y R-Value References
+class ResourceManager {
+    int*? data;
+
+    ResourceManager(int size) {
+        data = new int[size];
+    }
+
+    // Move Constructor: robamos el puntero, no es tiempo de copias costosas
+    ResourceManager(ResourceManager&& other) {
+        this.data = other.data;
+        other.data = null;
+    }
+
+    ~ResourceManager() {
+        if (data != null) {
+            delete[] data;
+        }
+    }
+}
+
+// Lógica de control, punteros y aritmética
+int calculateComplexity(int*? ptr, int& ref, int count) {
+    // Assert de nulabilidad: si ptr es null, aquí termina el viaje (runtime panic)
+    int value = ptr![0];
+    
+    int result = 0;
+    for (int i = 0; i < count; i++) {
+        if (i % 2 == 0) {
+            result += (value * ref) / (i + 1);
+        } else {
+            continue;
+        }
+
+        if (result > 1000) {
+            break;
+        }
+    }
+    return result;
+}
+
+force_inline void heavyMath(float& a, float b) {
+    // El clásico truco de inversión de bits no cabe aquí, pero la precisión sí.
+    a = (a * b) + float(int(a / b)); 
+}
+
+int main() {
+    print("--- Utopia Stress Test Starting ---");
+
+    // 1. Stack allocation y Static members
+    print("Initial Entities:", Entity.getCount());
+    Player p1 = Player(1, "Slayer", 100.0);
+    p1.draw();
+    
+    // 2. Heap allocation y Nullability
+    float*? maybeHealth = new float(50.5);
+    if (maybeHealth != null) {
+        print("Health is allocated:", *maybeHealth!);
+    }
+
+    // 3. Arrays y Punteros
+    int scores[5];
+    for (int i = 0; i < 5; i++) {
+        scores[i] = i * 10;
+    }
+    
+    int& firstScore = scores[0];
+    int res = calculateComplexity(&scores[0], firstScore, 5);
+    print("Complexity Result:", res);
+
+    // 4. Move Semantics
+    ResourceManager rm1 = ResourceManager(1024);
+    // Movemos rm1 a rm2. rm1 queda invalidado (data = null).
+    ResourceManager rm2 = ResourceManager(move(rm1));
+
+    // 5. Extensions y Casts
+    String msg = "System Stable";
+    msg.shout();
+
+    float a = 10.5;
+    heavyMath(a, 2.0);
+    print("Math result:", a);
+
+    // 6. Cleanup de memoria manual (Heap)
+    delete maybeHealth;
+
+    print("Final Entity Count:", Entity.getCount());
+    print("--- Test Finished ---");
+
     return 0;
 }

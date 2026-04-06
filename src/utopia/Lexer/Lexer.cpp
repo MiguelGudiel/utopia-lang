@@ -121,22 +121,43 @@ Token Lexer::nextToken() {
       return {TokenType::KW_REQUIRED, val, startLine, startCol};
     if (val == "static")
       return {TokenType::KW_STATIC, val, startLine, startCol};
+    if (val == "extends")
+      return {TokenType::KW_EXTENDS, val, startLine, startCol};
+    if (val == "implements")
+      return {TokenType::KW_IMPLEMENTS, val, startLine, startCol};
+    if (val == "extension")
+      return {TokenType::KW_EXTENSION, val, startLine, startCol};
+    if (val == "on")
+      return {TokenType::KW_ON, val, startLine, startCol};
     return {TokenType::IDENTIFIER, val, startLine, startCol};
   }
 
   if (std::isdigit(static_cast<unsigned char>(c))) {
     std::string val;
     bool hasDot = false;
-    while (cursor < source.length() &&
-           (std::isdigit(static_cast<unsigned char>(source[cursor])) ||
-            source[cursor] == '.')) {
-      if (source[cursor] == '.') {
-        if (hasDot)
+    while (cursor < source.length()) {
+      char current = source[cursor];
+
+      if (std::isdigit(static_cast<unsigned char>(current))) {
+        val += current;
+        advanceCursor();
+      } else if (current == '.' && !hasDot) {
+        // LOOKAHEAD: We only use the period if the NEXT character is a digit.
+        // If it is a letter or a space (e.g., 42.isEven or 42.abs), the period
+        // is an operator
+        if (cursor + 1 < source.length() &&
+            std::isdigit(static_cast<unsigned char>(source[cursor + 1]))) {
+          hasDot = true;
+          val += current;
+          advanceCursor();
+        } else {
+          // It's an integer followed by a possible member access. We break it
+          // here so that the dot is processed in the next nextToken()
           break;
-        hasDot = true;
+        }
+      } else {
+        break;
       }
-      val += source[cursor];
-      advanceCursor();
     }
     return {hasDot ? TokenType::FLOAT_LITERAL : TokenType::NUMBER, val,
             startLine, startCol};
@@ -147,7 +168,33 @@ Token Lexer::nextToken() {
     advanceCursor();
     std::string val;
     while (cursor < source.length() && source[cursor] != quote) {
-      val += source[cursor];
+      // Fast-path unescape. Because printing literal '\n' to standard out is a
+      // crime.
+      if (source[cursor] == '\\' && cursor + 1 < source.length()) {
+        advanceCursor();
+        switch (source[cursor]) {
+        case 'n':
+          val += '\n';
+          break;
+        case 't':
+          val += '\t';
+          break;
+        case 'r':
+          val += '\r';
+          break;
+        case '\\':
+          val += '\\';
+          break;
+        case '"':
+          val += '"';
+          break;
+        default:
+          val += source[cursor];
+          break;
+        }
+      } else {
+        val += source[cursor];
+      }
       advanceCursor();
     }
     advanceCursor();
@@ -198,6 +245,8 @@ Token Lexer::nextToken() {
       return {TokenType::SLASH_EQ, "/=", startLine, startCol};
     }
     return {TokenType::SLASH, "/", startLine, startCol};
+  case '%':
+    return {TokenType::PERCENT, "%", startLine, startCol};
   case ',':
     return {TokenType::COMMA, ",", startLine, startCol};
   case '?':

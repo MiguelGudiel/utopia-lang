@@ -30,9 +30,17 @@ private:
     std::map<std::string, Field> fields;
     std::vector<int> constructorArities;
   };
+
+  struct OverloadCandidate {
+    std::string mangledName;
+    std::vector<TypeInfo> paramTypes;
+    TypeInfo returnType;
+  };
+  std::map<std::string, std::vector<OverloadCandidate>> overloadTable;
+
+  std::map<std::string, StructDeclNode *> structASTs;
   std::map<std::string, StructDef> customStructs;
-  std::map<std::string, std::string>
-      copyConstructors; // ClassName -> MangledName
+  std::map<std::string, std::string> copyConstructors;
 
   std::vector<std::map<std::string, Symbol>> scopeStack;
   std::vector<ErrorInfo> errors;
@@ -44,6 +52,7 @@ private:
 
   int loopDepth = 0;
   bool inStaticMethod = false;
+  bool isProcessingExtension = false;
 
   void enterScope();
   void exitScope();
@@ -54,8 +63,28 @@ private:
   bool checkAssignment(const TypeInfo &target, const TypeInfo &source,
                        ASTNode *node);
 
+  void registerOverload(const std::string &baseName,
+                        const std::string &mangledName,
+                        const std::vector<TypeInfo> &params,
+                        const TypeInfo &ret);
+  int getConversionCost(const TypeInfo &target, const TypeInfo &source);
+  std::string resolveOverload(const std::string &baseName,
+                              const std::vector<TypeInfo> &argTypes,
+                              ASTNode *node, TypeInfo &outReturnType);
+
+  bool methodExistsInClass(const std::string &className,
+                           const std::string &methodName);
+  void validateInterfaceCompliance(StructDeclNode *node,
+                                   const std::string &interfaceName);
+  bool hasClassField(StructDeclNode *node, const std::string &name,
+                     const std::string &type);
+  bool hasClassMethod(StructDeclNode *node, FunctionNode *m);
+  std::string resolveParamType(StructDeclNode *node,
+                               const FunctionParam &param);
+
   void visit(ThisNode *node) override;
   void visit(StructDeclNode *node) override;
+  void visit(ExtensionNode *node) override;
   void visit(MemberAccessNode *node) override;
   void visit(BlockNode *node) override;
   void visit(NullLiteralNode *node) override;

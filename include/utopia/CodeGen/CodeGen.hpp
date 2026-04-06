@@ -44,6 +44,8 @@ private:
   std::map<std::string, std::map<std::string, int>> structMemberIndices;
   std::map<std::string, std::map<std::string, TypeInfo>> structMemberTypes;
 
+  std::map<std::string, std::vector<TypeInfo>> functionParamTypes;
+
   llvm::Value *currentVal = nullptr;
   TypeInfo currentType;
   std::string currentClass;
@@ -87,6 +89,7 @@ private:
 
   void visit(ThisNode *node) override;
   void visit(StructDeclNode *node) override;
+  void visit(ExtensionNode *node) override;
   void visit(MemberAccessNode *node) override;
   void visit(BlockNode *node) override;
   void visit(NullLiteralNode *node) override;
