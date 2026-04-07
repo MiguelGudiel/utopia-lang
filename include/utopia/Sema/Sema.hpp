@@ -12,6 +12,7 @@ class Sema : public ASTVisitor {
 public:
   bool analyze(ProgramNode *program);
   const std::vector<ErrorInfo> &getErrors() const { return errors; }
+  bool analyzeModules(const std::vector<ModuleNode *> &modules);
 
 private:
   struct Symbol {
@@ -82,6 +83,19 @@ private:
   std::string resolveParamType(StructDeclNode *node,
                                const FunctionParam &param);
 
+public:
+  const std::map<std::string, StructDef> &getCustomStructs() const {
+    return customStructs;
+  }
+  const std::map<std::string, TypeInfo> &getFunctionTypes() const {
+    return functionTypes;
+  }
+  const std::map<std::string, std::vector<OverloadCandidate>> &
+  getOverloadTable() const {
+    return overloadTable;
+  }
+
+private:
   void visit(ThisNode *node) override;
   void visit(StructDeclNode *node) override;
   void visit(ExtensionNode *node) override;
@@ -114,6 +128,7 @@ private:
   void visit(ReturnNode *node) override;
   void visit(FunctionNode *node) override;
   void visit(ProgramNode *node) override;
+  void visit(ModuleNode *node) override;
 };
 
 } // namespace utopia

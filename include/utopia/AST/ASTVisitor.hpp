@@ -70,6 +70,7 @@ public:
   virtual void visit(ReturnNode *node) = 0;
   virtual void visit(FunctionNode *node) = 0;
   virtual void visit(ProgramNode *node) = 0;
+  virtual void visit(ModuleNode *node) = 0;
 };
 
 } // namespace utopia

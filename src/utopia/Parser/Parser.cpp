@@ -208,24 +208,25 @@ bool Parser::isFunctionStart() const {
   return false;
 }
 
-std::unique_ptr<ProgramNode> Parser::parseProgram() {
-  auto program = std::make_unique<ProgramNode>();
+std::unique_ptr<ModuleNode> Parser::parseModule(const std::string &filename) {
+  auto module = std::make_unique<ModuleNode>(filename);
+
   while (currentToken().type != TokenType::EOF_TOK) {
     if (currentToken().type == TokenType::KW_IMPORT) {
-      parseImport();
+      parseImportInto(module.get());
       continue;
     }
 
     DeclPreamble preamble = parsePreamble();
 
     if (match(TokenType::KW_STRUCT)) {
-      program->structs.push_back(parseStructDecl(false, preamble));
+      module->structs.push_back(parseStructDecl(false, preamble));
     } else if (match(TokenType::KW_CLASS)) {
-      program->structs.push_back(parseStructDecl(true, preamble));
+      module->structs.push_back(parseStructDecl(true, preamble));
     } else if (match(TokenType::KW_EXTENSION)) {
-      program->extensions.push_back(parseExtension());
+      module->extensions.push_back(parseExtension());
     } else if (isFunctionStart()) {
-      program->functions.push_back(parseFunction(preamble));
+      module->functions.push_back(parseFunction(preamble));
     } else {
       const Token &stray = currentToken();
       throw std::runtime_error(
@@ -233,7 +234,7 @@ std::unique_ptr<ProgramNode> Parser::parseProgram() {
           "|Syntax Error: Unexpected token '" + stray.value + "'");
     }
   }
-  return program;
+  return module;
 }
 
 std::unique_ptr<StructDeclNode>
@@ -385,10 +386,12 @@ Parser::parseMethod(const std::string &className,
   return funcNode;
 }
 
-void Parser::parseImport() {
+void Parser::parseImportInto(ModuleNode* module) {
   expect(TokenType::KW_IMPORT, "Expected 'import'");
-  expect(TokenType::STRING, "Expected cadena");
+  std::string path = currentToken().value;
+  expect(TokenType::STRING, "Expected string literal");
   expect(TokenType::SEMICOLON, "Expected ';'");
+  module->imports.push_back(path);
 }
 
 std::unique_ptr<FunctionNode>

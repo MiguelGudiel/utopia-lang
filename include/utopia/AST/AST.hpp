@@ -193,7 +193,7 @@ public:
   std::string typeName;
   std::vector<std::unique_ptr<ExprNode>> arguments;
   std::unique_ptr<ExprNode> arraySize;
-  
+
   std::string resolvedMangledName;
 
   explicit NewNode(std::string tName,
@@ -389,6 +389,18 @@ public:
   std::vector<std::unique_ptr<FunctionNode>> functions;
   std::vector<std::unique_ptr<ExtensionNode>> extensions;
 
+  void accept(ASTVisitor *visitor) override;
+};
+
+class ModuleNode : public ASTNode {
+public:
+  std::string filename;
+  std::vector<std::string> imports;
+  std::vector<std::unique_ptr<StructDeclNode>> structs;
+  std::vector<std::unique_ptr<FunctionNode>> functions;
+  std::vector<std::unique_ptr<ExtensionNode>> extensions;
+
+  ModuleNode(const std::string &fname) : filename(fname) {}
   void accept(ASTVisitor *visitor) override;
 };
 

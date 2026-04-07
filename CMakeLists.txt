@@ -35,6 +35,9 @@ add_definitions(${LLVM_DEFINITIONS})
 include_directories(include)
 
 # Añadir subdirectorios
+set(YAML_CPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+add_subdirectory(thirdparty/yaml-cpp)
 add_subdirectory(src)
 add_subdirectory(tools/utopia)
 add_subdirectory(tools/lsp)

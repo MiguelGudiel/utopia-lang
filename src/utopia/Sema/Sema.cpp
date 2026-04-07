@@ -15,6 +15,123 @@ Sema::Symbol *Sema::lookup(const std::string &name) {
   return nullptr;
 }
 
+bool Sema::analyzeModules(const std::vector<ModuleNode *> &modules) {
+  errors.clear();
+  scopeStack.clear();
+  functionTypes.clear();
+  customStructs.clear();
+  currentClass.clear();
+  structASTs.clear();
+  loopDepth = 0;
+
+  // Primera fase: recolectar declaraciones de todos los módulos
+  for (ModuleNode *mod : modules) {
+    for (auto &st : mod->structs) {
+      structASTs[st->name] = st.get();
+      StructDef def;
+      def.isClass = st->isClass;
+      int idx = 0;
+      for (auto &f : st->fields) {
+        def.fields[f.name] = {parseType(f.typeName, st.get()), f.modifier,
+                              f.isStatic ? -1 : idx++, f.isStatic};
+      }
+      customStructs[st->name] = def;
+
+      for (auto &m : st->methods) {
+        std::string baseName = st->name + "_" + m->name;
+        std::string mangledName = baseName;
+        std::vector<TypeInfo> params;
+
+        if (!m->isStatic && !m->isConstructor) {
+          TypeInfo thisType = {st->name, 1, false};
+          params.push_back(thisType);
+          mangledName += "_" + getMangledType(thisType);
+        }
+
+        for (auto &arg : m->args) {
+          TypeInfo t;
+          if (arg.isThisAssign) {
+            t = def.fields.count(arg.name) ? def.fields[arg.name].type
+                                           : TypeInfo{"error"};
+            // AST mutation in-place. Salva a CodeGen de un escaneo extra.
+            arg.type = t.base;
+          } else {
+            t = parseType(arg.type, m.get());
+          }
+          params.push_back(t);
+          mangledName += "_" + getMangledType(t);
+        }
+
+        TypeInfo ret = parseType(m->returnType, m.get());
+        registerOverload(baseName, mangledName, params, ret);
+        functionTypes[mangledName] = ret;
+
+        if (m->isConstructor && m->args.size() == 1) {
+          TypeInfo argType = parseType(m->args[0].type, m.get());
+          if (argType.base == st->name && argType.isReference) {
+            copyConstructors[st->name] = mangledName;
+          }
+        }
+      }
+    }
+
+    for (auto &fn : mod->functions) {
+      std::string mangledName = fn->name;
+      std::vector<TypeInfo> params;
+      for (auto &arg : fn->args) {
+        TypeInfo t = parseType(arg.type, fn.get());
+        params.push_back(t);
+        mangledName += "_" + getMangledType(t);
+      }
+      TypeInfo ret = parseType(fn->returnType, fn.get());
+      functionTypes[mangledName] = ret;
+      registerOverload(fn->name, mangledName, params, ret);
+    }
+
+    for (auto &ext : mod->extensions) {
+      for (auto &m : ext->methods) {
+        std::string baseName = "ext_" + ext->targetTypedef + "_" + m->name;
+        std::string mangledName = baseName;
+        std::vector<TypeInfo> params;
+        TypeInfo targetType = parseType(ext->targetTypedef, ext.get());
+        params.push_back(targetType);
+        mangledName += "_" + getMangledType(targetType);
+
+        for (auto &arg : m->args) {
+          TypeInfo t = arg.isThisAssign
+                           ? parseType(ext->targetTypedef, ext.get())
+                           : parseType(arg.type, m.get());
+          params.push_back(t);
+          mangledName += "_" + getMangledType(t);
+        }
+        TypeInfo ret = parseType(m->returnType, m.get());
+        registerOverload(baseName, mangledName, params, ret);
+        functionTypes[mangledName] = ret;
+      }
+    }
+  }
+
+  // Segunda fase: analizar los cuerpos (funciones y métodos)
+  for (ModuleNode *mod : modules) {
+    for (auto &st : mod->structs) {
+      st->accept(this);
+
+      for (auto &m : st->methods) {
+        m->accept(this);
+      }
+    }
+    for (auto &ext : mod->extensions) {
+      for (auto &m : ext->methods) {
+        m->accept(this);
+      }
+    }
+    for (auto &fn : mod->functions) {
+      fn->accept(this);
+    }
+  }
+  return errors.empty();
+}
+
 void Sema::reportError(ASTNode *node, const std::string &message) {
   errors.push_back(
       {node->line, node->column, node->endLine, node->endColumn, message});
@@ -481,6 +598,8 @@ void Sema::visit(MemberAccessNode *node) {
 void Sema::visit(ProgramNode *node) {
   enterScope();
   for (auto &st : node->structs) {
+    st->accept(this);
+    
     currentClass = st->name; // Setup this context for initializers
 
     // Typecheck initializers against field definitions
@@ -1022,6 +1141,15 @@ void Sema::visit(MoveNode *node) {
   node->operand->accept(this);
   currentExprType.isRValueRef = true;
   currentExprType.isReference = false;
+}
+
+void Sema::visit(ModuleNode *node) {
+  for (auto &st : node->structs)
+    st->accept(this);
+  for (auto &ext : node->extensions)
+    ext->accept(this);
+  for (auto &fn : node->functions)
+    fn->accept(this);
 }
 
 } // namespace utopia

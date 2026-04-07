@@ -17,6 +17,9 @@ class CodeGen : public ASTVisitor {
 public:
   CodeGen(const std::string &sourceFile, bool isDebug);
   void generate(ProgramNode *program);
+  void generate(ModuleNode *module, const std::string &outputObjPath,
+                const std::vector<ModuleNode *> &allModules);
+  void registerModules(const std::vector<ModuleNode *> &allModules);
   void optimize(int level);
   void saveToFile(const std::string &filename);
   void emitObjectFile(const std::string &filename);
@@ -37,13 +40,12 @@ private:
   std::vector<llvm::BasicBlock *> continueTargets;
   std::vector<size_t> loopScopeDepths;
 
-  std::map<std::string, TypeInfo> functionTypes;
-
   std::map<std::string, StructDeclNode *> structASTs;
   std::map<std::string, llvm::StructType *> structTypes;
   std::map<std::string, std::map<std::string, int>> structMemberIndices;
   std::map<std::string, std::map<std::string, TypeInfo>> structMemberTypes;
 
+  std::map<std::string, TypeInfo> functionTypes;
   std::map<std::string, std::vector<TypeInfo>> functionParamTypes;
 
   llvm::Value *currentVal = nullptr;
@@ -119,6 +121,7 @@ private:
   void visit(ReturnNode *node) override;
   void visit(FunctionNode *node) override;
   void visit(ProgramNode *node) override;
+  void visit(ModuleNode *node) override;
 };
 
 } // namespace utopia

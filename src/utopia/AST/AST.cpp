@@ -40,5 +40,5 @@ void VarDeclNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void ReturnNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void FunctionNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void ProgramNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
-
+void ModuleNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 } // namespace utopia

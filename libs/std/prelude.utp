@@ -1,0 +1,3 @@
+void debugPrint(String msg) {
+    print(msg);
+}

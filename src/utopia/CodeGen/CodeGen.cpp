@@ -68,6 +68,143 @@ CodeGen::CodeGen(const std::string &sourceFile, bool isDebug)
   }
 }
 
+void CodeGen::registerModules(const std::vector<ModuleNode *> &allModules) {
+  // Construye las estructuras opacas para todo el programa
+  for (auto *mod : allModules) {
+    for (auto &st : mod->structs) {
+      structASTs[st->name] = st.get();
+      structTypes[st->name] = llvm::StructType::create(*context, st->name);
+    }
+  }
+
+  // Despliega el layout de memoria y registra firmas
+  for (auto *mod : allModules) {
+    for (auto &st : mod->structs) {
+      std::vector<llvm::Type *> body;
+      int idx = 0;
+
+      auto buildMemoryLayout = [&](std::string className, auto &self) -> void {
+        StructDeclNode *currentAST = structASTs[className];
+        if (!currentAST->baseClass.empty() &&
+            structASTs.count(currentAST->baseClass)) {
+          self(currentAST->baseClass, self);
+        }
+        for (auto &f : currentAST->fields) {
+          TypeInfo t = parseTypeString(f.typeName);
+          body.push_back(getLLVMType(t));
+          structMemberIndices[st->name][f.name] = idx++;
+          structMemberTypes[st->name][f.name] = t;
+        }
+      };
+
+      buildMemoryLayout(st->name, buildMemoryLayout);
+      structTypes[st->name]->setBody(body);
+    }
+
+    for (auto &func : mod->functions) {
+      std::string mangledName = func->name;
+      std::vector<TypeInfo> paramTypes;
+      for (auto &arg : func->args) {
+        paramTypes.push_back(parseTypeString(arg.type));
+        mangledName += "_" + getMangledType(paramTypes.back());
+      }
+      functionParamTypes[mangledName] = paramTypes;
+      functionTypes[mangledName] = parseTypeString(func->returnType);
+    }
+
+    for (auto &st : mod->structs) {
+      for (auto &method : st->methods) {
+        std::string mangledName = st->name + "_" + method->name;
+        std::vector<TypeInfo> paramTypes;
+        if (!method->isStatic && !method->isConstructor) {
+          TypeInfo thisType = {st->name, 1, false};
+          paramTypes.push_back(thisType);
+          mangledName += "_" + getMangledType(thisType);
+        }
+        if (method->isConstructor) {
+          TypeInfo thisType = {st->name, 1, false};
+          paramTypes.push_back(thisType);
+          mangledName += "_" + getMangledType(thisType);
+        }
+        for (auto &arg : method->args) {
+          TypeInfo t = arg.isThisAssign ? structMemberTypes[st->name][arg.name]
+                                        : parseTypeString(arg.type);
+          paramTypes.push_back(t);
+          mangledName += "_" + getMangledType(t);
+        }
+        functionParamTypes[mangledName] = paramTypes;
+        functionTypes[mangledName] = parseTypeString(method->returnType);
+      }
+    }
+
+    for (auto &ext : mod->extensions) {
+      for (auto &method : ext->methods) {
+        std::string mangledName =
+            "ext_" + ext->targetTypedef + "_" + method->name;
+        std::vector<TypeInfo> paramTypes;
+
+        TypeInfo targetType = parseTypeString(ext->targetTypedef);
+        paramTypes.push_back(targetType);
+        mangledName += "_" + getMangledType(targetType);
+
+        for (auto &arg : method->args) {
+          TypeInfo t = arg.isThisAssign
+                           ? structMemberTypes[ext->targetTypedef][arg.name]
+                           : parseTypeString(arg.type);
+          paramTypes.push_back(t);
+          mangledName += "_" + getMangledType(t);
+        }
+        functionParamTypes[mangledName] = paramTypes;
+        functionTypes[mangledName] = parseTypeString(method->returnType);
+      }
+    }
+  }
+}
+
+void CodeGen::generate(ModuleNode *astModule, const std::string &outputObjPath,
+                       const std::vector<ModuleNode *> &allModules) {
+  valueScopes.clear();
+  typeScopes.clear();
+  stringPool.clear();
+  breakTargets.clear();
+  continueTargets.clear();
+  loopScopeDepths.clear();
+  currentVal = nullptr;
+  currentType = TypeInfo{};
+  currentClass = "";
+  currentReturnType = TypeInfo{};
+  currentLValue = nullptr;
+  isLValueContext = false;
+  rvoTarget = nullptr;
+  dbgScopes.clear();
+
+  // Recrear el módulo LLVM para este módulo AST
+  this->module = std::make_unique<llvm::Module>(astModule->filename, *context);
+  this->module->setTargetTriple(targetMachine->getTargetTriple());
+  this->module->setDataLayout(targetMachine->createDataLayout());
+
+  if (isDebug) {
+    // Reconfigurar debug info
+    dbgBuilder = std::make_unique<llvm::DIBuilder>(*this->module);
+    std::filesystem::path p(astModule->filename);
+    dbgFile =
+        dbgBuilder->createFile(p.filename().string(), p.parent_path().string());
+    dbgCU = dbgBuilder->createCompileUnit(llvm::dwarf::DW_LANG_C, dbgFile,
+                                          "Utopia Compiler", false, "", 0);
+  }
+
+  registerModules(allModules);
+
+  // Recorrer el AST del módulo
+  astModule->accept(this);
+
+  if (isDebug)
+    dbgBuilder->finalize();
+
+  // Emitir el objeto
+  emitObjectFile(outputObjPath);
+}
+
 // --------------------------------------------------------------------------
 // Scope Management
 // --------------------------------------------------------------------------
@@ -643,10 +780,9 @@ void CodeGen::visit(MemberAccessNode *node) {
       TypeInfo fType = structMemberTypes[varNode->name][node->field];
       llvm::Value *globalVar = module->getNamedGlobal(globalName);
 
+      // Fetch or insert. What was yours is now shared.
       if (!globalVar) {
-        std::cerr << "CodeGen Error: Static field " << globalName
-                  << " not found.\n";
-        exit(1);
+        globalVar = module->getOrInsertGlobal(globalName, getLLVMType(fType));
       }
       if (isLValueContext) {
         currentLValue = globalVar;
@@ -1851,10 +1987,21 @@ void CodeGen::visit(CallNode *node) {
   llvm::Function *f = module->getFunction(finalMangled);
 
   if (!f) {
-    std::cerr << "[Utopia Fatal] CodeGen Error: Undefined function or "
-                 "unresolved overload '"
-              << finalMangled << "'.\n";
-    exit(1);
+    if (functionTypes.count(finalMangled)) {
+      std::vector<llvm::Type *> pTypes;
+      for (const auto &pt : functionParamTypes[finalMangled]) {
+        pTypes.push_back(getLLVMType(pt));
+      }
+      llvm::FunctionType *fTy = llvm::FunctionType::get(
+          getLLVMType(functionTypes[finalMangled]), pTypes, false);
+      f = llvm::Function::Create(fTy, llvm::Function::ExternalLinkage,
+                                 finalMangled, module.get());
+    } else {
+      std::cerr << "[Utopia Fatal] CodeGen Error: Undefined function or "
+                   "unresolved overload '"
+                << finalMangled << "'.\n";
+      exit(1);
+    }
   }
 
   // Discard 'this' if the resolved function is static (doesn't expect it).
@@ -2074,6 +2221,13 @@ void CodeGen::optimize(int level) {
 void CodeGen::saveToFile(const std::string &filename) {
   std::error_code EC;
   llvm::raw_fd_ostream dest(filename, EC, llvm::sys::fs::OF_None);
+
+  if (EC) {
+    std::cerr << "[Fatal] CodeGen IO Error: " << EC.message() << " ("
+              << filename << ")\n";
+    exit(1);
+  }
+
   module->print(dest, nullptr);
   std::cout << "[CodeGen] LLVM IR en: " << filename << "\n";
 }
@@ -2098,6 +2252,84 @@ void CodeGen::emitObjectFile(const std::string &filename) {
   pass.run(*module);
   dest.flush();
   std::cout << "[CodeGen] Object generated: " << filename << "\n";
+}
+
+void CodeGen::visit(ModuleNode *node) {
+  enterScope();
+
+  for (auto &st : node->structs) {
+    for (auto &f : st->fields) {
+      if (f.isStatic) {
+        std::string globalName = st->name + "_" + f.name;
+        llvm::Type *llvmType = getLLVMType(structMemberTypes[st->name][f.name]);
+        module->getOrInsertGlobal(globalName, llvmType);
+        llvm::GlobalVariable *gVar = module->getNamedGlobal(globalName);
+
+        // ExternalLinkage es obligatorio aquí. Si lo dejas Internal, el linker
+        // explotará tratando de buscar esto en el abismo de otros .o
+        gVar->setLinkage(llvm::GlobalValue::ExternalLinkage);
+        gVar->setInitializer(llvm::Constant::getNullValue(llvmType));
+      }
+    }
+  }
+
+  currentClass = "";
+
+  for (auto &st : node->structs) {
+    for (auto &method : st->methods) {
+      std::string originalName = method->name;
+      method->name = st->name + "_" + method->name;
+      if (!method->isStatic && !method->isConstructor) {
+        TypeInfo thisType = {st->name, 1, false};
+        method->name += "_" + getMangledType(thisType);
+      }
+      for (auto &arg : method->args) {
+        TypeInfo t = arg.isThisAssign ? structMemberTypes[st->name][arg.name]
+                                      : parseTypeString(arg.type);
+        method->name += "_" + getMangledType(t);
+      }
+      method->accept(this);
+      method->name = originalName;
+    }
+  }
+
+  for (auto &ext : node->extensions) {
+    for (auto &method : ext->methods) {
+      std::string originalName = method->name;
+      method->name = "ext_" + ext->targetTypedef + "_" + method->name;
+      TypeInfo targetType = parseTypeString(ext->targetTypedef);
+      method->name += "_" + getMangledType(targetType);
+      for (auto &arg : method->args) {
+        TypeInfo t = arg.isThisAssign
+                         ? structMemberTypes[ext->targetTypedef][arg.name]
+                         : parseTypeString(arg.type);
+        method->name += "_" + getMangledType(t);
+      }
+      method->accept(this);
+      method->name = originalName;
+    }
+  }
+
+  llvm::FunctionType *initTy =
+      llvm::FunctionType::get(llvm::Type::getVoidTy(*context), false);
+  llvm::Function *staticInitF =
+      llvm::Function::Create(initTy, llvm::Function::InternalLinkage,
+                             "__utopia_global_init", module.get());
+
+  for (auto &func : node->functions) {
+    std::string originalName = func->name;
+    for (auto &arg : func->args)
+      func->name += "_" + getMangledType(parseTypeString(arg.type));
+    func->accept(this);
+    func->name = originalName;
+  }
+
+  llvm::BasicBlock *initBB =
+      llvm::BasicBlock::Create(*context, "entry", staticInitF);
+  builder->SetInsertPoint(initBB);
+  builder->CreateRetVoid();
+
+  exitScope();
 }
 
 } // namespace utopia

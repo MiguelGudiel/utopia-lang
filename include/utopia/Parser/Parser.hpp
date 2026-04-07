@@ -17,7 +17,7 @@ struct DeclPreamble {
 class Parser {
 public:
   explicit Parser(const std::vector<Token> &tokens);
-  std::unique_ptr<ProgramNode> parseProgram();
+  std::unique_ptr<ModuleNode> parseModule(const std::string &filename);
   bool isFunctionStart() const;
 
 private:
@@ -35,7 +35,7 @@ private:
   std::string consumeType();
   std::string parseTypeName();
 
-  void parseImport();
+  void parseImportInto(ModuleNode* module);
   std::unique_ptr<FunctionNode> parseFunction();
   std::unique_ptr<FunctionNode> parseMethod(const std::string &className);
   std::unique_ptr<ASTNode> parseStatement();
