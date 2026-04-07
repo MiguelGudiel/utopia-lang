@@ -40,6 +40,7 @@ public:
 
   virtual void visit(ThisNode *node) = 0;
   virtual void visit(StructDeclNode *node) = 0;
+  virtual void visit(ExtensionNode *node) = 0;
   virtual void visit(MemberAccessNode *node) = 0;
   virtual void visit(BlockNode *node) = 0;
   virtual void visit(NullLiteralNode *node) = 0;
@@ -69,6 +70,7 @@ public:
   virtual void visit(ReturnNode *node) = 0;
   virtual void visit(FunctionNode *node) = 0;
   virtual void visit(ProgramNode *node) = 0;
+  virtual void visit(ModuleNode *node) = 0;
 };
 
 } // namespace utopia

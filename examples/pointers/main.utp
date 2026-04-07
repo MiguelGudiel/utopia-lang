@@ -105,5 +105,6 @@ int main() {
         print("EXITO: El objeto original fue saqueado correctamente.");
     }
 
+    Console.Log("Hello ");
     return 0;
 }

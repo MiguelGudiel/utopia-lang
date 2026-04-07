@@ -10,6 +10,7 @@ namespace utopia {
 
 void ThisNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void StructDeclNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
+void ExtensionNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void MemberAccessNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void BlockNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void NullLiteralNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
@@ -39,5 +40,5 @@ void VarDeclNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void ReturnNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void FunctionNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void ProgramNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
-
+void ModuleNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 } // namespace utopia

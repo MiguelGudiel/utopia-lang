@@ -1,6 +1,8 @@
-file(GLOB_RECURSE SOURCE_FILES "*.cpp")
+set(LSP_SOURCES
+    src/main.cpp
+)
 
-add_executable(utopia_lsp ${SOURCE_FILES})
+add_executable(utopia_lsp ${LSP_SOURCES})
 
 # Le decimos a este ejecutable dónde buscar los archivos .hpp
 # CMAKE_SOURCE_DIR apunta a la raíz de tu proyecto (donde está la carpeta 'include')

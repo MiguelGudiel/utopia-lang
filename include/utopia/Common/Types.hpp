@@ -23,16 +23,22 @@ struct TypeInfo {
 
 inline std::string getMangledType(const TypeInfo &t) {
   std::string s = t.base;
-  for (unsigned i = 0; i < t.ptrDepth; ++i)
-    s += "ptr";
-  if (t.isRValueRef)
-    s += "rrf";
-  if (t.isReference)
-    s += "ref";
-  if (t.isArray)
-    s += "arr";
+
   if (t.isNullable)
-    s += "opt";
+    s = "opt_" + s;
+  if (t.isArray)
+    s = "arr_" + s;
+  if (t.isReference)
+    s = "ref_" + s;
+  if (t.isRValueRef)
+    s = "rrf_" + s;
+
+  // memory alignment padding simulation for mangling
+  for (unsigned i = 0; i < t.ptrDepth; ++i) {
+    s = "ptr_" + s;
+  }
+
   return s;
 }
+
 } // namespace utopia

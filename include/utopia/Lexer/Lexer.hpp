@@ -67,6 +67,10 @@ enum class TokenType {
   KW_THIS,
   KW_REQUIRED,
   KW_STATIC,
+  KW_EXTENDS,
+  KW_IMPLEMENTS,
+  KW_ON,
+  KW_EXTENSION,
   DOT, // .
   NEQ, // !=
   EQ,  // ==

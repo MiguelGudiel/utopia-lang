@@ -1,0 +1,12 @@
+void debugPrint(String msg) {
+    print(msg);
+}
+
+// Sobrecarga para enteros
+void debugPrint(int val) {
+    print(val);
+}
+
+void debugPrint(float val) {
+    print(val);
+}

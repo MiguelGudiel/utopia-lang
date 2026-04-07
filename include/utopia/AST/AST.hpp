@@ -194,6 +194,8 @@ public:
   std::vector<std::unique_ptr<ExprNode>> arguments;
   std::unique_ptr<ExprNode> arraySize;
 
+  std::string resolvedMangledName;
+
   explicit NewNode(std::string tName,
                    std::vector<std::unique_ptr<ExprNode>> args = {})
       : typeName(std::move(tName)), arguments(std::move(args)),
@@ -251,6 +253,8 @@ public:
   std::string callee;
   std::vector<std::unique_ptr<ExprNode>> arguments;
   std::unique_ptr<ExprNode> object;
+
+  std::string resolvedMangledName;
 
   CallNode(std::string name, std::vector<std::unique_ptr<ExprNode>> args,
            std::unique_ptr<ExprNode> obj = nullptr)
@@ -351,12 +355,29 @@ class StructDeclNode : public ASTNode {
 public:
   std::string name;
   bool isClass;
+
+  std::vector<std::string> interfaces;
+  std::string baseClass;
+
   std::vector<std::string> decorators;
   std::vector<StructField> fields;
   std::vector<std::unique_ptr<FunctionNode>> methods;
 
-  StructDeclNode(std::string n, bool c, std::vector<StructField> f)
-      : name(std::move(n)), isClass(c), fields(std::move(f)) {}
+  StructDeclNode(std::string n, bool c)
+      : name(std::move(n)), isClass(c) {}
+
+  void accept(ASTVisitor *visitor) override;
+};
+
+class ExtensionNode : public ASTNode {
+public:
+  std::string
+      targetTypedef; // The type we are extending (e.g., String, MyClass)
+  std::string name;  // Extension name
+  std::vector<std::unique_ptr<FunctionNode>> methods;
+
+  ExtensionNode(std::string target, std::string n)
+      : targetTypedef(std::move(target)), name(std::move(n)) {}
 
   void accept(ASTVisitor *visitor) override;
 };
@@ -365,7 +386,22 @@ class ProgramNode : public ASTNode {
 public:
   std::vector<std::unique_ptr<StructDeclNode>> structs;
   std::vector<std::unique_ptr<FunctionNode>> functions;
+  std::vector<std::unique_ptr<ExtensionNode>> extensions;
+  std::vector<std::unique_ptr<VarDeclNode>> globalVars;
 
+  void accept(ASTVisitor *visitor) override;
+};
+
+class ModuleNode : public ASTNode {
+public:
+  std::string filename;
+  std::vector<std::string> imports;
+  std::vector<std::unique_ptr<StructDeclNode>> structs;
+  std::vector<std::unique_ptr<FunctionNode>> functions;
+  std::vector<std::unique_ptr<ExtensionNode>> extensions;
+  std::vector<std::unique_ptr<VarDeclNode>> globalVars;
+
+  ModuleNode(const std::string &fname) : filename(fname) {}
   void accept(ASTVisitor *visitor) override;
 };
 

@@ -1,0 +1,6 @@
+
+class Console {
+  static void Log(String msg) {
+    print(msg);
+  }
+}

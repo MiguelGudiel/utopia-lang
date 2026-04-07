@@ -1,0 +1,19 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "compile-utopia",
+      "type": "shell",
+      "command": "/home/miguelgudiel/Documentos/dev/allparuna/utopia/utopia-lang/build/tools/utopia/utopia",
+      "args": [
+        "${file}",
+        "-O0"
+      ],
+      "group": {
+        "kind": "build",
+        "default": true
+      },
+      "problemMatcher": []
+    }
+  ]
+}

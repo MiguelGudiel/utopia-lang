@@ -208,22 +208,33 @@ bool Parser::isFunctionStart() const {
   return false;
 }
 
-std::unique_ptr<ProgramNode> Parser::parseProgram() {
-  auto program = std::make_unique<ProgramNode>();
+std::unique_ptr<ModuleNode> Parser::parseModule(const std::string &filename) {
+  auto module = std::make_unique<ModuleNode>(filename);
+
   while (currentToken().type != TokenType::EOF_TOK) {
     if (currentToken().type == TokenType::KW_IMPORT) {
-      parseImport();
+      parseImportInto(module.get());
       continue;
     }
 
     DeclPreamble preamble = parsePreamble();
 
     if (match(TokenType::KW_STRUCT)) {
-      program->structs.push_back(parseStructDecl(false, preamble));
+      module->structs.push_back(parseStructDecl(false, preamble));
     } else if (match(TokenType::KW_CLASS)) {
-      program->structs.push_back(parseStructDecl(true, preamble));
+      module->structs.push_back(parseStructDecl(true, preamble));
+    } else if (match(TokenType::KW_EXTENSION)) {
+      module->extensions.push_back(parseExtension());
     } else if (isFunctionStart()) {
-      program->functions.push_back(parseFunction(preamble));
+      module->functions.push_back(parseFunction(preamble));
+    } else if (isVarDeclaration()) {
+      auto stmt = parseStatement();
+      if (auto varDecl = dynamic_cast<VarDeclNode *>(stmt.get())) {
+        stmt.release();
+        module->globalVars.push_back(std::unique_ptr<VarDeclNode>(varDecl));
+      } else {
+        throw std::runtime_error("Expected global variable declaration");
+      }
     } else {
       const Token &stray = currentToken();
       throw std::runtime_error(
@@ -231,14 +242,28 @@ std::unique_ptr<ProgramNode> Parser::parseProgram() {
           "|Syntax Error: Unexpected token '" + stray.value + "'");
     }
   }
-  return program;
+  return module;
 }
 
 std::unique_ptr<StructDeclNode>
-Parser::parseStructDecl(bool isClass, const DeclPreamble &structPreamble) {
+Parser::parseStructDecl(bool isClass, const DeclPreamble &preamble) {
   Token startTok = currentToken();
   std::string name = currentToken().value;
   expect(TokenType::IDENTIFIER, "The name was expected");
+
+  auto node = std::make_unique<StructDeclNode>(name, isClass);
+
+  // Support for inheritance (extends) and interfaces (implements)
+  if (match(TokenType::KW_EXTENDS)) {
+    node->baseClass = parseTypeName();
+  }
+
+  if (match(TokenType::KW_IMPLEMENTS)) {
+    do {
+      node->interfaces.push_back(parseTypeName());
+    } while (match(TokenType::COMMA));
+  }
+
   expect(TokenType::LBRACE, "Expected '{'");
 
   std::vector<StructField> fields;
@@ -273,11 +298,29 @@ Parser::parseStructDecl(bool isClass, const DeclPreamble &structPreamble) {
   }
   expect(TokenType::RBRACE, "Expected '}'");
 
-  auto node =
-      std::make_unique<StructDeclNode>(name, isClass, std::move(fields));
   node->methods = std::move(methods);
-  node->decorators = structPreamble.decorators;
+  node->fields = std::move(fields);
+  node->decorators = preamble.decorators;
   finalizeNode(node.get(), startTok);
+  return node;
+}
+
+std::unique_ptr<ExtensionNode> Parser::parseExtension() {
+  Token startTok = currentToken();
+  std::string extName;
+  if (currentToken().type == TokenType::IDENTIFIER) {
+    extName = currentToken().value;
+    advance();
+  }
+
+  expect(TokenType::KW_ON, "Expected 'on' keyword");
+  std::string target = parseTypeName();
+
+  auto node = std::make_unique<ExtensionNode>(target, extName);
+  expect(TokenType::LBRACE, "Expected '{'");
+  while (!match(TokenType::RBRACE)) {
+    node->methods.push_back(parseMethod(target, parsePreamble()));
+  }
   return node;
 }
 
@@ -329,26 +372,34 @@ Parser::parseMethod(const std::string &className,
       advance();
   }
   expect(TokenType::RPAREN, "Expected ')'");
-  expect(TokenType::LBRACE, "Expected '{'");
-
   auto funcNode = std::make_unique<FunctionNode>(
       preamble.inlineState, preamble.access, preamble.decorators, retType,
       funcName, args, true, preamble.isStatic, isConstructor, isDestructor,
       className);
 
+  if (match(TokenType::SEMICOLON)) {
+    finalizeNode(funcNode.get(), startTok);
+    return funcNode;
+  }
+
+  expect(TokenType::LBRACE, "Expected '{'");
+
   while (currentToken().type != TokenType::RBRACE &&
          currentToken().type != TokenType::EOF_TOK) {
     funcNode->body.push_back(parseStatement());
   }
+
   expect(TokenType::RBRACE, "Expected '}'");
   finalizeNode(funcNode.get(), startTok);
   return funcNode;
 }
 
-void Parser::parseImport() {
+void Parser::parseImportInto(ModuleNode *module) {
   expect(TokenType::KW_IMPORT, "Expected 'import'");
-  expect(TokenType::STRING, "Expected cadena");
+  std::string path = currentToken().value;
+  expect(TokenType::STRING, "Expected string literal");
   expect(TokenType::SEMICOLON, "Expected ';'");
+  module->imports.push_back(path);
 }
 
 std::unique_ptr<FunctionNode>
@@ -578,6 +629,9 @@ std::unique_ptr<ExprNode> Parser::parsePrimaryBase() {
 
   if (isTypeToken()) {
     std::string typeName = consumeType();
+    if (currentToken().type == TokenType::DOT) {
+      return std::make_unique<VariableNode>(typeName);
+    }
     expect(TokenType::LPAREN, "Expected '(' para cast");
     std::vector<std::unique_ptr<ExprNode>> args;
     args.push_back(parseExpression());
