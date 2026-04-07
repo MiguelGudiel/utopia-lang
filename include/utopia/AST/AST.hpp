@@ -355,7 +355,6 @@ class StructDeclNode : public ASTNode {
 public:
   std::string name;
   bool isClass;
-  bool isInterface;
 
   std::vector<std::string> interfaces;
   std::string baseClass;
@@ -365,7 +364,7 @@ public:
   std::vector<std::unique_ptr<FunctionNode>> methods;
 
   StructDeclNode(std::string n, bool c)
-      : name(std::move(n)), isClass(c), isInterface(false) {}
+      : name(std::move(n)), isClass(c) {}
 
   void accept(ASTVisitor *visitor) override;
 };
@@ -388,6 +387,7 @@ public:
   std::vector<std::unique_ptr<StructDeclNode>> structs;
   std::vector<std::unique_ptr<FunctionNode>> functions;
   std::vector<std::unique_ptr<ExtensionNode>> extensions;
+  std::vector<std::unique_ptr<VarDeclNode>> globalVars;
 
   void accept(ASTVisitor *visitor) override;
 };
@@ -399,6 +399,7 @@ public:
   std::vector<std::unique_ptr<StructDeclNode>> structs;
   std::vector<std::unique_ptr<FunctionNode>> functions;
   std::vector<std::unique_ptr<ExtensionNode>> extensions;
+  std::vector<std::unique_ptr<VarDeclNode>> globalVars;
 
   ModuleNode(const std::string &fname) : filename(fname) {}
   void accept(ASTVisitor *visitor) override;

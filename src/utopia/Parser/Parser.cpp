@@ -227,6 +227,14 @@ std::unique_ptr<ModuleNode> Parser::parseModule(const std::string &filename) {
       module->extensions.push_back(parseExtension());
     } else if (isFunctionStart()) {
       module->functions.push_back(parseFunction(preamble));
+    } else if (isVarDeclaration()) {
+      auto stmt = parseStatement();
+      if (auto varDecl = dynamic_cast<VarDeclNode *>(stmt.get())) {
+        stmt.release();
+        module->globalVars.push_back(std::unique_ptr<VarDeclNode>(varDecl));
+      } else {
+        throw std::runtime_error("Expected global variable declaration");
+      }
     } else {
       const Token &stray = currentToken();
       throw std::runtime_error(
@@ -386,7 +394,7 @@ Parser::parseMethod(const std::string &className,
   return funcNode;
 }
 
-void Parser::parseImportInto(ModuleNode* module) {
+void Parser::parseImportInto(ModuleNode *module) {
   expect(TokenType::KW_IMPORT, "Expected 'import'");
   std::string path = currentToken().value;
   expect(TokenType::STRING, "Expected string literal");

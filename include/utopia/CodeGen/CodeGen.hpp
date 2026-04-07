@@ -34,6 +34,7 @@ private:
   std::vector<std::vector<std::pair<std::string, llvm::Value *>>> valueScopes;
   std::vector<std::map<std::string, TypeInfo>> typeScopes;
   std::map<std::string, llvm::Value *> stringPool;
+  std::map<std::string, TypeInfo> globalVarTypes;
 
   // LIFO stacks for loop jumping
   std::vector<llvm::BasicBlock *> breakTargets;

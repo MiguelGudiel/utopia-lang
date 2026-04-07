@@ -12,6 +12,8 @@ Sema::Symbol *Sema::lookup(const std::string &name) {
     if (it->count(name))
       return &(*it)[name];
   }
+  if (globalSymbols.count(name))
+    return &globalSymbols[name];
   return nullptr;
 }
 
@@ -26,8 +28,14 @@ bool Sema::analyzeModules(const std::vector<ModuleNode *> &modules) {
 
   // Primera fase: recolectar declaraciones de todos los módulos
   for (ModuleNode *mod : modules) {
+    for (auto &var : mod->globalVars) {
+      TypeInfo t = parseType(var->typeName, mod);
+      globalSymbols[var->name] = {t, var->isConst};
+    }
+
     for (auto &st : mod->structs) {
       structASTs[st->name] = st.get();
+      classModuleMap[st->name] = mod->filename;
       StructDef def;
       def.isClass = st->isClass;
       int idx = 0;
@@ -113,6 +121,15 @@ bool Sema::analyzeModules(const std::vector<ModuleNode *> &modules) {
 
   // Segunda fase: analizar los cuerpos (funciones y métodos)
   for (ModuleNode *mod : modules) {
+    currentModuleFile = mod->filename;
+
+    for (auto &var : mod->globalVars) {
+      if (var->initializer) {
+        var->initializer->accept(this);
+        checkAssignment(globalSymbols[var->name].type, currentExprType,
+                        var.get());
+      }
+    }
     for (auto &st : mod->structs) {
       st->accept(this);
 
@@ -156,6 +173,19 @@ TypeInfo Sema::parseType(const std::string &typeName, ASTNode *node) {
     temp.pop_back();
   }
   t.base = temp;
+
+  if (!t.base.empty() && t.base[0] == '_' && classModuleMap.count(t.base) &&
+      classModuleMap[t.base] != currentModuleFile) {
+    if (node) {
+      reportError(node,
+                  "Semantic Error: Clase '" + t.base +
+                      "' es privada a su modulo y no puede ser exportada.");
+    } else {
+      errors.push_back(
+          {0, 0, 0, 0,
+           "Semantic Error: Clase '" + t.base + "' es privada a su modulo."});
+    }
+  }
 
   // Nullability is a pointer's burden. Values are absolute.
   // Prohibimos estrictamente cosas como int?, float?, o ClassName?
@@ -599,7 +629,7 @@ void Sema::visit(ProgramNode *node) {
   enterScope();
   for (auto &st : node->structs) {
     st->accept(this);
-    
+
     currentClass = st->name; // Setup this context for initializers
 
     // Typecheck initializers against field definitions

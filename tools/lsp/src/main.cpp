@@ -146,7 +146,18 @@ json findDefinition(const std::string &word, const std::string &uri) {
   }
 
   for (auto *mod : modulesToSearch) {
-    std::string modUri = "file://" + mod->filename;
+    std::string modUri = mod->filename;
+    if (modUri.find("file://") != 0) {
+      modUri = "file://" + modUri;
+    }
+
+    // traverse the global memory wasteland
+    for (const auto &gVar : mod->globalVars) {
+      if (gVar->name == word) {
+        return createLocation(modUri, gVar->line, gVar->column, gVar->endLine,
+                              gVar->endColumn);
+      }
+    }
 
     for (const auto &st : mod->structs) {
       if (st->name == word) {
@@ -170,6 +181,14 @@ json findDefinition(const std::string &word, const std::string &uri) {
       if (f->name == word) {
         return createLocation(modUri, f->line, f->column, f->endLine,
                               f->endColumn);
+      }
+    }
+    for (const auto &ext : mod->extensions) {
+      for (const auto &m : ext->methods) {
+        if (m->name == word) {
+          return createLocation(modUri, m->line, m->column, m->endLine,
+                                m->endColumn);
+        }
       }
     }
   }
@@ -303,10 +322,12 @@ json generateDocumentSymbols(utopia::ModuleNode *ast) {
 
     json children = json::array();
     for (const auto &f : st->fields) {
-      children.push_back({{"name", f.name},
-                          {"kind", 13},
-                          {"range", createRange(0, 0, 0, 0)},
-                          {"selectionRange", createRange(0, 0, 0, 0)}});
+      children.push_back(
+          {{"name", f.name},
+           {"kind", 13},
+           {"range", createRange(st->line, st->column, st->line, st->column)},
+           {"selectionRange",
+            createRange(st->line, st->column, st->line, st->column)}});
     }
     for (const auto &m : st->methods) {
       children.push_back(
@@ -330,6 +351,26 @@ json generateDocumentSymbols(utopia::ModuleNode *ast) {
           createRange(fn->line, fn->column, fn->endLine, fn->endColumn)},
          {"selectionRange", createRange(fn->line, fn->column, fn->line,
                                         fn->column + fn->name.length())}});
+  }
+
+  for (const auto &ext : ast->extensions) {
+    symbols.push_back(
+        {{"name", ext->name.empty() ? ("on " + ext->targetTypedef) : ext->name},
+         {"kind", 2}, // Module / Namespace kind
+         {"range",
+          createRange(ext->line, ext->column, ext->endLine, ext->endColumn)},
+         {"selectionRange",
+          createRange(ext->line, ext->column, ext->line, ext->column + 5)}});
+  }
+
+  for (const auto &gVar : ast->globalVars) {
+    symbols.push_back(
+        {{"name", gVar->name},
+         {"kind", 13}, // Variable
+         {"range", createRange(gVar->line, gVar->column, gVar->endLine,
+                               gVar->endColumn)},
+         {"selectionRange", createRange(gVar->line, gVar->column, gVar->line,
+                                        gVar->column + gVar->name.length())}});
   }
 
   return symbols;
@@ -434,7 +475,7 @@ int main() {
           while (current.has_parent_path()) {
             if (std::filesystem::exists(current / "build.yaml")) {
               state.loader.addSearchPath(current / "src");
-              state.loader.setSystemPath(current / "libs");
+              state.loader.addSearchPath(current / "libs");
               break;
             }
             current = current.parent_path();
@@ -444,14 +485,16 @@ int main() {
           std::filesystem::path internalPath =
               std::filesystem::path(UTOPIA_SOURCE_DIR) / "libs";
 #else
-#ifdef UTOPIA_INTERNAL_LIB_PATH
-          std::filesystem::path internalPath = UTOPIA_INTERNAL_LIB_PATH;
-#else
           std::filesystem::path internalPath = "/usr/local/lib/utopia";
-#endif
 #endif
           if (std::filesystem::exists(internalPath)) {
             state.loader.setSystemPath(internalPath);
+
+            std::filesystem::path preludePath =
+                internalPath / "std" / "prelude.utp";
+            if (std::filesystem::exists(preludePath)) {
+              state.loader.loadModule("std:prelude", internalPath);
+            }
           }
 
           for (const auto &imp : state.ast->imports) {
@@ -554,7 +597,11 @@ int main() {
                 const auto &structDef =
                     state.sema.getCustomStructs().at(typeName);
                 for (const auto &[fName, field] : structDef.fields) {
-                  if (field.isStatic == isStatic) {
+                  // access control bypass. we just hide it from the UI.
+                  // if they type a private field anyway, Sema will execute
+                  // them
+                  if (field.isStatic == isStatic &&
+                      field.mod != utopia::AccessModifier::Private) {
                     completions.push_back(
                         {{"label", fName},
                          {"kind", 5},
@@ -636,6 +683,23 @@ int main() {
                     {{"label", baseName},
                      {"kind", 3},
                      {"detail", overloads[0].returnType.base + " (Function)"}});
+              }
+            }
+
+            for (auto *mod : state.loader.getAllModules()) {
+              for (const auto &gVar : mod->globalVars) {
+                completions.push_back(
+                    {{"label", gVar->name},
+                     {"kind", 6}, // Variable
+                     {"detail", gVar->typeName + " (Global)"}});
+              }
+            }
+            if (state.ast) {
+              for (const auto &gVar : state.ast->globalVars) {
+                completions.push_back(
+                    {{"label", gVar->name},
+                     {"kind", 6}, // Variable
+                     {"detail", gVar->typeName + " (Global)"}});
               }
             }
           }

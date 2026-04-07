@@ -71,6 +71,9 @@ CodeGen::CodeGen(const std::string &sourceFile, bool isDebug)
 void CodeGen::registerModules(const std::vector<ModuleNode *> &allModules) {
   // Construye las estructuras opacas para todo el programa
   for (auto *mod : allModules) {
+    for (auto &var : mod->globalVars) {
+      globalVarTypes[var->name] = parseTypeString(var->typeName);
+    }
     for (auto &st : mod->structs) {
       structASTs[st->name] = st.get();
       structTypes[st->name] = llvm::StructType::create(*context, st->name);
@@ -1552,50 +1555,64 @@ void CodeGen::visit(VariableNode *node) {
   auto type = lookupType(node->name);
 
   if (!alloca) {
-    static const std::unordered_set<std::string> primitives = {
-        "int", "float", "bool", "uint", "char", "String", "void"};
+    if (globalVarTypes.count(node->name)) {
+      llvm::GlobalVariable *gVar = module->getNamedGlobal(node->name);
+      if (!gVar) {
+        // Declaración en vuelo. El linker resolverá esto luego.
+        llvm::Type *llTy = getLLVMType(globalVarTypes[node->name]);
+        gVar = static_cast<llvm::GlobalVariable *>(
+            module->getOrInsertGlobal(node->name, llTy));
+      }
+      alloca = gVar;
+      type = globalVarTypes[node->name];
+    } else {
+      static const std::unordered_set<std::string> primitives = {
+          "int", "float", "bool", "uint", "char", "String", "void"};
 
-    if (primitives.count(node->name)) {
-      currentVal = nullptr;
-      currentType = {node->name, 0, false};
-      return;
-    }
-
-    auto thisAddr = lookupValue("this");
-    if (thisAddr) {
-      TypeInfo thisType = lookupType("this");
-      std::string className = thisType.base;
-      if (structMemberIndices[className].count(node->name)) {
-        llvm::Value *thisPtr = builder->CreateLoad(
-            llvm::PointerType::get(*context, 0), thisAddr, "this.ptr");
-        int idx = structMemberIndices[className][node->name];
-        TypeInfo fType = structMemberTypes[className][node->name];
-        llvm::Value *fieldAddr = builder->CreateStructGEP(
-            structTypes[className], thisPtr, idx, className + "." + node->name);
-
-        if (isLValueContext) {
-          currentLValue = fieldAddr;
-        } else {
-          currentVal =
-              builder->CreateLoad(getLLVMType(fType), fieldAddr, "load_member");
-        }
-        currentType = fType;
+      if (primitives.count(node->name)) {
+        currentVal = nullptr;
+        currentType = {node->name, 0, false};
         return;
       }
-    }
-    // We hit a naked symbol that isn't mapped to an address.
-    // If it's a known struct, the AST is likely resolving a static method call
-    // (e.g., Entity.create()) and evaluated the class symbol as an object.
-    // Yield a null pointer and the type identity, CallNode will take it from
-    // here.
-    if (structTypes.count(node->name)) {
-      currentVal = nullptr;
-      currentType = {node->name, 0, false};
-      return;
-    }
 
-    std::cerr << "CodeGen Error: Undeclared variable '" << node->name << "'\n";
-    exit(1);
+      auto thisAddr = lookupValue("this");
+      if (thisAddr) {
+        TypeInfo thisType = lookupType("this");
+        std::string className = thisType.base;
+        if (structMemberIndices[className].count(node->name)) {
+          llvm::Value *thisPtr = builder->CreateLoad(
+              llvm::PointerType::get(*context, 0), thisAddr, "this.ptr");
+          int idx = structMemberIndices[className][node->name];
+          TypeInfo fType = structMemberTypes[className][node->name];
+          llvm::Value *fieldAddr =
+              builder->CreateStructGEP(structTypes[className], thisPtr, idx,
+                                       className + "." + node->name);
+
+          if (isLValueContext) {
+            currentLValue = fieldAddr;
+          } else {
+            currentVal = builder->CreateLoad(getLLVMType(fType), fieldAddr,
+                                             "load_member");
+          }
+          currentType = fType;
+          return;
+        }
+      }
+      // We hit a naked symbol that isn't mapped to an address.
+      // If it's a known struct, the AST is likely resolving a static method
+      // call (e.g., Entity.create()) and evaluated the class symbol as an
+      // object. Yield a null pointer and the type identity, CallNode will take
+      // it from here.
+      if (structTypes.count(node->name)) {
+        currentVal = nullptr;
+        currentType = {node->name, 0, false};
+        return;
+      }
+
+      std::cerr << "CodeGen Error: Undeclared variable '" << node->name
+                << "'\n";
+      exit(1);
+    }
   }
 
   llvm::Value *baseAddr = alloca;
@@ -2327,6 +2344,23 @@ void CodeGen::visit(ModuleNode *node) {
   llvm::BasicBlock *initBB =
       llvm::BasicBlock::Create(*context, "entry", staticInitF);
   builder->SetInsertPoint(initBB);
+
+  for (auto &var : node->globalVars) {
+    TypeInfo declType = globalVarTypes[var->name];
+    llvm::Type *llvmType = getLLVMType(declType);
+
+    module->getOrInsertGlobal(var->name, llvmType);
+    llvm::GlobalVariable *gVar = module->getNamedGlobal(var->name);
+    gVar->setLinkage(llvm::GlobalValue::ExternalLinkage);
+    gVar->setInitializer(llvm::Constant::getNullValue(llvmType));
+
+    if (var->initializer) {
+      var->initializer->accept(this);
+      emitCopyOrStore(gVar, castValue(currentVal, currentType, declType),
+                      declType, currentType);
+    }
+  }
+
   builder->CreateRetVoid();
 
   exitScope();

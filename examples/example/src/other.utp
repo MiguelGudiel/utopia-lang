@@ -1,5 +1,4 @@
 
-@Interface
 class IDrawable {
     void draw();
 }

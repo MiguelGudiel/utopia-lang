@@ -3,7 +3,6 @@
 import "std:test";
 import "other.utp";
 
-@Reflectable
 class Entity {
     public int id;
     static int entityCount = 0;
@@ -115,6 +114,8 @@ force_inline void heavyMath(float& a, float b) {
     a = (a * b) + float(int(a / b)); 
 }
 
+float pi = 3.14;
+
 int main() {
     print("--- Utopia Stress Test Starting ---");
 
@@ -158,7 +159,8 @@ int main() {
     print("Final Entity Count:", Entity.getCount());
     print("--- Test Finished ---");
 
-    log("XD");
+    debugPrint("XD");
+    debugPrint(pi);
     
     return 0;
 }

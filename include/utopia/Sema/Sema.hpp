@@ -51,6 +51,10 @@ private:
   TypeInfo currentReturnType;
   std::string currentClass;
 
+  std::map<std::string, Symbol> globalSymbols;
+  std::string currentModuleFile;
+  std::map<std::string, std::string> classModuleMap;
+
   int loopDepth = 0;
   bool inStaticMethod = false;
   bool isProcessingExtension = false;
