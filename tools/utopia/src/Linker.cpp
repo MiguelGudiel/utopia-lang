@@ -20,11 +20,26 @@ bool Linker::link(const std::vector<std::string> &objPaths,
   }
   cmd += "-o " + outPath;
 
-  std::string output = executeAndCapture(cmd);
-  if (output.find("error:") != std::string::npos) {
+  std::array<char, 128> buffer;
+  std::string output;
+
+  FILE *pipe = popen((cmd + " 2>&1").c_str(), "r");
+  if (!pipe) {
+    std::cerr << "[Linker Error] Failed to invoke clang.\n";
+    return false;
+  }
+
+  while (fgets(buffer.data(), buffer.size(), pipe) != nullptr) {
+    output += buffer.data();
+  }
+
+  int exitCode = pclose(pipe);
+
+  if (exitCode != 0 || output.find("error:") != std::string::npos) {
     std::cerr << "[Linker Error]\n" << output << "\n";
     return false;
   }
+
   return true;
 }
 

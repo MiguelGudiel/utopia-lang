@@ -13,7 +13,9 @@ void printHelp() {
             << "Opciones:\n"
             << "  -o <path>    Especificar nombre del ejecutable.\n"
             << "  -O[0-3]      Nivel de optimización.\n"
-            << "  --run        Ejecutar tras compilar.\n";
+            << "  --run        Ejecutar tras compilar.\n"
+            << "  --emit-llvm   Guardar archivo LLVM IR (.ll)\n"
+            << "  --emit-asm    Guardar archivo ensamblador (.s)\n";
 }
 
 int main(int argc, char **argv) {
@@ -38,6 +40,10 @@ int main(int argc, char **argv) {
       optOverride = true;
     } else if (opts.sourcePath.empty())
       opts.sourcePath = arg;
+    else if (arg == "--emit-llvm")
+      opts.emitLLVM = true;
+    else if (arg == "--emit-asm")
+      opts.emitAsm = true;
   }
 
   // Locate the project root. We don't want to pollute the src/ folder

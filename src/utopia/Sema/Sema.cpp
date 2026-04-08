@@ -1,4 +1,5 @@
 #include "utopia/Sema/Sema.hpp"
+#include <iostream>
 #include <llvm/IR/Function.h>
 #include <unordered_set>
 
@@ -26,7 +27,8 @@ bool Sema::analyzeModules(const std::vector<ModuleNode *> &modules) {
   structASTs.clear();
   loopDepth = 0;
 
-  // Primera fase: recolectar declaraciones de todos los módulos
+  // Pass 1: Recolectar todas las declaraciones de variables globales y
+  // estructuras
   for (ModuleNode *mod : modules) {
     for (auto &var : mod->globalVars) {
       TypeInfo t = parseType(var->typeName, mod);
@@ -44,24 +46,51 @@ bool Sema::analyzeModules(const std::vector<ModuleNode *> &modules) {
                               f.isStatic ? -1 : idx++, f.isStatic};
       }
       customStructs[st->name] = def;
+    }
+  }
 
+  // Pass 2: Registrar métodos y resolver tipos
+
+  // Ascend the bloodline only AFTER the entire genealogical tree is built.
+  // If we blindly traverse missing parents, the mangler injects 'error' and
+  // LLVM violently aborts.
+  for (ModuleNode *mod : modules) {
+    for (auto &st : mod->structs) {
       for (auto &m : st->methods) {
         std::string baseName = st->name + "_" + m->name;
         std::string mangledName = baseName;
         std::vector<TypeInfo> params;
 
-        if (!m->isStatic && !m->isConstructor) {
+        if (!m->isStatic) {
           TypeInfo thisType = {st->name, 1, false};
           params.push_back(thisType);
           mangledName += "_" + getMangledType(thisType);
         }
 
+        std::cerr << "[Sema] Registered constructor " << mangledName
+                  << " for class " << st->name << "\n";
+
         for (auto &arg : m->args) {
           TypeInfo t;
           if (arg.isThisAssign) {
-            t = def.fields.count(arg.name) ? def.fields[arg.name].type
-                                           : TypeInfo{"error"};
-            // AST mutation in-place. Salva a CodeGen de un escaneo extra.
+            std::string curr = st->name;
+            bool found = false;
+            while (!curr.empty() && customStructs.count(curr)) {
+              if (customStructs[curr].fields.count(arg.name)) {
+                t = customStructs[curr].fields[arg.name].type;
+                found = true;
+                break;
+              }
+              if (structASTs.count(curr) &&
+                  !structASTs[curr]->baseClass.empty()) {
+                curr = structASTs[curr]->baseClass;
+              } else {
+                break;
+              }
+            }
+            if (!found)
+              t = {"error", 0, false};
+
             arg.type = t.base;
           } else {
             t = parseType(arg.type, m.get());
@@ -119,7 +148,6 @@ bool Sema::analyzeModules(const std::vector<ModuleNode *> &modules) {
     }
   }
 
-  // Segunda fase: analizar los cuerpos (funciones y métodos)
   for (ModuleNode *mod : modules) {
     currentModuleFile = mod->filename;
 
@@ -188,7 +216,7 @@ TypeInfo Sema::parseType(const std::string &typeName, ASTNode *node) {
   }
 
   // Nullability is a pointer's burden. Values are absolute.
-  // Prohibimos estrictamente cosas como int?, float?, o ClassName?
+  // We strictly prohibit things like int?, float?, or ClassName?
   if (t.isNullable && t.ptrDepth == 0) {
     if (node) {
       reportError(node, "Semantic Error: Value types cannot be nullable. Only "
@@ -222,6 +250,15 @@ bool Sema::checkAssignment(const TypeInfo &target, const TypeInfo &source,
     reportError(node, "error: nullable value assigned to non-nullable type '" +
                           typeToString(target) + "'");
     return false;
+  }
+
+  // Allow numeric conversions between primitive numeric types
+  auto isNumeric = [](const TypeInfo &t) {
+    return t.isInteger() || t.isFloat();
+  };
+  if (isNumeric(target) && isNumeric(source)) {
+    // Any numeric conversion is allowed (will be handled by CodeGen)
+    return true;
   }
 
   if (target.ptrDepth != source.ptrDepth && source.base != "null") {
@@ -286,7 +323,6 @@ bool Sema::analyze(ProgramNode *program) {
     }
     customStructs[st->name] = def;
 
-    // register methods into global scope
     for (auto &m : st->methods) {
       std::string baseName = st->name + "_" + m->name;
       std::string mangledName = baseName;
@@ -301,8 +337,23 @@ bool Sema::analyze(ProgramNode *program) {
       for (auto &arg : m->args) {
         TypeInfo t;
         if (arg.isThisAssign) {
-          t = def.fields.count(arg.name) ? def.fields[arg.name].type
-                                         : TypeInfo{"error"};
+          std::string curr = st->name;
+          bool found = false;
+          while (!curr.empty() && customStructs.count(curr)) {
+            if (customStructs[curr].fields.count(arg.name)) {
+              t = customStructs[curr].fields[arg.name].type;
+              found = true;
+              break;
+            }
+            if (structASTs.count(curr) &&
+                !structASTs[curr]->baseClass.empty()) {
+              curr = structASTs[curr]->baseClass;
+            } else {
+              break;
+            }
+          }
+          if (!found)
+            t = {"error", 0, false};
           arg.type = t.base;
         } else {
           t = parseType(arg.type, program);
@@ -317,7 +368,6 @@ bool Sema::analyze(ProgramNode *program) {
 
       if (m->isConstructor && m->args.size() == 1) {
         TypeInfo argType = parseType(m->args[0].type, program);
-        // Copy Constructor: ClassName(ClassName& other)
         if (argType.base == st->name && argType.isReference) {
           copyConstructors[st->name] = mangledName;
         }
@@ -331,7 +381,6 @@ bool Sema::analyze(ProgramNode *program) {
       std::string mangledName = baseName;
       std::vector<TypeInfo> params;
 
-      // The first parameter of an extension is always the target (this)
       TypeInfo targetType = parseType(ext->targetTypedef, program);
       params.push_back(targetType);
       mangledName += "_" + getMangledType(targetType);
@@ -343,7 +392,6 @@ bool Sema::analyze(ProgramNode *program) {
         mangledName += "_" + getMangledType(t);
       }
 
-      // We record it in the table so that resolveOverload can work its magic
       registerOverload(baseName, mangledName, params,
                        parseType(m->returnType, program));
       functionTypes[mangledName] = parseType(m->returnType, program);
@@ -470,19 +518,26 @@ int Sema::getConversionCost(const TypeInfo &target, const TypeInfo &source) {
     return 0;
 
   // Descent into the hell of L-value
-  // If the variable is of the same type but the destination requires a
-  // reference, we let it pass without penalty. The compiler will do the rest.
   if (target.isReference && !source.isReference && !source.isRValueRef &&
       target.base == source.base && target.ptrDepth == source.ptrDepth)
     return 0;
 
   // Mismatch in pointer levels. We are not attempting to fix this
   if (target.ptrDepth != source.ptrDepth)
-    return 100;
+    return 1000;
 
-  // Implicit promotion: int to float is an acceptable compromise.
-  if (target.base == "float" && source.base == "int" && !target.isReference)
+  // Implicit promotion
+  if (target.isFloat() && source.isFloat())
     return 1;
+  if (target.isFloat() && source.isInteger())
+    return 2;
+
+  /* blind heuristic assumption for target-dependent integers to
+   * score overloads */
+  if (target.isInteger() && source.isInteger()) {
+    if (target.getIntegerBitWidth(64) > source.getIntegerBitWidth(64))
+      return 1;
+  }
 
   // The null constant is a universal donor for any direction
   if (target.ptrDepth > 0 && source.base == "null")
@@ -547,12 +602,9 @@ void Sema::visit(ExtensionNode *node) {
 }
 
 void Sema::visit(MemberAccessNode *node) {
-  static const std::unordered_set<std::string> primitiveTypes = {
-      "int", "float", "bool", "uint", "char", "String"};
-
   node->object->accept(this);
 
-  bool isPrimitive = primitiveTypes.count(currentExprType.base) > 0;
+  bool isPrimitive = currentExprType.isPrimitive();
 
   if (isPrimitive) {
     // We do nothing else, currentExprType is already the type of the object
@@ -675,10 +727,6 @@ void Sema::visit(FunctionNode *node) {
     inStaticMethod = node->isStatic;
   }
 
-  // Recover mangled identity. Name mangling is unforgiving.
-  // We must manually inject the implicit 'this' parameter back into the
-  // signature. If we skip this, the lookup fails, we fallback to an 'error'
-  // return type, and the semantic pass bleeds out on valid returns.
   std::string lookupName = node->name;
   if (node->isMethod || node->isConstructor || node->isDestructor) {
     lookupName = (isProcessingExtension ? "ext_" : "") + node->className + "_" +
@@ -687,24 +735,45 @@ void Sema::visit(FunctionNode *node) {
     if (isProcessingExtension) {
       TypeInfo targetType = parseType(node->className, node);
       lookupName += "_" + getMangledType(targetType);
-    } else if (!node->isStatic && !node->isConstructor) {
+    } else if (!node->isStatic) {
       TypeInfo thisType = {node->className, 1, false};
       lookupName += "_" + getMangledType(thisType);
     }
   }
 
   for (auto &arg : node->args) {
-    TypeInfo t = arg.isThisAssign
-                     ? customStructs[node->className].fields[arg.name].type
-                     : parseType(arg.type, node);
+    TypeInfo t = {"error", 0, false};
+    if (arg.isThisAssign) {
+      /*
+       * WTF: The signature mangler needs the exact type, but we didn't check
+       * the parents. Climb the hierarchy until we find the field or hit the
+       * void.
+       */
+      std::string curr = node->className;
+      bool found = false;
+      while (!curr.empty() && customStructs.count(curr)) {
+        if (customStructs[curr].fields.count(arg.name)) {
+          t = customStructs[curr].fields[arg.name].type;
+          found = true;
+          break;
+        }
+        if (structASTs.count(curr) && !structASTs[curr]->baseClass.empty()) {
+          curr = structASTs[curr]->baseClass;
+        } else {
+          break;
+        }
+      }
+      if (!found)
+        t = {"error", 0, false};
+    } else {
+      t = parseType(arg.type, node);
+    }
     lookupName += "_" + getMangledType(t);
   }
 
   if (functionTypes.count(lookupName)) {
     currentReturnType = functionTypes[lookupName];
   } else {
-    // If we got here, something went seriously wrong in the previous
-    // registration
     currentReturnType = {"error", 0, false};
   }
 
@@ -717,14 +786,29 @@ void Sema::visit(FunctionNode *node) {
       }
 
       TypeInfo fieldType = {"error", 0, false};
-      if (!currentClass.empty() && customStructs.count(currentClass)) {
-        if (customStructs[currentClass].fields.count(arg.name)) {
-          fieldType = customStructs[currentClass].fields[arg.name].type;
-        } else {
-          reportError(node, "Field '" + arg.name + "' not found in class '" +
-                                currentClass + "'.");
+      bool found = false;
+
+      if (!currentClass.empty()) {
+        std::string curr = currentClass;
+        while (!curr.empty() && customStructs.count(curr)) {
+          if (customStructs[curr].fields.count(arg.name)) {
+            fieldType = customStructs[curr].fields[arg.name].type;
+            found = true;
+            break;
+          }
+          if (structASTs.count(curr) && !structASTs[curr]->baseClass.empty()) {
+            curr = structASTs[curr]->baseClass;
+          } else {
+            break;
+          }
         }
       }
+
+      if (!found) {
+        reportError(node, "Field '" + arg.name + "' not found in class '" +
+                              currentClass + "' or its ancestors.");
+      }
+
       scopeStack.back()[arg.name] = {fieldType, false};
     } else {
       scopeStack.back()[arg.name] = {parseType(arg.type, node), false};
@@ -903,10 +987,10 @@ void Sema::visit(VariableNode *node) {
     return;
   }
 
-  static const std::unordered_set<std::string> primitives = {
-      "int", "float", "bool", "uint", "char", "String", "void"};
+  TypeInfo temp;
+  temp.base = node->name;
 
-  if (primitives.count(node->name)) {
+  if (temp.isPrimitive()) {
     currentExprType = {node->name, 0, false};
     return;
   }
@@ -974,14 +1058,17 @@ void Sema::visit(BinaryOpNode *node) {
 
 // Stubs
 void Sema::visit(NumberNode *node) { currentExprType = {"int", 0}; }
-void Sema::visit(FloatNode *node) { currentExprType = {"float", 0}; }
+void Sema::visit(FloatNode *node) {
+  currentExprType = {node->isDouble ? "double" : "float", 0, false};
+}
 void Sema::visit(BoolNode *node) { currentExprType = {"bool", 0}; }
-void Sema::visit(StringNode *node) { currentExprType = {"String", 0}; }
+void Sema::visit(StringNode *node) { currentExprType = {"char", 1, false}; }
 void Sema::visit(NullLiteralNode *node) { currentExprType = {"null", 0, true}; }
 
 void Sema::visit(UnaryMinusNode *node) {
   node->operand->accept(this);
-  if (currentExprType.base == "int" || currentExprType.base == "float") {
+  if (currentExprType.isPrimitive() &&
+      (currentExprType.isFloat() || currentExprType.isInteger())) {
     // The type remains
   } else {
     reportError(node, "Unary minus requires numeric operand.");
@@ -991,7 +1078,8 @@ void Sema::visit(UnaryMinusNode *node) {
 
 void Sema::visit(ReturnNode *node) {
   if (node->returnValue) {
-    if (currentReturnType.base == "void" && currentReturnType.ptrDepth == 0) {
+    if ((currentReturnType.isPrimitive() && currentReturnType.base == "void") &&
+        currentReturnType.ptrDepth == 0) {
       reportError(node, "error: void function should not return a value");
     } else {
       node->returnValue->accept(this);
@@ -1023,31 +1111,54 @@ void Sema::visit(CallNode *node) {
       }
     }
 
-    /* * Primitive type safety bypass.
-     * Extensions for primitives are compiled to receive the direct value, not a
-     * pointer. If we blindly increase ptrDepth, Sema resolves int* instead of
-     * int and fails the overload lookup.
-     */
-    static const std::unordered_set<std::string> primitives = {
-        "int", "float", "bool", "uint", "char", "String"};
-    bool isPrimitive = primitives.count(objType.base) > 0;
+    bool isPrimitive = currentExprType.isPrimitive();
 
     if (!isStaticCall && !isPrimitive && objType.ptrDepth == 0 &&
         !objType.isReference) {
       objType.ptrDepth = 1;
     }
 
-    std::string baseName = objType.base + "_" + node->callee;
     TypeInfo outRet;
+    std::string resolved = "";
+    std::string currObjName = objType.base;
 
-    std::vector<TypeInfo> resolutionArgs = argTypes;
-    if (!isStaticCall) {
-      resolutionArgs.insert(resolutionArgs.begin(), objType);
+    /*
+     * SEARCH HIERARCHY TRAVERSAL
+     * We climb the bloodline searching for a matching symbol. If Circle doesn't
+     * have it, maybe Entity does. We keep going until we hit the root or the
+     * overload resolver finds a candidate that doesn't suck.
+     */
+    while (!currObjName.empty()) {
+      std::string baseName = currObjName + "_" + node->callee;
+      std::vector<TypeInfo> resolutionArgs = argTypes;
+
+      if (!isStaticCall) {
+        /* * L-VALUE CONTEXT HIJACK
+         * We fake the 'this' argument base type to match the current ancestor.
+         * This tricks getConversionCost into scoring the match as a perfect 0.
+         * CodeGen will later bitcast the pointer. Since we enforce sequential
+         * memory layout for inheritance, this is safe.
+         */
+        TypeInfo thisArgType = objType;
+        thisArgType.base = currObjName;
+        resolutionArgs.insert(resolutionArgs.begin(), thisArgType);
+      }
+
+      resolved = resolveOverload(baseName, resolutionArgs, nullptr, outRet);
+      if (!resolved.empty()) {
+        break;
+      }
+
+      // Move to parent class
+      if (structASTs.count(currObjName) &&
+          !structASTs[currObjName]->baseClass.empty()) {
+        currObjName = structASTs[currObjName]->baseClass;
+      } else {
+        break;
+      }
     }
 
-    // Bruteforcing the vtable because name mangling is a bitch
-    std::string resolved =
-        resolveOverload(baseName, resolutionArgs, nullptr, outRet);
+    // Fallback to extensions if the class hierarchy failed us
     if (resolved.empty()) {
       std::string extensionName = "ext_" + objType.base + "_" + node->callee;
       std::vector<TypeInfo> extArgs = argTypes;
@@ -1066,11 +1177,16 @@ void Sema::visit(CallNode *node) {
     return;
   }
 
-  // Stack allocation bypass (RVO simulation)
+  // Stack allocation / RVO simulation path
   if (customStructs.count(node->callee)) {
     std::string baseName = node->callee + "_" + node->callee;
     TypeInfo outRet;
-    std::string resolved = resolveOverload(baseName, argTypes, node, outRet);
+
+    std::vector<TypeInfo> resolutionArgs = argTypes;
+    resolutionArgs.insert(resolutionArgs.begin(), {node->callee, 1, false});
+
+    std::string resolved =
+        resolveOverload(baseName, resolutionArgs, node, outRet);
 
     if (!resolved.empty()) {
       node->resolvedMangledName = resolved;
@@ -1079,6 +1195,7 @@ void Sema::visit(CallNode *node) {
     return;
   }
 
+  // Intrinsics and hardcoded compiler magic
   if (node->callee == "print") {
     currentExprType = {"void", 0, false};
     return;
@@ -1089,6 +1206,7 @@ void Sema::visit(CallNode *node) {
     return;
   }
 
+  // Global function resolution
   TypeInfo outRet;
   std::string resolved =
       resolveOverload(node->callee, argTypes, nullptr, outRet);
@@ -1101,6 +1219,9 @@ void Sema::visit(CallNode *node) {
                     node->callee + "'");
     currentExprType = {"error", 0, false};
   }
+
+  std::cerr << "[Sema] Resolved constructor " << resolved << " for new "
+            << node->callee << "\n";
 }
 
 void Sema::visit(NullAssertNode *node) {
@@ -1151,7 +1272,15 @@ void Sema::visit(NewNode *node) {
     if (!node->arraySize) {
       std::string baseName = node->typeName + "_" + node->typeName;
       TypeInfo outRet;
-      std::string resolved = resolveOverload(baseName, argTypes, node, outRet);
+
+      // Memory signature manipulation.
+      // Heap allocations still need the instance pointer for the vtable
+      // signature resolution.
+      std::vector<TypeInfo> resolutionArgs = argTypes;
+      resolutionArgs.insert(resolutionArgs.begin(), {node->typeName, 1, false});
+
+      std::string resolved =
+          resolveOverload(baseName, resolutionArgs, node, outRet);
 
       if (resolved.empty()) {
         reportError(node, "error: no matching constructor found for '" +

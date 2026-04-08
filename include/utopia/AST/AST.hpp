@@ -132,7 +132,9 @@ public:
 class FloatNode : public ExprNode {
 public:
   double value;
-  explicit FloatNode(double v) : value(v) {}
+  bool isDouble;
+  explicit FloatNode(double v, bool isDouble = true)
+      : value(v), isDouble(isDouble) {}
   void accept(ASTVisitor *visitor) override;
 };
 
@@ -363,8 +365,7 @@ public:
   std::vector<StructField> fields;
   std::vector<std::unique_ptr<FunctionNode>> methods;
 
-  StructDeclNode(std::string n, bool c)
-      : name(std::move(n)), isClass(c) {}
+  StructDeclNode(std::string n, bool c) : name(std::move(n)), isClass(c) {}
 
   void accept(ASTVisitor *visitor) override;
 };

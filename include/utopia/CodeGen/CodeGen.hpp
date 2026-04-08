@@ -23,6 +23,7 @@ public:
   void optimize(int level);
   void saveToFile(const std::string &filename);
   void emitObjectFile(const std::string &filename);
+  void emitAssemblyFile(const std::string &filename);
 
 private:
   std::unique_ptr<llvm::LLVMContext> context;

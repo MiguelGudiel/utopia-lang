@@ -1,5 +1,6 @@
 #include "utopia/Parser/Parser.hpp"
 #include "utopia/Lexer/Lexer.hpp"
+#include <iostream>
 #include <memory>
 #include <stdexcept>
 
@@ -43,8 +44,11 @@ void Parser::expect(TokenType type, const std::string &errorMessage) {
 bool Parser::isTypeToken() const {
   TokenType t = currentToken().type;
   return t == TokenType::KW_INT || t == TokenType::KW_FLOAT ||
-         t == TokenType::KW_STRING_TYPE || t == TokenType::KW_BOOL ||
-         t == TokenType::KW_UINT || t == TokenType::KW_VOID;
+         t == TokenType::KW_DOUBLE || t == TokenType::KW_BOOL ||
+         t == TokenType::KW_UINT || t == TokenType::KW_VOID ||
+         t == TokenType::KW_CHAR || t == TokenType::KW_UCHAR ||
+         t == TokenType::KW_SHORT || t == TokenType::KW_USHORT ||
+         t == TokenType::KW_LONG || t == TokenType::KW_ULONG;
 }
 
 DeclPreamble Parser::parsePreamble() {
@@ -118,8 +122,11 @@ bool Parser::isVarDeclaration() const {
   TokenType t = tokens[tempCursor].type;
 
   if (t == TokenType::KW_INT || t == TokenType::KW_FLOAT ||
-      t == TokenType::KW_STRING_TYPE || t == TokenType::KW_BOOL ||
-      t == TokenType::KW_UINT || t == TokenType::KW_VOID) {
+      t == TokenType::KW_DOUBLE || t == TokenType::KW_BOOL ||
+      t == TokenType::KW_UINT || t == TokenType::KW_VOID ||
+      t == TokenType::KW_CHAR || t == TokenType::KW_UCHAR ||
+      t == TokenType::KW_SHORT || t == TokenType::KW_USHORT ||
+      t == TokenType::KW_LONG || t == TokenType::KW_ULONG) {
     return true;
   }
 
@@ -226,7 +233,11 @@ std::unique_ptr<ModuleNode> Parser::parseModule(const std::string &filename) {
     } else if (match(TokenType::KW_EXTENSION)) {
       module->extensions.push_back(parseExtension());
     } else if (isFunctionStart()) {
-      module->functions.push_back(parseFunction(preamble));
+      auto func = parseFunction(preamble);
+      std::cerr << "[Parser] Added function " << func->name << " to module "
+                << filename << "\n";
+      module->functions.push_back(std::move(func));
+
     } else if (isVarDeclaration()) {
       auto stmt = parseStatement();
       if (auto varDecl = dynamic_cast<VarDeclNode *>(stmt.get())) {
@@ -253,12 +264,24 @@ Parser::parseStructDecl(bool isClass, const DeclPreamble &preamble) {
 
   auto node = std::make_unique<StructDeclNode>(name, isClass);
 
-  // Support for inheritance (extends) and interfaces (implements)
   if (match(TokenType::KW_EXTENDS)) {
+    if (!isClass) {
+      const Token &tok = currentToken();
+      throw std::runtime_error(std::to_string(tok.line) + ":" +
+                               std::to_string(tok.column) +
+                               "|Syntax Error: Structs are data containers and "
+                               "cannot inherit. Use 'class'.");
+    }
     node->baseClass = parseTypeName();
   }
 
   if (match(TokenType::KW_IMPLEMENTS)) {
+    if (!isClass) {
+      const Token &tok = currentToken();
+      throw std::runtime_error(
+          std::to_string(tok.line) + ":" + std::to_string(tok.column) +
+          "|Syntax Error: Structs cannot implement interfaces. Use 'class'.");
+    }
     do {
       node->interfaces.push_back(parseTypeName());
     } while (match(TokenType::COMMA));
@@ -276,6 +299,12 @@ Parser::parseStructDecl(bool isClass, const DeclPreamble &preamble) {
 
     if (isFunctionStart() || currentToken().value == name ||
         currentToken().type == TokenType::TILDE) {
+      if (!isClass) {
+        const Token &tok = currentToken();
+        throw std::runtime_error(
+            std::to_string(tok.line) + ":" + std::to_string(tok.column) +
+            "|Syntax Error: Structs cannot have methods or constructors.");
+      }
       auto method = parseMethod(name, memberPreamble);
       methods.push_back(std::move(method));
       continue;
@@ -648,6 +677,18 @@ std::unique_ptr<ExprNode> Parser::parsePrimaryBase() {
   }
   if (currentToken().type == TokenType::FLOAT_LITERAL) {
     auto node = std::make_unique<FloatNode>(std::stod(currentToken().value));
+    advance();
+    return node;
+  }
+  if (currentToken().type == TokenType::FLOAT_LITERAL_FLOAT) {
+    double val = std::stod(currentToken().value);
+    auto node = std::make_unique<FloatNode>(val, false); // float
+    advance();
+    return node;
+  }
+  if (currentToken().type == TokenType::FLOAT_LITERAL_DOUBLE) {
+    double val = std::stod(currentToken().value);
+    auto node = std::make_unique<FloatNode>(val, true); // double
     advance();
     return node;
   }

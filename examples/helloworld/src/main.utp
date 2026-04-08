@@ -1,0 +1,35 @@
+import "IDrawable.utp";
+import "Entity.utp";
+
+char* msg = "¡Hello World!";
+
+struct Vec3 {
+  float x;
+  float y;
+  float z;
+}
+
+class Circle extends Entity implements IDrawable {
+  float radius;
+  Circle(this.radius, this.name) {}
+  
+  void Draw() {
+    print(this.name, ":D");
+  }
+}
+
+int main() {
+  char* msg2 = "Mamaguebo, digo glu glu glu";
+  Vec3 vec3;
+  vec3.x = 10;
+  vec3.y = 20.0f;
+  vec3.z = 30;
+  print(msg);
+  print(msg2);
+  print("Vec3(", vec3.x, ", ", vec3.y, ", ", vec3.z, ");");
+
+  Circle* c = new Circle(10.0f, "Circle XD");
+  c.Draw();
+  c.Update();
+  return 0;
+}

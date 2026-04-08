@@ -68,6 +68,10 @@ bool CompilerDriver::run() {
   }
   loader.setRootModule(root);
 
+  std::cerr << "All modules (" << loader.getAllModules().size() << "):\n";
+  for (auto m : loader.getAllModules())
+    std::cerr << "  " << m->filename << "\n";
+
   Sema sema;
   if (!sema.analyzeModules(loader.getAllModules())) {
     for (auto &err : sema.getErrors()) {
@@ -136,6 +140,10 @@ bool CompilerDriver::run() {
     }
   }
 
+  std::cerr << "Modules to compile: " << modulesToCompile.size() << "\n";
+  for (auto m : modulesToCompile)
+    std::cerr << "  " << m->filename << "\n";
+
   for (ModuleNode *mod : modulesToCompile) {
     fs::path modPath(mod->filename);
     std::error_code ec;
@@ -157,7 +165,30 @@ bool CompilerDriver::run() {
     fs::path objPath = objDir / relPath;
 
     CodeGen codegen(mod->filename, options.isDebug);
-    codegen.generate(mod, objPath.string(), loader.getAllModules());
+    try {
+      codegen.generate(mod, objPath.string(), loader.getAllModules());
+    } catch (const std::exception &e) {
+      std::cerr << "Exception: " << e.what() << "\n";
+      return false;
+    } catch (...) {
+      std::cerr << "Unknown exception during codegen for " << mod->filename
+                << "\n";
+      return false;
+    }
+
+    fs::path basePath = objPath;
+    basePath.replace_extension(); // remove .o
+
+    if (options.emitLLVM) {
+      fs::path llPath = basePath;
+      llPath.replace_extension(".ll");
+      codegen.saveToFile(llPath.string());
+    }
+    if (options.emitAsm) {
+      fs::path asmPath = basePath;
+      asmPath.replace_extension(".s");
+      codegen.emitAssemblyFile(asmPath.string());
+    }
   }
 
   // Delegamos el linkeo directamente desde aquí.

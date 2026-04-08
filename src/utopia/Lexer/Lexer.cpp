@@ -63,16 +63,26 @@ Token Lexer::nextToken() {
       return {TokenType::KW_IMPORT, val, startLine, startCol};
     if (val == "int")
       return {TokenType::KW_INT, val, startLine, startCol};
-    if (val == "float")
-      return {TokenType::KW_FLOAT, val, startLine, startCol};
-    if (val == "String")
-      return {TokenType::KW_STRING_TYPE, val, startLine, startCol};
-    if (val == "bool")
-      return {TokenType::KW_BOOL, val, startLine, startCol};
     if (val == "uint")
       return {TokenType::KW_UINT, val, startLine, startCol};
+    if (val == "float")
+      return {TokenType::KW_FLOAT, val, startLine, startCol};
+    if (val == "double")
+      return {TokenType::KW_DOUBLE, val, startLine, startCol};
     if (val == "char")
       return {TokenType::KW_CHAR, val, startLine, startCol};
+    if (val == "uchar")
+      return {TokenType::KW_UCHAR, val, startLine, startCol};
+    if (val == "short")
+      return {TokenType::KW_SHORT, val, startLine, startCol};
+    if (val == "ushort")
+      return {TokenType::KW_USHORT, val, startLine, startCol};
+    if (val == "long")
+      return {TokenType::KW_LONG, val, startLine, startCol};
+    if (val == "ulong")
+      return {TokenType::KW_ULONG, val, startLine, startCol};
+    if (val == "bool")
+      return {TokenType::KW_BOOL, val, startLine, startCol};
     if (val == "void")
       return {TokenType::KW_VOID, val, startLine, startCol};
     if (val == "return")
@@ -137,30 +147,30 @@ Token Lexer::nextToken() {
     bool hasDot = false;
     while (cursor < source.length()) {
       char current = source[cursor];
-
       if (std::isdigit(static_cast<unsigned char>(current))) {
         val += current;
         advanceCursor();
       } else if (current == '.' && !hasDot) {
-        // LOOKAHEAD: We only use the period if the NEXT character is a digit.
-        // If it is a letter or a space (e.g., 42.isEven or 42.abs), the period
-        // is an operator
         if (cursor + 1 < source.length() &&
             std::isdigit(static_cast<unsigned char>(source[cursor + 1]))) {
           hasDot = true;
           val += current;
           advanceCursor();
-        } else {
-          // It's an integer followed by a possible member access. We break it
-          // here so that the dot is processed in the next nextToken()
+        } else
           break;
-        }
-      } else {
+      } else
         break;
-      }
     }
-    return {hasDot ? TokenType::FLOAT_LITERAL : TokenType::NUMBER, val,
-            startLine, startCol};
+    if (!hasDot) {
+      return {TokenType::NUMBER, val, startLine, startCol};
+    }
+    TokenType floatType = TokenType::FLOAT_LITERAL_DOUBLE; // por defecto double
+    if (cursor < source.length() &&
+        (source[cursor] == 'f' || source[cursor] == 'F')) {
+      advanceCursor();
+      floatType = TokenType::FLOAT_LITERAL_FLOAT;
+    }
+    return {floatType, val, startLine, startCol};
   }
 
   if (c == '"' || c == '\'') {

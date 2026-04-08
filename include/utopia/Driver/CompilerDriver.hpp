@@ -16,6 +16,8 @@ struct CompileOptions {
   std::string projectRoot;
   std::vector<std::string> includeDirs;
   std::vector<std::string> linkerFlags;
+  bool emitLLVM = false;
+  bool emitAsm = false;
 
   int optLevel = 0;
   bool isDebug = false;
