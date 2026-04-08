@@ -42,6 +42,11 @@ private:
   std::vector<llvm::BasicBlock *> continueTargets;
   std::vector<size_t> loopScopeDepths;
 
+  std::map<std::string, llvm::GlobalVariable *> vtables;
+  std::map<std::string, llvm::StructType *> vtableTypes;
+  std::map<std::string, std::map<std::string, int>> vtableLayout;
+  std::map<std::string, std::vector<std::string>> vtableMethods;
+
   std::map<std::string, StructDeclNode *> structASTs;
   std::map<std::string, llvm::StructType *> structTypes;
   std::map<std::string, std::map<std::string, int>> structMemberIndices;

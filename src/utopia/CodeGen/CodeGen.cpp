@@ -75,7 +75,12 @@ void CodeGen::registerModules(const std::vector<ModuleNode *> &allModules) {
     }
     for (auto &st : mod->structs) {
       structASTs[st->name] = st.get();
-      structTypes[st->name] = llvm::StructType::create(*context, st->name);
+      auto *existingTy = llvm::StructType::getTypeByName(*context, st->name);
+      if (!existingTy) {
+        structTypes[st->name] = llvm::StructType::create(*context, st->name);
+      } else {
+        structTypes[st->name] = existingTy;
+      }
     }
   }
 
@@ -86,6 +91,14 @@ void CodeGen::registerModules(const std::vector<ModuleNode *> &allModules) {
 
       auto buildMemoryLayout = [&](std::string className, auto &self) -> void {
         StructDeclNode *currentAST = structASTs[className];
+
+        /* The root of the bloodline gets the soul (vptr). No duplicated ptrs
+         * for children. */
+        if (currentAST->baseClass.empty() && currentAST->isClass) {
+          body.push_back(llvm::PointerType::get(*context, 0));
+          idx++;
+        }
+
         if (!currentAST->baseClass.empty() &&
             structASTs.count(currentAST->baseClass)) {
           self(currentAST->baseClass, self);
@@ -96,13 +109,22 @@ void CodeGen::registerModules(const std::vector<ModuleNode *> &allModules) {
 
           TypeInfo t = parseTypeString(f.typeName);
           body.push_back(getLLVMType(t));
-          structMemberIndices[st->name][f.name] = idx++;
+          structMemberIndices[st->name][f.name] = idx;
           structMemberTypes[st->name][f.name] = t;
+
+          idx++;
         }
       };
 
       buildMemoryLayout(st->name, buildMemoryLayout);
-      structTypes[st->name]->setBody(body);
+      if (structTypes[st->name]->isOpaque()) {
+        structTypes[st->name]->setBody(body);
+      }
+
+      std::cerr << "[CodeGen] Struct " << st->name << " fields:\n";
+      for (auto &[fName, idx] : structMemberIndices[st->name]) {
+        std::cerr << "  " << fName << " -> " << idx << "\n";
+      }
     }
 
     for (auto &func : mod->functions) {
@@ -163,6 +185,92 @@ void CodeGen::registerModules(const std::vector<ModuleNode *> &allModules) {
       }
     }
   }
+
+  /*
+   * VTABLE GENERATION & LAYOUT
+   * We forge the VTables after all signatures are mapped.
+   */
+  for (auto *mod : allModules) {
+    for (auto &st : mod->structs) {
+      if (!st->isClass)
+        continue;
+
+      std::map<std::string, int> layout;
+      std::vector<std::string> methods;
+
+      auto buildVTable = [&](std::string className, auto &self) -> void {
+        StructDeclNode *ast = structASTs[className];
+        if (!ast->baseClass.empty() && structASTs.count(ast->baseClass)) {
+          self(ast->baseClass, self);
+        }
+
+        for (auto &m : ast->methods) {
+          if (m->isStatic || m->isConstructor || m->isDestructor)
+            continue;
+
+          std::string definingClass =
+              m->className.empty() ? className : m->className;
+
+          std::string mangled = definingClass + "_" + m->name;
+          TypeInfo thisType = {definingClass, 1, false};
+          mangled += "_" + getMangledType(thisType);
+
+          for (auto &arg : m->args) {
+            TypeInfo t = arg.isThisAssign
+                             ? structMemberTypes[definingClass][arg.name]
+                             : parseTypeString(arg.type);
+            mangled += "_" + getMangledType(t);
+          }
+
+          if (layout.count(m->name)) {
+            methods[layout[m->name]] = mangled;
+          } else {
+            layout[m->name] = methods.size();
+            methods.push_back(mangled);
+          }
+        }
+      };
+
+      buildVTable(st->name, buildVTable);
+      vtableLayout[st->name] = layout;
+      vtableMethods[st->name] = methods;
+    }
+  }
+
+  for (auto const &[className, methods] : vtableMethods) {
+    std::vector<llvm::Constant *> vtableInit;
+    for (auto const &mangledName : methods) {
+      llvm::Function *func = module->getFunction(mangledName);
+
+      if (!func && functionTypes.count(mangledName)) {
+        std::vector<llvm::Type *> pTypes;
+        for (const auto &pt : functionParamTypes[mangledName]) {
+          pTypes.push_back(getLLVMType(pt));
+        }
+        llvm::FunctionType *fTy = llvm::FunctionType::get(
+            getLLVMType(functionTypes[mangledName]), pTypes, false);
+
+        func = llvm::Function::Create(fTy, llvm::Function::ExternalLinkage,
+                                      mangledName, module.get());
+      }
+
+      if (func) {
+        vtableInit.push_back(func);
+      } else {
+        vtableInit.push_back(llvm::ConstantPointerNull::get(
+            llvm::PointerType::get(*context, 0)));
+      }
+    }
+
+    if (!vtableInit.empty()) {
+      llvm::ArrayType *vtableTy = llvm::ArrayType::get(
+          llvm::PointerType::get(*context, 0), methods.size());
+      llvm::Constant *init = llvm::ConstantArray::get(vtableTy, vtableInit);
+      vtables[className] = new llvm::GlobalVariable(
+          *module, vtableTy, true, llvm::GlobalValue::LinkOnceODRLinkage, init,
+          className + "_vtable");
+    }
+  }
 }
 
 void CodeGen::generate(ModuleNode *astModule, const std::string &outputObjPath,
@@ -173,6 +281,14 @@ void CodeGen::generate(ModuleNode *astModule, const std::string &outputObjPath,
   breakTargets.clear();
   continueTargets.clear();
   loopScopeDepths.clear();
+  vtables.clear();
+  vtableLayout.clear();
+  vtableMethods.clear();
+  structTypes.clear();
+  structMemberIndices.clear();
+  structMemberTypes.clear();
+  functionTypes.clear();
+  functionParamTypes.clear();
   currentVal = nullptr;
   currentType = TypeInfo{};
   currentClass = "";
@@ -203,7 +319,18 @@ void CodeGen::generate(ModuleNode *astModule, const std::string &outputObjPath,
   registerModules(allModules);
 
   // Recorrer el AST del módulo
-  astModule->accept(this);
+  try {
+    astModule->accept(this);
+  } catch (const std::exception &e) {
+    std::cerr << "Exception during AST visit: " << e.what() << "\n";
+    throw;
+  }
+
+  if (llvm::verifyModule(*module, &llvm::errs())) {
+    std::cerr << "Module verification failed!\n";
+    module->print(llvm::errs(), nullptr);
+    exit(1);
+  }
 
   std::cerr << "LLVM module has " << module->getFunctionList().size()
             << " functions\n";
@@ -213,6 +340,16 @@ void CodeGen::generate(ModuleNode *astModule, const std::string &outputObjPath,
 
   // Emitir el objeto
   emitObjectFile(outputObjPath);
+
+  std::string error;
+  llvm::raw_string_ostream os(error);
+  if (llvm::verifyModule(*module, &os)) {
+    std::cerr << "LLVM IR Verification Error en " << astModule->filename
+              << ":\n"
+              << os.str() << std::endl;
+    // Aquí podrías guardar el .ll de todas formas para inspeccionarlo
+    exit(1);
+  }
 }
 
 // --------------------------------------------------------------------------
@@ -935,9 +1072,13 @@ void CodeGen::visit(ThisNode *node) {
     if (isLValueContext) {
       currentLValue = ptr;
     } else {
-      // If the object is an int/float, load it. We cannot do math with
-      // addresses
-      if (currentType.isPrimitive() && type.ptrDepth == 1) {
+      /*
+       * State bleeding.
+       * Evaluating currentType here reads the type of the PREVIOUS AST node.
+       * We strictly check the isolated type of 'this' to avoid destroying the
+       * pointer.
+       */
+      if (type.isPrimitive() && type.ptrDepth == 1) {
         currentVal =
             builder->CreateLoad(getLLVMType(type.base), ptr, "this.val");
         currentType = type;
@@ -961,9 +1102,8 @@ void CodeGen::visit(FunctionNode *node) {
 
   if ((node->isMethod && !node->isStatic) || node->isConstructor ||
       node->isDestructor) {
-    if (currentType.isPrimitive()) {
-      // If it's an extension of int/float, 'this' is the direct value, not a
-      // pointer.
+    TypeInfo classType = parseTypeString(node->className);
+    if (classType.isPrimitive()) {
       argTypes.push_back(getLLVMType(node->className));
       isPrimitiveExtension = true;
     } else {
@@ -980,8 +1120,17 @@ void CodeGen::visit(FunctionNode *node) {
   llvm::FunctionType *funcType =
       llvm::FunctionType::get(getLLVMType(retType), argTypes, false);
 
-  llvm::Function *func = llvm::Function::Create(
-      funcType, llvm::Function::ExternalLinkage, node->name, module.get());
+  /*
+   * VTable pre-declaration overlap.
+   * If registerModules already claimed the signature, blindly invoking Create()
+   * will silently suffix the implementation with '.1' to avoid symbol
+   * collision, bleeding the linker out. We hook the existing function instead.
+   */
+  llvm::Function *func = module->getFunction(node->name);
+  if (!func) {
+    func = llvm::Function::Create(funcType, llvm::Function::ExternalLinkage,
+                                  node->name, module.get());
+  }
 
   if (isDebug) {
     func->addFnAttr(llvm::Attribute::NoInline);
@@ -1101,6 +1250,13 @@ void CodeGen::visit(FunctionNode *node) {
     if (classAST) {
       llvm::Value *thisPtr = builder->CreateLoad(
           llvm::PointerType::get(*context, 0), lookupValue("this"));
+
+      /* Bind the soul. Inject VTable pointer at index 0 if it exists. */
+      if (classAST->isClass && vtables.count(node->className)) {
+        llvm::Value *vptrAddr = builder->CreateStructGEP(
+            structTypes[node->className], thisPtr, 0, "vptr.addr");
+        builder->CreateStore(vtables[node->className], vptrAddr);
+      }
 
       for (auto &field : classAST->fields) {
         if (field.isStatic)
@@ -1723,7 +1879,6 @@ void CodeGen::visit(VariableNode *node) {
     if (globalVarTypes.count(node->name)) {
       llvm::GlobalVariable *gVar = module->getNamedGlobal(node->name);
       if (!gVar) {
-        // Declaración en vuelo. El linker resolverá esto luego.
         llvm::Type *llTy = getLLVMType(globalVarTypes[node->name]);
         gVar = static_cast<llvm::GlobalVariable *>(
             module->getOrInsertGlobal(node->name, llTy));
@@ -1731,9 +1886,10 @@ void CodeGen::visit(VariableNode *node) {
       alloca = gVar;
       type = globalVarTypes[node->name];
     } else {
-      if (currentType.isPrimitive()) {
+      TypeInfo tempType = {node->name, 0, false};
+      if (tempType.isPrimitive()) {
         currentVal = nullptr;
-        currentType = {node->name, 0, false};
+        currentType = tempType;
         return;
       }
 
@@ -1763,7 +1919,7 @@ void CodeGen::visit(VariableNode *node) {
       // We hit a naked symbol that isn't mapped to an address.
       // If it's a known struct, the AST is likely resolving a static method
       // call (e.g., Entity.create()) and evaluated the class symbol as an
-      // object. Yield a null pointer and the type identity, CallNode will take
+      // object. Yield a null pointer and the type identity,  will take
       // it from here.
       if (structTypes.count(node->name)) {
         currentVal = nullptr;
@@ -1973,7 +2129,7 @@ void CodeGen::visit(AddressOfNode *node) {
   isLValueContext = old;
   currentVal = currentLValue;
 
-  // Wipe the L-value tag. If left alive, CallNode assumes a memory
+  // Wipe the L-value tag. If left alive,  assumes a memory
   // location and executes a 64-bit pointer load over adjacent 32-bit
   // array elements. 0x0000000A00000000
   currentLValue = nullptr;
@@ -2355,7 +2511,35 @@ void CodeGen::visit(CallNode *node) {
     args.push_back(argVal);
   }
 
-  currentVal = builder->CreateCall(f, args);
+  llvm::FunctionType *fTy = f->getFunctionType();
+  llvm::Value *callableFunc = f;
+
+  if (thisArg && structASTs.count(currentType.base) &&
+      structASTs[currentType.base]->isClass) {
+    auto &layout = vtableLayout[currentType.base];
+    if (layout.count(node->callee)) {
+      /*
+       * VIRTUAL DISPATCH TRAMPOLINE
+       * 1. Extract the vptr from index 0.
+       * 2. GEP to the specific method index.
+       * 3. Load the function pointer and execute.
+       */
+      int vtableIdx = layout[node->callee];
+      llvm::Value *vptrAddr = builder->CreateStructGEP(
+          structTypes[currentType.base], thisArg, 0, "vptr_addr");
+      llvm::Value *vtable = builder->CreateLoad(
+          llvm::PointerType::get(*context, 0), vptrAddr, "vtable");
+
+      llvm::Value *funcPtrAddr = builder->CreateInBoundsGEP(
+          llvm::PointerType::get(*context, 0), vtable,
+          llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), vtableIdx),
+          "vfunc_addr");
+      callableFunc = builder->CreateLoad(llvm::PointerType::get(*context, 0),
+                                         funcPtrAddr, "vfunc");
+    }
+  }
+
+  currentVal = builder->CreateCall(fTy, callableFunc, args);
   currentType = functionTypes.count(finalMangled) ? functionTypes[finalMangled]
                                                   : TypeInfo{"int"};
 }

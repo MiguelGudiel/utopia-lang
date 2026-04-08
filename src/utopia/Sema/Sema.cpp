@@ -50,10 +50,54 @@ bool Sema::analyzeModules(const std::vector<ModuleNode *> &modules) {
       classModuleMap[st->name] = mod->filename;
       StructDef def;
       def.isClass = st->isClass;
+      def.baseClass = st->baseClass;
+      def.hasVTable = !st->baseClass.empty();
+      def.isClass = st->isClass;
+
+      if (!st->baseClass.empty() && customStructs.count(st->baseClass)) {
+        def.vtableLayout = customStructs[st->baseClass].vtableLayout;
+        def.vtableMethods = customStructs[st->baseClass].vtableMethods;
+      }
+
       int idx = 0;
       for (auto &f : st->fields) {
         def.fields[f.name] = {parseType(f.typeName, st.get()), f.modifier,
                               f.isStatic ? -1 : idx++, f.isStatic};
+      }
+
+      // Register methods in the VTable and validate @override
+      for (auto &m : st->methods) {
+        if (m->isStatic || m->isConstructor || m->isDestructor)
+          continue;
+
+        def.hasVTable =
+            true; // If there are instance methods in a class, we force VTable
+
+        bool hasOverrideAlias =
+            std::find(m->decorators.begin(), m->decorators.end(), "override") !=
+            m->decorators.end();
+
+        if (def.vtableLayout.count(m->name)) {
+          // The method already exists in the parent system; it is being
+          // overwritten
+          if (!hasOverrideAlias) {
+            reportError(m.get(), "Semantic Error: Method '" + m->name +
+                                     "' overwrites a base class method but "
+                                     "lacks @override decorator.");
+          }
+          // We updated the implementation in that index
+          int vtableIdx = def.vtableLayout[m->name];
+          def.vtableMethods[vtableIdx] = st->name + "_" + m->name;
+        } else {
+          if (hasOverrideAlias) {
+            reportError(m.get(), "Semantic Error: Method '" + m->name +
+                                     "' is marked with @override but no base "
+                                     "class method matches this signature.");
+          }
+          // It's a new method, it goes at the end of the VTable
+          def.vtableLayout[m->name] = def.vtableMethods.size();
+          def.vtableMethods.push_back(st->name + "_" + m->name);
+        }
       }
       customStructs[st->name] = def;
     }
@@ -353,7 +397,7 @@ bool Sema::analyze(ProgramNode *program) {
           }
           if (!found)
             t = {"error", 0, false};
-          arg.type = t.base;
+          arg.type = typeToString(t);
         } else {
           t = parseType(arg.type, program);
         }

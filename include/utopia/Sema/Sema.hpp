@@ -22,6 +22,9 @@ private:
 
   struct StructDef {
     bool isClass;
+    bool hasVTable = false;
+    std::string baseClass;
+
     struct Field {
       TypeInfo type;
       AccessModifier mod;
@@ -29,6 +32,10 @@ private:
       bool isStatic;
     };
     std::map<std::string, Field> fields;
+
+    // Map method name to its index in the VTable
+    std::map<std::string, int> vtableLayout;
+    std::vector<std::string> vtableMethods; // Exact order of the table
     std::vector<int> constructorArities;
   };
 

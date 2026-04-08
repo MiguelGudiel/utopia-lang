@@ -104,24 +104,35 @@ ModuleNode *ModuleLoader::loadModule(const std::string &importPath,
                                      const fs::path &currentFileDir) {
   fs::path absPath = resolveImportPath(importPath, currentFileDir);
   if (absPath.empty()) {
-    // Error: Module not found
     return nullptr;
   }
+
   std::string key = absPath.string();
   if (loadedModules.find(key) != loadedModules.end()) {
     return loadedModules[key].get();
   }
-  // Load module
+
   auto module = std::unique_ptr<ModuleNode>(parseModule(absPath));
   if (!module)
     return nullptr;
+
   ModuleNode *ptr = module.get();
+
+  /* Lock the symbol in the cache to prevent cyclic import explosions */
   loadedModules[key] = std::move(module);
-  allModules.push_back(ptr);
-  // Cargar recursivamente sus imports
+
   for (const auto &imp : ptr->imports) {
     loadModule(imp, absPath.parent_path());
   }
+
+  /*
+   * Post-order insertion.
+   * We must flush the dependencies into the module list before the parent.
+   * If we don't, Sema evaluates derived classes before their base classes exist
+   * and hallucinates missing vtables.
+   */
+  allModules.push_back(ptr);
+
   return ptr;
 }
 

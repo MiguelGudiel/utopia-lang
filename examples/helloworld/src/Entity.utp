@@ -2,6 +2,6 @@ class Entity {
   char* name;
 
   void Update() {
-    print("Entity updated");
+    print("Entity updated", this.name);
   }
 }
