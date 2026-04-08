@@ -1,6 +1,6 @@
 class Entity {
   char* name;
-  
+
   void Update() {
     print("Entity updated");
   }

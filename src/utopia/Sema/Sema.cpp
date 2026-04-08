@@ -1,12 +1,22 @@
 #include "utopia/Sema/Sema.hpp"
 #include <iostream>
 #include <llvm/IR/Function.h>
-#include <unordered_set>
 
 namespace utopia {
 
 void Sema::enterScope() { scopeStack.push_back({}); }
 void Sema::exitScope() { scopeStack.pop_back(); }
+
+std::string typeToString(const TypeInfo &t) {
+  std::string s = t.base;
+  for (unsigned i = 0; i < t.ptrDepth; ++i)
+    s += "*";
+  if (t.isReference)
+    s += "&";
+  if (t.isNullable)
+    s += "?";
+  return s;
+}
 
 Sema::Symbol *Sema::lookup(const std::string &name) {
   for (auto it = scopeStack.rbegin(); it != scopeStack.rend(); ++it) {
@@ -67,9 +77,6 @@ bool Sema::analyzeModules(const std::vector<ModuleNode *> &modules) {
           mangledName += "_" + getMangledType(thisType);
         }
 
-        std::cerr << "[Sema] Registered constructor " << mangledName
-                  << " for class " << st->name << "\n";
-
         for (auto &arg : m->args) {
           TypeInfo t;
           if (arg.isThisAssign) {
@@ -91,13 +98,16 @@ bool Sema::analyzeModules(const std::vector<ModuleNode *> &modules) {
             if (!found)
               t = {"error", 0, false};
 
-            arg.type = t.base;
+            arg.type = typeToString(t);
           } else {
             t = parseType(arg.type, m.get());
           }
           params.push_back(t);
           mangledName += "_" + getMangledType(t);
         }
+
+        std::cerr << "[Sema] Registered constructor " << mangledName
+                  << " for class " << st->name << "\n";
 
         TypeInfo ret = parseType(m->returnType, m.get());
         registerOverload(baseName, mangledName, params, ret);
@@ -231,17 +241,6 @@ TypeInfo Sema::parseType(const std::string &typeName, ASTNode *node) {
   }
 
   return t;
-}
-
-std::string typeToString(const TypeInfo &t) {
-  std::string s = t.base;
-  for (unsigned i = 0; i < t.ptrDepth; ++i)
-    s += "*";
-  if (t.isReference)
-    s += "&";
-  if (t.isNullable)
-    s += "?";
-  return s;
 }
 
 bool Sema::checkAssignment(const TypeInfo &target, const TypeInfo &source,
@@ -930,12 +929,14 @@ void Sema::visit(VarDeclNode *node) {
 
   TypeInfo declType = parseType(node->typeName, node);
 
-  if (node->arraySize) {
-    node->arraySize->accept(this);
-    if (currentExprType.base != "int") {
-      reportError(node, "Array size must evaluate to an integer.");
+  if (!node->arraySizes.empty()) {
+    for (auto &sz : node->arraySizes) {
+      sz->accept(this);
+      if (currentExprType.base != "int") {
+        reportError(node, "Array sizes must evaluate to integers.");
+      }
     }
-    declType.isArray = true;
+    declType.arrayDimensions = node->arraySizes.size();
   }
 
   if (node->initializer) {
@@ -956,7 +957,7 @@ void Sema::visit(SubscriptNode *node) {
                 "'!' to assert non-nullity (e.g., 'ptr![index]').");
   }
 
-  // Since VariableNode already decayed, objType is already a pointer (ptrDepth
+  // Since  already decayed, objType is already a pointer (ptrDepth
   // > 0)
   if (objType.ptrDepth == 0) {
     reportError(node, "Subscript operator [] requires a pointer or array.");
@@ -980,9 +981,9 @@ void Sema::visit(VariableNode *node) {
   if (sym) {
     currentExprType = sym->type;
     // Native Array-to-Pointer Decay
-    if (currentExprType.isArray) {
-      currentExprType.isArray = false;
-      currentExprType.ptrDepth++;
+    if (currentExprType.arrayDimensions > 0) {
+      currentExprType.ptrDepth += currentExprType.arrayDimensions;
+      currentExprType.arrayDimensions = 0;
     }
     return;
   }
@@ -1260,7 +1261,10 @@ void Sema::visit(DerefNode *node) {
 
 void Sema::visit(NewNode *node) {
   TypeInfo resultType = parseType(node->typeName, node);
-  resultType.ptrDepth = 1; // Heap allocation always returns a pointer
+  resultType.ptrDepth +=
+      node->arraySizes.empty()
+          ? 1
+          : node->arraySizes.size(); // Heap allocation always returns a pointer
 
   std::vector<TypeInfo> argTypes;
   for (auto &a : node->arguments) {
@@ -1269,7 +1273,7 @@ void Sema::visit(NewNode *node) {
   }
 
   if (customStructs.count(node->typeName)) {
-    if (!node->arraySize) {
+    if (node->arraySizes.empty()) {
       std::string baseName = node->typeName + "_" + node->typeName;
       TypeInfo outRet;
 

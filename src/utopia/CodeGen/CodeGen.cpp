@@ -10,7 +10,6 @@
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/TargetParser/Host.h>
 #include <optional>
-#include <unordered_set>
 
 namespace utopia {
 
@@ -270,7 +269,7 @@ llvm::DIType *CodeGen::getDebugType(const TypeInfo &type) {
      */
     TypeInfo pointee = type;
     pointee.ptrDepth = 0;
-    pointee.isArray = false;
+    pointee.arrayDimensions = 0;
     pointee.isReference = false;
     pointee.isRValueRef = false;
     return dbgBuilder->createPointerType(getDebugType(pointee), 64);
@@ -388,7 +387,8 @@ TypeInfo CodeGen::parseTypeString(const std::string &typeName) const {
 }
 
 llvm::Type *CodeGen::getLLVMType(const TypeInfo &type) {
-  if (type.ptrDepth > 0 || type.isReference || type.isRValueRef)
+  if (type.ptrDepth > 0 || type.arrayDimensions > 0 || type.isReference ||
+      type.isRValueRef)
     return llvm::PointerType::get(*context, 0);
   if (structTypes.count(type.base))
     return structTypes[type.base];
@@ -1301,30 +1301,118 @@ void CodeGen::visit(VarDeclNode *node) {
     return;
   }
 
-  if (node->arraySize) {
-    node->arraySize->accept(this);
-    llvm::Value *sizeVal = currentVal;
-
-    llvm::AllocaInst *alloca =
-        builder->CreateAlloca(llvmType, sizeVal, node->name);
-
-    if (isDebug && !dbgScopes.empty()) {
-      llvm::DILocalVariable *dbgVar =
-          dbgBuilder->createAutoVariable(dbgScopes.back(), node->name, dbgFile,
-                                         node->line, getDebugType(declType));
-
-      dbgBuilder->insertDeclare(alloca, dbgVar, dbgBuilder->createExpression(),
-                                llvm::DILocation::get(*context, node->line,
-                                                      node->column,
-                                                      dbgScopes.back()),
-                                builder->GetInsertBlock());
+  if (!node->arraySizes.empty()) {
+    std::vector<llvm::Value *> sizeVals;
+    for (auto &szNode : node->arraySizes) {
+      szNode->accept(this);
+      llvm::Value *sz = currentVal;
+      if (sz->getType()->isIntegerTy(32))
+        sz = builder->CreateZExt(sz, llvm::Type::getInt64Ty(*context));
+      sizeVals.push_back(sz);
     }
 
-    emitLifecycleLoop(alloca, sizeVal, node->typeName, false);
+    // WTF: Single-Allocation Iliffe Vector Stack Allocation.
+    // Adiós a los alloca recursivos. Destrozamos la memoria con un bloque
+    // gigante y contiguo.
+    llvm::Type *i64 = builder->getInt64Ty();
+    llvm::Type *i8 = builder->getInt8Ty();
+    llvm::Type *ptrTy = llvm::PointerType::get(*context, 0);
 
-    declType.isArray = true;
-    valueScopes.back().push_back({node->name, alloca});
+    std::vector<llvm::Value *> levelCounts;
+    llvm::Value *curCount = builder->getInt64(1);
+    for (auto sz : sizeVals) {
+      curCount = builder->CreateMul(curCount, sz);
+      levelCounts.push_back(curCount);
+    }
+
+    llvm::Value *totalData = levelCounts.back();
+    llvm::Value *totalPointers = builder->getInt64(0);
+
+    for (size_t i = 0; i < sizeVals.size() - 1; ++i) {
+      totalPointers = builder->CreateAdd(totalPointers, levelCounts[i]);
+    }
+
+    uint64_t elemSize =
+        module->getDataLayout().getTypeAllocSize(getLLVMType(declType));
+    llvm::Value *ptrBytes =
+        builder->CreateMul(totalPointers, builder->getInt64(8));
+    llvm::Value *dataBytes =
+        builder->CreateMul(totalData, builder->getInt64(elemSize));
+    llvm::Value *totalBytes = builder->CreateAdd(ptrBytes, dataBytes);
+
+    // Un solo Alloca masivo.
+    llvm::Value *blockMem =
+        builder->CreateAlloca(i8, totalBytes, node->name + "_flat_vla");
+
+    std::vector<llvm::Value *> levelOffsets;
+    llvm::Value *currentOffset = builder->getInt64(0);
+    for (size_t i = 0; i < sizeVals.size() - 1; ++i) {
+      levelOffsets.push_back(currentOffset);
+      llvm::Value *levelBytes =
+          builder->CreateMul(levelCounts[i], builder->getInt64(8));
+      currentOffset = builder->CreateAdd(currentOffset, levelBytes);
+    }
+    llvm::Value *dataOffset = currentOffset;
+    levelOffsets.push_back(dataOffset);
+
+    // Runtime pointer threading magic.
+    llvm::Function *func = builder->GetInsertBlock()->getParent();
+    for (size_t L = 0; L < sizeVals.size() - 1; ++L) {
+      llvm::Value *numPtrs = levelCounts[L];
+      llvm::Value *stride = sizeVals[L + 1];
+      llvm::Value *curLvlOffset = levelOffsets[L];
+      llvm::Value *nextLvlOffset = levelOffsets[L + 1];
+      llvm::Value *nextElemSz =
+          builder->getInt64((L == sizeVals.size() - 2) ? elemSize : 8);
+
+      llvm::BasicBlock *condBB =
+          llvm::BasicBlock::Create(*context, "vla.cond", func);
+      llvm::BasicBlock *bodyBB =
+          llvm::BasicBlock::Create(*context, "vla.body", func);
+      llvm::BasicBlock *endBB =
+          llvm::BasicBlock::Create(*context, "vla.end", func);
+
+      llvm::AllocaInst *idxPtr = builder->CreateAlloca(i64, nullptr, "idx");
+      builder->CreateStore(builder->getInt64(0), idxPtr);
+      builder->CreateBr(condBB);
+
+      builder->SetInsertPoint(condBB);
+      llvm::Value *idx = builder->CreateLoad(i64, idxPtr);
+      llvm::Value *cmp = builder->CreateICmpULT(idx, numPtrs);
+      builder->CreateCondBr(cmp, bodyBB, endBB);
+
+      builder->SetInsertPoint(bodyBB);
+      llvm::Value *ptrOffset = builder->CreateAdd(
+          curLvlOffset, builder->CreateMul(idx, builder->getInt64(8)));
+      llvm::Value *ptrAddr =
+          builder->CreateInBoundsGEP(i8, blockMem, ptrOffset);
+      ptrAddr = builder->CreateBitCast(ptrAddr, ptrTy);
+
+      llvm::Value *targetOffset = builder->CreateAdd(
+          nextLvlOffset,
+          builder->CreateMul(builder->CreateMul(idx, stride), nextElemSz));
+      llvm::Value *targetAddr =
+          builder->CreateInBoundsGEP(i8, blockMem, targetOffset);
+
+      builder->CreateStore(targetAddr, ptrAddr);
+
+      builder->CreateStore(builder->CreateAdd(idx, builder->getInt64(1)),
+                           idxPtr);
+      builder->CreateBr(condBB);
+      builder->SetInsertPoint(endBB);
+    }
+
+    llvm::Value *dataStart =
+        builder->CreateInBoundsGEP(i8, blockMem, dataOffset);
+    emitLifecycleLoop(builder->CreateBitCast(dataStart, ptrTy), totalData,
+                      node->typeName, false);
+
+    declType.arrayDimensions = node->arraySizes.size();
+    llvm::Value *finalAlloca =
+        builder->CreateBitCast(blockMem, getLLVMType(declType));
+    valueScopes.back().push_back({node->name, finalAlloca});
     typeScopes.back()[node->name] = declType;
+
   } else {
     llvm::Type *llvmType = getLLVMType(declType);
     llvm::AllocaInst *alloca =
@@ -1350,7 +1438,7 @@ void CodeGen::visit(VarDeclNode *node) {
       if (isRef)
         isLValueContext = true;
 
-      // Set the RVO trap. We tell the child expression exactly where to build.
+      // Set the RVO trap.
       if (canRVO) {
         rvoTarget = alloca;
       }
@@ -1369,8 +1457,6 @@ void CodeGen::visit(VarDeclNode *node) {
         llvm::Value *refTarget = currentLValue ? currentLValue : currentVal;
         builder->CreateStore(refTarget, alloca);
       } else {
-        // RVO Verification: If the returned value IS our allocated address,
-        // the constructor executed in-place. We bypass the copy constructor.
         if (initVal != alloca) {
           emitCopyOrStore(alloca, castValue(initVal, currentType, declType),
                           declType, currentType);
@@ -1702,7 +1788,7 @@ void CodeGen::visit(VariableNode *node) {
   } else {
     if (structTypes.count(type.base) && type.ptrDepth == 0) {
       currentVal = baseAddr;
-    } else if (type.isArray) {
+    } else if (type.arrayDimensions > 0) {
       currentVal = baseAddr;
     } else {
       // strip reference flag. if we don't, getLLVMType returns ptr
@@ -1715,9 +1801,10 @@ void CodeGen::visit(VariableNode *node) {
   }
 
   currentType = type;
-  if (currentType.isArray) {
-    currentType.isArray = false;
-    currentType.ptrDepth++;
+  if (currentType.arrayDimensions > 0) {
+    // Decay full dimensions into pointer indirection.
+    currentType.ptrDepth += currentType.arrayDimensions;
+    currentType.arrayDimensions = 0;
   }
 }
 
@@ -1914,58 +2001,128 @@ void CodeGen::visit(NewNode *node) {
   TypeInfo baseType = parseTypeString(node->typeName);
   llvm::Type *llvmType = getLLVMType(baseType);
 
-  llvm::Value *sizeVal = nullptr;
-  if (node->arraySize) {
-    node->arraySize->accept(this);
-    sizeVal = currentVal;
-    if (sizeVal->getType()->isIntegerTy(32)) {
-      sizeVal = builder->CreateZExt(sizeVal, llvm::Type::getInt64Ty(*context));
-    }
+  std::vector<llvm::Value *> sizeVals;
+  for (auto &szNode : node->arraySizes) {
+    szNode->accept(this);
+    llvm::Value *sz = currentVal;
+    if (sz->getType()->isIntegerTy(32))
+      sz = builder->CreateZExt(sz, llvm::Type::getInt64Ty(*context));
+    sizeVals.push_back(sz);
   }
 
-  uint64_t typeBytes = module->getDataLayout().getTypeAllocSize(llvmType);
-  llvm::Value *typeSz =
-      llvm::ConstantInt::get(*context, llvm::APInt(64, typeBytes));
+  if (!sizeVals.empty()) {
+    // WTF: Single-Allocation Iliffe Vector Heap Allocation.
+    // Adiós al laberinto de fragmentación. Un solo malloc y que la caché fluya.
+    llvm::Type *i64 = builder->getInt64Ty();
+    llvm::Type *i8 = builder->getInt8Ty();
+    llvm::Type *ptrTy = llvm::PointerType::get(*context, 0);
 
-  llvm::Value *totalSz = typeSz;
-  bool needsCookie = false;
-
-  if (sizeVal) {
-    std::string dtorName = node->typeName + "_~" + node->typeName;
-    needsCookie = (module->getFunction(dtorName) != nullptr);
-
-    llvm::Value *arrayBytes =
-        builder->CreateMul(typeSz, sizeVal, "array_bytes");
-
-    if (needsCookie) {
-      totalSz = builder->CreateAdd(
-          arrayBytes, llvm::ConstantInt::get(*context, llvm::APInt(64, 8)),
-          "total_sz_with_cookie");
-    } else {
-      totalSz = arrayBytes;
+    std::vector<llvm::Value *> levelCounts;
+    llvm::Value *curCount = builder->getInt64(1);
+    for (auto sz : sizeVals) {
+      curCount = builder->CreateMul(curCount, sz);
+      levelCounts.push_back(curCount);
     }
-  }
 
-  llvm::Value *rawMem =
-      builder->CreateCall(getMallocPrototype(), {totalSz}, "raw_mem");
+    llvm::Value *totalData = levelCounts.back();
+    llvm::Value *totalPointers = builder->getInt64(0);
 
-  if (sizeVal) {
-    if (needsCookie) {
-      builder->CreateStore(sizeVal, rawMem);
-
-      /* Shift the pointer past the metadata cookie.
-       * Memory layout: [ 8 bytes size ][ elements... ] */
-      llvm::Value *arrayBase = builder->CreateInBoundsGEP(
-          llvm::Type::getInt8Ty(*context), rawMem,
-          llvm::ConstantInt::get(*context, llvm::APInt(64, 8)), "array_base");
-
-      emitLifecycleLoop(arrayBase, sizeVal, node->typeName, false);
-      currentVal = arrayBase;
-    } else {
-      emitLifecycleLoop(rawMem, sizeVal, node->typeName, false);
-      currentVal = rawMem;
+    for (size_t i = 0; i < sizeVals.size() - 1; ++i) {
+      totalPointers = builder->CreateAdd(totalPointers, levelCounts[i]);
     }
+
+    uint64_t elemSize =
+        module->getDataLayout().getTypeAllocSize(getLLVMType(baseType));
+    llvm::Value *ptrBytes =
+        builder->CreateMul(totalPointers, builder->getInt64(8));
+    llvm::Value *dataBytes =
+        builder->CreateMul(totalData, builder->getInt64(elemSize));
+    llvm::Value *totalBytes = builder->CreateAdd(ptrBytes, dataBytes);
+
+    // Aseguramos la supervivencia agregando 8 bytes extra para que DeleteNode
+    // no reviente.
+    llvm::Value *allocBytes =
+        builder->CreateAdd(totalBytes, builder->getInt64(8));
+    llvm::Value *rawMem = builder->CreateCall(getMallocPrototype(),
+                                              {allocBytes}, "flat_matrix_heap");
+
+    // Anclamos el tamaño en el offset -8 para DeleteNode.
+    builder->CreateStore(
+        totalData,
+        builder->CreateBitCast(rawMem, llvm::PointerType::get(i64, 0)));
+    llvm::Value *blockMem =
+        builder->CreateInBoundsGEP(i8, rawMem, builder->getInt64(8));
+
+    std::vector<llvm::Value *> levelOffsets;
+    llvm::Value *currentOffset = builder->getInt64(0);
+    for (size_t i = 0; i < sizeVals.size() - 1; ++i) {
+      levelOffsets.push_back(currentOffset);
+      llvm::Value *levelBytes =
+          builder->CreateMul(levelCounts[i], builder->getInt64(8));
+      currentOffset = builder->CreateAdd(currentOffset, levelBytes);
+    }
+    llvm::Value *dataOffset = currentOffset;
+    levelOffsets.push_back(dataOffset);
+
+    // The Pointer Threader
+    llvm::Function *func = builder->GetInsertBlock()->getParent();
+    for (size_t L = 0; L < sizeVals.size() - 1; ++L) {
+      llvm::Value *numPtrs = levelCounts[L];
+      llvm::Value *stride = sizeVals[L + 1];
+      llvm::Value *curLvlOffset = levelOffsets[L];
+      llvm::Value *nextLvlOffset = levelOffsets[L + 1];
+      llvm::Value *nextElemSz =
+          builder->getInt64((L == sizeVals.size() - 2) ? elemSize : 8);
+
+      llvm::BasicBlock *condBB =
+          llvm::BasicBlock::Create(*context, "arr.cond", func);
+      llvm::BasicBlock *bodyBB =
+          llvm::BasicBlock::Create(*context, "arr.body", func);
+      llvm::BasicBlock *endBB =
+          llvm::BasicBlock::Create(*context, "arr.end", func);
+
+      llvm::AllocaInst *idxPtr = builder->CreateAlloca(i64, nullptr, "idx");
+      builder->CreateStore(builder->getInt64(0), idxPtr);
+      builder->CreateBr(condBB);
+
+      builder->SetInsertPoint(condBB);
+      llvm::Value *idx = builder->CreateLoad(i64, idxPtr);
+      llvm::Value *cmp = builder->CreateICmpULT(idx, numPtrs);
+      builder->CreateCondBr(cmp, bodyBB, endBB);
+
+      builder->SetInsertPoint(bodyBB);
+      llvm::Value *ptrOffset = builder->CreateAdd(
+          curLvlOffset, builder->CreateMul(idx, builder->getInt64(8)));
+      llvm::Value *ptrAddr =
+          builder->CreateInBoundsGEP(i8, blockMem, ptrOffset);
+      ptrAddr = builder->CreateBitCast(ptrAddr, ptrTy);
+
+      llvm::Value *targetOffset = builder->CreateAdd(
+          nextLvlOffset,
+          builder->CreateMul(builder->CreateMul(idx, stride), nextElemSz));
+      llvm::Value *targetAddr =
+          builder->CreateInBoundsGEP(i8, blockMem, targetOffset);
+
+      builder->CreateStore(targetAddr, ptrAddr);
+
+      builder->CreateStore(builder->CreateAdd(idx, builder->getInt64(1)),
+                           idxPtr);
+      builder->CreateBr(condBB);
+      builder->SetInsertPoint(endBB);
+    }
+
+    llvm::Value *dataStart =
+        builder->CreateInBoundsGEP(i8, blockMem, dataOffset);
+    emitLifecycleLoop(builder->CreateBitCast(dataStart, ptrTy), totalData,
+                      node->typeName, false);
+
+    currentVal = builder->CreateBitCast(blockMem, ptrTy);
   } else {
+    uint64_t typeBytes = module->getDataLayout().getTypeAllocSize(llvmType);
+    llvm::Value *typeSz =
+        llvm::ConstantInt::get(*context, llvm::APInt(64, typeBytes));
+    llvm::Value *rawMem =
+        builder->CreateCall(getMallocPrototype(), {typeSz}, "raw_mem");
     std::vector<TypeInfo> expectedParams;
     if (functionParamTypes.count(node->resolvedMangledName)) {
       expectedParams = functionParamTypes[node->resolvedMangledName];
@@ -1979,8 +2136,7 @@ void CodeGen::visit(NewNode *node) {
       arg->accept(this);
       llvm::Value *argVal = currentVal;
 
-      /* Force alignment for overloaded constructors.
-       * LLVM takes no prisoners if signatures mismatch. */
+      /* Force alignment for overloaded constructors. */
       if (pIdx < expectedParams.size()) {
         argVal = castValue(argVal, currentType, expectedParams[pIdx]);
       }
@@ -2003,18 +2159,8 @@ void CodeGen::visit(NewNode *node) {
   }
 
   currentType = baseType;
-  currentType.ptrDepth = 1;
-
-  std::cerr << "[CodeGen] Looking for constructor: "
-            << node->resolvedMangledName << "\n";
-  llvm::Function *ctor = module->getFunction(node->resolvedMangledName);
-  if (ctor)
-    std::cerr << "  Found.\n";
-  else
-    std::cerr << "  NOT FOUND.\n";
-
-  for (auto &F : module->getFunctionList())
-    std::cerr << "  Function: " << F.getName().str() << "\n";
+  currentType.ptrDepth +=
+      node->arraySizes.empty() ? 1 : node->arraySizes.size();
 }
 
 void CodeGen::visit(CallNode *node) {
@@ -2306,7 +2452,7 @@ void CodeGen::optimize(int level) {
   llvm::CGSCCAnalysisManager cgam;
   llvm::ModuleAnalysisManager mam;
 
-  llvm::PassBuilder pb;
+  llvm::PassBuilder pb(targetMachine.get());
   pb.registerModuleAnalyses(mam);
   pb.registerCGSCCAnalyses(cgam);
   pb.registerFunctionAnalyses(fam);

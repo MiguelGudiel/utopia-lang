@@ -167,6 +167,10 @@ bool CompilerDriver::run() {
     CodeGen codegen(mod->filename, options.isDebug);
     try {
       codegen.generate(mod, objPath.string(), loader.getAllModules());
+
+      if (options.optLevel > 0) {
+        codegen.optimize(options.optLevel);
+      }
     } catch (const std::exception &e) {
       std::cerr << "Exception: " << e.what() << "\n";
       return false;

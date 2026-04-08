@@ -634,25 +634,27 @@ std::unique_ptr<ExprNode> Parser::parsePrimaryBase() {
 
   if (match(TokenType::KW_NEW)) {
     std::string typeName = consumeType();
-    std::unique_ptr<ExprNode> arrSize = nullptr;
     std::vector<std::unique_ptr<ExprNode>> args;
 
-    if (match(TokenType::LBRACKET)) {
-      arrSize = parseExpression();
+    auto node = std::make_unique<NewNode>(typeName, std::move(args));
+
+    while (match(TokenType::LBRACKET)) {
+      node->arraySizes.push_back(parseExpression());
       expect(TokenType::RBRACKET, "Expected ']' after array size");
     }
 
     if (match(TokenType::LPAREN)) {
       while (currentToken().type != TokenType::RPAREN &&
              currentToken().type != TokenType::EOF_TOK) {
-        args.push_back(parseExpression());
+
+        node->arguments.push_back(parseExpression());
+
         if (currentToken().type == TokenType::COMMA)
           advance();
       }
       expect(TokenType::RPAREN, "Expected ')' after constructor arguments");
     }
-    auto node = std::make_unique<NewNode>(typeName, std::move(args));
-    node->arraySize = std::move(arrSize);
+
     return node;
   }
 
@@ -865,15 +867,22 @@ std::unique_ptr<ASTNode> Parser::parseStatement() {
     std::string varName = currentToken().value;
     expect(TokenType::IDENTIFIER, "Expected the variable name");
 
+    std::unique_ptr<ExprNode> init = nullptr;
+
+    auto node =
+        std::make_unique<VarDeclNode>(typeName, varName, preamble.isConst,
+                                      preamble.isStatic, std::move(init));
+
     std::unique_ptr<ExprNode> arrSize = nullptr;
-    if (match(TokenType::LBRACKET)) {
-      arrSize = parseExpression();
+    while (match(TokenType::LBRACKET)) {
+      node->arraySizes.push_back(parseExpression());
       expect(TokenType::RBRACKET, "Expected ']' after array size");
     }
 
-    std::unique_ptr<ExprNode> init = nullptr;
     if (match(TokenType::ASSIGN)) {
-      init = parseExpression();
+      // Inject the expression into the live AST.
+      // Writing to the dead local variable spawned phantom nulls.
+      node->initializer = parseExpression();
     } else if (match(TokenType::LPAREN)) {
       /*
        * STACK ALLOCATION SYNTAX SUGAR
@@ -889,13 +898,9 @@ std::unique_ptr<ASTNode> Parser::parseStatement() {
           advance();
       }
       expect(TokenType::RPAREN, "Expected ')'");
-      init = std::make_unique<CallNode>(typeName, std::move(args));
+      node->initializer = std::make_unique<CallNode>(typeName, std::move(args));
     }
 
-    auto node =
-        std::make_unique<VarDeclNode>(typeName, varName, preamble.isConst,
-                                      preamble.isStatic, std::move(init));
-    node->arraySize = std::move(arrSize);
     node->decorators = preamble.decorators;
     expect(TokenType::SEMICOLON, "Expected ';'");
     finalizeNode(node.get(), startTok);

@@ -194,14 +194,13 @@ class NewNode : public ExprNode {
 public:
   std::string typeName;
   std::vector<std::unique_ptr<ExprNode>> arguments;
-  std::unique_ptr<ExprNode> arraySize;
+  std::vector<std::unique_ptr<ExprNode>> arraySizes;
 
   std::string resolvedMangledName;
 
   explicit NewNode(std::string tName,
                    std::vector<std::unique_ptr<ExprNode>> args = {})
-      : typeName(std::move(tName)), arguments(std::move(args)),
-        arraySize(nullptr) {}
+      : typeName(std::move(tName)), arguments(std::move(args)) {}
 
   void accept(ASTVisitor *visitor) override;
 };
@@ -298,12 +297,12 @@ public:
   bool isStatic;
   std::vector<std::string> decorators;
   std::unique_ptr<ExprNode> initializer;
-  std::unique_ptr<ExprNode> arraySize;
+  std::vector<std::unique_ptr<ExprNode>> arraySizes;
 
   VarDeclNode(std::string t, std::string n, bool c, bool st,
               std::unique_ptr<ExprNode> init)
       : typeName(std::move(t)), name(std::move(n)), isConst(c), isStatic(st),
-        initializer(std::move(init)), arraySize(nullptr) {}
+        initializer(std::move(init)) {}
 
   void accept(ASTVisitor *visitor) override;
 };

@@ -31,5 +31,24 @@ int main() {
   Circle* c = new Circle(10.0f, "Circle XD");
   c.Draw();
   c.Update();
+
+  // Declaración de una matriz 3x3 en el stack
+  // El compilador genera alocaciones anidadas. Cuidado con el Stack Pointer.
+  int matrix[3][3];
+
+  // Inicialización manual
+  for (int i = 0; i < 3; i++) {
+      for (int j = 0; j < 3; j++) {
+          // Inyección de valores basándonos en la posición
+          matrix[i][j] = i + j;
+      }
+  }
+
+  // Acceso y suma de elementos
+  int total = matrix[0][0] + matrix[1][1] + matrix[2][2];
+
+  // Imprimir resultado usando el intrínseco de impresión
+  print("La suma de la diagonal es:");
+  print(total);
   return 0;
 }
