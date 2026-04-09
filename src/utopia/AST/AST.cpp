@@ -36,6 +36,7 @@ void DeleteNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void MoveNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void BinaryOpNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void CallNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
+void CastNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void AssignNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void VarDeclNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void ReturnNode::accept(ASTVisitor *visitor) { visitor->visit(this); }

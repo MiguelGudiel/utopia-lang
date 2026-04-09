@@ -141,6 +141,8 @@ Token Lexer::nextToken() {
       return {TokenType::KW_EXTENSION, val, startLine, startCol};
     if (val == "on")
       return {TokenType::KW_ON, val, startLine, startCol};
+    if (val == "as")
+      return {TokenType::KW_AS, val, startLine, startCol};
     return {TokenType::IDENTIFIER, val, startLine, startCol};
   }
 

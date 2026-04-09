@@ -29,6 +29,7 @@ class DeleteNode;
 class MoveNode;
 class BinaryOpNode;
 class CallNode;
+class CastNode;
 class AssignNode;
 class VarDeclNode;
 class ReturnNode;
@@ -67,6 +68,7 @@ public:
   virtual void visit(MoveNode *node) = 0;
   virtual void visit(BinaryOpNode *node) = 0;
   virtual void visit(CallNode *node) = 0;
+  virtual void visit(CastNode *node) = 0;
   virtual void visit(AssignNode *node) = 0;
   virtual void visit(VarDeclNode *node) = 0;
   virtual void visit(ReturnNode *node) = 0;

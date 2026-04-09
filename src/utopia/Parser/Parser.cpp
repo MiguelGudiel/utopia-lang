@@ -535,18 +535,32 @@ std::unique_ptr<ExprNode> Parser::parseAdditive() {
 
 std::unique_ptr<ExprNode> Parser::parseTerm() {
   Token startTok = currentToken();
-  auto left = parsePrimary();
+  auto left = parseCast();
   while (currentToken().type == TokenType::STAR ||
          currentToken().type == TokenType::SLASH ||
          currentToken().type == TokenType::PERCENT) {
     std::string op = currentToken().value;
     advance();
-    auto right = parsePrimary();
+    auto right = parseCast();
     left =
         std::make_unique<BinaryOpNode>(op, std::move(left), std::move(right));
     finalizeNode(left.get(), startTok);
   }
   return left;
+}
+
+std::unique_ptr<ExprNode> Parser::parseCast() {
+  Token startTok = currentToken();
+  auto node = parsePrimary();
+
+  while (match(TokenType::KW_AS)) {
+    std::string targetType = parseTypeName();
+    auto castNode = std::make_unique<CastNode>(std::move(node), targetType);
+    finalizeNode(castNode.get(), startTok);
+    node = std::move(castNode);
+  }
+
+  return node;
 }
 
 std::unique_ptr<ExprNode> Parser::parsePrimary() {
@@ -674,20 +688,6 @@ std::unique_ptr<ExprNode> Parser::parsePrimaryBase() {
       expect(TokenType::RPAREN, "Expected ')' after constructor arguments");
     }
 
-    return node;
-  }
-
-  if (isTypeToken()) {
-    std::string typeName = parseTypeName();
-    if (currentToken().type == TokenType::DOT) {
-      return std::make_unique<VariableNode>(typeName);
-    }
-    expect(TokenType::LPAREN, "Expected '(' para cast");
-    std::vector<std::unique_ptr<ExprNode>> args;
-    args.push_back(parseExpression());
-    expect(TokenType::RPAREN, "Expected ')'");
-    auto node = std::make_unique<CallNode>(typeName, std::move(args));
-    finalizeNode(node.get(), startTok);
     return node;
   }
 

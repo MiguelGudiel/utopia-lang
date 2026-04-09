@@ -305,6 +305,7 @@ public:
   void visit(utopia::MoveNode *) override {}
   void visit(utopia::BinaryOpNode *) override {}
   void visit(utopia::CallNode *) override {}
+  void visit(utopia::CastNode *) override {}
   void visit(utopia::AssignNode *) override {}
   void visit(utopia::ReturnNode *) override {}
   void visit(utopia::ProgramNode *) override {}

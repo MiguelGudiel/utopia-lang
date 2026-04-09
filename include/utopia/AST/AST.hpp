@@ -270,6 +270,17 @@ public:
   void accept(ASTVisitor *visitor) override;
 };
 
+class CastNode : public ExprNode {
+public:
+  std::unique_ptr<ExprNode> operand;
+  std::string targetType;
+
+  CastNode(std::unique_ptr<ExprNode> op, std::string tType)
+      : operand(std::move(op)), targetType(std::move(tType)) {}
+
+  void accept(ASTVisitor *visitor) override;
+};
+
 class AssignNode : public StmtNode {
 public:
   std::unique_ptr<ExprNode> target;

@@ -2404,18 +2404,6 @@ void CodeGen::visit(CallNode *node) {
     return;
   }
 
-  bool isCast = (node->callee == "int" || node->callee == "float" ||
-                 node->callee == "bool") ||
-                (node->callee.find('*') != std::string::npos);
-
-  if (isCast) {
-    node->arguments[0]->accept(this);
-    TypeInfo targetType = parseTypeString(node->callee);
-    currentVal = castValue(currentVal, currentType, targetType);
-    currentType = targetType;
-    return;
-  }
-
   if (!node->object && structTypes.count(node->callee)) {
     llvm::Value *target = nullptr;
 
@@ -2600,6 +2588,16 @@ void CodeGen::visit(CallNode *node) {
   currentVal = builder->CreateCall(fTy, callableFunc, args);
   currentType = functionTypes.count(finalMangled) ? functionTypes[finalMangled]
                                                   : TypeInfo{"int"};
+}
+
+void CodeGen::visit(CastNode *node) {
+  emitLocation(node);
+  node->operand->accept(this);
+  TypeInfo targetType = parseTypeString(node->targetType);
+
+  /* Pointer transmutation. Tell the backend to look the other way. */
+  currentVal = castValue(currentVal, currentType, targetType);
+  currentType = targetType;
 }
 
 void CodeGen::visit(NullAssertNode *node) {

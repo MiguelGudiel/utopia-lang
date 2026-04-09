@@ -124,6 +124,7 @@ private:
   void visit(MoveNode *node) override;
   void visit(BinaryOpNode *node) override;
   void visit(CallNode *node) override;
+  void visit(CastNode *node) override;
   void visit(AssignNode *node) override;
   void visit(VarDeclNode *node) override;
   void visit(ReturnNode *node) override;

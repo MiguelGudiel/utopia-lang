@@ -48,6 +48,7 @@ private:
   std::unique_ptr<ExprNode> parseRelational();
   std::unique_ptr<ExprNode> parseAdditive();
   std::unique_ptr<ExprNode> parseTerm();
+  std::unique_ptr<ExprNode> parseCast();
   std::unique_ptr<ExprNode> parsePrimary();
   std::unique_ptr<StructDeclNode> parseStructDecl(bool isClass);
   std::unique_ptr<ExtensionNode> parseExtension();

@@ -79,6 +79,7 @@ enum class TokenType {
   KW_IMPLEMENTS,
   KW_ON,
   KW_EXTENSION,
+  KW_AS,
   DOT, // .
   NEQ, // !=
   EQ,  // ==

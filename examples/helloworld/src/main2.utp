@@ -1,19 +1,14 @@
-// Dispatcher de eventos genérico
+// File: examples/helloworld/src/main2.utp
 class EventSystem {
-    // Recibe un puntero a cualquier cosa (Type Erasure)
     static void handleEvent(int eventType, void* data) {
         if (eventType == 1) {
-            // Cast de void* a int*
-            int* score = int*(data);
+            int* score = data as int*;
             print("Score actualizado: ", *score);
         } 
         else if (eventType == 2) {
-            // Cast de void* a float*
-            float* speed = float*(data);
+            float* speed = data as float*;
             print("Velocidad detectada: ", *speed);
         }
-
-        // int value = *data; 
     }
 }
 
@@ -21,14 +16,11 @@ void main() {
     int points = 100;
     float velocity = 88.5;
 
-    //  Decaimiento implícito (int* -> void*)
     EventSystem.handleEvent(1, &points);
-
-    // Decaimiento implícito (float* -> void*)
     EventSystem.handleEvent(2, &velocity);
 
-    void* buffer = void*(&points); // Forzamos a void*
-    int* recovered = int*(buffer); // Recuperamos como int*
+    void* buffer = &points as void*; 
+    int* recovered = buffer as int*; 
     
     print("Valor recuperado: ", *recovered);
 }

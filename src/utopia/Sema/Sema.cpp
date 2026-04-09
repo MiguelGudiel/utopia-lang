@@ -1304,15 +1304,6 @@ void Sema::visit(CallNode *node) {
     currentExprType = {"void", 0, false};
     return;
   }
-  bool isCast = (node->callee == "int" || node->callee == "float" ||
-                 node->callee == "bool") ||
-                (node->callee.find('*') != std::string::npos);
-  if (isCast) {
-    TypeInfo targetType = parseType(node->callee, node);
-    node->arguments[0]->accept(this);
-    currentExprType = targetType;
-    return;
-  }
   // Global function resolution
   TypeInfo outRet;
   std::string resolved =
@@ -1329,6 +1320,11 @@ void Sema::visit(CallNode *node) {
 
   std::cerr << "[Sema] Resolved constructor " << resolved << " for new "
             << node->callee << "\n";
+}
+
+void Sema::visit(CastNode *node) {
+  node->operand->accept(this);
+  currentExprType = parseType(node->targetType, node);
 }
 
 void Sema::visit(NullAssertNode *node) {
