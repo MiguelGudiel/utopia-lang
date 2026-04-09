@@ -1,4 +1,5 @@
 // File: examples/helloworld/src/main2.utp
+
 class EventSystem {
     static void handleEvent(int eventType, void* data) {
         if (eventType == 1) {
@@ -20,7 +21,8 @@ void main() {
     EventSystem.handleEvent(2, &velocity);
 
     void* buffer = &points as void*; 
-    int* recovered = buffer as int*; 
+    int* recovered = buffer as int*;
     
     print("Valor recuperado: ", *recovered);
+
 }

@@ -12,6 +12,6 @@ build:
   source_dirs:
     - src/
   sources:
-    - main2.utp
-    #- IDrawable.utp
-    #- Entity.utp
+    - main.utp
+    - IDrawable.utp
+    - Entity.utp

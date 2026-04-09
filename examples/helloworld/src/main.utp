@@ -11,50 +11,59 @@ struct Vec3 {
 
 class Circle extends Entity implements IDrawable {
   float radius;
-  Circle(this.radius, this.name) {}
-  
+  Circle(this.radius, this.name) {
+  }
+
   void Draw() {
     print(this.name, ":D");
   }
 
-  @override
+  @override 
   void Update() {
     super.Update();
     print("Circle updated", name);
   }
+
+  inline float GetRadius() const {
+    return this.radius;
+  }
+}
+
+// esto hace una suma chingona
+inline int sum(int a, int b) {
+  return a + b;
 }
 
 int main() {
   char* msg2 = "Mamaguebo, digo glu glu glu";
   Vec3 vec3;
   vec3.x = 10;
-  vec3.y = 20.0f;
+  vec3.y = 20.0;
   vec3.z = 30;
   print(msg);
   print(msg2);
   print("Vec3(", vec3.x, ", ", vec3.y, ", ", vec3.z, ");");
 
-  Circle* c = new Circle(10.0f, "Circle XD");
+  sum(1, 2);
+
+  Circle* c = new Circle(10.0, "Circle XD");
   c.Draw();
   c.Update();
 
-  // Declaración de una matriz 3x3 en el stack
-  // El compilador genera alocaciones anidadas. Cuidado con el Stack Pointer.
   int matrix[3][3];
 
-  // Inicialización manual
   for (int i = 0; i < 3; i++) {
-      for (int j = 0; j < 3; j++) {
-          // Inyección de valores basándonos en la posición
-          matrix[i][j] = i + j;
-      }
+    for (int j = 0; j < 3; j++) {
+      matrix[i][j] = i + j;
+    }
   }
 
-  // Acceso y suma de elementos
   int total = matrix[0][0] + matrix[1][1] + matrix[2][2];
 
-  // Imprimir resultado usando el intrínseco de impresión
   print("La suma de la diagonal es:");
   print(total);
+
+  float radius = c.GetRadius();
+  print(radius);
   return 0;
 }

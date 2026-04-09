@@ -1,11 +1,9 @@
 #include "utopia/Sema/Sema.hpp"
+#include "utopia/AST/AST.hpp"
 #include <iostream>
 #include <llvm/IR/Function.h>
 
 namespace utopia {
-
-void Sema::enterScope() { scopeStack.push_back({}); }
-void Sema::exitScope() { scopeStack.pop_back(); }
 
 std::string typeToString(const TypeInfo &t) {
   std::string s = t.base;
@@ -17,6 +15,9 @@ std::string typeToString(const TypeInfo &t) {
     s += "?";
   return s;
 }
+
+void Sema::enterScope() { scopeStack.push_back({}); }
+void Sema::exitScope() { scopeStack.pop_back(); }
 
 Sema::Symbol *Sema::lookup(const std::string &name) {
   for (auto it = scopeStack.rbegin(); it != scopeStack.rend(); ++it) {
@@ -31,6 +32,7 @@ Sema::Symbol *Sema::lookup(const std::string &name) {
 bool Sema::analyzeModules(const std::vector<ModuleNode *> &modules) {
   errors.clear();
   scopeStack.clear();
+  nodeTypes.clear();
   functionTypes.clear();
   customStructs.clear();
   currentClass.clear();
@@ -41,6 +43,13 @@ bool Sema::analyzeModules(const std::vector<ModuleNode *> &modules) {
   // estructuras
   for (ModuleNode *mod : modules) {
     for (auto &var : mod->globalVars) {
+      for (const auto &dec : var->decorators) {
+        if (dec == "virtual" || dec == "override") {
+          reportError(var.get(), "Semantic Error: Global variable '" +
+                                     var->name + "' cannot have @" + dec +
+                                     " decorator.");
+        }
+      }
       TypeInfo t = parseType(var->typeName, mod);
       globalSymbols[var->name] = {t, var->isConst};
     }
@@ -61,44 +70,69 @@ bool Sema::analyzeModules(const std::vector<ModuleNode *> &modules) {
 
       int idx = 0;
       for (auto &f : st->fields) {
+        for (const auto &dec : f.decorators) {
+          if (dec == "virtual" || dec == "override") {
+            reportError(st.get(), "Semantic Error: Field '" + f.name +
+                                      "' cannot be marked as @" + dec + ".");
+          }
+        }
         def.fields[f.name] = {parseType(f.typeName, st.get()), f.modifier,
                               f.isStatic ? -1 : idx++, f.isStatic};
       }
 
       // Register methods in the VTable and validate @override
       for (auto &m : st->methods) {
-        if (m->isStatic || m->isConstructor || m->isDestructor)
-          continue;
-
-        def.hasVTable =
-            true; // If there are instance methods in a class, we force VTable
-
         bool hasOverrideAlias =
             std::find(m->decorators.begin(), m->decorators.end(), "override") !=
             m->decorators.end();
+        bool hasVirtualAlias =
+            std::find(m->decorators.begin(), m->decorators.end(), "virtual") !=
+            m->decorators.end();
+
+        if (m->isStatic || m->isConstructor || m->isDestructor) {
+          if (hasOverrideAlias || hasVirtualAlias) {
+            std::string type =
+                m->isStatic ? "Static method"
+                            : (m->isConstructor ? "Constructor" : "Destructor");
+            reportError(m.get(),
+                        "Semantic Error: " + type + " '" + m->name +
+                            "' cannot be marked as @virtual or @override.");
+          }
+          continue;
+        }
+
+        def.hasVTable =
+            true; // If there are instance methods in a class, we force VTable
 
         if (def.vtableLayout.count(m->name)) {
           // The method already exists in the parent system; it is being
           // overwritten
           if (!hasOverrideAlias) {
-            reportError(m.get(), "Semantic Error: Method '" + m->name +
-                                     "' overwrites a base class method but "
-                                     "lacks @override decorator.");
+            reportError(m.get(),
+                        "Semantic Error: Method '" + m->name +
+                            "' overwrites a base class virtual method but "
+                            "lacks @override decorator.");
           }
-          // We updated the implementation in that index
+          // Update the implementation in that index
           int vtableIdx = def.vtableLayout[m->name];
           def.vtableMethods[vtableIdx] = st->name + "_" + m->name;
         } else {
           if (hasOverrideAlias) {
-            reportError(m.get(), "Semantic Error: Method '" + m->name +
-                                     "' is marked with @override but no base "
-                                     "class method matches this signature.");
+            reportError(m.get(),
+                        "Semantic Error: Method '" + m->name +
+                            "' is marked with @override but no base "
+                            "class virtual method matches this signature.");
           }
-          // It's a new method, it goes at the end of the VTable
-          def.vtableLayout[m->name] = def.vtableMethods.size();
-          def.vtableMethods.push_back(st->name + "_" + m->name);
+          if (hasVirtualAlias) {
+            // It's a new virtual method, it goes at the end of the VTable
+            def.vtableLayout[m->name] = def.vtableMethods.size();
+            def.vtableMethods.push_back(st->name + "_" + m->name);
+          }
         }
       }
+      // Update hasVTable correctly based on whether we actually have virtual
+      // methods
+      def.hasVTable = !def.vtableMethods.empty();
       customStructs[st->name] = def;
     }
   }
@@ -117,6 +151,7 @@ bool Sema::analyzeModules(const std::vector<ModuleNode *> &modules) {
 
         if (!m->isStatic) {
           TypeInfo thisType = {st->name, 1, false};
+          thisType.isConst = m->isConstMethod;
           params.push_back(thisType);
           mangledName += "_" + getMangledType(thisType);
         }
@@ -169,6 +204,13 @@ bool Sema::analyzeModules(const std::vector<ModuleNode *> &modules) {
     for (auto &fn : mod->functions) {
       std::string mangledName = fn->name;
       std::vector<TypeInfo> params;
+
+      for (const auto &dec : fn->decorators) {
+        if (dec == "virtual" || dec == "override") {
+          reportError(fn.get(), "Semantic Error: Global function '" + fn->name +
+                                    "' cannot be marked as @" + dec + ".");
+        }
+      }
       for (auto &arg : fn->args) {
         TypeInfo t = parseType(arg.type, fn.get());
         params.push_back(t);
@@ -188,6 +230,14 @@ bool Sema::analyzeModules(const std::vector<ModuleNode *> &modules) {
         params.push_back(targetType);
         mangledName += "_" + getMangledType(targetType);
 
+        for (const auto &dec : m->decorators) {
+          if (dec == "virtual" || dec == "override") {
+            reportError(m.get(),
+                        "Semantic Error: Extension method '" + m->name +
+                            "' cannot be @" + dec +
+                            " (extensions are statically dispatched).");
+          }
+        }
         for (auto &arg : m->args) {
           TypeInfo t = arg.isThisAssign
                            ? parseType(ext->targetTypedef, ext.get())
@@ -289,6 +339,13 @@ TypeInfo Sema::parseType(const std::string &typeName, ASTNode *node) {
 
 bool Sema::checkAssignment(const TypeInfo &target, const TypeInfo &source,
                            ASTNode *node) {
+  if (!target.isConst && source.isConst &&
+      (target.ptrDepth > 0 || target.isReference)) {
+    reportError(
+        node,
+        "error: invalid conversion from const pointer/reference to non-const");
+    return false;
+  }
   if (!target.isNullable && source.isNullable) {
     reportError(node, "error: nullable value assigned to non-nullable type '" +
                           typeToString(target) + "'");
@@ -378,6 +435,7 @@ bool Sema::analyze(ProgramNode *program) {
 
       if (!m->isStatic && !m->isConstructor) {
         TypeInfo thisType = {st->name, 1, false};
+        thisType.isConst = m->isConstMethod;
         params.push_back(thisType);
         mangledName += "_" + getMangledType(thisType);
       }
@@ -723,9 +781,11 @@ void Sema::visit(MemberAccessNode *node) {
 
     currentExprType = foundField.type;
   } else {
-    // No field was found. We do nothing; we let CallNode attempt to resolve it
+    // No field was found. We do nothing; we let  attempt to resolve it
     // as a method. currentExprType is already the object's type
   }
+
+  nodeTypes[node] = currentExprType;
 }
 
 void Sema::visit(ProgramNode *node) {
@@ -766,6 +826,7 @@ void Sema::visit(ThisNode *node) {
     return;
   }
   currentExprType = {currentClass, 1, false};
+  nodeTypes[node] = currentExprType;
 }
 
 void Sema::visit(SuperNode *node) {
@@ -783,6 +844,7 @@ void Sema::visit(SuperNode *node) {
   }
 
   currentExprType = {structASTs[currentClass]->baseClass, 1, false};
+  nodeTypes[node] = currentExprType;
 }
 
 void Sema::visit(FunctionNode *node) {
@@ -805,6 +867,7 @@ void Sema::visit(FunctionNode *node) {
       lookupName += "_" + getMangledType(targetType);
     } else if (!node->isStatic) {
       TypeInfo thisType = {node->className, 1, false};
+      thisType.isConst = node->isConstMethod;
       lookupName += "_" + getMangledType(thisType);
     }
   }
@@ -877,9 +940,12 @@ void Sema::visit(FunctionNode *node) {
                               currentClass + "' or its ancestors.");
       }
 
+      fieldType.isConst = arg.isConst;
       scopeStack.back()[arg.name] = {fieldType, false};
     } else {
-      scopeStack.back()[arg.name] = {parseType(arg.type, node), false};
+      TypeInfo t = parseType(arg.type, node);
+      t.isConst = arg.isConst;
+      scopeStack.back()[arg.name] = {t, arg.isConst};
     }
   }
 
@@ -1047,6 +1113,7 @@ void Sema::visit(SubscriptNode *node) {
   currentExprType.ptrDepth--; // The resulting type is the extracted base type
 
   currentExprType.isNullable = false;
+  nodeTypes[node] = currentExprType;
 }
 
 void Sema::visit(VariableNode *node) {
@@ -1058,6 +1125,7 @@ void Sema::visit(VariableNode *node) {
       currentExprType.ptrDepth += currentExprType.arrayDimensions;
       currentExprType.arrayDimensions = 0;
     }
+    nodeTypes[node] = currentExprType;
     return;
   }
 
@@ -1092,6 +1160,7 @@ void Sema::visit(VariableNode *node) {
 
   reportError(node, "error: use of undeclared identifier '" + node->name + "'");
   currentExprType = {"error", 0, false};
+  nodeTypes[node] = currentExprType;
 }
 
 void Sema::visit(BinaryOpNode *node) {
@@ -1128,16 +1197,30 @@ void Sema::visit(BinaryOpNode *node) {
                           ? TypeInfo{"float", 0}
                           : TypeInfo{"int", 0};
   }
+  nodeTypes[node] = currentExprType;
 }
 
 // Stubs
-void Sema::visit(NumberNode *node) { currentExprType = {"int", 0}; }
+void Sema::visit(NumberNode *node) {
+  currentExprType = {"int", 0};
+  nodeTypes[node] = currentExprType;
+}
 void Sema::visit(FloatNode *node) {
   currentExprType = {node->isDouble ? "double" : "float", 0, false};
+  nodeTypes[node] = currentExprType;
 }
-void Sema::visit(BoolNode *node) { currentExprType = {"bool", 0}; }
-void Sema::visit(StringNode *node) { currentExprType = {"char", 1, false}; }
-void Sema::visit(NullLiteralNode *node) { currentExprType = {"null", 0, true}; }
+void Sema::visit(BoolNode *node) {
+  currentExprType = {"bool", 0};
+  nodeTypes[node] = currentExprType;
+}
+void Sema::visit(StringNode *node) {
+  currentExprType = {"char", 1, false};
+  nodeTypes[node] = currentExprType;
+}
+void Sema::visit(NullLiteralNode *node) {
+  currentExprType = {"null", 0, true};
+  nodeTypes[node] = currentExprType;
+}
 
 void Sema::visit(UnaryMinusNode *node) {
   node->operand->accept(this);
@@ -1148,6 +1231,7 @@ void Sema::visit(UnaryMinusNode *node) {
     reportError(node, "Unary minus requires numeric operand.");
     currentExprType = {"error", 0, false};
   }
+  nodeTypes[node] = currentExprType;
 }
 
 void Sema::visit(ReturnNode *node) {
@@ -1201,6 +1285,7 @@ void Sema::visit(CallNode *node) {
                       parentClass + "'");
     }
     currentExprType = {"void", 0, false};
+    nodeTypes[node] = currentExprType;
     return;
   }
 
@@ -1278,6 +1363,7 @@ void Sema::visit(CallNode *node) {
                             "' in '" + objType.base + "'");
       currentExprType = {"error", 0, false};
     }
+    nodeTypes[node] = currentExprType;
     return;
   }
 
@@ -1296,12 +1382,14 @@ void Sema::visit(CallNode *node) {
       node->resolvedMangledName = resolved;
     }
     currentExprType = {node->callee, 0, false};
+    nodeTypes[node] = currentExprType;
     return;
   }
 
   // Intrinsics and hardcoded compiler magic
   if (node->callee == "print") {
     currentExprType = {"void", 0, false};
+    nodeTypes[node] = currentExprType;
     return;
   }
   // Global function resolution
@@ -1320,16 +1408,20 @@ void Sema::visit(CallNode *node) {
 
   std::cerr << "[Sema] Resolved constructor " << resolved << " for new "
             << node->callee << "\n";
+
+  nodeTypes[node] = currentExprType;
 }
 
 void Sema::visit(CastNode *node) {
   node->operand->accept(this);
   currentExprType = parseType(node->targetType, node);
+  nodeTypes[node] = currentExprType;
 }
 
 void Sema::visit(NullAssertNode *node) {
   node->operand->accept(this);
   currentExprType.isNullable = false;
+  nodeTypes[node] = currentExprType;
 }
 
 void Sema::visit(LogicalNotNode *node) {
@@ -1349,6 +1441,7 @@ void Sema::visit(LogicalNotNode *node) {
 void Sema::visit(AddressOfNode *node) {
   node->operand->accept(this);
   currentExprType.ptrDepth++;
+  nodeTypes[node] = currentExprType;
 }
 
 void Sema::visit(DerefNode *node) {
@@ -1365,6 +1458,8 @@ void Sema::visit(DerefNode *node) {
 
   if (currentExprType.ptrDepth > 0)
     currentExprType.ptrDepth--;
+
+  nodeTypes[node] = currentExprType;
 }
 
 void Sema::visit(NewNode *node) {
@@ -1404,6 +1499,7 @@ void Sema::visit(NewNode *node) {
   }
 
   currentExprType = resultType;
+  nodeTypes[node] = currentExprType;
 }
 
 void Sema::visit(DeleteNode *node) { node->pointerExpr->accept(this); }
@@ -1412,6 +1508,7 @@ void Sema::visit(MoveNode *node) {
   node->operand->accept(this);
   currentExprType.isRValueRef = true;
   currentExprType.isReference = false;
+  nodeTypes[node] = currentExprType;
 }
 
 void Sema::visit(ModuleNode *node) {

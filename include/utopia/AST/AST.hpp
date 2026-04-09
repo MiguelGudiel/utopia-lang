@@ -16,6 +16,8 @@ public:
   int endLine = 0;
   int endColumn = 0;
 
+  std::string doc;
+
   virtual ~ASTNode() = default;
 
   void setRange(int l, int c, int el, int ec) {
@@ -337,6 +339,7 @@ struct FunctionParam {
   std::string name;
   bool isRequired = false;
   bool isThisAssign = false;
+  bool isConst = false;
 };
 
 class FunctionNode : public ASTNode {
@@ -349,6 +352,7 @@ public:
   std::vector<FunctionParam> args;
   std::vector<std::unique_ptr<ASTNode>> body;
 
+  bool isConstMethod;
   bool isMethod;
   bool isStatic;
   bool isConstructor;
@@ -359,11 +363,12 @@ public:
                std::vector<std::string> decs, std::string retT, std::string n,
                std::vector<FunctionParam> a, bool isMeth = false,
                bool isStat = false, bool isCtor = false, bool isDtor = false,
-               std::string cName = "")
+               std::string cName = "", bool isConstMeth = false) // <-- AGREGADO
       : inlineState(is), access(acc), decorators(std::move(decs)),
         returnType(std::move(retT)), name(std::move(n)), args(std::move(a)),
         isMethod(isMeth), isStatic(isStat), isConstructor(isCtor),
-        isDestructor(isDtor), className(std::move(cName)) {}
+        isDestructor(isDtor), className(std::move(cName)),
+        isConstMethod(isConstMeth) {}
 
   void accept(ASTVisitor *visitor) override;
 };

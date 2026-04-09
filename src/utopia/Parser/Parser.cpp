@@ -12,6 +12,20 @@ void Parser::finalizeNode(ASTNode *node, const Token &startToken) {
   const Token &endToken = tokens[cursor > 0 ? cursor - 1 : 0];
   node->setRange(startToken.line, startToken.column, endToken.line,
                  endToken.column + (int)endToken.value.length());
+
+  if (!startToken.leadingDoc.empty()) {
+    node->doc = startToken.leadingDoc;
+  } else {
+    // fallback: buscar en tokens anteriores
+    for (int i = cursor - 1; i >= 0; --i) {
+      if (!tokens[i].leadingDoc.empty()) {
+        node->doc = tokens[i].leadingDoc;
+        break;
+      }
+      if (tokens[i].line < startToken.line - 2)
+        break;
+    }
+  }
 }
 
 const Token &Parser::currentToken() const { return tokens[cursor]; }
@@ -384,27 +398,31 @@ Parser::parseMethod(const std::string &className,
   std::vector<FunctionParam> args;
   while (currentToken().type != TokenType::RPAREN) {
     bool isReq = match(TokenType::KW_REQUIRED);
+    bool isConst = match(TokenType::KW_CONST);
 
     if (match(TokenType::KW_THIS)) {
       expect(TokenType::DOT, "Expected '.' after this in constructor param");
       std::string argName = currentToken().value;
       expect(TokenType::IDENTIFIER, "Expected field name");
-      args.push_back({"", argName, isReq, true});
+      args.push_back({"", argName, isReq, true, isConst});
     } else {
       std::string argType = parseTypeName();
       std::string argName = currentToken().value;
       expect(TokenType::IDENTIFIER, "Expected param name");
-      args.push_back({argType, argName, isReq, false});
+      args.push_back({argType, argName, isReq, false, isConst});
     }
 
     if (currentToken().type == TokenType::COMMA)
       advance();
   }
   expect(TokenType::RPAREN, "Expected ')'");
+
+  bool isConstMethod = match(TokenType::KW_CONST);
+
   auto funcNode = std::make_unique<FunctionNode>(
       preamble.inlineState, preamble.access, preamble.decorators, retType,
       funcName, args, true, preamble.isStatic, isConstructor, isDestructor,
-      className);
+      className, isConstMethod);
 
   if (match(TokenType::SEMICOLON)) {
     finalizeNode(funcNode.get(), startTok);
@@ -445,8 +463,10 @@ Parser::parseFunction(const DeclPreamble &preamble) {
   while (currentToken().type != TokenType::RPAREN) {
     std::string argType = parseTypeName();
     std::string argName = currentToken().value;
+    bool isConst = match(TokenType::KW_CONST);
+
     expect(TokenType::IDENTIFIER, "Expected arg name");
-    args.push_back({argType, argName, false, false});
+    args.push_back({argType, argName, false, false, isConst});
     if (currentToken().type == TokenType::COMMA)
       advance();
   }
@@ -620,6 +640,8 @@ std::unique_ptr<ExprNode> Parser::parsePrimaryBase() {
   if (match(TokenType::LPAREN)) {
     auto expr = parseExpression();
     expect(TokenType::RPAREN, "Expected ')' to close the grouped expression");
+    // No necesita finalize aquí porque 'expr' ya viene finalizado de sus
+    // sub-reglas
     return expr;
   }
 
@@ -629,22 +651,41 @@ std::unique_ptr<ExprNode> Parser::parsePrimaryBase() {
     return expr;
   }
 
-  if (match(TokenType::AMPERSAND))
-    return std::make_unique<AddressOfNode>(parsePrimary());
-  if (match(TokenType::STAR))
-    return std::make_unique<DerefNode>(parsePrimary());
-  if (match(TokenType::MINUS))
-    return std::make_unique<UnaryMinusNode>(parsePrimary());
-  if (match(TokenType::KW_NULL))
-    return std::make_unique<NullLiteralNode>();
-
-  if (match(TokenType::BANG)) {
-    // Prefix '!': Logical Negation.
-    return std::make_unique<LogicalNotNode>(parsePrimary());
+  if (match(TokenType::AMPERSAND)) {
+    auto node = std::make_unique<AddressOfNode>(parsePrimary());
+    finalizeNode(node.get(), startTok);
+    return node;
   }
 
-  if (match(TokenType::KW_THIS))
-    return std::make_unique<ThisNode>();
+  if (match(TokenType::STAR)) {
+    auto node = std::make_unique<DerefNode>(parsePrimary());
+    finalizeNode(node.get(), startTok);
+    return node;
+  }
+
+  if (match(TokenType::MINUS)) {
+    auto node = std::make_unique<UnaryMinusNode>(parsePrimary());
+    finalizeNode(node.get(), startTok);
+    return node;
+  }
+
+  if (match(TokenType::KW_NULL)) {
+    auto node = std::make_unique<NullLiteralNode>();
+    finalizeNode(node.get(), startTok);
+    return node;
+  }
+
+  if (match(TokenType::BANG)) {
+    auto node = std::make_unique<LogicalNotNode>(parsePrimary());
+    finalizeNode(node.get(), startTok);
+    return node;
+  }
+
+  if (match(TokenType::KW_THIS)) {
+    auto node = std::make_unique<ThisNode>();
+    finalizeNode(node.get(), startTok);
+    return node;
+  }
 
   if (match(TokenType::KW_SUPER)) {
     if (match(TokenType::LPAREN)) {
@@ -668,7 +709,6 @@ std::unique_ptr<ExprNode> Parser::parsePrimaryBase() {
   if (match(TokenType::KW_NEW)) {
     std::string typeName = consumeType();
     std::vector<std::unique_ptr<ExprNode>> args;
-
     auto node = std::make_unique<NewNode>(typeName, std::move(args));
 
     while (match(TokenType::LBRACKET)) {
@@ -679,53 +719,74 @@ std::unique_ptr<ExprNode> Parser::parsePrimaryBase() {
     if (match(TokenType::LPAREN)) {
       while (currentToken().type != TokenType::RPAREN &&
              currentToken().type != TokenType::EOF_TOK) {
-
         node->arguments.push_back(parseExpression());
-
         if (currentToken().type == TokenType::COMMA)
           advance();
       }
       expect(TokenType::RPAREN, "Expected ')' after constructor arguments");
     }
 
+    finalizeNode(node.get(), startTok);
     return node;
   }
+
+  // --- LITERALES ---
 
   if (currentToken().type == TokenType::NUMBER) {
     auto node = std::make_unique<NumberNode>(std::stoi(currentToken().value));
     advance();
+    finalizeNode(node.get(), startTok);
     return node;
   }
+
   if (currentToken().type == TokenType::FLOAT_LITERAL) {
     auto node = std::make_unique<FloatNode>(std::stod(currentToken().value));
     advance();
+    finalizeNode(node.get(), startTok);
     return node;
   }
+
   if (currentToken().type == TokenType::FLOAT_LITERAL_FLOAT) {
     double val = std::stod(currentToken().value);
     auto node = std::make_unique<FloatNode>(val, false); // float
     advance();
+    finalizeNode(node.get(), startTok);
     return node;
   }
+
   if (currentToken().type == TokenType::FLOAT_LITERAL_DOUBLE) {
     double val = std::stod(currentToken().value);
     auto node = std::make_unique<FloatNode>(val, true); // double
     advance();
+    finalizeNode(node.get(), startTok);
     return node;
   }
+
   if (currentToken().type == TokenType::STRING) {
     auto node = std::make_unique<StringNode>(currentToken().value);
     advance();
+    finalizeNode(node.get(), startTok);
     return node;
   }
-  if (match(TokenType::KW_TRUE))
-    return std::make_unique<BoolNode>(true);
-  if (match(TokenType::KW_FALSE))
-    return std::make_unique<BoolNode>(false);
+
+  if (match(TokenType::KW_TRUE)) {
+    auto node = std::make_unique<BoolNode>(true);
+    finalizeNode(node.get(), startTok);
+    return node;
+  }
+
+  if (match(TokenType::KW_FALSE)) {
+    auto node = std::make_unique<BoolNode>(false);
+    finalizeNode(node.get(), startTok);
+    return node;
+  }
+
+  // --- IDENTIFICADORES (Variables y Llamadas) ---
 
   if (currentToken().type == TokenType::IDENTIFIER) {
     std::string name = currentToken().value;
     advance();
+
     if (match(TokenType::LPAREN)) {
       std::vector<std::unique_ptr<ExprNode>> args;
       while (currentToken().type != TokenType::RPAREN &&
@@ -736,10 +797,14 @@ std::unique_ptr<ExprNode> Parser::parsePrimaryBase() {
       }
       auto callNode = std::make_unique<CallNode>(name, std::move(args));
       expect(TokenType::RPAREN, "Expected ')'");
+
       finalizeNode(callNode.get(), startTok);
       return callNode;
     }
-    return std::make_unique<VariableNode>(name);
+
+    auto varNode = std::make_unique<VariableNode>(name);
+    finalizeNode(varNode.get(), startTok);
+    return varNode;
   }
 
   const Token &tok = currentToken();

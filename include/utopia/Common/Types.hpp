@@ -10,10 +10,11 @@ struct ErrorInfo {
 struct TypeInfo {
   std::string base;
   unsigned ptrDepth = 0;
-  bool isNullable = false;
   unsigned arrayDimensions = 0;
   bool isReference = false;
   bool isRValueRef = false;
+  bool isNullable = false;
+  bool isConst = false;
 
   bool isPointer() const {
     return ptrDepth > 0 || arrayDimensions > 0 || isReference || isRValueRef ||
@@ -67,6 +68,8 @@ struct TypeInfo {
 inline std::string getMangledType(const TypeInfo &t) {
   std::string s = t.base;
 
+  if (t.isConst)
+    s = "c_" + s;
   if (t.isNullable)
     s = "opt_" + s;
   for (unsigned i = 0; i < t.arrayDimensions; ++i)

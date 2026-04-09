@@ -8,6 +8,8 @@
 
 namespace utopia {
 
+std::string typeToString(const TypeInfo &t);
+
 class Sema : public ASTVisitor {
 public:
   bool analyze(ProgramNode *program);
@@ -95,6 +97,7 @@ private:
                                const FunctionParam &param);
 
 public:
+  std::map<ASTNode*, TypeInfo> nodeTypes;
   const std::map<std::string, StructDef> &getCustomStructs() const {
     return customStructs;
   }

@@ -1,18 +1,31 @@
 // File: src/utopia/Lexer/Lexer.cpp
 #include "utopia/Lexer/Lexer.hpp"
 #include <cctype>
+#include <sstream>
 
 namespace utopia {
 
-Lexer::Lexer(std::string_view sourceCode) : source(sourceCode) {}
+Lexer::Lexer(std::string_view sourceCode) : source(sourceCode) {
+  if (source.size() >= 3 && static_cast<unsigned char>(source[0]) == 0xEF &&
+      static_cast<unsigned char>(source[1]) == 0xBB &&
+      static_cast<unsigned char>(source[2]) == 0xBF) {
+    cursor = 3;
+  }
+}
 
 void Lexer::advanceCursor() {
   if (cursor < source.length()) {
+    unsigned char c = static_cast<unsigned char>(source[cursor]);
+
     if (source[cursor] == '\n') {
       currentLine++;
       currentColumn = 1;
     } else {
-      currentColumn++;
+      // UTF-8 awareness: Only increment the column for the start byte
+      // of a character. Continuation bytes (0b10xxxxxx) are ignored.
+      if ((c & 0xC0) != 0x80) {
+        currentColumn++;
+      }
     }
     cursor++;
   }
@@ -20,12 +33,82 @@ void Lexer::advanceCursor() {
 
 void Lexer::skipWhitespace() {
   while (cursor < source.length()) {
-    if (std::isspace(static_cast<unsigned char>(source[cursor]))) {
+    unsigned char c = static_cast<unsigned char>(source[cursor]);
+
+    if (c < 32 && !std::isspace(c)) {
       advanceCursor();
-    } else if (cursor + 1 < source.length() && source[cursor] == '/' &&
-               source[cursor + 1] == '/') {
-      while (cursor < source.length() && source[cursor] != '\n') {
+      continue;
+    }
+
+    if (std::isspace(c)) {
+      advanceCursor();
+    } else if (cursor + 1 < source.length() && source[cursor] == '/') {
+      if (source[cursor + 1] == '/') {
+        // Skip the // or ///
+        int offset =
+            (cursor + 2 < source.length() && source[cursor + 2] == '/') ? 3 : 2;
         advanceCursor();
+        advanceCursor();
+        if (offset == 3)
+          advanceCursor();
+
+        std::string currentDocLine;
+        int startLine = currentLine;
+        while (cursor < source.length() && source[cursor] != '\n') {
+          currentDocLine += source[cursor];
+          advanceCursor();
+        }
+
+        // Trim leading spaces from the cleaned line
+        size_t first = currentDocLine.find_first_not_of(' ');
+        if (std::string::npos != first)
+          currentDocLine = currentDocLine.substr(first);
+
+        if (!lastComment.empty() && currentLine == lastCommentLine + 1) {
+          lastComment += "\n" + currentDocLine;
+        } else {
+          lastComment = currentDocLine;
+        }
+        lastCommentLine = startLine;
+      } else if (source[cursor + 1] == '*') {
+        /*
+         * Block comment parsing.
+         * Nested block comments will burn the CPU. Don't even try.
+         */
+        advanceCursor();
+        advanceCursor(); // Skip /*
+
+        std::string fullBlock;
+        while (cursor + 1 < source.length() &&
+               !(source[cursor] == '*' && source[cursor + 1] == '/')) {
+          fullBlock += source[cursor];
+          advanceCursor();
+        }
+
+        // Consume the closing terminator if we didn't just hit EOF
+        if (cursor + 1 < source.length()) {
+          advanceCursor(); // '*'
+          advanceCursor(); // '/'
+        }
+        // Professional block comment cleaning:
+        // Strip leading '*' and whitespace from each line
+        std::stringstream ss(fullBlock);
+        std::string line, cleanedBlock;
+        while (std::getline(ss, line)) {
+          size_t first = line.find_first_not_of(" \t*");
+          if (first != std::string::npos)
+            line = line.substr(first);
+          else
+            line = ""; // Empty line or just stars
+
+          if (!cleanedBlock.empty())
+            cleanedBlock += "\n";
+          cleanedBlock += line;
+        }
+        lastComment = cleanedBlock;
+        lastCommentLine = currentLine;
+      } else {
+        break;
       }
     } else {
       break;
@@ -36,6 +119,20 @@ void Lexer::skipWhitespace() {
 Token Lexer::nextToken() {
   skipWhitespace();
 
+  Token tok = scanToken();
+
+  if (!lastComment.empty()) {
+    tok.leadingDoc = lastComment;
+    lastComment.clear();
+  }
+
+  lastComment.clear();
+  lastCommentLine = -1;
+
+  return tok;
+}
+
+Token Lexer::scanToken() {
   int startLine = currentLine;
   int startCol = currentColumn;
 
@@ -178,12 +275,11 @@ Token Lexer::nextToken() {
   }
 
   if (c == '"' || c == '\'') {
-    char quote = c;
+    char quote = c; // Lock the delimiter. What is yours is now mine.
     advanceCursor();
     std::string val;
+
     while (cursor < source.length() && source[cursor] != quote) {
-      // Fast-path unescape. Because printing literal '\n' to standard out is a
-      // crime.
       if (source[cursor] == '\\' && cursor + 1 < source.length()) {
         advanceCursor();
         switch (source[cursor]) {
@@ -202,6 +298,9 @@ Token Lexer::nextToken() {
         case '"':
           val += '"';
           break;
+        case '\'':
+          val += '\'';
+          break;
         default:
           val += source[cursor];
           break;
@@ -211,7 +310,12 @@ Token Lexer::nextToken() {
       }
       advanceCursor();
     }
-    advanceCursor();
+
+    // Annihilate the matching closing quote
+    if (cursor < source.length() && source[cursor] == quote) {
+      advanceCursor();
+    }
+
     return {TokenType::STRING, val, startLine, startCol};
   }
 

@@ -144,11 +144,13 @@ void CodeGen::registerModules(const std::vector<ModuleNode *> &allModules) {
         std::vector<TypeInfo> paramTypes;
         if (!method->isStatic && !method->isConstructor) {
           TypeInfo thisType = {st->name, 1, false};
+          thisType.isConst = method->isConstMethod;
           paramTypes.push_back(thisType);
           mangledName += "_" + getMangledType(thisType);
         }
         if (method->isConstructor) {
           TypeInfo thisType = {st->name, 1, false};
+          thisType.isConst = method->isConstMethod;
           paramTypes.push_back(thisType);
           mangledName += "_" + getMangledType(thisType);
         }
@@ -208,11 +210,22 @@ void CodeGen::registerModules(const std::vector<ModuleNode *> &allModules) {
           if (m->isStatic || m->isConstructor || m->isDestructor)
             continue;
 
+          bool isVirtual = std::find(m->decorators.begin(), m->decorators.end(),
+                                     "virtual") != m->decorators.end();
+          bool isOverride =
+              std::find(m->decorators.begin(), m->decorators.end(),
+                        "override") != m->decorators.end();
+
+          if (!isVirtual && !isOverride && !layout.count(m->name)) {
+            continue;
+          }
+
           std::string definingClass =
               m->className.empty() ? className : m->className;
 
           std::string mangled = definingClass + "_" + m->name;
           TypeInfo thisType = {definingClass, 1, false};
+          thisType.isConst = m->isConstMethod;
           mangled += "_" + getMangledType(thisType);
 
           for (auto &arg : m->args) {
@@ -224,7 +237,7 @@ void CodeGen::registerModules(const std::vector<ModuleNode *> &allModules) {
 
           if (layout.count(m->name)) {
             methods[layout[m->name]] = mangled;
-          } else {
+          } else if (isVirtual) {
             layout[m->name] = methods.size();
             methods.push_back(mangled);
           }
@@ -1189,12 +1202,19 @@ void CodeGen::visit(FunctionNode *node) {
     builder->CreateCall(initF);
   }
 
-  int paramOffset = 1;
+  int paramOffset = 0;
   auto argIt = func->arg_begin();
   if ((node->isMethod && !node->isStatic) || node->isConstructor ||
       node->isDestructor) {
     llvm::Argument *thisArg = &(*argIt);
     thisArg->setName("this");
+
+    TypeInfo thisType = {node->className, 1, false};
+    thisType.isConst = node->isConstMethod;
+
+    if (thisType.isConst) {
+      func->addParamAttr(paramOffset, llvm::Attribute::ReadOnly);
+    }
 
     llvm::Type *allocType = isPrimitiveExtension
                                 ? getLLVMType(node->className)
@@ -1230,6 +1250,12 @@ void CodeGen::visit(FunctionNode *node) {
     TypeInfo argType = node->args[idx].isThisAssign
                            ? structMemberTypes[node->className][argName]
                            : parseTypeString(node->args[idx].type);
+
+    argType.isConst = node->args[idx].isConst;
+
+    if (argType.isConst && getLLVMType(argType)->isPointerTy()) {
+      func->addParamAttr(paramOffset, llvm::Attribute::ReadOnly);
+    }
 
     llvm::Argument *arg = &(*argIt);
     arg->setName(argName);
@@ -2791,6 +2817,7 @@ void CodeGen::visit(ModuleNode *node) {
       // signature.
       if (!method->isStatic) {
         TypeInfo thisType = {st->name, 1, false};
+        thisType.isConst = method->isConstMethod;
         method->name += "_" + getMangledType(thisType);
       }
 

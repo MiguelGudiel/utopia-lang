@@ -97,12 +97,15 @@ struct Token {
   std::string value;
   int line;
   int column;
+  std::string leadingDoc;
 };
 
 class Lexer {
 public:
   explicit Lexer(std::string_view sourceCode);
   std::vector<Token> tokenize();
+  std::string lastComment;
+  int lastCommentLine = -1;
 
 private:
   std::string_view source;
@@ -113,6 +116,7 @@ private:
 
   void skipWhitespace();
   Token nextToken();
+  Token scanToken();
 
   void advanceCursor();
 };
