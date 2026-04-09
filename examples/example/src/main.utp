@@ -48,6 +48,7 @@ class Player extends Entity implements IDrawable {
         print("Drawing player:", name, "ID:", id);
     }
 
+    @override
     void update() {
         if (health == null) { 
             return; 

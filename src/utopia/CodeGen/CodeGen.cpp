@@ -1091,6 +1091,27 @@ void CodeGen::visit(ThisNode *node) {
   }
 }
 
+void CodeGen::visit(SuperNode *node) {
+  auto alloca = lookupValue("this");
+  if (!alloca) {
+    std::cerr << "CodeGen Error: 'this' pointer not found in current scope for "
+                 "'super'.\n";
+    exit(1);
+  }
+
+  llvm::Value *ptr = builder->CreateLoad(llvm::PointerType::get(*context, 0),
+                                         alloca, "super.ptr");
+
+  if (isLValueContext) {
+    currentLValue = ptr;
+  } else {
+    currentVal = ptr;
+  }
+
+  TypeInfo thisType = lookupType("this");
+  currentType = {structASTs[thisType.base]->baseClass, 1, false};
+}
+
 void CodeGen::visit(FunctionNode *node) {
   enterScope();
 
@@ -1467,9 +1488,7 @@ void CodeGen::visit(VarDeclNode *node) {
       sizeVals.push_back(sz);
     }
 
-    // WTF: Single-Allocation Iliffe Vector Stack Allocation.
-    // Adiós a los alloca recursivos. Destrozamos la memoria con un bloque
-    // gigante y contiguo.
+    // OH YEA BABY, Single-Allocation Iliffe Vector Stack Allocation :D
     llvm::Type *i64 = builder->getInt64Ty();
     llvm::Type *i8 = builder->getInt8Ty();
     llvm::Type *ptrTy = llvm::PointerType::get(*context, 0);
@@ -2167,8 +2186,7 @@ void CodeGen::visit(NewNode *node) {
   }
 
   if (!sizeVals.empty()) {
-    // WTF: Single-Allocation Iliffe Vector Heap Allocation.
-    // Adiós al laberinto de fragmentación. Un solo malloc y que la caché fluya.
+    // Single-Allocation Iliffe Vector Heap Allocation
     llvm::Type *i64 = builder->getInt64Ty();
     llvm::Type *i8 = builder->getInt8Ty();
     llvm::Type *ptrTy = llvm::PointerType::get(*context, 0);
@@ -2322,6 +2340,34 @@ void CodeGen::visit(NewNode *node) {
 void CodeGen::visit(CallNode *node) {
   emitLocation(node);
 
+  if (node->callee == "@super") {
+    llvm::Value *thisArg = builder->CreateLoad(
+        llvm::PointerType::get(*context, 0), lookupValue("this"));
+    std::vector<llvm::Value *> args = {thisArg};
+
+    std::vector<TypeInfo> expectedParams;
+    if (functionParamTypes.count(node->resolvedMangledName)) {
+      expectedParams = functionParamTypes[node->resolvedMangledName];
+    }
+
+    int pIdx = 1;
+    for (auto &a : node->arguments) {
+      a->accept(this);
+      llvm::Value *argVal = currentVal;
+      if (pIdx < expectedParams.size()) {
+        argVal = castValue(argVal, currentType, expectedParams[pIdx]);
+      }
+      args.push_back(argVal);
+      pIdx++;
+    }
+
+    llvm::Function *ctor = module->getFunction(node->resolvedMangledName);
+    if (ctor) {
+      builder->CreateCall(ctor, args);
+    }
+    return;
+  }
+
   if (node->callee == "@assign_deref") {
     isLValueContext = true;
     node->arguments[0]->accept(this);
@@ -2358,10 +2404,13 @@ void CodeGen::visit(CallNode *node) {
     return;
   }
 
-  if (node->callee == "int" || node->callee == "float" ||
-      node->callee == "bool") {
+  bool isCast = (node->callee == "int" || node->callee == "float" ||
+                 node->callee == "bool") ||
+                (node->callee.find('*') != std::string::npos);
+
+  if (isCast) {
     node->arguments[0]->accept(this);
-    TypeInfo targetType{node->callee, 0, false};
+    TypeInfo targetType = parseTypeString(node->callee);
     currentVal = castValue(currentVal, currentType, targetType);
     currentType = targetType;
     return;
@@ -2514,10 +2563,19 @@ void CodeGen::visit(CallNode *node) {
   llvm::FunctionType *fTy = f->getFunctionType();
   llvm::Value *callableFunc = f;
 
+  // Revisa si el nodo objeto es específicamente una invocación de 'super'
+  bool isSuperCall =
+      node->object && dynamic_cast<SuperNode *>(node->object.get()) != nullptr;
+
   if (thisArg && structASTs.count(currentType.base) &&
       structASTs[currentType.base]->isClass) {
     auto &layout = vtableLayout[currentType.base];
-    if (layout.count(node->callee)) {
+
+    // Static dispatch override.
+    // If the user explicitly asked for the ancestor's method via 'super',
+    // we bypass the vtable entirely and hardcode the jump.
+    // Because sometimes the father actually knows best.
+    if (!isSuperCall && layout.count(node->callee)) {
       /*
        * VIRTUAL DISPATCH TRAMPOLINE
        * 1. Extract the vptr from index 0.

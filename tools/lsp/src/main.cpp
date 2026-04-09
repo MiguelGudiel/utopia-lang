@@ -1,3 +1,4 @@
+#include "utopia/AST/AST.hpp"
 #include "utopia/AST/ASTVisitor.hpp"
 #include "utopia/Driver/ModuleLoader.hpp"
 #include "utopia/Lexer/Lexer.hpp"
@@ -282,6 +283,7 @@ public:
   }
 
   void visit(utopia::ThisNode *) override {}
+  void visit(utopia::SuperNode *node) override {}
   void visit(utopia::ExtensionNode *) override {}
   void visit(utopia::MemberAccessNode *) override {}
   void visit(utopia::NullLiteralNode *) override {}

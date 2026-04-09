@@ -5,6 +5,7 @@ namespace utopia {
 
 // Forward declarations for the vtable mapping
 class ThisNode;
+class SuperNode;
 class StructDeclNode;
 class MemberAccessNode;
 class BlockNode;
@@ -39,6 +40,7 @@ public:
   virtual ~ASTVisitor() = default;
 
   virtual void visit(ThisNode *node) = 0;
+  virtual void visit(SuperNode *node) = 0;
   virtual void visit(StructDeclNode *node) = 0;
   virtual void visit(ExtensionNode *node) = 0;
   virtual void visit(MemberAccessNode *node) = 0;

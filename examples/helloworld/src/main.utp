@@ -17,10 +17,11 @@ class Circle extends Entity implements IDrawable {
     print(this.name, ":D");
   }
 
-  //@override
-  //void Update() {
-  //  print("Circle updated", name);
-  //}
+  @override
+  void Update() {
+    super.Update();
+    print("Circle updated", name);
+  }
 }
 
 int main() {

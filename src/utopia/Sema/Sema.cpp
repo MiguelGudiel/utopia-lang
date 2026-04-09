@@ -312,6 +312,11 @@ bool Sema::checkAssignment(const TypeInfo &target, const TypeInfo &source,
     return false;
   }
 
+  if (target.ptrDepth > 0 && source.ptrDepth > 0) {
+    if (target.base == "void")
+      return true; /* Implicit decay to void* */
+  }
+
   if (target.base != source.base && source.base != "null" &&
       target.ptrDepth == source.ptrDepth) {
     reportError(node, "error: cannot convert '" + typeToString(source) +
@@ -565,6 +570,9 @@ int Sema::getConversionCost(const TypeInfo &target, const TypeInfo &source) {
       target.base == source.base && target.ptrDepth == source.ptrDepth)
     return 0;
 
+  if (target.base == "void" && target.ptrDepth == 1 && source.ptrDepth > 0)
+    return 1;
+
   // Mismatch in pointer levels. We are not attempting to fix this
   if (target.ptrDepth != source.ptrDepth)
     return 1000;
@@ -758,6 +766,23 @@ void Sema::visit(ThisNode *node) {
     return;
   }
   currentExprType = {currentClass, 1, false};
+}
+
+void Sema::visit(SuperNode *node) {
+  if (currentClass.empty() || inStaticMethod) {
+    reportError(node, "Semantic Error: invalid use of 'super' outside of a "
+                      "non-static member function");
+    currentExprType = {"error", 0, false};
+    return;
+  }
+  if (structASTs[currentClass]->baseClass.empty()) {
+    reportError(node, "Semantic Error: class '" + currentClass +
+                          "' has no base class");
+    currentExprType = {"error", 0, false};
+    return;
+  }
+
+  currentExprType = {structASTs[currentClass]->baseClass, 1, false};
 }
 
 void Sema::visit(FunctionNode *node) {
@@ -973,6 +998,10 @@ void Sema::visit(VarDeclNode *node) {
 
   TypeInfo declType = parseType(node->typeName, node);
 
+  if (declType.base == "void" && declType.ptrDepth == 0) {
+    reportError(node, "error: variables cannot have type 'void'");
+  }
+
   if (!node->arraySizes.empty()) {
     for (auto &sz : node->arraySizes) {
       sz->accept(this);
@@ -1145,6 +1174,36 @@ void Sema::visit(CallNode *node) {
     argTypes.push_back(currentExprType);
   }
 
+  if (node->callee == "@super") {
+    if (currentClass.empty() || !structASTs.count(currentClass) ||
+        structASTs[currentClass]->baseClass.empty()) {
+      reportError(node, "Semantic Error: 'super()' call is invalid here. Class "
+                        "has no parent.");
+      currentExprType = {"error", 0, false};
+      return;
+    }
+
+    std::string parentClass = structASTs[currentClass]->baseClass;
+    std::string baseName = parentClass + "_" + parentClass;
+
+    std::vector<TypeInfo> resolutionArgs = argTypes;
+    resolutionArgs.insert(resolutionArgs.begin(), {parentClass, 1, false});
+
+    TypeInfo outRet;
+    std::string resolved =
+        resolveOverload(baseName, resolutionArgs, node, outRet);
+
+    if (!resolved.empty()) {
+      node->resolvedMangledName = resolved;
+    } else {
+      reportError(node,
+                  "Semantic Error: no matching super constructor found for '" +
+                      parentClass + "'");
+    }
+    currentExprType = {"void", 0, false};
+    return;
+  }
+
   if (node->object) {
     node->object->accept(this);
     TypeInfo objType = currentExprType;
@@ -1245,12 +1304,15 @@ void Sema::visit(CallNode *node) {
     currentExprType = {"void", 0, false};
     return;
   }
-  if (node->callee == "int" || node->callee == "float" ||
-      node->callee == "bool") {
-    currentExprType = {node->callee, 0, false};
+  bool isCast = (node->callee == "int" || node->callee == "float" ||
+                 node->callee == "bool") ||
+                (node->callee.find('*') != std::string::npos);
+  if (isCast) {
+    TypeInfo targetType = parseType(node->callee, node);
+    node->arguments[0]->accept(this);
+    currentExprType = targetType;
     return;
   }
-
   // Global function resolution
   TypeInfo outRet;
   std::string resolved =
@@ -1299,6 +1361,12 @@ void Sema::visit(DerefNode *node) {
     reportError(node, "error: cannot dereference a nullable pointer. You must "
                       "assert it first with '!'.");
   }
+
+  /* The void stares back. Prevents raw memory interpretation. */
+  if (currentExprType.base == "void" && currentExprType.ptrDepth == 1) {
+    reportError(node, "error: cannot dereference a void pointer");
+  }
+
   if (currentExprType.ptrDepth > 0)
     currentExprType.ptrDepth--;
 }

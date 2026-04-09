@@ -632,6 +632,25 @@ std::unique_ptr<ExprNode> Parser::parsePrimaryBase() {
   if (match(TokenType::KW_THIS))
     return std::make_unique<ThisNode>();
 
+  if (match(TokenType::KW_SUPER)) {
+    if (match(TokenType::LPAREN)) {
+      std::vector<std::unique_ptr<ExprNode>> args;
+      while (currentToken().type != TokenType::RPAREN &&
+             currentToken().type != TokenType::EOF_TOK) {
+        args.push_back(parseExpression());
+        if (currentToken().type == TokenType::COMMA)
+          advance();
+      }
+      expect(TokenType::RPAREN, "Expected ')' after super arguments");
+      auto callNode = std::make_unique<CallNode>("@super", std::move(args));
+      finalizeNode(callNode.get(), startTok);
+      return callNode;
+    }
+    auto node = std::make_unique<SuperNode>();
+    finalizeNode(node.get(), startTok);
+    return node;
+  }
+
   if (match(TokenType::KW_NEW)) {
     std::string typeName = consumeType();
     std::vector<std::unique_ptr<ExprNode>> args;
@@ -659,7 +678,7 @@ std::unique_ptr<ExprNode> Parser::parsePrimaryBase() {
   }
 
   if (isTypeToken()) {
-    std::string typeName = consumeType();
+    std::string typeName = parseTypeName();
     if (currentToken().type == TokenType::DOT) {
       return std::make_unique<VariableNode>(typeName);
     }

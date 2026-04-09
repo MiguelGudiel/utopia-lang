@@ -40,6 +40,11 @@ public:
   void accept(ASTVisitor *visitor) override;
 };
 
+class SuperNode : public ExprNode {
+public:
+  void accept(ASTVisitor *visitor) override;
+};
+
 class MemberAccessNode : public ExprNode {
 public:
   std::unique_ptr<ExprNode> object;

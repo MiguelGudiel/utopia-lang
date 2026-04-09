@@ -97,6 +97,7 @@ private:
   llvm::DIType *getDebugType(const TypeInfo &type);
 
   void visit(ThisNode *node) override;
+  void visit(SuperNode *node) override;
   void visit(StructDeclNode *node) override;
   void visit(ExtensionNode *node) override;
   void visit(MemberAccessNode *node) override;

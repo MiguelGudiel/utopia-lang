@@ -72,6 +72,7 @@ enum class TokenType {
   KW_PUBLIC,
   KW_PRIVATE,
   KW_THIS,
+  KW_SUPER,
   KW_REQUIRED,
   KW_STATIC,
   KW_EXTENDS,

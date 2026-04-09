@@ -9,6 +9,7 @@ namespace utopia {
 // resolve the vtable pointer of the calling object. Do not touch.
 
 void ThisNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
+void SuperNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void StructDeclNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void ExtensionNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
 void MemberAccessNode::accept(ASTVisitor *visitor) { visitor->visit(this); }
