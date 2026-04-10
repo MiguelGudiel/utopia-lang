@@ -158,26 +158,44 @@ Token Lexer::scanToken() {
     }
     if (val == "import")
       return {TokenType::KW_IMPORT, val, startLine, startCol};
+    if (val == "char")
+      return {TokenType::KW_CHAR, val, startLine, startCol};
     if (val == "int")
       return {TokenType::KW_INT, val, startLine, startCol};
     if (val == "uint")
       return {TokenType::KW_UINT, val, startLine, startCol};
+    if (val == "usize")
+      return {TokenType::KW_USIZE, val, startLine, startCol};
+    // Fixed-width integers (The heavy lifters)
+    if (val == "int8")
+      return {TokenType::KW_INT8, val, startLine, startCol};
+    if (val == "int16")
+      return {TokenType::KW_INT16, val, startLine, startCol};
+    if (val == "int32")
+      return {TokenType::KW_INT32, val, startLine, startCol};
+    if (val == "int64")
+      return {TokenType::KW_INT64, val, startLine, startCol};
+    if (val == "uint8")
+      return {TokenType::KW_UINT8, val, startLine, startCol};
+    if (val == "uint16")
+      return {TokenType::KW_UINT16, val, startLine, startCol};
+    if (val == "uint32")
+      return {TokenType::KW_UINT32, val, startLine, startCol};
+    if (val == "uint64")
+      return {TokenType::KW_UINT64, val, startLine, startCol};
+    // Floating point (From deep learning to standard precision)
     if (val == "float")
       return {TokenType::KW_FLOAT, val, startLine, startCol};
+    if (val == "float8")
+      return {TokenType::KW_FLOAT8, val, startLine, startCol};
+    if (val == "float16")
+      return {TokenType::KW_FLOAT16, val, startLine, startCol};
+    if (val == "float32")
+      return {TokenType::KW_FLOAT32, val, startLine, startCol};
+    if (val == "float64")
+      return {TokenType::KW_FLOAT64, val, startLine, startCol};
     if (val == "double")
       return {TokenType::KW_DOUBLE, val, startLine, startCol};
-    if (val == "char")
-      return {TokenType::KW_CHAR, val, startLine, startCol};
-    if (val == "uchar")
-      return {TokenType::KW_UCHAR, val, startLine, startCol};
-    if (val == "short")
-      return {TokenType::KW_SHORT, val, startLine, startCol};
-    if (val == "ushort")
-      return {TokenType::KW_USHORT, val, startLine, startCol};
-    if (val == "long")
-      return {TokenType::KW_LONG, val, startLine, startCol};
-    if (val == "ulong")
-      return {TokenType::KW_ULONG, val, startLine, startCol};
     if (val == "bool")
       return {TokenType::KW_BOOL, val, startLine, startCol};
     if (val == "void")
@@ -265,7 +283,7 @@ Token Lexer::scanToken() {
     if (!hasDot) {
       return {TokenType::NUMBER, val, startLine, startCol};
     }
-    TokenType floatType = TokenType::FLOAT_LITERAL_DOUBLE; // por defecto double
+    TokenType floatType = TokenType::FLOAT_LITERAL_DOUBLE;
     if (cursor < source.length() &&
         (source[cursor] == 'f' || source[cursor] == 'F')) {
       advanceCursor();

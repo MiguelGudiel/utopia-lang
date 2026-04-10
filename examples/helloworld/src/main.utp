@@ -34,6 +34,15 @@ inline int sum(int a, int b) {
   return a + b;
 }
 
+force_inline int sleep() {
+  double t = 0.0;
+  // Precise enough to avoid the infinite loop trap
+  while (t < 1000.0) {
+    t += 1.0 / 99999.0;
+  }
+  return t;
+}
+
 int main() {
   char* msg2 = "Mamaguebo, digo glu glu glu";
   Vec3 vec3;
@@ -46,9 +55,13 @@ int main() {
 
   sum(1, 2);
 
+  sleep();
+
   Circle* c = new Circle(10.0, "Circle XD");
   c.Draw();
   c.Update();
+
+  sleep();
 
   int matrix[3][3];
 
@@ -61,9 +74,18 @@ int main() {
   int total = matrix[0][0] + matrix[1][1] + matrix[2][2];
 
   print("La suma de la diagonal es:");
+  sleep();
   print(total);
 
+  sleep();
   float radius = c.GetRadius();
   print(radius);
+
+  double t = 0;
+  while(t < 9000) {
+    t += 1.0 / 99999.0;
+  }
+
+  print(t);
   return 0;
 }

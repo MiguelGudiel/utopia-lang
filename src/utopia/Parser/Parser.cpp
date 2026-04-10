@@ -57,12 +57,31 @@ void Parser::expect(TokenType type, const std::string &errorMessage) {
 
 bool Parser::isTypeToken() const {
   TokenType t = currentToken().type;
-  return t == TokenType::KW_INT || t == TokenType::KW_FLOAT ||
-         t == TokenType::KW_DOUBLE || t == TokenType::KW_BOOL ||
-         t == TokenType::KW_UINT || t == TokenType::KW_VOID ||
-         t == TokenType::KW_CHAR || t == TokenType::KW_UCHAR ||
-         t == TokenType::KW_SHORT || t == TokenType::KW_USHORT ||
-         t == TokenType::KW_LONG || t == TokenType::KW_ULONG;
+  switch (t) {
+  case TokenType::KW_INT:
+  case TokenType::KW_UINT:
+  case TokenType::KW_INT8:
+  case TokenType::KW_INT16:
+  case TokenType::KW_INT32:
+  case TokenType::KW_INT64:
+  case TokenType::KW_UINT8:
+  case TokenType::KW_UINT16:
+  case TokenType::KW_UINT32:
+  case TokenType::KW_UINT64:
+  case TokenType::KW_FLOAT:
+  case TokenType::KW_DOUBLE:
+  case TokenType::KW_FLOAT8:
+  case TokenType::KW_FLOAT16:
+  case TokenType::KW_FLOAT32:
+  case TokenType::KW_FLOAT64:
+  case TokenType::KW_USIZE:
+  case TokenType::KW_VOID:
+  case TokenType::KW_BOOL:
+  case TokenType::KW_CHAR:
+    return true;
+  default:
+    return false;
+  }
 }
 
 DeclPreamble Parser::parsePreamble() {
@@ -135,12 +154,16 @@ bool Parser::isVarDeclaration() const {
 
   TokenType t = tokens[tempCursor].type;
 
-  if (t == TokenType::KW_INT || t == TokenType::KW_FLOAT ||
-      t == TokenType::KW_DOUBLE || t == TokenType::KW_BOOL ||
-      t == TokenType::KW_UINT || t == TokenType::KW_VOID ||
-      t == TokenType::KW_CHAR || t == TokenType::KW_UCHAR ||
-      t == TokenType::KW_SHORT || t == TokenType::KW_USHORT ||
-      t == TokenType::KW_LONG || t == TokenType::KW_ULONG) {
+  if (t == TokenType::KW_INT || t == TokenType::KW_INT8 ||
+      t == TokenType::KW_INT16 || t == TokenType::KW_INT32 ||
+      t == TokenType::KW_INT64 || t == TokenType::KW_UINT ||
+      t == TokenType::KW_UINT8 || t == TokenType::KW_UINT16 ||
+      t == TokenType::KW_UINT32 || t == TokenType::KW_UINT64 ||
+      t == TokenType::KW_FLOAT || t == TokenType::KW_FLOAT8 ||
+      t == TokenType::KW_FLOAT16 || t == TokenType::KW_FLOAT32 ||
+      t == TokenType::KW_FLOAT64 || t == TokenType::KW_DOUBLE ||
+      t == TokenType::KW_BOOL || t == TokenType::KW_USIZE ||
+      t == TokenType::KW_VOID || t == TokenType::KW_CHAR) {
     return true;
   }
 

@@ -1192,10 +1192,15 @@ void Sema::visit(BinaryOpNode *node) {
     if (node->op != "+")
       reportError(node, "Invalid operator for String type");
     currentExprType = {"String", 0, false};
+  } else if (leftT.isFloat() || rightT.isFloat()) {
+    /* * floating point promotion logic
+     * if any operand is double, the whole thing is double.
+     */
+    currentExprType = (leftT.base == "double" || rightT.base == "double")
+                          ? TypeInfo{"double", 0, false}
+                          : TypeInfo{"float", 0, false};
   } else {
-    currentExprType = (leftT.base == "float" || rightT.base == "float")
-                          ? TypeInfo{"float", 0}
-                          : TypeInfo{"int", 0};
+    currentExprType = {"int", 0, false};
   }
   nodeTypes[node] = currentExprType;
 }

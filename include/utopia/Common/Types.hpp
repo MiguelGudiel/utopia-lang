@@ -9,6 +9,7 @@ struct ErrorInfo {
 
 struct TypeInfo {
   std::string base;
+  
   unsigned ptrDepth = 0;
   unsigned arrayDimensions = 0;
   bool isReference = false;
@@ -22,42 +23,49 @@ struct TypeInfo {
   }
 
   bool isUnsigned() const {
-    return base == "uchar" || base == "ushort" || base == "uint" ||
-           base == "ulong" || base == "uint8_t" || base == "uint16_t" ||
-           base == "uint32_t" || base == "uint64_t" || base == "size_t" ||
-           base == "uintptr_t";
+    return base == "uint8" || base == "uint16" || base == "uint" ||
+           base == "uint32" || base == "uint64" || base == "usize";
   }
 
-  bool isFloat() const { return base == "float" || base == "double"; }
+  bool isFloat() const {
+    if (ptrDepth > 0 || arrayDimensions > 0 || isReference || isRValueRef)
+      return false;
+    return base == "float" || base == "double" || base == "float8" ||
+           base == "float16" || base == "float32" || base == "float64";
+  }
 
   bool isInteger() const {
-    return base == "char" || base == "uchar" || base == "int8_t" ||
-           base == "uint8_t" || base == "short" || base == "ushort" ||
-           base == "int16_t" || base == "uint16_t" || base == "int" ||
-           base == "uint" || base == "int32_t" || base == "uint32_t" ||
-           base == "long" || base == "ulong" || base == "int64_t" ||
-           base == "uint64_t" || base == "size_t" || base == "intptr_t" ||
-           base == "uintptr_t";
+    if (ptrDepth > 0 || arrayDimensions > 0 || isReference || isRValueRef)
+      return false;
+
+    return base == "char" || base == "int8" || base == "uint8" ||
+           base == "int16" || base == "uint16" || base == "int" ||
+           base == "uint" || base == "int32" || base == "uint32" ||
+           base == "int64" || base == "uint64" || base == "usize" ||
+           base == "intptr";
   }
 
   int getIntegerBitWidth(unsigned targetPtrSize) const {
-    if (base == "char" || base == "uchar" || base == "int8_t" ||
-        base == "uint8_t")
+    if (base == "int8" || base == "uint8")
       return 8;
-    if (base == "short" || base == "ushort" || base == "int16_t" ||
-        base == "uint16_t")
+    if (base == "int16" || base == "uint16")
       return 16;
-    if (base == "int" || base == "uint" || base == "int32_t" ||
-        base == "uint32_t")
+    if (base == "int32" || base == "uint32")
       return 32;
-    if (base == "int64_t" || base == "uint64_t")
+    if (base == "int" || base == "uint")
+      return 32; // Default 32b
+    if (base == "int64" || base == "uint64")
       return 64;
 
-    if (base == "long" || base == "ulong" || base == "size_t" ||
-        base == "intptr_t" || base == "uintptr_t")
+    // Architecture pointer size (usually 64 or 32)
+    if (base == "usize" || base == "intptr")
       return targetPtrSize;
 
     return 0;
+  }
+
+  bool isTextual() const {
+    return (base == "char" && ptrDepth == 1) || (base == "String");
   }
 
   bool isPrimitive() const {

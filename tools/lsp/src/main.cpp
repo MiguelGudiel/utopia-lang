@@ -592,8 +592,8 @@ int main() {
       }
 
       if (isDecorator) {
-        static const char *const decorators[] = {"virtual", "override", "deprecated",
-                                                 "noinline", "naked"};
+        static const char *const decorators[] = {
+            "virtual", "override", "deprecated", "noinline", "naked"};
         for (const auto &dec : decorators) {
           items.push_back(
               {{"label", dec}, {"kind", 14}, {"detail", "Decorator"}});
@@ -636,15 +636,17 @@ int main() {
          * editor sort out the mess.
          */
         static const char *const keywords[] = {
-            "import",   "int",      "uint",    "float",        "double",
-            "char",     "uchar",    "short",   "ushort",       "long",
-            "ulong",    "bool",     "void",    "const",        "true",
-            "false",    "return",   "new",     "delete",       "move",
-            "null",     "if",       "else",    "while",        "for",
-            "break",    "continue", "inline",  "force_inline", "struct",
-            "class",    "public",   "private", "this",         "super",
-            "required", "static",   "extends", "implements",   "extension",
-            "on",       "as"};
+            "import", "return", "new", "delete", "move", "null", "if", "else",
+            "while", "for", "break", "continue", "inline", "force_inline",
+            "struct", "class", "enum", "public", "private", "protected", "this",
+            "super", "required", "static", "extends", "implements", "extension",
+            "on", "as", "const", "true", "false", "async", "await",
+
+            // Primitives & Explicit Width Types
+            "void", "bool", "char", "String", "int", "uint", "int8", "uint8",
+            "int16", "uint16", "int32", "uint32", "int64", "uint64", "usize",
+            "intptr", "float", "double", "float8", "float16", "float32",
+            "float64"};
 
         // 14 = LSP CompletionItemKind::Keyword
         for (const auto &kw : keywords) {

@@ -545,30 +545,35 @@ llvm::Type *CodeGen::getLLVMType(const TypeInfo &type) {
   if (type.base == "void")
     return llvm::Type::getVoidTy(*context);
 
-  if (type.base == "char" || type.base == "uchar" || type.base == "int8_t" ||
-      type.base == "uint8_t")
+  // Integers
+  if (type.base == "int8" || type.base == "uint8" || type.base == "char")
     return llvm::Type::getInt8Ty(*context);
-  if (type.base == "short" || type.base == "ushort" || type.base == "int16_t" ||
-      type.base == "uint16_t")
+  if (type.base == "int16" || type.base == "uint16")
     return llvm::Type::getInt16Ty(*context);
-  if (type.base == "int" || type.base == "uint" || type.base == "int32_t" ||
-      type.base == "uint32_t")
+  if (type.base == "int" || type.base == "uint" || type.base == "int32" ||
+      type.base == "uint32")
     return llvm::Type::getInt32Ty(*context);
-  if (type.base == "int64_t" || type.base == "uint64_t")
+  if (type.base == "int64" || type.base == "uint64")
     return llvm::Type::getInt64Ty(*context);
 
-  if (type.base == "long" || type.base == "ulong" || type.base == "size_t" ||
-      type.base == "intptr_t" || type.base == "uintptr_t") {
-    /* dynamic bit width resolution. black magic to avoid stack corruption on
-     * 32-bit toasters */
+  // Architecture specific
+  if (type.base == "usize") {
     unsigned ptrSize = module->getDataLayout().getPointerSizeInBits();
     return llvm::Type::getIntNTy(*context, ptrSize);
   }
 
-  if (type.base == "float")
+  // Floating Point
+  // NOTE: float8 is a different beast. Mapping to i8 for storage if not
+  // supported by target
+  if (type.base == "float8")
+    return llvm::Type::getInt8Ty(*context);
+  if (type.base == "float16")
+    return llvm::Type::getHalfTy(*context);
+  if (type.base == "float" || type.base == "float32")
     return llvm::Type::getFloatTy(*context);
-  if (type.base == "double")
+  if (type.base == "double" || type.base == "float64")
     return llvm::Type::getDoubleTy(*context);
+
   if (type.base == "bool")
     return llvm::Type::getInt1Ty(*context);
 
@@ -1177,6 +1182,8 @@ void CodeGen::visit(FunctionNode *node) {
     }
   }
 
+  func->setDoesNotThrow();
+
   llvm::BasicBlock *block = llvm::BasicBlock::Create(*context, "entry", func);
   builder->SetInsertPoint(block);
 
@@ -1403,7 +1410,11 @@ void CodeGen::visit(AssignNode *node) {
   if (node->op != "=") {
     llvm::Value *curVal =
         builder->CreateLoad(getLLVMType(targetType), destAddr, "cur_val");
-    bool isF = (targetType.base == "float");
+    if (curVal->getType() != val->getType()) {
+      val = builder->CreateFPCast(val, curVal->getType());
+    }
+    bool isF = targetType.isFloat();
+
     if (node->op == "+=")
       val = isF ? builder->CreateFAdd(curVal, val)
                 : builder->CreateAdd(curVal, val);
@@ -2411,17 +2422,23 @@ void CodeGen::visit(CallNode *node) {
     std::vector<llvm::Value *> args = {nullptr};
     for (auto &arg : node->arguments) {
       arg->accept(this);
-      if (currentType.base == "int") {
-        fmt += "%d ";
+      if (currentType.isTextual()) {
+        fmt += "%s";
         args.push_back(currentVal);
-      } else if (currentType.base == "float") {
-        fmt += "%f ";
-        llvm::Value *doubleVal =
-            builder->CreateFPExt(currentVal, llvm::Type::getDoubleTy(*context));
-        args.push_back(doubleVal);
-      } else {
-        fmt += "%s ";
+      } else if (currentType.isPointer()) {
+        fmt += "%p";
         args.push_back(currentVal);
+      } else if (currentType.isInteger()) {
+        fmt += "%d";
+        args.push_back(currentVal);
+      } else if (currentType.isFloat()) {
+        fmt += "%f";
+        if (currentVal->getType()->isFloatTy()) {
+          args.push_back(builder->CreateFPExt(
+              currentVal, llvm::Type::getDoubleTy(*context)));
+        } else {
+          args.push_back(currentVal);
+        }
       }
     }
     fmt += "\n";
@@ -2627,8 +2644,8 @@ void CodeGen::visit(CastNode *node) {
 }
 
 void CodeGen::visit(NullAssertNode *node) {
-  // Se evalua el operando. Preservamos isLValueContext por si estamos afirmando
-  // un l-value (ej. un puntero en una estructura).
+  // Se evalua el operando. Preservamos isLValueContext por si estamos
+  // afirmando un l-value (ej. un puntero en una estructura).
   node->operand->accept(this);
   llvm::Value *ptrVal = currentVal;
   llvm::Value *preservedLValue = currentLValue;
