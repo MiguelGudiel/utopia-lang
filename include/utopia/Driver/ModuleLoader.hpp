@@ -36,7 +36,7 @@ private:
   std::filesystem::path
   resolveImportPath(const std::string &importPath,
                     const std::filesystem::path &currentDir);
-  ModuleNode *parseModule(const std::filesystem::path &absPath);
+  std::unique_ptr<ModuleNode> parseModule(const std::filesystem::path &absPath);
 };
 
 } // namespace utopia

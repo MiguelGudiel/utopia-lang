@@ -32,8 +32,7 @@ CodeGen::CodeGen(const std::string &sourceFile, bool isDebug)
   std::string error;
   auto target = llvm::TargetRegistry::lookupTarget(targetTripleStr, error);
   if (!target) {
-    std::cerr << "LLVM Error: " << error << "\n";
-    exit(1);
+    throw std::runtime_error("LLVM Target Error: " + error);
   }
 
   auto cpu = "generic";
@@ -128,38 +127,36 @@ void CodeGen::registerModules(const std::vector<ModuleNode *> &allModules) {
     }
 
     for (auto &func : mod->functions) {
-      std::string mangledName = func->name;
       std::vector<TypeInfo> paramTypes;
       for (auto &arg : func->args) {
         paramTypes.push_back(parseTypeString(arg.type));
-        mangledName += "_" + getMangledType(paramTypes.back());
       }
+      std::string mangledName = mangleSignature(func->name, paramTypes);
       functionParamTypes[mangledName] = paramTypes;
       functionTypes[mangledName] = parseTypeString(func->returnType);
     }
 
     for (auto &st : mod->structs) {
       for (auto &method : st->methods) {
-        std::string mangledName = st->name + "_" + method->name;
         std::vector<TypeInfo> paramTypes;
         if (!method->isStatic && !method->isConstructor) {
           TypeInfo thisType = {st->name, 1, false};
           thisType.isConst = method->isConstMethod;
           paramTypes.push_back(thisType);
-          mangledName += "_" + getMangledType(thisType);
         }
         if (method->isConstructor) {
           TypeInfo thisType = {st->name, 1, false};
           thisType.isConst = method->isConstMethod;
           paramTypes.push_back(thisType);
-          mangledName += "_" + getMangledType(thisType);
         }
         for (auto &arg : method->args) {
           TypeInfo t = arg.isThisAssign ? structMemberTypes[st->name][arg.name]
                                         : parseTypeString(arg.type);
           paramTypes.push_back(t);
-          mangledName += "_" + getMangledType(t);
         }
+        std::string baseName = getMethodBaseName(st->name, method->name);
+        std::string mangledName = mangleSignature(baseName, paramTypes);
+
         functionParamTypes[mangledName] = paramTypes;
         functionTypes[mangledName] = parseTypeString(method->returnType);
       }
@@ -339,30 +336,22 @@ void CodeGen::generate(ModuleNode *astModule, const std::string &outputObjPath,
     throw;
   }
 
-  if (llvm::verifyModule(*module, &llvm::errs())) {
-    std::cerr << "Module verification failed!\n";
-    module->print(llvm::errs(), nullptr);
-    exit(1);
+  if (isDebug)
+    dbgBuilder->finalize();
+
+  std::string error;
+  llvm::raw_string_ostream os(error);
+  if (llvm::verifyModule(*module, &os)) {
+    module->print(llvm::errs(), nullptr); // Dump for post-mortem
+    throw std::runtime_error("LLVM IR Verification failed for " +
+                             astModule->filename + ": " + os.str());
   }
 
   std::cerr << "LLVM module has " << module->getFunctionList().size()
             << " functions\n";
 
-  if (isDebug)
-    dbgBuilder->finalize();
-
   // Emitir el objeto
   emitObjectFile(outputObjPath);
-
-  std::string error;
-  llvm::raw_string_ostream os(error);
-  if (llvm::verifyModule(*module, &os)) {
-    std::cerr << "LLVM IR Verification Error en " << astModule->filename
-              << ":\n"
-              << os.str() << std::endl;
-    // Aquí podrías guardar el .ll de todas formas para inspeccionarlo
-    exit(1);
-  }
 }
 
 // --------------------------------------------------------------------------
@@ -857,21 +846,23 @@ void CodeGen::visit(ProgramNode *node) {
 
   for (auto &st : node->structs) {
     for (auto &method : st->methods) {
-      std::string originalName = method->name;
-      method->name = st->name + "_" + method->name;
+      std::vector<TypeInfo> paramTypes;
 
       if (!method->isStatic && !method->isConstructor) {
         TypeInfo thisType = {st->name, 1, false};
-        method->name += "_" + getMangledType(thisType);
+        thisType.isConst = method->isConstMethod;
+        paramTypes.push_back(thisType);
       }
+
       for (auto &arg : method->args) {
         TypeInfo t = arg.isThisAssign ? structMemberTypes[st->name][arg.name]
                                       : parseTypeString(arg.type);
-        method->name += "_" + getMangledType(t);
+        paramTypes.push_back(t);
       }
 
+      std::string baseName = getMethodBaseName(st->name, method->name);
+      method->mangledName = mangleSignature(baseName, paramTypes);
       method->accept(this);
-      method->name = originalName;
     }
   }
 
@@ -883,85 +874,79 @@ void CodeGen::visit(ProgramNode *node) {
    */
   for (auto &ext : node->extensions) {
     for (auto &method : ext->methods) {
-      std::string originalName = method->name;
-      method->name = "ext_" + ext->targetTypedef + "_" + method->name;
-
+      std::vector<TypeInfo> paramTypes;
       TypeInfo targetType = parseTypeString(ext->targetTypedef);
-      method->name += "_" + getMangledType(targetType);
+      paramTypes.push_back(targetType);
 
       for (auto &arg : method->args) {
         TypeInfo t = arg.isThisAssign
                          ? structMemberTypes[ext->targetTypedef][arg.name]
                          : parseTypeString(arg.type);
-        method->name += "_" + getMangledType(t);
+        paramTypes.push_back(parseTypeString(arg.type));
       }
 
+      std::string baseName =
+          getExtensionBaseName(ext->targetTypedef, method->name);
+      method->mangledName = mangleSignature(baseName, paramTypes);
       method->accept(this);
-      method->name = originalName;
     }
   }
 
   for (auto &func : node->functions) {
-    std::string mangledName = func->name;
     std::vector<TypeInfo> paramTypes;
     for (auto &arg : func->args) {
       paramTypes.push_back(parseTypeString(arg.type));
-      mangledName += "_" + getMangledType(paramTypes.back());
     }
-    functionParamTypes[mangledName] = paramTypes;
+    func->mangledName = mangleSignature(func->name, paramTypes);
+    func->accept(this);
   }
 
   for (auto &st : node->structs) {
     for (auto &method : st->methods) {
-      std::string mangledName = st->name + "_" + method->name;
       std::vector<TypeInfo> paramTypes;
 
       // Inject 'this' pointer to match Sema's mangled signature
       if (!method->isStatic && !method->isConstructor) {
-        TypeInfo thisType = {st->name, 1, false}; // pointer
+        TypeInfo thisType = {st->name, 1, false};
+        thisType.isConst = method->isConstMethod;
         paramTypes.push_back(thisType);
-        mangledName += "_" + getMangledType(thisType);
       }
 
       if (method->isConstructor) {
-        TypeInfo thisType = {st->name, 1, false}; // pointer
-        paramTypes.push_back(thisType);
-        mangledName += "_" + getMangledType(thisType);
+        TypeInfo thisType = {st->name, 1, false};
+        paramTypes.insert(paramTypes.begin(), thisType);
       }
 
       for (auto &arg : method->args) {
         TypeInfo t = arg.isThisAssign ? structMemberTypes[st->name][arg.name]
                                       : parseTypeString(arg.type);
         paramTypes.push_back(t);
-        mangledName += "_" + getMangledType(t);
       }
-      functionParamTypes[mangledName] = paramTypes;
+
+      std::string baseName = getMethodBaseName(st->name, method->name);
+      functionParamTypes[mangleSignature(baseName, paramTypes)] = paramTypes;
     }
   }
 
   /*
    * Extension parameter types registration.
    * If we don't do this, CallNode resolves the arguments as raw ints and burns
-   * the stack. WTF.
+   * the stack.
    */
   for (auto &ext : node->extensions) {
     for (auto &method : ext->methods) {
-      std::string mangledName =
-          "ext_" + ext->targetTypedef + "_" + method->name;
       std::vector<TypeInfo> paramTypes;
-
       TypeInfo targetType = parseTypeString(ext->targetTypedef);
       paramTypes.push_back(targetType);
-      mangledName += "_" + getMangledType(targetType);
 
       for (auto &arg : method->args) {
         TypeInfo t = arg.isThisAssign
                          ? structMemberTypes[ext->targetTypedef][arg.name]
                          : parseTypeString(arg.type);
-        paramTypes.push_back(t);
-        mangledName += "_" + getMangledType(t);
+        paramTypes.push_back(parseTypeString(arg.type));
       }
-      functionParamTypes[mangledName] = paramTypes;
+      functionParamTypes[mangleSignature(method->name, paramTypes)] =
+          paramTypes;
     }
   }
 
@@ -976,11 +961,11 @@ void CodeGen::visit(ProgramNode *node) {
                              "__utopia_global_init", module.get());
 
   for (auto &func : node->functions) {
-    std::string originalName = func->name;
+    std::vector<TypeInfo> paramTypes;
     for (auto &arg : func->args)
-      func->name += "_" + getMangledType(parseTypeString(arg.type));
+      paramTypes.push_back(parseTypeString(arg.type));
+    func->mangledName = mangleSignature(func->name, paramTypes);
     func->accept(this);
-    func->name = originalName;
   }
 
   // Evaluate static initializing expressions
@@ -997,38 +982,40 @@ void CodeGen::visit(StructDeclNode *node) {}
 void CodeGen::visit(ExtensionNode *node) {}
 
 void CodeGen::visit(MemberAccessNode *node) {
-  // Access via the Class Symbol (Counter.globalCount)
-  if (auto varNode = dynamic_cast<VariableNode *>(node->object.get())) {
-    if (structTypes.count(varNode->name) && !lookupValue(varNode->name)) {
-      std::string globalName = varNode->name + "_" + node->field;
-      TypeInfo fType = structMemberTypes[varNode->name][node->field];
-      llvm::Value *globalVar = module->getNamedGlobal(globalName);
-
-      if (!globalVar) {
-        globalVar = module->getOrInsertGlobal(globalName, getLLVMType(fType));
-      }
-      if (isLValueContext) {
-        currentLValue = globalVar;
-      } else {
-        // Evil bit-level trick. If it's a struct by value, we intercept the
-        // load and just pass the raw pointer. Saves register space and prevents
-        // LLVM from exploding.
-        if (structTypes.count(fType.base) && fType.ptrDepth == 0) {
-          currentVal = globalVar;
-        } else {
-          currentVal =
-              builder->CreateLoad(getLLVMType(fType), globalVar, "load_static");
-        }
-      }
-      currentType = fType;
-      return;
-    }
-  }
-
   bool oldContext = isLValueContext;
   isLValueContext = false;
   node->object->accept(this);
   isLValueContext = oldContext;
+
+  /* No memory address?
+   * If the visitor yielded a null pointer but a valid struct type,
+   * we just hit a naked class symbol. Static domain time.
+   */
+  if (!currentVal && structTypes.count(currentType.base)) {
+    std::string globalName = currentType.base + "_" + node->field;
+    TypeInfo fType = structMemberTypes[currentType.base][node->field];
+    llvm::Value *globalVar = module->getNamedGlobal(globalName);
+
+    if (!globalVar) {
+      globalVar = module->getOrInsertGlobal(globalName, getLLVMType(fType));
+    }
+
+    if (isLValueContext) {
+      currentLValue = globalVar;
+    } else {
+      // Evil bit-level trick. If it's a struct by value, we intercept the
+      // load and just pass the raw pointer. Saves register space and prevents
+      // LLVM from exploding.
+      if (structTypes.count(fType.base) && fType.ptrDepth == 0) {
+        currentVal = globalVar;
+      } else {
+        currentVal =
+            builder->CreateLoad(getLLVMType(fType), globalVar, "load_static");
+      }
+    }
+    currentType = fType;
+    return;
+  }
 
   llvm::Value *objPtr = currentVal;
   std::string objTypeName = currentType.base;
@@ -1128,6 +1115,11 @@ void CodeGen::visit(SuperNode *node) {
 
   TypeInfo thisType = lookupType("this");
   currentType = {structASTs[thisType.base]->baseClass, 1, false};
+
+  /* Leave breadcrumbs for the caller.
+   * Let CallNode know we are climbing the bloodline.
+   */
+  isSuperContext = true;
 }
 
 void CodeGen::visit(FunctionNode *node) {
@@ -1165,10 +1157,10 @@ void CodeGen::visit(FunctionNode *node) {
    * will silently suffix the implementation with '.1' to avoid symbol
    * collision, bleeding the linker out. We hook the existing function instead.
    */
-  llvm::Function *func = module->getFunction(node->name);
+  llvm::Function *func = module->getFunction(node->mangledName);
   if (!func) {
     func = llvm::Function::Create(funcType, llvm::Function::ExternalLinkage,
-                                  node->name, module.get());
+                                  node->mangledName, module.get());
   }
 
   if (isDebug) {
@@ -1692,11 +1684,17 @@ void CodeGen::visit(IfNode *node) {
 
   llvm::Function *func = builder->GetInsertBlock()->getParent();
   llvm::BasicBlock *thenBB = llvm::BasicBlock::Create(*context, "then", func);
-  llvm::BasicBlock *elseBB = llvm::BasicBlock::Create(*context, "else");
   llvm::BasicBlock *mergeBB = llvm::BasicBlock::Create(*context, "cont");
 
   bool hasElse = !node->elseBody.empty();
-  builder->CreateCondBr(condV, thenBB, hasElse ? elseBB : mergeBB);
+  llvm::BasicBlock *elseBB = nullptr;
+
+  if (hasElse) {
+    elseBB = llvm::BasicBlock::Create(*context, "else");
+    builder->CreateCondBr(condV, thenBB, elseBB);
+  } else {
+    builder->CreateCondBr(condV, thenBB, mergeBB);
+  }
 
   builder->SetInsertPoint(thenBB);
   enterScope();
@@ -1721,8 +1719,6 @@ void CodeGen::visit(IfNode *node) {
     exitScope();
     if (!builder->GetInsertBlock()->getTerminator())
       builder->CreateBr(mergeBB);
-  } else {
-    delete elseBB;
   }
 
   func->insert(func->end(), mergeBB);
@@ -1983,9 +1979,9 @@ void CodeGen::visit(VariableNode *node) {
         return;
       }
 
-      std::cerr << "CodeGen Error: Undeclared variable '" << node->name
-                << "'\n";
-      exit(1);
+      throw std::runtime_error(
+          "Internal Compiler Error: Undeclared identifier '" + node->name +
+          "' leaked into CodeGen.");
     }
   }
 
@@ -2021,6 +2017,42 @@ void CodeGen::visit(VariableNode *node) {
 }
 
 void CodeGen::visit(BinaryOpNode *node) {
+  if (node->op == "&&" || node->op == "||") {
+    node->left->accept(this);
+    llvm::Value *L = currentVal;
+    llvm::BasicBlock *leftBB = builder->GetInsertBlock();
+
+    llvm::Function *func = leftBB->getParent();
+    llvm::BasicBlock *rhsBB =
+        llvm::BasicBlock::Create(*context, "log.rhs", func);
+    llvm::BasicBlock *mergeBB = llvm::BasicBlock::Create(*context, "log.merge");
+
+    // Short-circuit logic. Don't fry the stack if the left operand already
+    // killed the branch.
+    if (node->op == "&&") {
+      builder->CreateCondBr(L, rhsBB, mergeBB);
+    } else {
+      builder->CreateCondBr(L, mergeBB, rhsBB);
+    }
+
+    builder->SetInsertPoint(rhsBB);
+    node->right->accept(this);
+    llvm::Value *R = currentVal;
+    llvm::BasicBlock *evalRhsBB = builder->GetInsertBlock();
+    builder->CreateBr(mergeBB);
+
+    func->insert(func->end(), mergeBB);
+    builder->SetInsertPoint(mergeBB);
+
+    llvm::PHINode *phi = builder->CreatePHI(builder->getInt1Ty(), 2, "log.res");
+    phi->addIncoming(L, leftBB);
+    phi->addIncoming(R, evalRhsBB);
+
+    currentVal = phi;
+    currentType = {"bool", 0, false};
+    return;
+  }
+
   node->left->accept(this);
   llvm::Value *L = currentVal;
   TypeInfo LT = currentType;
@@ -2037,8 +2069,6 @@ void CodeGen::visit(BinaryOpNode *node) {
     if (RT.base == "int" && !RT.isPointer())
       R = builder->CreateSIToFP(R, llvm::Type::getDoubleTy(*context));
 
-    // LLVM panics if we feed it mixed precision floats for FCmp.
-    // Promote the 32-bit weakling to 64-bit before the backend loses its mind.
     if (L->getType()->isFloatTy() && R->getType()->isDoubleTy()) {
       L = builder->CreateFPExt(L, llvm::Type::getDoubleTy(*context));
     } else if (L->getType()->isDoubleTy() && R->getType()->isFloatTy()) {
@@ -2063,17 +2093,6 @@ void CodeGen::visit(BinaryOpNode *node) {
     }
   }
 
-  if (node->op == "&&") {
-    currentVal = builder->CreateAnd(L, R, "and_tmp");
-    currentType = {"bool"};
-    return;
-  }
-  if (node->op == "||") {
-    currentVal = builder->CreateOr(L, R, "or_tmp");
-    currentType = {"bool"};
-    return;
-  }
-
   if (node->op == "==") {
     currentVal =
         isF ? builder->CreateFCmpOEQ(L, R) : builder->CreateICmpEQ(L, R);
@@ -2086,6 +2105,7 @@ void CodeGen::visit(BinaryOpNode *node) {
     currentType = {"bool", 0, false};
     return;
   }
+
   if (node->op == "<") {
     currentVal = isF ? builder->CreateFCmpOLT(L, R)
                      : (LT.isUnsigned() ? builder->CreateICmpULT(L, R)
@@ -2101,15 +2121,17 @@ void CodeGen::visit(BinaryOpNode *node) {
     return;
   }
   if (node->op == "<=") {
-    currentVal =
-        isF ? builder->CreateFCmpOLE(L, R) : builder->CreateICmpSLE(L, R);
-    currentType = {"bool"};
+    currentVal = isF ? builder->CreateFCmpOLE(L, R)
+                     : (LT.isUnsigned() ? builder->CreateICmpULE(L, R)
+                                        : builder->CreateICmpSLE(L, R));
+    currentType = {"bool", 0, false};
     return;
   }
   if (node->op == ">=") {
-    currentVal =
-        isF ? builder->CreateFCmpOGE(L, R) : builder->CreateICmpSGE(L, R);
-    currentType = {"bool"};
+    currentVal = isF ? builder->CreateFCmpOGE(L, R)
+                     : (LT.isUnsigned() ? builder->CreateICmpUGE(L, R)
+                                        : builder->CreateICmpSGE(L, R));
+    currentType = {"bool", 0, false};
     return;
   }
 
@@ -2490,15 +2512,23 @@ void CodeGen::visit(CallNode *node) {
 
   llvm::Value *thisArg = nullptr;
   std::string baseName = node->callee;
+  bool isSuperCall = false;
 
   if (node->object) {
     bool oldCtx = isLValueContext;
 
-    // What the fuck? isLValueContext = true was leaving currentVal stale,
+    // isLValueContext = true was leaving currentVal stale,
     // feeding a void CallInst hallucination as the 'this' pointer.
     // We need the actual evaluated pointer, not an L-value ghost.
     isLValueContext = false;
+    bool oldSuperCtx = isSuperContext;
+    isSuperContext = false;
+
     node->object->accept(this);
+
+    isSuperCall = isSuperContext; // Spring the trap
+    isSuperContext = oldSuperCtx;
+
     isLValueContext = oldCtx;
 
     thisArg = currentVal;
@@ -2593,10 +2623,6 @@ void CodeGen::visit(CallNode *node) {
 
   llvm::FunctionType *fTy = f->getFunctionType();
   llvm::Value *callableFunc = f;
-
-  // Revisa si el nodo objeto es específicamente una invocación de 'super'
-  bool isSuperCall =
-      node->object && dynamic_cast<SuperNode *>(node->object.get()) != nullptr;
 
   if (thisArg && structASTs.count(currentType.base) &&
       structASTs[currentType.base]->isClass) {
@@ -2753,9 +2779,8 @@ void CodeGen::saveToFile(const std::string &filename) {
   llvm::raw_fd_ostream dest(filename, EC, llvm::sys::fs::OF_None);
 
   if (EC) {
-    std::cerr << "[Fatal] CodeGen IO Error: " << EC.message() << " ("
-              << filename << ")\n";
-    exit(1);
+    throw std::runtime_error("[Fatal] CodeGen IO Error: " + EC.message() +
+                             " (" + filename + ")");
   }
 
   module->print(dest, nullptr);
@@ -2767,8 +2792,9 @@ void CodeGen::emitObjectFile(const std::string &filename) {
   llvm::raw_fd_ostream dest(filename, EC, llvm::sys::fs::OF_None);
 
   if (EC) {
-    std::cerr << "Could not open object file: " << EC.message() << "\n";
-    return;
+    // If we can't open the file, there is no point in continuing the charade.
+    throw std::runtime_error("Could not open object file for writing: " +
+                             EC.message());
   }
 
   llvm::legacy::PassManager pass;
@@ -2824,44 +2850,55 @@ void CodeGen::visit(ModuleNode *node) {
 
   currentClass = "";
 
+  // Struct Methods
   for (auto &st : node->structs) {
     for (auto &method : st->methods) {
-      std::string originalName = method->name;
-      method->name = st->name + "_" + method->name;
+      std::vector<TypeInfo> paramTypes;
 
       // Inject 'this'. Constructors are instance methods in disguise.
-      // If we skip this, the linker bleeds out searching for a phantom
-      // signature.
-      if (!method->isStatic) {
+      if (!method->isStatic && !method->isConstructor) {
         TypeInfo thisType = {st->name, 1, false};
         thisType.isConst = method->isConstMethod;
-        method->name += "_" + getMangledType(thisType);
+        paramTypes.push_back(thisType);
+      }
+      if (method->isConstructor) {
+        TypeInfo thisType = {st->name, 1, false};
+        thisType.isConst = method->isConstMethod;
+        paramTypes.push_back(thisType);
       }
 
       for (auto &arg : method->args) {
         TypeInfo t = arg.isThisAssign ? structMemberTypes[st->name][arg.name]
                                       : parseTypeString(arg.type);
-        method->name += "_" + getMangledType(t);
+        paramTypes.push_back(t);
       }
+
+      std::string baseName = getMethodBaseName(st->name, method->name);
+      method->mangledName = mangleSignature(baseName, paramTypes);
+
       method->accept(this);
-      method->name = originalName;
     }
   }
 
+  // Extensions
   for (auto &ext : node->extensions) {
     for (auto &method : ext->methods) {
-      std::string originalName = method->name;
-      method->name = "ext_" + ext->targetTypedef + "_" + method->name;
+      std::vector<TypeInfo> paramTypes;
       TypeInfo targetType = parseTypeString(ext->targetTypedef);
-      method->name += "_" + getMangledType(targetType);
+      paramTypes.push_back(targetType);
+
       for (auto &arg : method->args) {
         TypeInfo t = arg.isThisAssign
                          ? structMemberTypes[ext->targetTypedef][arg.name]
                          : parseTypeString(arg.type);
-        method->name += "_" + getMangledType(t);
+        paramTypes.push_back(t);
       }
+
+      std::string baseName =
+          getExtensionBaseName(ext->targetTypedef, method->name);
+      method->mangledName = mangleSignature(baseName, paramTypes);
+
       method->accept(this);
-      method->name = originalName;
     }
   }
 
@@ -2871,12 +2908,20 @@ void CodeGen::visit(ModuleNode *node) {
       llvm::Function::Create(initTy, llvm::Function::InternalLinkage,
                              "__utopia_global_init", module.get());
 
+  // Global Functions
   for (auto &func : node->functions) {
-    std::string originalName = func->name;
-    for (auto &arg : func->args)
-      func->name += "_" + getMangledType(parseTypeString(arg.type));
+    /*
+     * Standard global functions.
+     * If 'main' passes through here with 0 args, mangleSignature correctly
+     * returns "main", keeping the C ABI happy.
+     */
+    std::vector<TypeInfo> paramTypes;
+    for (auto &arg : func->args) {
+      paramTypes.push_back(parseTypeString(arg.type));
+    }
+
+    func->mangledName = mangleSignature(func->name, paramTypes);
     func->accept(this);
-    func->name = originalName;
   }
 
   llvm::BasicBlock *initBB =

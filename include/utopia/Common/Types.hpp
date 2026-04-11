@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <vector>
 
 namespace utopia {
 struct ErrorInfo {
@@ -9,7 +10,7 @@ struct ErrorInfo {
 
 struct TypeInfo {
   std::string base;
-  
+
   unsigned ptrDepth = 0;
   unsigned arrayDimensions = 0;
   bool isReference = false;
@@ -93,6 +94,30 @@ inline std::string getMangledType(const TypeInfo &t) {
   }
 
   return s;
+}
+
+inline std::string getMethodBaseName(const std::string &className,
+                                     const std::string &methodName) {
+  return className + "_" + methodName;
+}
+
+inline std::string getExtensionBaseName(const std::string &targetType,
+                                        const std::string &methodName) {
+  return "ext_" + targetType + "_" + methodName;
+}
+
+/*
+ * The signature forge.
+ * Serializes the parameter types into the mangled symbol.
+ * Do not feed it unparsed AST nodes.
+ */
+inline std::string mangleSignature(const std::string &baseName,
+                                   const std::vector<TypeInfo> &paramTypes) {
+  std::string mangled = baseName;
+  for (const auto &t : paramTypes) {
+    mangled += "_" + getMangledType(t);
+  }
+  return mangled;
 }
 
 } // namespace utopia

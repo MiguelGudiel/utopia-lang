@@ -1,4 +1,3 @@
-// File: src/utopia/Lexer/Lexer.cpp
 #include "utopia/Lexer/Lexer.hpp"
 #include <cctype>
 #include <sstream>

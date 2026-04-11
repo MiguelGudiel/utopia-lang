@@ -1,6 +1,7 @@
-#include <utopia/Driver/BuildCache.hpp>
+#include "utopia/Driver/BuildCache.hpp"
 #include <fstream>
 #include <iostream>
+#include <algorithm>
 
 namespace utopia {
 
@@ -43,14 +44,47 @@ bool BuildCache::isUpToDate(const std::string &modulePath, uint64_t currentTime,
   auto it = modules.find(modulePath);
   if (it == modules.end())
     return false;
+    
   if (it->second.timestamp != currentTime)
     return false;
-  // Comprobar que las dependencias no han cambiado
+
+  std::vector<std::string> visited;
+  visited.push_back(modulePath);
+
+  /*
+   * DFS through the dependency graph.
+   * We compare the child's cache timestamp against the parent's DISK timestamp.
+   * If a deep dependency mutates, its cache time will exceed the parent's,
+   * effectively poisoning the bloodline without needing OS filesystem checks.
+   * Rip and tear.
+   */
+  auto checkRecursively = [&](const std::string& node, auto& self) -> bool {
+    auto impIt = modules.find(node);
+    if (impIt == modules.end())
+      return false;
+
+    if (impIt->second.timestamp > currentTime)
+      return false;
+
+    visited.push_back(node);
+
+    for (const auto& child : impIt->second.imports) {
+      if (std::find(visited.begin(), visited.end(), child) != visited.end())
+        continue;
+
+      if (!self(child, self))
+        return false;
+    }
+    
+    return true;
+  };
+
   for (const auto &imp : imports) {
-    // Nota: necesitaríamos timestamp de cada import; aquí simplificamos
-    // asumiendo que si el módulo está actualizado, sus imports también.
-    // Para una implementación real, se debe verificar recursivamente.
+    if (!checkRecursively(imp, checkRecursively)) {
+      return false;
+    }
   }
+
   return true;
 }
 

@@ -131,8 +131,8 @@ public:
 
 class NumberNode : public ExprNode {
 public:
-  int value;
-  explicit NumberNode(int v) : value(v) {}
+  long long value;
+  explicit NumberNode(long long v) : value(v) {}
   void accept(ASTVisitor *visitor) override;
 };
 
@@ -349,6 +349,7 @@ public:
   std::vector<std::string> decorators;
   std::string returnType;
   std::string name;
+  std::string mangledName;
   std::vector<FunctionParam> args;
   std::vector<std::unique_ptr<ASTNode>> body;
 

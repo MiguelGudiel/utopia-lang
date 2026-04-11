@@ -95,9 +95,11 @@ private:
   bool hasClassMethod(StructDeclNode *node, FunctionNode *m);
   std::string resolveParamType(StructDeclNode *node,
                                const FunctionParam &param);
+  int getInheritanceDistance(const std::string &derived,
+                             const std::string &base);
 
 public:
-  std::map<ASTNode*, TypeInfo> nodeTypes;
+  std::map<ASTNode *, TypeInfo> nodeTypes;
   const std::map<std::string, StructDef> &getCustomStructs() const {
     return customStructs;
   }

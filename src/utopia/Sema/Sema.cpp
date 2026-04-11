@@ -19,6 +19,28 @@ std::string typeToString(const TypeInfo &t) {
 void Sema::enterScope() { scopeStack.push_back({}); }
 void Sema::exitScope() { scopeStack.pop_back(); }
 
+int Sema::getInheritanceDistance(const std::string &derived,
+                                 const std::string &base) {
+  if (derived == base)
+    return 0;
+
+  int dist = 0;
+  std::string curr = derived;
+
+  /* * Ascend the bloodline.
+   * Crawl up the struct definitions until we hit the desired ancestor or
+   * fall into the void.
+   */
+  while (!curr.empty() && structASTs.count(curr)) {
+    if (curr == base)
+      return dist;
+    curr = structASTs[curr]->baseClass;
+    dist++;
+  }
+
+  return -1; // -1 means they share no blood
+}
+
 Sema::Symbol *Sema::lookup(const std::string &name) {
   for (auto it = scopeStack.rbegin(); it != scopeStack.rend(); ++it) {
     if (it->count(name))
@@ -145,15 +167,13 @@ bool Sema::analyzeModules(const std::vector<ModuleNode *> &modules) {
   for (ModuleNode *mod : modules) {
     for (auto &st : mod->structs) {
       for (auto &m : st->methods) {
-        std::string baseName = st->name + "_" + m->name;
-        std::string mangledName = baseName;
+        std::string baseName = getMethodBaseName(st->name, m->name);
         std::vector<TypeInfo> params;
 
         if (!m->isStatic) {
           TypeInfo thisType = {st->name, 1, false};
           thisType.isConst = m->isConstMethod;
           params.push_back(thisType);
-          mangledName += "_" + getMangledType(thisType);
         }
 
         for (auto &arg : m->args) {
@@ -182,8 +202,9 @@ bool Sema::analyzeModules(const std::vector<ModuleNode *> &modules) {
             t = parseType(arg.type, m.get());
           }
           params.push_back(t);
-          mangledName += "_" + getMangledType(t);
         }
+
+        std::string mangledName = mangleSignature(baseName, params);
 
         std::cerr << "[Sema] Registered constructor " << mangledName
                   << " for class " << st->name << "\n";
@@ -202,7 +223,6 @@ bool Sema::analyzeModules(const std::vector<ModuleNode *> &modules) {
     }
 
     for (auto &fn : mod->functions) {
-      std::string mangledName = fn->name;
       std::vector<TypeInfo> params;
 
       for (const auto &dec : fn->decorators) {
@@ -214,8 +234,8 @@ bool Sema::analyzeModules(const std::vector<ModuleNode *> &modules) {
       for (auto &arg : fn->args) {
         TypeInfo t = parseType(arg.type, fn.get());
         params.push_back(t);
-        mangledName += "_" + getMangledType(t);
       }
+      std::string mangledName = mangleSignature(fn->name, params);
       TypeInfo ret = parseType(fn->returnType, fn.get());
       functionTypes[mangledName] = ret;
       registerOverload(fn->name, mangledName, params, ret);
@@ -223,12 +243,11 @@ bool Sema::analyzeModules(const std::vector<ModuleNode *> &modules) {
 
     for (auto &ext : mod->extensions) {
       for (auto &m : ext->methods) {
-        std::string baseName = "ext_" + ext->targetTypedef + "_" + m->name;
-        std::string mangledName = baseName;
+        std::string baseName =
+            getExtensionBaseName(ext->targetTypedef, m->name);
         std::vector<TypeInfo> params;
         TypeInfo targetType = parseType(ext->targetTypedef, ext.get());
         params.push_back(targetType);
-        mangledName += "_" + getMangledType(targetType);
 
         for (const auto &dec : m->decorators) {
           if (dec == "virtual" || dec == "override") {
@@ -243,8 +262,8 @@ bool Sema::analyzeModules(const std::vector<ModuleNode *> &modules) {
                            ? parseType(ext->targetTypedef, ext.get())
                            : parseType(arg.type, m.get());
           params.push_back(t);
-          mangledName += "_" + getMangledType(t);
         }
+        std::string mangledName = mangleSignature(baseName, params);
         TypeInfo ret = parseType(m->returnType, m.get());
         registerOverload(baseName, mangledName, params, ret);
         functionTypes[mangledName] = ret;
@@ -372,6 +391,13 @@ bool Sema::checkAssignment(const TypeInfo &target, const TypeInfo &source,
   if (target.ptrDepth > 0 && source.ptrDepth > 0) {
     if (target.base == "void")
       return true; /* Implicit decay to void* */
+
+    /* Allow upcasting: Base* ptr = new Derived() */
+    if (target.ptrDepth == source.ptrDepth) {
+      int dist = getInheritanceDistance(source.base, target.base);
+      if (dist >= 0)
+        return true;
+    }
   }
 
   if (target.base != source.base && source.base != "null" &&
@@ -635,6 +661,21 @@ int Sema::getConversionCost(const TypeInfo &target, const TypeInfo &source) {
   if (target.ptrDepth != source.ptrDepth)
     return 1000;
 
+  if (target.ptrDepth > 0 && source.ptrDepth > 0 &&
+      target.ptrDepth == source.ptrDepth) {
+    int dist = getInheritanceDistance(source.base, target.base);
+    if (dist > 0) {
+      /*
+       * Polymorphic gravity well.
+       * We add a slight penalty per generation to guide the overload
+       * resolver towards the most immediate ancestor.
+       * WTF? Yes, an int penalty prevents the inheritance tree from
+       * collapsing into ambiguity.
+       */
+      return dist;
+    }
+  }
+
   // Implicit promotion
   if (target.isFloat() && source.isFloat())
     return 1;
@@ -876,7 +917,7 @@ void Sema::visit(FunctionNode *node) {
     TypeInfo t = {"error", 0, false};
     if (arg.isThisAssign) {
       /*
-       * WTF: The signature mangler needs the exact type, but we didn't check
+       * The signature mangler needs the exact type, but we didn't check
        * the parents. Climb the hierarchy until we find the field or hit the
        * void.
        */
@@ -1207,7 +1248,11 @@ void Sema::visit(BinaryOpNode *node) {
 
 // Stubs
 void Sema::visit(NumberNode *node) {
-  currentExprType = {"int", 0};
+  if (node->value > 2147483647LL || node->value < -2147483648LL) {
+    currentExprType = {"int64", 0};
+  } else {
+    currentExprType = {"int", 0};
+  }
   nodeTypes[node] = currentExprType;
 }
 void Sema::visit(FloatNode *node) {
@@ -1327,15 +1372,12 @@ void Sema::visit(CallNode *node) {
       std::vector<TypeInfo> resolutionArgs = argTypes;
 
       if (!isStaticCall) {
-        /* * L-VALUE CONTEXT HIJACK
-         * We fake the 'this' argument base type to match the current ancestor.
-         * This tricks getConversionCost into scoring the match as a perfect 0.
-         * CodeGen will later bitcast the pointer. Since we enforce sequential
-         * memory layout for inheritance, this is safe.
+        /*
+         * Pass honest types.
+         * The polymorphic upcast logic inside getConversionCost will naturally
+         * calculate the correct inheritance penalty without type spoofing.
          */
-        TypeInfo thisArgType = objType;
-        thisArgType.base = currObjName;
-        resolutionArgs.insert(resolutionArgs.begin(), thisArgType);
+        resolutionArgs.insert(resolutionArgs.begin(), objType);
       }
 
       resolved = resolveOverload(baseName, resolutionArgs, nullptr, outRet);

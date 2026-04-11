@@ -2,6 +2,10 @@
 #include <array>
 #include <iostream>
 
+#ifndef _WIN32
+#include <sys/wait.h>
+#endif
+
 namespace utopia {
 
 bool Linker::link(const std::vector<std::string> &objPaths,
@@ -33,7 +37,20 @@ bool Linker::link(const std::vector<std::string> &objPaths,
     output += buffer.data();
   }
 
-  int exitCode = pclose(pipe);
+  int status = pclose(pipe);
+
+  /* Termination status resolution.
+   * On POSIX-compliant systems, pclose() returns the full termination status 
+   * as defined by wait4() rather than a raw exit code. Direct comparison 
+   * against zero is unreliable as it may fail to detect abnormal termination 
+   * or signal interference. We use WEXITSTATUS to guarantee we are evaluating 
+   * the actual return code from the linker process.
+   */
+#ifdef _WIN32
+  int exitCode = status;
+#else
+  int exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : status;
+#endif
 
   if (exitCode != 0 || output.find("error:") != std::string::npos) {
     std::cerr << "[Linker Error]\n" << output << "\n";
@@ -52,7 +69,12 @@ std::string Linker::executeAndCapture(const std::string &cmd) {
   while (fgets(buffer.data(), buffer.size(), pipe) != nullptr) {
     result += buffer.data();
   }
-  pclose(pipe);
+  
+  int status = pclose(pipe);
+#ifndef _WIN32
+  (void)WIFEXITED(status); 
+#endif
+
   return result;
 }
 

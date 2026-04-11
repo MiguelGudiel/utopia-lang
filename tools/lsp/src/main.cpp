@@ -888,9 +888,7 @@ int main() {
             for (int j = 0; j < indentLevel * tabSize; ++j)
               formattedCode += " ";
 
-            // Fast slash detection to prevent double commenting.
-            // what the fuck? the lexer sometimes eats the slashes and sometimes
-            // doesn't.
+            // Fast slash detection to prevent double commenting
             bool hasSlashes = false;
             int k = 0;
             while (k < docLine.length() &&

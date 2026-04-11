@@ -756,7 +756,28 @@ std::unique_ptr<ExprNode> Parser::parsePrimaryBase() {
   // --- LITERALES ---
 
   if (currentToken().type == TokenType::NUMBER) {
-    auto node = std::make_unique<NumberNode>(std::stoi(currentToken().value));
+    long long val;
+    const Token &tok = currentToken();
+
+    try {
+      /* We attempt to convert the literal to a 64-bit integer.
+       * If the number is greater than 9,223,372,036,854,775,807, stoll will throw
+       * out_of_range.
+       */
+      val = std::stoll(tok.value);
+    } catch (const std::out_of_range &) {
+      throw std::runtime_error(std::to_string(tok.line) + ":" +
+                               std::to_string(tok.column) +
+                               "|Syntax Error: Integer literal is too large "
+                               "for a 64-bit container: '" +
+                               tok.value + "'");
+    } catch (const std::invalid_argument &) {
+      throw std::runtime_error(
+          std::to_string(tok.line) + ":" + std::to_string(tok.column) +
+          "|Syntax Error: Invalid integer literal: '" + tok.value + "'");
+    }
+
+    auto node = std::make_unique<NumberNode>(val);
     advance();
     finalizeNode(node.get(), startTok);
     return node;

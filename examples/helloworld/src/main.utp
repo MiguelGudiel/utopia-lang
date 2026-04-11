@@ -57,8 +57,8 @@ int main() {
 
   sleep();
 
-  Circle* c = new Circle(10.0, "Circle XD");
-  c.Draw();
+  Entity* c = new Circle(10.0, "Circle XD");
+  //c.Draw();
   c.Update();
 
   sleep();
@@ -78,7 +78,7 @@ int main() {
   print(total);
 
   sleep();
-  float radius = c.GetRadius();
+  float radius = 10;//c.GetRadius();
   print(radius);
 
   double t = 0;

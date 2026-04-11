@@ -138,8 +138,11 @@ std::string Formatter::format() {
       break;
 
     case TokenType::KW_IF:
+      break;
     case TokenType::KW_WHILE:
+      break;
     case TokenType::KW_FOR:
+      break;
     //case TokenType::KW_SWITCH:
     //  result += tok.value + " ";
     //  break;

@@ -61,6 +61,8 @@ private:
   TypeInfo currentReturnType;
   llvm::Value *currentLValue = nullptr;
   bool isLValueContext = false;
+  
+  bool isSuperContext = false;
 
   llvm::Value *rvoTarget = nullptr;
 
