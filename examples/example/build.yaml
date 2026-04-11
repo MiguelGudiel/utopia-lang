@@ -1,0 +1,16 @@
+project:
+  name: "big-example"
+  version: "0.1.0"
+
+build:
+  target: executable
+  output_dir: "build"
+  optimization: 2
+  linker_flags:
+    - "-lm"
+    - "-lpthread"
+  source_dirs:
+    - src/
+  sources:
+    - main.utp
+    - other.utp

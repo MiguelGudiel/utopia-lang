@@ -11,12 +11,13 @@ struct DeclPreamble {
   InlineState inlineState = InlineState::None;
   std::vector<std::string> decorators;
   bool isConst = false;
+  bool isStatic = false;
 };
 
 class Parser {
 public:
   explicit Parser(const std::vector<Token> &tokens);
-  std::unique_ptr<ProgramNode> parseProgram();
+  std::unique_ptr<ModuleNode> parseModule(const std::string &filename);
   bool isFunctionStart() const;
 
 private:
@@ -34,7 +35,7 @@ private:
   std::string consumeType();
   std::string parseTypeName();
 
-  void parseImport();
+  void parseImportInto(ModuleNode* module);
   std::unique_ptr<FunctionNode> parseFunction();
   std::unique_ptr<FunctionNode> parseMethod(const std::string &className);
   std::unique_ptr<ASTNode> parseStatement();
@@ -47,8 +48,10 @@ private:
   std::unique_ptr<ExprNode> parseRelational();
   std::unique_ptr<ExprNode> parseAdditive();
   std::unique_ptr<ExprNode> parseTerm();
+  std::unique_ptr<ExprNode> parseCast();
   std::unique_ptr<ExprNode> parsePrimary();
   std::unique_ptr<StructDeclNode> parseStructDecl(bool isClass);
+  std::unique_ptr<ExtensionNode> parseExtension();
   std::unique_ptr<ExprNode> parsePrimaryBase();
   DeclPreamble parsePreamble();
   std::unique_ptr<StructDeclNode> parseStructDecl(bool isClass,
