@@ -9,6 +9,7 @@ set(CORE_SOURCES
     utopia/Lexer/Lexer.cpp
     utopia/Parser/Parser.cpp
     utopia/Sema/Sema.cpp
+    utopia/Formatter/Formatter.cpp
 )
 
 add_library(utopia_core STATIC ${CORE_SOURCES})

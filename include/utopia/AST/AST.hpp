@@ -16,6 +16,8 @@ public:
   int endLine = 0;
   int endColumn = 0;
 
+  std::string doc;
+
   virtual ~ASTNode() = default;
 
   void setRange(int l, int c, int el, int ec) {
@@ -36,6 +38,11 @@ class ExprNode : public ASTNode {};
 class StmtNode : public ASTNode {};
 
 class ThisNode : public ExprNode {
+public:
+  void accept(ASTVisitor *visitor) override;
+};
+
+class SuperNode : public ExprNode {
 public:
   void accept(ASTVisitor *visitor) override;
 };
@@ -124,15 +131,17 @@ public:
 
 class NumberNode : public ExprNode {
 public:
-  int value;
-  explicit NumberNode(int v) : value(v) {}
+  long long value;
+  explicit NumberNode(long long v) : value(v) {}
   void accept(ASTVisitor *visitor) override;
 };
 
 class FloatNode : public ExprNode {
 public:
   double value;
-  explicit FloatNode(double v) : value(v) {}
+  bool isDouble;
+  explicit FloatNode(double v, bool isDouble = true)
+      : value(v), isDouble(isDouble) {}
   void accept(ASTVisitor *visitor) override;
 };
 
@@ -192,14 +201,13 @@ class NewNode : public ExprNode {
 public:
   std::string typeName;
   std::vector<std::unique_ptr<ExprNode>> arguments;
-  std::unique_ptr<ExprNode> arraySize;
+  std::vector<std::unique_ptr<ExprNode>> arraySizes;
 
   std::string resolvedMangledName;
 
   explicit NewNode(std::string tName,
                    std::vector<std::unique_ptr<ExprNode>> args = {})
-      : typeName(std::move(tName)), arguments(std::move(args)),
-        arraySize(nullptr) {}
+      : typeName(std::move(tName)), arguments(std::move(args)) {}
 
   void accept(ASTVisitor *visitor) override;
 };
@@ -264,6 +272,17 @@ public:
   void accept(ASTVisitor *visitor) override;
 };
 
+class CastNode : public ExprNode {
+public:
+  std::unique_ptr<ExprNode> operand;
+  std::string targetType;
+
+  CastNode(std::unique_ptr<ExprNode> op, std::string tType)
+      : operand(std::move(op)), targetType(std::move(tType)) {}
+
+  void accept(ASTVisitor *visitor) override;
+};
+
 class AssignNode : public StmtNode {
 public:
   std::unique_ptr<ExprNode> target;
@@ -296,12 +315,12 @@ public:
   bool isStatic;
   std::vector<std::string> decorators;
   std::unique_ptr<ExprNode> initializer;
-  std::unique_ptr<ExprNode> arraySize;
+  std::vector<std::unique_ptr<ExprNode>> arraySizes;
 
   VarDeclNode(std::string t, std::string n, bool c, bool st,
               std::unique_ptr<ExprNode> init)
       : typeName(std::move(t)), name(std::move(n)), isConst(c), isStatic(st),
-        initializer(std::move(init)), arraySize(nullptr) {}
+        initializer(std::move(init)) {}
 
   void accept(ASTVisitor *visitor) override;
 };
@@ -320,6 +339,7 @@ struct FunctionParam {
   std::string name;
   bool isRequired = false;
   bool isThisAssign = false;
+  bool isConst = false;
 };
 
 class FunctionNode : public ASTNode {
@@ -329,9 +349,11 @@ public:
   std::vector<std::string> decorators;
   std::string returnType;
   std::string name;
+  std::string mangledName;
   std::vector<FunctionParam> args;
   std::vector<std::unique_ptr<ASTNode>> body;
 
+  bool isConstMethod;
   bool isMethod;
   bool isStatic;
   bool isConstructor;
@@ -342,11 +364,12 @@ public:
                std::vector<std::string> decs, std::string retT, std::string n,
                std::vector<FunctionParam> a, bool isMeth = false,
                bool isStat = false, bool isCtor = false, bool isDtor = false,
-               std::string cName = "")
+               std::string cName = "", bool isConstMeth = false) // <-- AGREGADO
       : inlineState(is), access(acc), decorators(std::move(decs)),
         returnType(std::move(retT)), name(std::move(n)), args(std::move(a)),
         isMethod(isMeth), isStatic(isStat), isConstructor(isCtor),
-        isDestructor(isDtor), className(std::move(cName)) {}
+        isDestructor(isDtor), className(std::move(cName)),
+        isConstMethod(isConstMeth) {}
 
   void accept(ASTVisitor *visitor) override;
 };
@@ -363,8 +386,7 @@ public:
   std::vector<StructField> fields;
   std::vector<std::unique_ptr<FunctionNode>> methods;
 
-  StructDeclNode(std::string n, bool c)
-      : name(std::move(n)), isClass(c) {}
+  StructDeclNode(std::string n, bool c) : name(std::move(n)), isClass(c) {}
 
   void accept(ASTVisitor *visitor) override;
 };

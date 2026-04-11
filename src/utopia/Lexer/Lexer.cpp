@@ -1,18 +1,30 @@
-// File: src/utopia/Lexer/Lexer.cpp
 #include "utopia/Lexer/Lexer.hpp"
 #include <cctype>
+#include <sstream>
 
 namespace utopia {
 
-Lexer::Lexer(std::string_view sourceCode) : source(sourceCode) {}
+Lexer::Lexer(std::string_view sourceCode) : source(sourceCode) {
+  if (source.size() >= 3 && static_cast<unsigned char>(source[0]) == 0xEF &&
+      static_cast<unsigned char>(source[1]) == 0xBB &&
+      static_cast<unsigned char>(source[2]) == 0xBF) {
+    cursor = 3;
+  }
+}
 
 void Lexer::advanceCursor() {
   if (cursor < source.length()) {
+    unsigned char c = static_cast<unsigned char>(source[cursor]);
+
     if (source[cursor] == '\n') {
       currentLine++;
       currentColumn = 1;
     } else {
-      currentColumn++;
+      // UTF-8 awareness: Only increment the column for the start byte
+      // of a character. Continuation bytes (0b10xxxxxx) are ignored.
+      if ((c & 0xC0) != 0x80) {
+        currentColumn++;
+      }
     }
     cursor++;
   }
@@ -20,12 +32,82 @@ void Lexer::advanceCursor() {
 
 void Lexer::skipWhitespace() {
   while (cursor < source.length()) {
-    if (std::isspace(static_cast<unsigned char>(source[cursor]))) {
+    unsigned char c = static_cast<unsigned char>(source[cursor]);
+
+    if (c < 32 && !std::isspace(c)) {
       advanceCursor();
-    } else if (cursor + 1 < source.length() && source[cursor] == '/' &&
-               source[cursor + 1] == '/') {
-      while (cursor < source.length() && source[cursor] != '\n') {
+      continue;
+    }
+
+    if (std::isspace(c)) {
+      advanceCursor();
+    } else if (cursor + 1 < source.length() && source[cursor] == '/') {
+      if (source[cursor + 1] == '/') {
+        // Skip the // or ///
+        int offset =
+            (cursor + 2 < source.length() && source[cursor + 2] == '/') ? 3 : 2;
         advanceCursor();
+        advanceCursor();
+        if (offset == 3)
+          advanceCursor();
+
+        std::string currentDocLine;
+        int startLine = currentLine;
+        while (cursor < source.length() && source[cursor] != '\n') {
+          currentDocLine += source[cursor];
+          advanceCursor();
+        }
+
+        // Trim leading spaces from the cleaned line
+        size_t first = currentDocLine.find_first_not_of(' ');
+        if (std::string::npos != first)
+          currentDocLine = currentDocLine.substr(first);
+
+        if (!lastComment.empty() && currentLine == lastCommentLine + 1) {
+          lastComment += "\n" + currentDocLine;
+        } else {
+          lastComment = currentDocLine;
+        }
+        lastCommentLine = startLine;
+      } else if (source[cursor + 1] == '*') {
+        /*
+         * Block comment parsing.
+         * Nested block comments will burn the CPU. Don't even try.
+         */
+        advanceCursor();
+        advanceCursor(); // Skip /*
+
+        std::string fullBlock;
+        while (cursor + 1 < source.length() &&
+               !(source[cursor] == '*' && source[cursor + 1] == '/')) {
+          fullBlock += source[cursor];
+          advanceCursor();
+        }
+
+        // Consume the closing terminator if we didn't just hit EOF
+        if (cursor + 1 < source.length()) {
+          advanceCursor(); // '*'
+          advanceCursor(); // '/'
+        }
+        // Professional block comment cleaning:
+        // Strip leading '*' and whitespace from each line
+        std::stringstream ss(fullBlock);
+        std::string line, cleanedBlock;
+        while (std::getline(ss, line)) {
+          size_t first = line.find_first_not_of(" \t*");
+          if (first != std::string::npos)
+            line = line.substr(first);
+          else
+            line = ""; // Empty line or just stars
+
+          if (!cleanedBlock.empty())
+            cleanedBlock += "\n";
+          cleanedBlock += line;
+        }
+        lastComment = cleanedBlock;
+        lastCommentLine = currentLine;
+      } else {
+        break;
       }
     } else {
       break;
@@ -36,6 +118,20 @@ void Lexer::skipWhitespace() {
 Token Lexer::nextToken() {
   skipWhitespace();
 
+  Token tok = scanToken();
+
+  if (!lastComment.empty()) {
+    tok.leadingDoc = lastComment;
+    lastComment.clear();
+  }
+
+  lastComment.clear();
+  lastCommentLine = -1;
+
+  return tok;
+}
+
+Token Lexer::scanToken() {
   int startLine = currentLine;
   int startCol = currentColumn;
 
@@ -61,18 +157,46 @@ Token Lexer::nextToken() {
     }
     if (val == "import")
       return {TokenType::KW_IMPORT, val, startLine, startCol};
-    if (val == "int")
-      return {TokenType::KW_INT, val, startLine, startCol};
-    if (val == "float")
-      return {TokenType::KW_FLOAT, val, startLine, startCol};
-    if (val == "String")
-      return {TokenType::KW_STRING_TYPE, val, startLine, startCol};
-    if (val == "bool")
-      return {TokenType::KW_BOOL, val, startLine, startCol};
-    if (val == "uint")
-      return {TokenType::KW_UINT, val, startLine, startCol};
     if (val == "char")
       return {TokenType::KW_CHAR, val, startLine, startCol};
+    if (val == "int")
+      return {TokenType::KW_INT, val, startLine, startCol};
+    if (val == "uint")
+      return {TokenType::KW_UINT, val, startLine, startCol};
+    if (val == "usize")
+      return {TokenType::KW_USIZE, val, startLine, startCol};
+    // Fixed-width integers (The heavy lifters)
+    if (val == "int8")
+      return {TokenType::KW_INT8, val, startLine, startCol};
+    if (val == "int16")
+      return {TokenType::KW_INT16, val, startLine, startCol};
+    if (val == "int32")
+      return {TokenType::KW_INT32, val, startLine, startCol};
+    if (val == "int64")
+      return {TokenType::KW_INT64, val, startLine, startCol};
+    if (val == "uint8")
+      return {TokenType::KW_UINT8, val, startLine, startCol};
+    if (val == "uint16")
+      return {TokenType::KW_UINT16, val, startLine, startCol};
+    if (val == "uint32")
+      return {TokenType::KW_UINT32, val, startLine, startCol};
+    if (val == "uint64")
+      return {TokenType::KW_UINT64, val, startLine, startCol};
+    // Floating point (From deep learning to standard precision)
+    if (val == "float")
+      return {TokenType::KW_FLOAT, val, startLine, startCol};
+    if (val == "float8")
+      return {TokenType::KW_FLOAT8, val, startLine, startCol};
+    if (val == "float16")
+      return {TokenType::KW_FLOAT16, val, startLine, startCol};
+    if (val == "float32")
+      return {TokenType::KW_FLOAT32, val, startLine, startCol};
+    if (val == "float64")
+      return {TokenType::KW_FLOAT64, val, startLine, startCol};
+    if (val == "double")
+      return {TokenType::KW_DOUBLE, val, startLine, startCol};
+    if (val == "bool")
+      return {TokenType::KW_BOOL, val, startLine, startCol};
     if (val == "void")
       return {TokenType::KW_VOID, val, startLine, startCol};
     if (val == "return")
@@ -117,6 +241,8 @@ Token Lexer::nextToken() {
       return {TokenType::KW_PRIVATE, val, startLine, startCol};
     if (val == "this")
       return {TokenType::KW_THIS, val, startLine, startCol};
+    if (val == "super")
+      return {TokenType::KW_SUPER, val, startLine, startCol};
     if (val == "required")
       return {TokenType::KW_REQUIRED, val, startLine, startCol};
     if (val == "static")
@@ -129,6 +255,8 @@ Token Lexer::nextToken() {
       return {TokenType::KW_EXTENSION, val, startLine, startCol};
     if (val == "on")
       return {TokenType::KW_ON, val, startLine, startCol};
+    if (val == "as")
+      return {TokenType::KW_AS, val, startLine, startCol};
     return {TokenType::IDENTIFIER, val, startLine, startCol};
   }
 
@@ -137,39 +265,38 @@ Token Lexer::nextToken() {
     bool hasDot = false;
     while (cursor < source.length()) {
       char current = source[cursor];
-
       if (std::isdigit(static_cast<unsigned char>(current))) {
         val += current;
         advanceCursor();
       } else if (current == '.' && !hasDot) {
-        // LOOKAHEAD: We only use the period if the NEXT character is a digit.
-        // If it is a letter or a space (e.g., 42.isEven or 42.abs), the period
-        // is an operator
         if (cursor + 1 < source.length() &&
             std::isdigit(static_cast<unsigned char>(source[cursor + 1]))) {
           hasDot = true;
           val += current;
           advanceCursor();
-        } else {
-          // It's an integer followed by a possible member access. We break it
-          // here so that the dot is processed in the next nextToken()
+        } else
           break;
-        }
-      } else {
+      } else
         break;
-      }
     }
-    return {hasDot ? TokenType::FLOAT_LITERAL : TokenType::NUMBER, val,
-            startLine, startCol};
+    if (!hasDot) {
+      return {TokenType::NUMBER, val, startLine, startCol};
+    }
+    TokenType floatType = TokenType::FLOAT_LITERAL_DOUBLE;
+    if (cursor < source.length() &&
+        (source[cursor] == 'f' || source[cursor] == 'F')) {
+      advanceCursor();
+      floatType = TokenType::FLOAT_LITERAL_FLOAT;
+    }
+    return {floatType, val, startLine, startCol};
   }
 
   if (c == '"' || c == '\'') {
-    char quote = c;
+    char quote = c; // Lock the delimiter. What is yours is now mine.
     advanceCursor();
     std::string val;
+
     while (cursor < source.length() && source[cursor] != quote) {
-      // Fast-path unescape. Because printing literal '\n' to standard out is a
-      // crime.
       if (source[cursor] == '\\' && cursor + 1 < source.length()) {
         advanceCursor();
         switch (source[cursor]) {
@@ -188,6 +315,9 @@ Token Lexer::nextToken() {
         case '"':
           val += '"';
           break;
+        case '\'':
+          val += '\'';
+          break;
         default:
           val += source[cursor];
           break;
@@ -197,7 +327,12 @@ Token Lexer::nextToken() {
       }
       advanceCursor();
     }
-    advanceCursor();
+
+    // Annihilate the matching closing quote
+    if (cursor < source.length() && source[cursor] == quote) {
+      advanceCursor();
+    }
+
     return {TokenType::STRING, val, startLine, startCol};
   }
 

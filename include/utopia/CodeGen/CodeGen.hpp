@@ -23,6 +23,7 @@ public:
   void optimize(int level);
   void saveToFile(const std::string &filename);
   void emitObjectFile(const std::string &filename);
+  void emitAssemblyFile(const std::string &filename);
 
 private:
   std::unique_ptr<llvm::LLVMContext> context;
@@ -41,6 +42,11 @@ private:
   std::vector<llvm::BasicBlock *> continueTargets;
   std::vector<size_t> loopScopeDepths;
 
+  std::map<std::string, llvm::GlobalVariable *> vtables;
+  std::map<std::string, llvm::StructType *> vtableTypes;
+  std::map<std::string, std::map<std::string, int>> vtableLayout;
+  std::map<std::string, std::vector<std::string>> vtableMethods;
+
   std::map<std::string, StructDeclNode *> structASTs;
   std::map<std::string, llvm::StructType *> structTypes;
   std::map<std::string, std::map<std::string, int>> structMemberIndices;
@@ -55,6 +61,8 @@ private:
   TypeInfo currentReturnType;
   llvm::Value *currentLValue = nullptr;
   bool isLValueContext = false;
+  
+  bool isSuperContext = false;
 
   llvm::Value *rvoTarget = nullptr;
 
@@ -91,6 +99,7 @@ private:
   llvm::DIType *getDebugType(const TypeInfo &type);
 
   void visit(ThisNode *node) override;
+  void visit(SuperNode *node) override;
   void visit(StructDeclNode *node) override;
   void visit(ExtensionNode *node) override;
   void visit(MemberAccessNode *node) override;
@@ -117,6 +126,7 @@ private:
   void visit(MoveNode *node) override;
   void visit(BinaryOpNode *node) override;
   void visit(CallNode *node) override;
+  void visit(CastNode *node) override;
   void visit(AssignNode *node) override;
   void visit(VarDeclNode *node) override;
   void visit(ReturnNode *node) override;

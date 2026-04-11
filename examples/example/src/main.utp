@@ -27,13 +27,13 @@ class Entity {
 
 // Herencia, Implementación e Inicializadores de campo
 class Player extends Entity implements IDrawable {
-    String name;
+    char* name;
     float* health;
     private bool _isDead = false;
     static int playerNums = 0;
 
     // Constructor complejo: inicializa base, usa required y asignación directa
-    Player(int id, required String name, float initialHealth) {
+    Player(int id, required char* name, float initialHealth) {
         this.id = id;
         this.name = name;
         this.health = new float(initialHealth);
@@ -48,6 +48,7 @@ class Player extends Entity implements IDrawable {
         print("Drawing player:", name, "ID:", id);
     }
 
+    @override
     void update() {
         if (health == null) { 
             return; 
@@ -59,13 +60,6 @@ class Player extends Entity implements IDrawable {
     }
 
     bool isDead() { return _isDead; }
-}
-
-// Extensiones: inyectando lógica en tipos existentes
-extension StringUtils on String {
-    void shout() {
-        print(this, "!!!");
-    }
 }
 
 // Prueba de Move Semantics y R-Value References
@@ -146,8 +140,8 @@ int main() {
     ResourceManager rm2 = ResourceManager(move(rm1));
 
     // 5. Extensions y Casts
-    String msg = "System Stable";
-    msg.shout();
+    char* msg = "System Stable";
+    //msg.shout();
 
     float a = 10.5;
     heavyMath(a, 2.0);

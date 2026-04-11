@@ -1,8 +1,7 @@
-void debugPrint(String msg) {
+void debugPrint(char* msg) {
     print(msg);
 }
 
-// Sobrecarga para enteros
 void debugPrint(int val) {
     print(val);
 }

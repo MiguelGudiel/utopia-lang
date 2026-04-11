@@ -1,14 +1,16 @@
 #include "ProjectManager.hpp"
 #include <chrono>
-#include <iostream>
+#include <stdexcept>
 #include <yaml-cpp/yaml.h>
 
 namespace utopia {
 
 uint64_t getFileTimestamp(const fs::path &path) {
   auto ftime = fs::last_write_time(path);
+  auto sysTime = std::chrono::clock_cast<std::chrono::system_clock>(ftime);
+
   return std::chrono::duration_cast<std::chrono::seconds>(
-             ftime.time_since_epoch())
+             sysTime.time_since_epoch())
       .count();
 }
 
@@ -39,7 +41,6 @@ ProjectConfig parseBuildManifest(const fs::path &manifestPath) {
 
     if (root["build"]) {
       auto b = root["build"];
-
       config.target = b["target"].as<std::string>("executable");
       config.outputDir =
           b["output_dir"] ? b["output_dir"].as<std::string>() : "build";
@@ -57,12 +58,10 @@ ProjectConfig parseBuildManifest(const fs::path &manifestPath) {
       if (b["source_dirs"] && b["source_dirs"].IsSequence()) {
         for (const auto &dir : b["source_dirs"]) {
           fs::path dirPath = baseDir / dir.as<std::string>();
-
           if (!fs::exists(dirPath) || !fs::is_directory(dirPath))
             continue;
 
           config.includeDirs.push_back(dirPath.string());
-
           for (const auto &entry : fs::recursive_directory_iterator(dirPath)) {
             if (entry.is_regular_file() && entry.path().extension() == ".utp") {
               config.resolvedSources.push_back(
@@ -90,8 +89,7 @@ ProjectConfig parseBuildManifest(const fs::path &manifestPath) {
       }
     }
   } catch (const YAML::Exception &e) {
-    std::cerr << "Fatal yaml-cpp error: " << e.what() << "\n";
-    exit(1);
+    throw std::runtime_error("YAML parse error: " + std::string(e.what()));
   }
   return config;
 }

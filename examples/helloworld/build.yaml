@@ -1,0 +1,17 @@
+project:
+  name: "hello-world"
+  version: "0.1.0"
+
+build:
+  target: executable
+  output_dir: "build"
+  optimization: 0
+  linker_flags:
+    - "-lm"
+    - "-lpthread"
+  source_dirs:
+    - src/
+  sources:
+    - main.utp
+    - IDrawable.utp
+    - Entity.utp

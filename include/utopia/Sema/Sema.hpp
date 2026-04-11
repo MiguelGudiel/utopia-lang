@@ -8,6 +8,8 @@
 
 namespace utopia {
 
+std::string typeToString(const TypeInfo &t);
+
 class Sema : public ASTVisitor {
 public:
   bool analyze(ProgramNode *program);
@@ -22,6 +24,9 @@ private:
 
   struct StructDef {
     bool isClass;
+    bool hasVTable = false;
+    std::string baseClass;
+
     struct Field {
       TypeInfo type;
       AccessModifier mod;
@@ -29,6 +34,10 @@ private:
       bool isStatic;
     };
     std::map<std::string, Field> fields;
+
+    // Map method name to its index in the VTable
+    std::map<std::string, int> vtableLayout;
+    std::vector<std::string> vtableMethods; // Exact order of the table
     std::vector<int> constructorArities;
   };
 
@@ -86,8 +95,11 @@ private:
   bool hasClassMethod(StructDeclNode *node, FunctionNode *m);
   std::string resolveParamType(StructDeclNode *node,
                                const FunctionParam &param);
+  int getInheritanceDistance(const std::string &derived,
+                             const std::string &base);
 
 public:
+  std::map<ASTNode *, TypeInfo> nodeTypes;
   const std::map<std::string, StructDef> &getCustomStructs() const {
     return customStructs;
   }
@@ -101,6 +113,7 @@ public:
 
 private:
   void visit(ThisNode *node) override;
+  void visit(SuperNode *node) override;
   void visit(StructDeclNode *node) override;
   void visit(ExtensionNode *node) override;
   void visit(MemberAccessNode *node) override;
@@ -127,6 +140,7 @@ private:
   void visit(MoveNode *node) override;
   void visit(BinaryOpNode *node) override;
   void visit(CallNode *node) override;
+  void visit(CastNode *node) override;
   void visit(AssignNode *node) override;
   void visit(VarDeclNode *node) override;
   void visit(ReturnNode *node) override;

@@ -30,8 +30,7 @@ fs::path ModuleLoader::resolveImportPath(const std::string &importPath,
     targetPath = targetPath.substr(8);
   } else {
     // Undocumented internal tag translation.
-    // Maps "std:io" -> "std/io.utp" to bypass verbose package URIs.
-    // Do not expose this in the public documentation.
+    // Maps "std:io" -> "std/io.utp" to bypass verbose package URIs
     size_t colonPos = targetPath.find(':');
     if (colonPos != std::string::npos) {
       targetPath[colonPos] = '/';
@@ -85,7 +84,7 @@ fs::path ModuleLoader::resolveImportPath(const std::string &importPath,
   return {};
 }
 
-ModuleNode *ModuleLoader::parseModule(const fs::path &absPath) {
+std::unique_ptr<ModuleNode> ModuleLoader::parseModule(const fs::path &absPath) {
   std::ifstream file(absPath);
   if (!file)
     return nullptr;
@@ -96,32 +95,39 @@ ModuleNode *ModuleLoader::parseModule(const fs::path &absPath) {
   Lexer lexer(source);
   auto tokens = lexer.tokenize();
   Parser parser(tokens);
-  auto module = parser.parseModule(absPath.string());
-  return module.release(); // ownership pasa a loadedModules
+  return parser.parseModule(absPath.string());
 }
 
 ModuleNode *ModuleLoader::loadModule(const std::string &importPath,
                                      const fs::path &currentFileDir) {
   fs::path absPath = resolveImportPath(importPath, currentFileDir);
   if (absPath.empty()) {
-    // Error: Module not found
     return nullptr;
   }
+
   std::string key = absPath.string();
   if (loadedModules.find(key) != loadedModules.end()) {
     return loadedModules[key].get();
   }
-  // Load module
-  auto module = std::unique_ptr<ModuleNode>(parseModule(absPath));
+
+  auto module = parseModule(absPath);
   if (!module)
     return nullptr;
+
   ModuleNode *ptr = module.get();
+
+  /* Atomic handoff to the cache.
+   * From this point on, loadedModules owns the memory.
+   */
   loadedModules[key] = std::move(module);
-  allModules.push_back(ptr);
-  // Cargar recursivamente sus imports
+
+  // Recursively load dependencies
   for (const auto &imp : ptr->imports) {
     loadModule(imp, absPath.parent_path());
   }
+
+  allModules.push_back(ptr);
+
   return ptr;
 }
 

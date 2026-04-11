@@ -1,11 +1,13 @@
 #pragma once
 
-#include "utopia/AST/AST.hpp"
 namespace utopia {
 
 // Forward declarations for the vtable mapping
+// We only need pointers here, so don't include AST.hpp
 class ThisNode;
+class SuperNode;
 class StructDeclNode;
+class ExtensionNode;
 class MemberAccessNode;
 class BlockNode;
 class NullLiteralNode;
@@ -20,6 +22,8 @@ class NumberNode;
 class FloatNode;
 class BoolNode;
 class StringNode;
+class UnaryMinusNode;
+class SubscriptNode;
 class VariableNode;
 class AddressOfNode;
 class DerefNode;
@@ -28,17 +32,20 @@ class DeleteNode;
 class MoveNode;
 class BinaryOpNode;
 class CallNode;
+class CastNode;
 class AssignNode;
 class VarDeclNode;
 class ReturnNode;
 class FunctionNode;
 class ProgramNode;
+class ModuleNode;
 
 class ASTVisitor {
 public:
   virtual ~ASTVisitor() = default;
 
   virtual void visit(ThisNode *node) = 0;
+  virtual void visit(SuperNode *node) = 0;
   virtual void visit(StructDeclNode *node) = 0;
   virtual void visit(ExtensionNode *node) = 0;
   virtual void visit(MemberAccessNode *node) = 0;
@@ -65,6 +72,7 @@ public:
   virtual void visit(MoveNode *node) = 0;
   virtual void visit(BinaryOpNode *node) = 0;
   virtual void visit(CallNode *node) = 0;
+  virtual void visit(CastNode *node) = 0;
   virtual void visit(AssignNode *node) = 0;
   virtual void visit(VarDeclNode *node) = 0;
   virtual void visit(ReturnNode *node) = 0;

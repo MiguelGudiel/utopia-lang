@@ -13,3 +13,4 @@ build:
     - src/
   sources:
     - main.utp
+    - other.utp
