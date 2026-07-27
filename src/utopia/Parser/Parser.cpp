@@ -683,21 +683,56 @@ ExprNode *Parser::parseUnary() {
     }
 
     std::vector<ExprNode *> args;
+    std::vector<std::string_view> argNames;
     bool hasParens = false;
+    bool namedStarted = false;
 
     if (match(TokenType::LPAREN)) {
       hasParens = true;
+      while (currentToken().type == TokenType::COMMENT)
+        advance();
+
       if (currentToken().type != TokenType::RPAREN) {
         do {
-          args.push_back(parseExpression());
+          while (currentToken().type == TokenType::COMMENT)
+            advance();
+          if (currentToken().type == TokenType::RPAREN)
+            break;
+
+          if (currentToken().type == TokenType::IDENTIFIER &&
+              peekToken().type == TokenType::COLON) {
+            namedStarted = true;
+            argNames.push_back(currentToken().value);
+            advance();
+            advance();
+            while (currentToken().type == TokenType::COMMENT)
+              advance();
+            args.push_back(parseExpression());
+          } else {
+            if (namedStarted) {
+              reportError(
+                  currentToken().line, currentToken().column,
+                  currentToken().value.length(),
+                  "Positional arguments cannot appear after named arguments.");
+              throw ParseException();
+            }
+            argNames.push_back("");
+            args.push_back(parseExpression());
+          }
+
+          while (currentToken().type == TokenType::COMMENT)
+            advance();
         } while (match(TokenType::COMMA));
       }
+      while (currentToken().type == TokenType::COMMENT)
+        advance();
       expect(TokenType::RPAREN, "Expected ')'");
     }
 
     return astCtx.create<NewExprNode>(
-        allocTy, arraySize, astCtx.copyArray<ExprNode *>(args), hasParens, line,
-        col, currentToken().column - col);
+        allocTy, arraySize, astCtx.copyArray<ExprNode *>(args),
+        astCtx.copyArray<std::string_view>(argNames), hasParens, line, col,
+        currentToken().column - col);
   }
 
   if (match(TokenType::DELETE_KW)) {
@@ -727,6 +762,7 @@ ExprNode *Parser::parseUnary() {
     auto expr = parseUnary();
     return astCtx.create<UnaryOpNode>(op, expr, line, col);
   }
+
   return parsePostfix();
 }
 
@@ -767,10 +803,19 @@ DeclNode *Parser::parseStructDecl() {
       int dLine = currentToken().line;
       int dCol = currentToken().column;
 
-      advance();
+      advance(); // Consume '~'
+
+      std::string_view dtorName = currentToken().value;
       expect(TokenType::IDENTIFIER, "Expected struct name after '~'");
-      expect(TokenType::LPAREN, "Expected '()'");
-      expect(TokenType::RPAREN, "Expected '()'");
+
+      if (dtorName != name) {
+        reportError(dLine, dCol, dtorName.length(),
+                    "Destructor name must match the struct name.");
+        throw ParseException();
+      }
+
+      expect(TokenType::LPAREN, "Expected '('");
+      expect(TokenType::RPAREN, "Expected ')'");
 
       destructor = astCtx.create<FunctionDeclNode>(astCtx.VoidTy, "~", dLine,
                                                    dCol, false, true);
@@ -789,19 +834,32 @@ DeclNode *Parser::parseStructDecl() {
       continue;
     }
 
-    if (currentToken().type == TokenType::IDENTIFIER &&
-        currentToken().value == name && peekToken().type == TokenType::LPAREN) {
+    /* Constructor pattern matching */
+    bool isConstCtor = false;
+    if (currentToken().type == TokenType::CONST_KW &&
+        peekToken().type == TokenType::IDENTIFIER &&
+        peekToken().value == name && peekToken(2).type == TokenType::LPAREN) {
+      isConstCtor = true;
+    }
+
+    if (isConstCtor || (currentToken().type == TokenType::IDENTIFIER &&
+                        currentToken().value == name &&
+                        peekToken().type == TokenType::LPAREN)) {
       int cLine = currentToken().line;
       int cCol = currentToken().column;
-      advance();
-      advance();
+
+      if (isConstCtor)
+        advance(); // Consume 'const'
+      advance();   // Consume name
+      advance();   // Consume '('
 
       bool isVariadic = false;
       auto params = parseParameterList(structTy, isVariadic);
       expect(TokenType::RPAREN, "Expected ')'");
 
-      auto constructor = astCtx.create<FunctionDeclNode>(
-          astCtx.VoidTy, name, cLine, cCol, false, true, false, isVariadic);
+      auto constructor =
+          astCtx.create<FunctionDeclNode>(astCtx.VoidTy, name, cLine, cCol,
+                                          isConstCtor, true, false, isVariadic);
       constructor->params = astCtx.copyArray<ParamDeclNode *>(params);
       constructor->annotations = memberAnnotations;
       if (!doc.empty())
@@ -949,10 +1007,19 @@ DeclNode *Parser::parseClassDecl() {
       int dLine = currentToken().line;
       int dCol = currentToken().column;
 
-      advance();
+      advance(); // Consume '~'
+
+      std::string_view dtorName = currentToken().value;
       expect(TokenType::IDENTIFIER, "Expected class name after '~'");
-      expect(TokenType::LPAREN, "Expected '()'");
-      expect(TokenType::RPAREN, "Expected '()'");
+
+      if (dtorName != name) {
+        reportError(dLine, dCol, dtorName.length(),
+                    "Destructor name must match the class name.");
+        throw ParseException();
+      }
+
+      expect(TokenType::LPAREN, "Expected '('");
+      expect(TokenType::RPAREN, "Expected ')'");
 
       destructor = astCtx.create<FunctionDeclNode>(astCtx.VoidTy, "~", dLine,
                                                    dCol, false, true);
@@ -974,19 +1041,31 @@ DeclNode *Parser::parseClassDecl() {
     }
 
     /* Constructor pattern matching */
-    if (currentToken().type == TokenType::IDENTIFIER &&
-        currentToken().value == name && peekToken().type == TokenType::LPAREN) {
+    bool isConstCtor = false;
+    if (currentToken().type == TokenType::CONST_KW &&
+        peekToken().type == TokenType::IDENTIFIER &&
+        peekToken().value == name && peekToken(2).type == TokenType::LPAREN) {
+      isConstCtor = true;
+    }
+
+    if (isConstCtor || (currentToken().type == TokenType::IDENTIFIER &&
+                        currentToken().value == name &&
+                        peekToken().type == TokenType::LPAREN)) {
       int cLine = currentToken().line;
       int cCol = currentToken().column;
-      advance();
-      advance();
+
+      if (isConstCtor)
+        advance(); // Consume 'const'
+      advance();   // Consume name
+      advance();   // Consume '('
 
       bool isVariadic = false;
       auto params = parseParameterList(classTy, isVariadic);
       expect(TokenType::RPAREN, "Expected ')'");
 
-      auto constructor = astCtx.create<FunctionDeclNode>(
-          astCtx.VoidTy, name, cLine, cCol, false, true, false, isVariadic);
+      auto constructor =
+          astCtx.create<FunctionDeclNode>(astCtx.VoidTy, name, cLine, cCol,
+                                          isConstCtor, true, false, isVariadic);
       constructor->params = astCtx.copyArray<ParamDeclNode *>(params);
       constructor->annotations = memberAnnotations;
       if (!doc.empty())

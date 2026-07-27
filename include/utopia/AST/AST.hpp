@@ -331,13 +331,15 @@ struct NewExprNode : public ExprNode {
   const Type *allocatedType;
   ExprNode *arraySize;
   llvm::ArrayRef<ExprNode *> args;
-  bool hasParens; // Tracks if '()' was explicitly provided
+  llvm::ArrayRef<std::string_view> argNames;
+  bool hasParens;
+  const FunctionDeclNode *resolvedConstructor = nullptr;
 
   NewExprNode(const Type *allocTy, ExprNode *arrSize,
-              llvm::ArrayRef<ExprNode *> a, bool hasParens, int l, int c,
-              int len)
+              llvm::ArrayRef<ExprNode *> a, llvm::ArrayRef<std::string_view> n,
+              bool hasParens, int l, int c, int len)
       : ExprNode(NodeKind::New, l, c, len), allocatedType(allocTy),
-        arraySize(arrSize), args(a), hasParens(hasParens) {}
+        arraySize(arrSize), args(a), argNames(n), hasParens(hasParens) {}
 };
 
 struct DeleteExprNode : public ExprNode {

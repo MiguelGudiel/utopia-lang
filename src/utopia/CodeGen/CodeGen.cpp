@@ -1426,42 +1426,47 @@ llvm::Value *CodeGen::visit(const NewExprNode *node) {
 
   llvm::Value *allocatedMem = builder.CreateCall(mallocFunc, {sizeVal});
 
-  // Proceed with explicit initialization only if '()' are present
   if (node->hasParens) {
     builder.CreateMemSet(allocatedMem, builder.getInt8(0), sizeVal,
                          llvm::Align(1));
 
     if (!node->arraySize) {
-      const auto *unqual = node->allocatedType->getUnqualifiedType();
-      if (unqual->getKind() == TypeKind::Class ||
-          unqual->getKind() == TypeKind::Struct) {
-        auto *recTy = static_cast<const RecordType *>(unqual);
-        auto *decl = recTy->getDeclaration();
+      if (node->resolvedConstructor) {
+        llvm::Function *ctorFunc =
+            getOrCreateFunction(node->resolvedConstructor);
+        llvm::Value *typedMem =
+            builder.CreateBitCast(allocatedMem, getLLVMType(node->exprType));
 
-        if (decl) {
-          const FunctionDeclNode *matchedCtor = nullptr;
-          llvm::ArrayRef<FunctionDeclNode *> ctors;
-          if (decl->kind == NodeKind::ClassDecl)
-            ctors = static_cast<const ClassDeclNode *>(decl)->constructors;
-          else if (decl->kind == NodeKind::StructDecl)
-            ctors = static_cast<const StructDeclNode *>(decl)->constructors;
+        std::vector<llvm::Value *> argsArgs;
+        argsArgs.push_back(typedMem);
 
-          if (node->args.empty()) {
-            for (auto *ctor : ctors) {
-              if (ctor->params.size() == 1) {
-                matchedCtor = ctor;
-                break;
-              }
+        unsigned argIdx = 1;
+        for (const auto &arg : node->args) {
+          llvm::Value *argVal = nullptr;
+
+          if (arg->kind == NodeKind::Variable &&
+              arg->exprType->isReferenceType()) {
+            argVal = getLValue(arg);
+          } else {
+            argVal = dispatch(arg);
+            if (ctorFunc && argVal && argIdx < ctorFunc->arg_size()) {
+              llvm::Type *paramTy =
+                  ctorFunc->getFunctionType()->getParamType(argIdx);
+              argVal = createImplicitCast(argVal, paramTy);
             }
           }
 
-          if (matchedCtor) {
-            llvm::Function *ctorFunc = getOrCreateFunction(matchedCtor);
-            llvm::Value *typedMem = builder.CreateBitCast(
-                allocatedMem, getLLVMType(node->exprType));
-            builder.CreateCall(ctorFunc, {typedMem});
+          if (!argVal) {
+            diags.report({DiagLevel::Error, arg->line, arg->column, arg->length,
+                          "Failed to evaluate argument for constructor call.",
+                          ""});
+            return nullptr;
           }
+          argsArgs.push_back(argVal);
+          argIdx++;
         }
+
+        builder.CreateCall(ctorFunc, argsArgs);
       }
     }
   }

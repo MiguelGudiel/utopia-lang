@@ -1342,10 +1342,182 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
       return ctx->reportError(node->line, node->column, node->length,
                               "Array size in 'new' must be an integer type");
     }
+    node->exprType = ctx->astCtx.getPointerType(node->allocatedType);
+    return node->exprType;
   }
 
-  // Todo: Constructor arg evaluation omitted for brevity as array
-  // initialization dominates this update
+  const Type *unqual = node->allocatedType->getUnqualifiedType();
+  if (unqual->getKind() == TypeKind::Class ||
+      unqual->getKind() == TypeKind::Struct) {
+    auto *recTy = static_cast<const RecordType *>(unqual);
+    auto *decl = recTy->getDeclaration();
+
+    if (decl) {
+      llvm::ArrayRef<FunctionDeclNode *> ctors;
+      if (decl->kind == NodeKind::ClassDecl)
+        ctors = static_cast<const ClassDeclNode *>(decl)->constructors;
+      else if (decl->kind == NodeKind::StructDecl)
+        ctors = static_cast<const StructDeclNode *>(decl)->constructors;
+
+      std::vector<const Type *> argTypes;
+      bool hasErrors = false;
+      for (const auto &arg : node->args) {
+        auto argType = dispatch(arg);
+        if (!argType) {
+          hasErrors = true;
+        } else {
+          argTypes.push_back(*argType);
+        }
+      }
+
+      if (hasErrors) {
+        return std::unexpected(
+            ErrorInfo{node->line, node->column, node->length,
+                      "Argument evaluation failed in new expression."});
+      }
+
+      const FunctionDeclNode *bestMatch = nullptr;
+      std::vector<std::vector<std::string>> overloadErrors;
+
+      for (const auto *ctor : ctors) {
+        size_t paramOffset = 1;
+        size_t expectedParams = ctor->params.size() - paramOffset;
+
+        std::vector<ExprNode *> resolvedArgs(expectedParams, nullptr);
+        std::vector<const Type *> resolvedTypes(expectedParams, nullptr);
+
+        size_t posArgCount = 0;
+        std::unordered_set<std::string_view> providedNamedArgs;
+        std::vector<std::string> errors;
+
+        for (size_t i = 0; i < node->args.size(); ++i) {
+          if (node->argNames[i].empty()) {
+            if (posArgCount >= expectedParams) {
+              if (ctor->isVariadic) {
+                resolvedArgs.push_back(node->args[i]);
+                resolvedTypes.push_back(argTypes[i]);
+                posArgCount++;
+                continue;
+              }
+              errors.push_back("Too many arguments provided.");
+              break;
+            }
+            if (ctor->params[paramOffset + posArgCount]->isNamed) {
+              errors.push_back(
+                  "Positional argument provided for named parameter '" +
+                  std::string(ctor->params[paramOffset + posArgCount]->name) +
+                  "'.");
+              break;
+            }
+            resolvedArgs[posArgCount] = node->args[i];
+            resolvedTypes[posArgCount] = argTypes[i];
+            posArgCount++;
+          } else {
+            auto name = node->argNames[i];
+            if (providedNamedArgs.contains(name)) {
+              errors.push_back("Duplicate named argument '" +
+                               std::string(name) + "'.");
+              continue;
+            }
+            providedNamedArgs.insert(name);
+
+            bool found = false;
+            for (size_t p = 0; p < expectedParams; ++p) {
+              if (ctor->params[paramOffset + p]->name == name) {
+                if (!ctor->params[paramOffset + p]->isNamed) {
+                  errors.push_back("Parameter '" + std::string(name) +
+                                   "' cannot be passed as a named argument.");
+                }
+                resolvedArgs[p] = node->args[i];
+                resolvedTypes[p] = argTypes[i];
+                found = true;
+                break;
+              }
+            }
+            if (!found) {
+              errors.push_back("No such named parameter '" + std::string(name) +
+                               "'.");
+            }
+          }
+        }
+
+        if (!errors.empty()) {
+          overloadErrors.push_back(errors);
+          continue;
+        }
+
+        for (size_t p = 0; p < expectedParams; ++p) {
+          if (!resolvedArgs[p]) {
+            if (ctor->params[paramOffset + p]->defaultValue) {
+              resolvedArgs[p] = ctor->params[paramOffset + p]->defaultValue;
+              resolvedTypes[p] =
+                  ctor->params[paramOffset + p]->defaultValue->exprType;
+            } else {
+              auto pName = std::string(ctor->params[paramOffset + p]->name);
+              if (ctor->params[paramOffset + p]->isRequired) {
+                errors.push_back("Missing required named parameter '" + pName +
+                                 "'.");
+              } else if (!ctor->params[paramOffset + p]->isNamed) {
+                errors.push_back("Missing mandatory positional parameter '" +
+                                 pName + "'.");
+              } else {
+                errors.push_back("Missing parameter '" + pName + "'.");
+              }
+            }
+          }
+        }
+
+        if (!errors.empty()) {
+          overloadErrors.push_back(errors);
+          continue;
+        }
+
+        for (size_t p = 0; p < expectedParams; ++p) {
+          if (!canImplicitlyCast(resolvedTypes[p],
+                                 ctor->params[paramOffset + p]->type)) {
+            errors.push_back("Type mismatch for parameter '" +
+                             std::string(ctor->params[paramOffset + p]->name) +
+                             "': expected '" +
+                             ctor->params[paramOffset + p]->type->toString() +
+                             "', but got '" + resolvedTypes[p]->toString() +
+                             "'.");
+          }
+        }
+
+        if (!errors.empty()) {
+          overloadErrors.push_back(errors);
+          continue;
+        }
+
+        bestMatch = ctor;
+        const_cast<NewExprNode *>(node)->args =
+            ctx->astCtx.copyArray<ExprNode *>(resolvedArgs);
+        const_cast<NewExprNode *>(node)->argNames = {};
+        break;
+      }
+
+      if (!bestMatch) {
+        std::string finalErr = "No matching constructor found for '" +
+                               std::string(recTy->getName()) + "'.";
+        if (!overloadErrors.empty()) {
+          finalErr += " Candidates failed with:\n";
+          for (const auto &errList : overloadErrors) {
+            finalErr += "- ";
+            for (size_t i = 0; i < errList.size(); ++i) {
+              finalErr += errList[i];
+              if (i < errList.size() - 1)
+                finalErr += ", ";
+            }
+            finalErr += "\n";
+          }
+        }
+        return ctx->reportError(node->line, node->column, node->length,
+                                finalErr);
+      }
+
+      const_cast<NewExprNode *>(node)->resolvedConstructor = bestMatch;
+    }
+  }
 
   node->exprType = ctx->astCtx.getPointerType(node->allocatedType);
   return node->exprType;
