@@ -15,7 +15,15 @@ struct ErrorInfo {
   std::string message;
 };
 
-enum class TypeKind { Builtin, Pointer, Reference, Const, Struct, Class };
+enum class TypeKind {
+  Builtin,
+  Pointer,
+  Reference,
+  Const,
+  Struct,
+  Class,
+  Array
+};
 
 enum class BuiltinKind {
   Int8,
@@ -95,6 +103,17 @@ public:
   const Type *getBaseType() const { return base; }
 };
 
+class ArrayType : public Type {
+  const Type *elementType;
+  uint64_t size;
+
+public:
+  explicit ArrayType(const Type *elem, uint64_t sz)
+      : Type(TypeKind::Array), elementType(elem), size(sz) {}
+  const Type *getElementType() const { return elementType; }
+  uint64_t getSize() const { return size; }
+};
+
 class RecordType : public Type {
 protected:
   std::string_view name;
@@ -166,6 +185,12 @@ inline std::string Type::toString() const {
   if (kind == TypeKind::Const) {
     return "const " +
            static_cast<const ConstType *>(this)->getBaseType()->toString();
+  }
+  if (kind == TypeKind::Array) {
+    return static_cast<const ArrayType *>(this)->getElementType()->toString() +
+           "[" +
+           std::to_string(static_cast<const ArrayType *>(this)->getSize()) +
+           "]";
   }
   if (isBuiltinType()) {
     switch (static_cast<const BuiltinType *>(this)->getBuiltinKind()) {

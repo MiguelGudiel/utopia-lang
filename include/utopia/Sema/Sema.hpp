@@ -1,5 +1,6 @@
 #pragma once
 #include "utopia/AST/ASTVisitor.hpp"
+#include "utopia/Common/Types.hpp"
 #include "utopia/Sema/SemaContext.hpp"
 #include <memory>
 #include <unordered_set>
@@ -30,8 +31,33 @@ static bool canImplicitlyCast(const Type *from, const Type *to) {
   if (baseFrom == baseTo)
     return true;
 
+  if (baseFrom->getKind() == TypeKind::Array &&
+      baseTo->getKind() == TypeKind::Array) {
+    auto *arrFrom = static_cast<const ArrayType *>(baseFrom);
+    auto *arrTo = static_cast<const ArrayType *>(baseTo);
+
+    /* Allow empty or un-typed array literals to bind to expected target array
+     * type */
+    if (arrFrom->getSize() == 0 || arrFrom->getElementType()->isVoid())
+      return true;
+
+    if (arrFrom->getSize() == arrTo->getSize())
+      return canImplicitlyCast(arrFrom->getElementType(),
+                               arrTo->getElementType());
+  }
+
   if (baseFrom->getUnqualifiedType() == baseTo->getUnqualifiedType()) {
     if (!baseFrom->isConstQualified() || baseTo->isConstQualified())
+      return true;
+  }
+
+  if (baseFrom->getKind() == TypeKind::Array && baseTo->isPointerType()) {
+    const Type *elemTy =
+        static_cast<const ArrayType *>(baseFrom)->getElementType();
+    const Type *toPointee =
+        static_cast<const PointerType *>(baseTo)->getPointeeType();
+    if (toPointee->isVoid() ||
+        elemTy->getUnqualifiedType() == toPointee->getUnqualifiedType())
       return true;
   }
 
@@ -92,6 +118,10 @@ public:
   void visit(const CastNode *) {}
   void visit(const ParamDeclNode *) {}
   void visit(const MemberAccessNode *) {}
+  void visit(const ArraySubscriptNode *) {}
+  void visit(const ArrayLiteralNode *) {}
+  void visit(const NewExprNode *) {}
+  void visit(const DeleteExprNode *) {}
 };
 
 class TypeCheckPass : public SemaPass,
@@ -128,6 +158,10 @@ public:
   SemaResult visit(const MemberAccessNode *node);
   SemaResult visit(const AnnotationDeclNode *node);
   SemaResult visit(const AnnotationNode *node);
+  SemaResult visit(const ArraySubscriptNode *node);
+  SemaResult visit(const ArrayLiteralNode *node);
+  SemaResult visit(const NewExprNode *node);
+  SemaResult visit(const DeleteExprNode *node);
 };
 
 class SemaPipeline {

@@ -5,7 +5,7 @@
       "name": "Debug Utopia Compiler (C++)",
       "type": "lldb",
       "request": "launch",
-      "program": "${workspaceFolder}/build/tools/utopia/utopia",
+      //"program": "${workspaceFolder}/build/tools/utopia/utopia",
       "args": [
         "${file}"
       ],

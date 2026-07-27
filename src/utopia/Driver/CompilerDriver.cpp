@@ -155,6 +155,9 @@ bool CompilerDriver::run() {
 
     if (!Backend::process(llvmMod, backendCtx, options,
                           targetBasePath.string())) {
+      std::cerr << "\033[1;31m[Fatal]\033[0m Backend processing failed for "
+                   "translation unit: "
+                << baseName << "." << std::endl;
       return false;
     }
 
@@ -177,8 +180,9 @@ bool CompilerDriver::run() {
 
     auto jitEx = llvm::orc::LLJITBuilder().create();
     if (!jitEx) {
-      std::cerr << "[JIT Error] Failed to spin up execution engine."
-                << std::endl;
+      std::cerr
+          << "\033[1;31m[JIT Error]\033[0m Failed to spin up execution engine."
+          << std::endl;
       return false;
     }
     auto jit = std::move(*jitEx);
@@ -194,8 +198,9 @@ bool CompilerDriver::run() {
       if (uniqueMod) {
         auto tsm = llvm::orc::ThreadSafeModule(std::move(uniqueMod), tsc);
         if (auto err = jit->addIRModule(std::move(tsm))) {
-          std::cerr << "[JIT Error] IR linkage failure for module: "
-                    << unitPath.string() << std::endl;
+          std::cerr
+              << "\033[1;31m[JIT Error]\033[0m IR linkage failure for module: "
+              << unitPath.string() << std::endl;
           return false;
         }
       }
@@ -203,7 +208,8 @@ bool CompilerDriver::run() {
 
     auto mainSym = jit->lookup("main");
     if (!mainSym) {
-      std::cerr << "[JIT Error] Entry point symbol 'main' not resolved."
+      std::cerr << "\033[1;31m[JIT Error]\033[0m Entry point symbol 'main' not "
+                   "resolved."
                 << std::endl;
       return false;
     }
@@ -223,6 +229,7 @@ bool CompilerDriver::run() {
 
     if (!Linker::link(compiledObjects, executablePath, options.isDebug,
                       options.linkerFlags)) {
+      std::cerr << "\033[1;31m[Fatal]\033[0m Linker step failed.\n";
       return false;
     }
     std::cout << "\033[1;32m[Build Success]\033[0m " << executablePath

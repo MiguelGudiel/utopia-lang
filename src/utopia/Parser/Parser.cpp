@@ -53,7 +53,7 @@ void Parser::expect(TokenType type, std::string_view errorMessage) {
   }
 }
 
-const Type *Parser::parseType() {
+const Type *Parser::parseType(bool inNewExpr) {
   bool isConst = match(TokenType::CONST_KW);
 
   if (currentToken().type != TokenType::TYPE_KW &&
@@ -80,9 +80,14 @@ const Type *Parser::parseType() {
     ty = astCtx.getConstType(ty);
   }
 
+  /*
+   * Array brackets are strictly omitted from type construction if evaluated
+   * within a dynamic heap allocation context (new expression).
+   */
   while (currentToken().type == TokenType::STAR ||
          currentToken().type == TokenType::AMPERSAND ||
-         currentToken().type == TokenType::CONST_KW) {
+         currentToken().type == TokenType::CONST_KW ||
+         (!inNewExpr && currentToken().type == TokenType::LBRACKET)) {
     if (currentToken().type == TokenType::CONST_KW) {
       ty = astCtx.getConstType(ty);
       advance();
@@ -92,6 +97,8 @@ const Type *Parser::parseType() {
     } else if (currentToken().type == TokenType::AMPERSAND) {
       ty = astCtx.getReferenceType(ty);
       advance();
+    } else if (!inNewExpr && currentToken().type == TokenType::LBRACKET) {
+      ty = applyArrayDeclarator(ty);
     }
   }
 
@@ -192,6 +199,33 @@ AnnotationNode *Parser::parseAnnotation() {
                                        line, col, len);
 }
 
+const Type *Parser::applyArrayDeclarator(const Type *baseType) {
+  std::vector<uint64_t> sizes;
+  while (match(TokenType::LBRACKET)) {
+    if (match(TokenType::RBRACKET)) {
+      sizes.push_back(0);
+    } else {
+      auto sizeExpr = parseExpression();
+      expect(TokenType::RBRACKET, "Expected ']'");
+      if (sizeExpr->kind == NodeKind::Number &&
+          !static_cast<NumberNode *>(sizeExpr)->isFloat) {
+        sizes.push_back(
+            std::stoull(std::string(static_cast<NumberNode *>(sizeExpr)->raw)));
+      } else {
+        reportError(sizeExpr->line, sizeExpr->column, sizeExpr->length,
+                    "Array size must be a constant integer literal");
+        sizes.push_back(1);
+      }
+    }
+  }
+
+  const Type *result = baseType;
+  for (auto it = sizes.rbegin(); it != sizes.rend(); ++it) {
+    result = astCtx.getArrayType(result, *it);
+  }
+  return result;
+}
+
 std::vector<ParamDeclNode *> Parser::parseParameterList(const Type *classTy,
                                                         bool &isVariadic) {
   std::vector<ParamDeclNode *> params;
@@ -250,6 +284,12 @@ std::vector<ParamDeclNode *> Parser::parseParameterList(const Type *classTy,
     std::string_view pName = currentToken().value;
     int pLen = (int)pName.length();
     expect(TokenType::IDENTIFIER, "Expected parameter name.");
+
+    /* Apply array-to-pointer decay for parameter declarations just like C++ */
+    if (pType->getKind() == TypeKind::Array) {
+      pType = astCtx.getPointerType(
+          static_cast<const ArrayType *>(pType)->getElementType());
+    }
 
     ExprNode *defVal = nullptr;
     if (match(TokenType::ASSIGN)) {
@@ -448,7 +488,8 @@ ASTNode *Parser::parseStatement() {
              currentToken().type == TokenType::CONST_KW ||
              currentToken().type == TokenType::EXTERN_KW ||
              (currentToken().type == TokenType::IDENTIFIER &&
-              peekToken().type == TokenType::IDENTIFIER)) {
+              (peekToken().type == TokenType::IDENTIFIER ||
+               astCtx.getRecordType(currentToken().value) != nullptr))) {
     node = parseDeclarationOrFunction();
   } else if (currentToken().type == TokenType::RETURN) {
     node = parseReturn();
@@ -516,7 +557,8 @@ ForNode *Parser::parseForStatement() {
     if (currentToken().type == TokenType::TYPE_KW ||
         currentToken().type == TokenType::CONST_KW ||
         (currentToken().type == TokenType::IDENTIFIER &&
-         peekToken().type == TokenType::IDENTIFIER)) {
+         (peekToken().type == TokenType::IDENTIFIER ||
+          astCtx.getRecordType(currentToken().value) != nullptr))) {
       initStmt = parseDeclarationOrFunction();
     } else {
       initStmt = parseExpressionStatement();
@@ -629,6 +671,50 @@ ExprNode *Parser::parseAdditive() {
 }
 
 ExprNode *Parser::parseUnary() {
+  if (match(TokenType::NEW_KW)) {
+    int line = currentToken().line;
+    int col = currentToken().column;
+    const Type *allocTy = parseType(true);
+    ExprNode *arraySize = nullptr;
+
+    if (match(TokenType::LBRACKET)) {
+      arraySize = parseExpression();
+      expect(TokenType::RBRACKET, "Expected ']'");
+    }
+
+    std::vector<ExprNode *> args;
+    bool hasParens = false;
+
+    if (match(TokenType::LPAREN)) {
+      hasParens = true;
+      if (currentToken().type != TokenType::RPAREN) {
+        do {
+          args.push_back(parseExpression());
+        } while (match(TokenType::COMMA));
+      }
+      expect(TokenType::RPAREN, "Expected ')'");
+    }
+
+    return astCtx.create<NewExprNode>(
+        allocTy, arraySize, astCtx.copyArray<ExprNode *>(args), hasParens, line,
+        col, currentToken().column - col);
+  }
+
+  if (match(TokenType::DELETE_KW)) {
+    int line = currentToken().line;
+    int col = currentToken().column;
+    bool isArray = false;
+
+    if (match(TokenType::LBRACKET)) {
+      expect(TokenType::RBRACKET, "Expected ']' after '[' in delete");
+      isArray = true;
+    }
+
+    auto ptr = parseUnary();
+    return astCtx.create<DeleteExprNode>(ptr, isArray, line, col,
+                                         currentToken().column - col);
+  }
+
   if (currentToken().type == TokenType::STAR ||
       currentToken().type == TokenType::AMPERSAND ||
       currentToken().type == TokenType::MINUS ||
@@ -650,23 +736,23 @@ DeclNode *Parser::parseStructDecl() {
   advance();
 
   std::string_view name = currentToken().value;
-  int nameLen = name.length();
   expect(TokenType::IDENTIFIER, "Expected struct name");
 
   RecordType *structTy = astCtx.createRecordType(TypeKind::Struct, name);
 
   expect(TokenType::LBRACE, "Expected '{'");
+
   std::vector<VarDeclNode *> fields;
+  std::vector<FunctionDeclNode *> methods;
+  std::vector<FunctionDeclNode *> constructors;
+  FunctionDeclNode *destructor = nullptr;
 
   while (currentToken().type != TokenType::RBRACE &&
          currentToken().type != TokenType::EOF_TOK) {
 
-    /* Extract potential documentation block and metadata preceding the member
-     */
     std::string doc = consumeComments();
     auto memberAnnotations = parseAnnotations();
 
-    /* Intercept floating metadata and comments guarding the scope closure */
     if (currentToken().type == TokenType::RBRACE ||
         currentToken().type == TokenType::EOF_TOK) {
       if (!memberAnnotations.empty()) {
@@ -677,24 +763,132 @@ DeclNode *Parser::parseStructDecl() {
       break;
     }
 
-    int fLine = currentToken().line;
-    int fCol = currentToken().column;
-    const Type *fType = parseType();
-    std::string_view fName = currentToken().value;
+    if (currentToken().type == TokenType::TILDE) {
+      int dLine = currentToken().line;
+      int dCol = currentToken().column;
 
-    expect(TokenType::IDENTIFIER, "Expected field name");
-    expect(TokenType::SEMICOLON, "Expected ';'");
+      advance();
+      expect(TokenType::IDENTIFIER, "Expected struct name after '~'");
+      expect(TokenType::LPAREN, "Expected '()'");
+      expect(TokenType::RPAREN, "Expected '()'");
 
-    auto field = astCtx.create<VarDeclNode>(fType, fName, nullptr, fLine, fCol,
-                                            fName.length());
+      destructor = astCtx.create<FunctionDeclNode>(astCtx.VoidTy, "~", dLine,
+                                                   dCol, false, true);
 
-    /* Bind metadata seamlessly into the AST CRTP structures */
-    field->annotations = memberAnnotations;
-    if (!doc.empty()) {
-      field->docString = astCtx.copyString(doc);
+      std::vector<ParamDeclNode *> params;
+      params.push_back(
+          astCtx.create<ParamDeclNode>(astCtx.getPointerType(structTy), "this",
+                                       nullptr, false, false, dLine, dCol, 4));
+
+      destructor->params = astCtx.copyArray<ParamDeclNode *>(params);
+      destructor->annotations = memberAnnotations;
+      if (!doc.empty())
+        destructor->docString = astCtx.copyString(doc);
+
+      destructor->body = parseBlock();
+      continue;
     }
 
-    fields.push_back(field);
+    if (currentToken().type == TokenType::IDENTIFIER &&
+        currentToken().value == name && peekToken().type == TokenType::LPAREN) {
+      int cLine = currentToken().line;
+      int cCol = currentToken().column;
+      advance();
+      advance();
+
+      bool isVariadic = false;
+      auto params = parseParameterList(structTy, isVariadic);
+      expect(TokenType::RPAREN, "Expected ')'");
+
+      auto constructor = astCtx.create<FunctionDeclNode>(
+          astCtx.VoidTy, name, cLine, cCol, false, true, false, isVariadic);
+      constructor->params = astCtx.copyArray<ParamDeclNode *>(params);
+      constructor->annotations = memberAnnotations;
+      if (!doc.empty())
+        constructor->docString = astCtx.copyString(doc);
+
+      constructor->body = parseBlock();
+      constructors.push_back(constructor);
+      continue;
+    }
+
+    bool isExtern = match(TokenType::EXTERN_KW);
+    int mLine = currentToken().line;
+    int mCol = currentToken().column;
+    const Type *memType = parseType();
+    std::string_view memName = currentToken().value;
+
+    expect(TokenType::IDENTIFIER, "Expected member name");
+
+    if (match(TokenType::LPAREN)) {
+      bool isVariadic = false;
+      auto params =
+          parseParameterList(isExtern ? nullptr : structTy, isVariadic);
+      expect(TokenType::RPAREN, "Expected ')'");
+
+      auto method = astCtx.create<FunctionDeclNode>(
+          memType, memName, mLine, mCol, false, true, isExtern, isVariadic);
+      method->params = astCtx.copyArray<ParamDeclNode *>(params);
+      method->annotations = memberAnnotations;
+      if (!doc.empty())
+        method->docString = astCtx.copyString(doc);
+
+      if (isExtern) {
+        expect(TokenType::SEMICOLON,
+               "Expected ';' after extern method declaration");
+      } else {
+        method->body = parseBlock();
+      }
+      methods.push_back(method);
+    } else {
+      if (isExtern) {
+        reportError(mLine, mCol, memName.length(),
+                    "Variables cannot be declared as extern.");
+        throw ParseException();
+      }
+      expect(TokenType::SEMICOLON, "Expected ';'");
+
+      auto field = astCtx.create<VarDeclNode>(memType, memName, nullptr, mLine,
+                                              mCol, memName.length());
+      field->annotations = memberAnnotations;
+      if (!doc.empty())
+        field->docString = astCtx.copyString(doc);
+
+      fields.push_back(field);
+    }
+  }
+
+  if (constructors.empty()) {
+    auto defaultCtor = astCtx.create<FunctionDeclNode>(
+        astCtx.VoidTy, name, line, col, false, true, false, false, true);
+
+    std::vector<ParamDeclNode *> params;
+    params.push_back(
+        astCtx.create<ParamDeclNode>(astCtx.getPointerType(structTy), "this",
+                                     nullptr, false, false, line, col, 4));
+    defaultCtor->params = astCtx.copyArray<ParamDeclNode *>(params);
+
+    auto emptyBody = astCtx.create<BlockNode>(line, col);
+    emptyBody->statements = {};
+    emptyBody->length = 0;
+    defaultCtor->body = emptyBody;
+
+    constructors.push_back(defaultCtor);
+  }
+
+  if (!destructor) {
+    destructor = astCtx.create<FunctionDeclNode>(
+        astCtx.VoidTy, "~", line, col, false, true, false, false, true);
+    std::vector<ParamDeclNode *> params;
+    params.push_back(
+        astCtx.create<ParamDeclNode>(astCtx.getPointerType(structTy), "this",
+                                     nullptr, false, false, line, col, 4));
+    destructor->params = astCtx.copyArray<ParamDeclNode *>(params);
+
+    auto emptyBody = astCtx.create<BlockNode>(line, col);
+    emptyBody->statements = {};
+    emptyBody->length = 0;
+    destructor->body = emptyBody;
   }
 
   int endCol = currentToken().column + 1;
@@ -708,6 +902,10 @@ DeclNode *Parser::parseStructDecl() {
 
   auto node = astCtx.create<StructDeclNode>(name, line, col, endCol - col);
   node->fields = astCtx.copyArray<VarDeclNode *>(fields);
+  node->methods = astCtx.copyArray<FunctionDeclNode *>(methods);
+  node->constructors = astCtx.copyArray<FunctionDeclNode *>(constructors);
+  node->destructor = destructor;
+
   return node;
 }
 
@@ -845,6 +1043,39 @@ DeclNode *Parser::parseClassDecl() {
     }
   }
 
+  if (constructors.empty()) {
+    auto defaultCtor = astCtx.create<FunctionDeclNode>(
+        astCtx.VoidTy, name, line, col, false, true, false, false, true);
+
+    std::vector<ParamDeclNode *> params;
+    params.push_back(
+        astCtx.create<ParamDeclNode>(astCtx.getPointerType(classTy), "this",
+                                     nullptr, false, false, line, col, 4));
+    defaultCtor->params = astCtx.copyArray<ParamDeclNode *>(params);
+
+    auto emptyBody = astCtx.create<BlockNode>(line, col);
+    emptyBody->statements = {};
+    emptyBody->length = 0;
+    defaultCtor->body = emptyBody;
+
+    constructors.push_back(defaultCtor);
+  }
+
+  if (!destructor) {
+    destructor = astCtx.create<FunctionDeclNode>(
+        astCtx.VoidTy, "~", line, col, false, true, false, false, true);
+    std::vector<ParamDeclNode *> params;
+    params.push_back(
+        astCtx.create<ParamDeclNode>(astCtx.getPointerType(classTy), "this",
+                                     nullptr, false, false, line, col, 4));
+    destructor->params = astCtx.copyArray<ParamDeclNode *>(params);
+
+    auto emptyBody = astCtx.create<BlockNode>(line, col);
+    emptyBody->statements = {};
+    emptyBody->length = 0;
+    destructor->body = emptyBody;
+  }
+
   int endCol = currentToken().column + 1;
   expect(TokenType::RBRACE, "Expected '}'");
 
@@ -971,6 +1202,29 @@ ExprNode *Parser::parseAssignment() {
   return expr;
 }
 
+ExprNode *Parser::parseArrayLiteral() {
+  int line = currentToken().line;
+  int col = currentToken().column;
+  advance(); /* Consume '[' */
+
+  std::vector<ExprNode *> elements;
+  if (currentToken().type != TokenType::RBRACKET &&
+      currentToken().type != TokenType::EOF_TOK) {
+    do {
+      if (currentToken().type == TokenType::RBRACKET) {
+        break;
+      }
+      elements.push_back(parseExpression());
+    } while (match(TokenType::COMMA));
+  }
+
+  int endCol = currentToken().column + 1;
+  expect(TokenType::RBRACKET, "Expected ']' at end of array literal");
+
+  return astCtx.create<ArrayLiteralNode>(astCtx.copyArray<ExprNode *>(elements),
+                                         line, col, endCol - col);
+}
+
 ExprNode *Parser::parseTerm() {
   auto left = parseCast();
   while (currentToken().type == TokenType::STAR ||
@@ -1015,6 +1269,14 @@ ExprNode *Parser::parsePostfix() {
       expect(TokenType::IDENTIFIER, "Expected member name after '.'");
       expr = astCtx.create<MemberAccessNode>(
           expr, memberName, line, col, (currentToken().column + memLen) - col);
+    } else if (match(TokenType::LBRACKET)) {
+      int line = expr->line;
+      int col = expr->column;
+      auto index = parseExpression();
+      int endCol = currentToken().column + currentToken().value.length();
+      expect(TokenType::RBRACKET, "Expected ']'");
+      expr = astCtx.create<ArraySubscriptNode>(expr, index, line, col,
+                                               endCol - col);
     } else if (match(TokenType::LPAREN)) {
       int line = expr->line;
       int col = expr->column;
@@ -1076,6 +1338,10 @@ ExprNode *Parser::parsePostfix() {
 ExprNode *Parser::parsePrimary() {
   int line = currentToken().line;
   int col = currentToken().column;
+
+  if (currentToken().type == TokenType::LBRACKET) {
+    return parseArrayLiteral();
+  }
 
   if (match(TokenType::LPAREN)) {
     auto expr = parseExpression();

@@ -48,9 +48,10 @@ private:
   }
   void synchronize();
 
-  const Type *parseType();
+  const Type *parseType(bool inNewExpr = false);
+  const Type *applyArrayDeclarator(const Type *baseType);
   std::string consumeComments();
-
+  ExprNode *parseArrayLiteral();
   ASTNode *parseStatement();
   IfNode *parseIfStatement();
   llvm::ArrayRef<AnnotationNode *> parseAnnotations();

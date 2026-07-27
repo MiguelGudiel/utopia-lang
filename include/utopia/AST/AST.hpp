@@ -31,7 +31,11 @@ enum class NodeKind : uint8_t {
   ParamDecl,
   StructDecl,
   ClassDecl,
-  MemberAccess
+  MemberAccess,
+  ArraySubscript,
+  ArrayLiteral,
+  New,
+  Delete
 };
 
 struct ASTNode {
@@ -186,14 +190,15 @@ struct FunctionDeclNode : public DeclNode {
   bool isMethod;
   bool isExtern;
   bool isVariadic;
+  bool isImplicit;
   mutable std::string_view externAlias;
 
   FunctionDeclNode(const Type *ret, std::string_view n, int l, int c,
                    bool isC = false, bool isMeth = false, bool isExt = false,
-                   bool isVar = false)
+                   bool isVar = false, bool isImpl = false)
       : DeclNode(NodeKind::FunctionDecl, l, c), returnType(ret), name(n),
         body(nullptr), isConst(isC), isMethod(isMeth), isExtern(isExt),
-        isVariadic(isVar) {}
+        isVariadic(isVar), isImplicit(isImpl) {}
 };
 
 struct FunctionCallNode : public ExprNode {
@@ -271,11 +276,15 @@ struct AnnotationDeclNode : public DeclNode {
 struct StructDeclNode : public DeclNode {
   std::string_view name;
   llvm::ArrayRef<VarDeclNode *> fields;
+  llvm::ArrayRef<FunctionDeclNode *> methods;
+  llvm::ArrayRef<FunctionDeclNode *> constructors;
+  FunctionDeclNode *destructor;
 
   mutable const RecordType *recordType = nullptr;
 
   StructDeclNode(std::string_view n, int l, int c, int len)
-      : DeclNode(NodeKind::StructDecl, l, c, len), name(n) {}
+      : DeclNode(NodeKind::StructDecl, l, c, len), name(n),
+        destructor(nullptr) {}
 };
 
 struct ClassDeclNode : public DeclNode {
@@ -302,6 +311,41 @@ struct MemberAccessNode : public ExprNode {
   MemberAccessNode(ExprNode *obj, std::string_view mem, int l, int c, int len)
       : ExprNode(NodeKind::MemberAccess, l, c, len), object(obj),
         memberName(mem) {}
+};
+
+struct ArraySubscriptNode : public ExprNode {
+  ExprNode *base;
+  ExprNode *index;
+
+  ArraySubscriptNode(ExprNode *b, ExprNode *i, int l, int c, int len)
+      : ExprNode(NodeKind::ArraySubscript, l, c, len), base(b), index(i) {}
+};
+
+struct ArrayLiteralNode : public ExprNode {
+  llvm::ArrayRef<ExprNode *> elements;
+  ArrayLiteralNode(llvm::ArrayRef<ExprNode *> elems, int l, int c, int len)
+      : ExprNode(NodeKind::ArrayLiteral, l, c, len), elements(elems) {}
+};
+
+struct NewExprNode : public ExprNode {
+  const Type *allocatedType;
+  ExprNode *arraySize;
+  llvm::ArrayRef<ExprNode *> args;
+  bool hasParens; // Tracks if '()' was explicitly provided
+
+  NewExprNode(const Type *allocTy, ExprNode *arrSize,
+              llvm::ArrayRef<ExprNode *> a, bool hasParens, int l, int c,
+              int len)
+      : ExprNode(NodeKind::New, l, c, len), allocatedType(allocTy),
+        arraySize(arrSize), args(a), hasParens(hasParens) {}
+};
+
+struct DeleteExprNode : public ExprNode {
+  ExprNode *ptr;
+  bool isArray;
+
+  DeleteExprNode(ExprNode *p, bool isArr, int l, int c, int len)
+      : ExprNode(NodeKind::Delete, l, c, len), ptr(p), isArray(isArr) {}
 };
 
 } // namespace utopia

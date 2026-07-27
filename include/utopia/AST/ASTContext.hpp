@@ -150,8 +150,20 @@ public:
     return nullptr;
   }
 
+  /* Returns the canonical array type for the given element type and size. */
+  const ArrayType *getArrayType(const Type *elementType, uint64_t size) {
+    for (const auto *arrTy : arrayTypes) {
+      if (arrTy->getElementType() == elementType && arrTy->getSize() == size)
+        return arrTy;
+    }
+    auto *arrTy = create<ArrayType>(elementType, size);
+    arrayTypes.push_back(arrTy);
+    return arrTy;
+  }
+
 private:
   llvm::BumpPtrAllocator allocator;
+  std::vector<const ArrayType *> arrayTypes;
   std::unordered_map<const Type *, const PointerType *> pointerTypes;
   std::unordered_map<const Type *, const ReferenceType *> referenceTypes;
   std::unordered_map<const Type *, const ConstType *> constTypes;

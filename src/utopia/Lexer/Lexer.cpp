@@ -189,6 +189,10 @@ Token Lexer::nextToken() {
       return {TokenType::CLASS_KW, id, startLine, startCol};
     if (id == "this")
       return {TokenType::THIS_KW, id, startLine, startCol};
+    if (id == "new")
+      return {TokenType::NEW_KW, id, startLine, startCol};
+    if (id == "delete")
+      return {TokenType::DELETE_KW, id, startLine, startCol};
     if (isTypeKeyword(id))
       return {TokenType::TYPE_KW, id, startLine, startCol};
     return {TokenType::IDENTIFIER, id, startLine, startCol};
@@ -291,6 +295,12 @@ Token Lexer::nextToken() {
     return {TokenType::LPAREN, std::string_view(start, 1), startLine, startCol};
   case ')':
     return {TokenType::RPAREN, std::string_view(start, 1), startLine, startCol};
+  case '[':
+    return {TokenType::LBRACKET, std::string_view(start, 1), startLine,
+            startCol};
+  case ']':
+    return {TokenType::RBRACKET, std::string_view(start, 1), startLine,
+            startCol};
   case '{':
     return {TokenType::LBRACE, std::string_view(start, 1), startLine, startCol};
   case '}':

@@ -49,6 +49,11 @@ std::string Mangler::mangle(const FunctionDeclNode *node,
 }
 
 std::string Mangler::mangleType(const Type *t) {
+  if (t->getKind() == TypeKind::Array) {
+    auto arrTy = static_cast<const ArrayType *>(t);
+    return "A" + std::to_string(arrTy->getSize()) + "_" +
+           mangleType(arrTy->getElementType());
+  }
   if (t->isPointerType()) {
     return "P" +
            mangleType(static_cast<const PointerType *>(t)->getPointeeType());

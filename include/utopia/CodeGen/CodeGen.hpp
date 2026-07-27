@@ -41,6 +41,10 @@ public:
   llvm::Value *visit(const ClassDeclNode *node);
   llvm::Value *visit(const AnnotationDeclNode *node);
   llvm::Value *visit(const AnnotationNode *node);
+  llvm::Value *visit(const ArraySubscriptNode *node);
+  llvm::Value *visit(const NewExprNode *node);
+  llvm::Value *visit(const DeleteExprNode *node);
+  llvm::Value *visit(const ArrayLiteralNode *node);
 
   llvm::Value *createImplicitCast(llvm::Value *src, llvm::Type *destTy);
 
@@ -60,6 +64,8 @@ private:
 
   void emitConstructorCall(const FunctionCallNode *node,
                            llvm::Value *targetAddr);
+  void emitArrayLiteralInit(llvm::Value *targetAddr, const Type *targetType,
+                            const ExprNode *initExpr);
   llvm::AllocaInst *createEntryBlockAlloca(llvm::Type *type,
                                            const std::string &varName);
   void emitDefaultInitialization(llvm::Value *ptr, const Type *type);

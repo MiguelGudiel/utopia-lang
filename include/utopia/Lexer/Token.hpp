@@ -50,6 +50,10 @@ enum class TokenType : uint8_t {
   RPAREN,
   LBRACE,
   RBRACE,
+  LBRACKET,  /* [ */
+  RBRACKET,  /* ] */
+  NEW_KW,    /* new */
+  DELETE_KW, /* delete */
   COMMA,
   SEMICOLON,
   RETURN,

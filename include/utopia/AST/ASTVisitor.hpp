@@ -91,6 +91,18 @@ public:
     case NodeKind::MemberAccess:
       return static_cast<Derived *>(this)->visit(
           static_cast<const MemberAccessNode *>(node));
+    case NodeKind::ArraySubscript:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const ArraySubscriptNode *>(node));
+    case NodeKind::ArrayLiteral:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const ArrayLiteralNode *>(node));
+    case NodeKind::New:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const NewExprNode *>(node));
+    case NodeKind::Delete:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const DeleteExprNode *>(node));
     default:
       /* Dispatch failure routing to prevent silent segfaults on unmapped nodes
        */
