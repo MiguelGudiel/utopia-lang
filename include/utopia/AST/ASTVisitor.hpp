@@ -58,6 +58,9 @@ public:
     case NodeKind::Block:
       return static_cast<Derived *>(this)->visit(
           static_cast<const BlockNode *>(node));
+    case NodeKind::If:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const IfNode *>(node));
     case NodeKind::FunctionDecl:
       return static_cast<Derived *>(this)->visit(
           static_cast<const FunctionDeclNode *>(node));

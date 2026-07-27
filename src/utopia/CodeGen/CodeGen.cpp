@@ -330,6 +330,11 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
       if (sym.value && llvm::isa<llvm::Constant>(sym.value)) {
         return llvm::cast<llvm::Constant>(sym.value);
       }
+    } else if (unNode->op == "!") {
+      llvm::Constant *innerConst = evaluateAsConstant(unNode->expr);
+      if (innerConst && innerConst->getType()->isIntegerTy(1)) {
+        return llvm::ConstantExpr::getNot(innerConst);
+      }
     } else if (unNode->op == "-" || unNode->op == "+") {
       llvm::Constant *innerConst = evaluateAsConstant(unNode->expr);
       if (innerConst) {
@@ -344,6 +349,110 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
           }
         } else if (auto *ci = llvm::dyn_cast<llvm::ConstantInt>(innerConst)) {
           return llvm::ConstantInt::get(ctx, -ci->getValue());
+        }
+      }
+    }
+  }
+
+  if (node->kind == NodeKind::BinaryOp) {
+    auto *binNode = static_cast<const BinaryOpNode *>(node);
+    llvm::Constant *L = evaluateAsConstant(binNode->left);
+    llvm::Constant *R = evaluateAsConstant(binNode->right);
+
+    if (L && R) {
+      if (auto *ciL = llvm::dyn_cast<llvm::ConstantInt>(L)) {
+        if (auto *ciR = llvm::dyn_cast<llvm::ConstantInt>(R)) {
+          llvm::APInt vL = ciL->getValue();
+          llvm::APInt vR = ciR->getValue();
+          bool isUnsigned = false;
+
+          if (binNode->left->exprType && binNode->left->exprType->isInteger()) {
+            auto bKind = static_cast<const BuiltinType *>(
+                             binNode->left->exprType->getUnqualifiedType())
+                             ->getBuiltinKind();
+            isUnsigned =
+                (bKind == BuiltinKind::UInt8 || bKind == BuiltinKind::UInt16 ||
+                 bKind == BuiltinKind::UInt32 || bKind == BuiltinKind::UInt64);
+          }
+
+          if (binNode->op == "+")
+            return llvm::ConstantInt::get(ctx, vL + vR);
+          if (binNode->op == "-")
+            return llvm::ConstantInt::get(ctx, vL - vR);
+          if (binNode->op == "*")
+            return llvm::ConstantInt::get(ctx, vL * vR);
+          if (binNode->op == "/") {
+            if (vR.isZero())
+              return nullptr;
+            return llvm::ConstantInt::get(ctx, isUnsigned ? vL.udiv(vR)
+                                                          : vL.sdiv(vR));
+          }
+          if (binNode->op == "&&")
+            return llvm::ConstantInt::get(builder.getInt1Ty(),
+                                          (vL != 0) && (vR != 0));
+          if (binNode->op == "||")
+            return llvm::ConstantInt::get(builder.getInt1Ty(),
+                                          (vL != 0) || (vR != 0));
+          if (binNode->op == "==")
+            return llvm::ConstantInt::get(builder.getInt1Ty(), vL == vR);
+          if (binNode->op == "!=")
+            return llvm::ConstantInt::get(builder.getInt1Ty(), vL != vR);
+          if (binNode->op == "<")
+            return llvm::ConstantInt::get(builder.getInt1Ty(),
+                                          isUnsigned ? vL.ult(vR) : vL.slt(vR));
+          if (binNode->op == "<=")
+            return llvm::ConstantInt::get(builder.getInt1Ty(),
+                                          isUnsigned ? vL.ule(vR) : vL.sle(vR));
+          if (binNode->op == ">")
+            return llvm::ConstantInt::get(builder.getInt1Ty(),
+                                          isUnsigned ? vL.ugt(vR) : vL.sgt(vR));
+          if (binNode->op == ">=")
+            return llvm::ConstantInt::get(builder.getInt1Ty(),
+                                          isUnsigned ? vL.uge(vR) : vL.sge(vR));
+        }
+      } else if (auto *cfpL = llvm::dyn_cast<llvm::ConstantFP>(L)) {
+        if (auto *cfpR = llvm::dyn_cast<llvm::ConstantFP>(R)) {
+          llvm::APFloat vL = cfpL->getValueAPF();
+          llvm::APFloat vR = cfpR->getValueAPF();
+
+          if (binNode->op == "+") {
+            vL.add(vR, llvm::APFloat::rmNearestTiesToEven);
+            return llvm::ConstantFP::get(ctx, vL);
+          }
+          if (binNode->op == "-") {
+            vL.subtract(vR, llvm::APFloat::rmNearestTiesToEven);
+            return llvm::ConstantFP::get(ctx, vL);
+          }
+          if (binNode->op == "*") {
+            vL.multiply(vR, llvm::APFloat::rmNearestTiesToEven);
+            return llvm::ConstantFP::get(ctx, vL);
+          }
+          if (binNode->op == "/") {
+            vL.divide(vR, llvm::APFloat::rmNearestTiesToEven);
+            return llvm::ConstantFP::get(ctx, vL);
+          }
+
+          auto cmp = vL.compare(vR);
+          if (binNode->op == "==")
+            return llvm::ConstantInt::get(builder.getInt1Ty(),
+                                          cmp == llvm::APFloat::cmpEqual);
+          if (binNode->op == "!=")
+            return llvm::ConstantInt::get(builder.getInt1Ty(),
+                                          cmp != llvm::APFloat::cmpEqual);
+          if (binNode->op == "<")
+            return llvm::ConstantInt::get(builder.getInt1Ty(),
+                                          cmp == llvm::APFloat::cmpLessThan);
+          if (binNode->op == "<=")
+            return llvm::ConstantInt::get(builder.getInt1Ty(),
+                                          cmp == llvm::APFloat::cmpLessThan ||
+                                              cmp == llvm::APFloat::cmpEqual);
+          if (binNode->op == ">")
+            return llvm::ConstantInt::get(builder.getInt1Ty(),
+                                          cmp == llvm::APFloat::cmpGreaterThan);
+          if (binNode->op == ">=")
+            return llvm::ConstantInt::get(
+                builder.getInt1Ty(), cmp == llvm::APFloat::cmpGreaterThan ||
+                                         cmp == llvm::APFloat::cmpEqual);
         }
       }
     }
@@ -565,7 +674,55 @@ llvm::Value *CodeGen::visit(const MemberAccessNode *node) {
   return builder.CreateLoad(getLLVMType(node->exprType), gep);
 }
 
+llvm::Value *CodeGen::visit(const IfNode *node) {
+  llvm::Value *condV = dispatch(node->condition);
+  if (!condV)
+    return nullptr;
+
+  condV = createImplicitCast(condV, builder.getInt1Ty());
+
+  llvm::Function *theFunction = builder.GetInsertBlock()->getParent();
+  llvm::BasicBlock *thenBB = llvm::BasicBlock::Create(ctx, "then", theFunction);
+  llvm::BasicBlock *elseBB = llvm::BasicBlock::Create(ctx, "else");
+  llvm::BasicBlock *mergeBB = llvm::BasicBlock::Create(ctx, "ifcont");
+
+  if (node->elseBlock) {
+    builder.CreateCondBr(condV, thenBB, elseBB);
+  } else {
+    builder.CreateCondBr(condV, thenBB, mergeBB);
+  }
+
+  builder.SetInsertPoint(thenBB);
+  dispatch(node->thenBlock);
+  if (!builder.GetInsertBlock()->getTerminator()) {
+    builder.CreateBr(mergeBB);
+  }
+
+  if (node->elseBlock) {
+    theFunction->insert(theFunction->end(), elseBB);
+    builder.SetInsertPoint(elseBB);
+    dispatch(node->elseBlock);
+    if (!builder.GetInsertBlock()->getTerminator()) {
+      builder.CreateBr(mergeBB);
+    }
+  } else {
+    /* Cleanup orphaned block explicitly */
+    delete elseBB;
+  }
+
+  theFunction->insert(theFunction->end(), mergeBB);
+  builder.SetInsertPoint(mergeBB);
+
+  return nullptr;
+}
+
 llvm::Value *CodeGen::visit(const UnaryOpNode *node) {
+  if (node->op == "!") {
+    llvm::Value *val = dispatch(node->expr);
+    if (!val)
+      return nullptr;
+    return builder.CreateNot(val);
+  }
   if (node->op == "&") {
     return getLValue(node->expr);
   }
@@ -609,7 +766,21 @@ llvm::Value *CodeGen::visit(const BinaryOpNode *node) {
     return nullptr;
   }
 
+  if (node->op == "&&")
+    return builder.CreateLogicalAnd(L, R);
+  if (node->op == "||")
+    return builder.CreateLogicalOr(L, R);
+
   bool isFloat = L->getType()->isFloatingPointTy();
+  bool isUnsigned = false;
+
+  if (node->left->exprType && node->left->exprType->isInteger()) {
+    auto bKind = static_cast<const BuiltinType *>(
+                     node->left->exprType->getUnqualifiedType())
+                     ->getBuiltinKind();
+    isUnsigned = (bKind == BuiltinKind::UInt8 || bKind == BuiltinKind::UInt16 ||
+                  bKind == BuiltinKind::UInt32 || bKind == BuiltinKind::UInt64);
+  }
 
   if (node->op == "+")
     return isFloat ? builder.CreateFAdd(L, R) : builder.CreateAdd(L, R);
@@ -618,7 +789,30 @@ llvm::Value *CodeGen::visit(const BinaryOpNode *node) {
   if (node->op == "*")
     return isFloat ? builder.CreateFMul(L, R) : builder.CreateMul(L, R);
   if (node->op == "/")
-    return isFloat ? builder.CreateFDiv(L, R) : builder.CreateSDiv(L, R);
+    return isFloat ? builder.CreateFDiv(L, R)
+                   : (isUnsigned ? builder.CreateUDiv(L, R)
+                                 : builder.CreateSDiv(L, R));
+
+  if (node->op == "==")
+    return isFloat ? builder.CreateFCmpOEQ(L, R) : builder.CreateICmpEQ(L, R);
+  if (node->op == "!=")
+    return isFloat ? builder.CreateFCmpONE(L, R) : builder.CreateICmpNE(L, R);
+  if (node->op == "<")
+    return isFloat ? builder.CreateFCmpOLT(L, R)
+                   : (isUnsigned ? builder.CreateICmpULT(L, R)
+                                 : builder.CreateICmpSLT(L, R));
+  if (node->op == "<=")
+    return isFloat ? builder.CreateFCmpOLE(L, R)
+                   : (isUnsigned ? builder.CreateICmpULE(L, R)
+                                 : builder.CreateICmpSLE(L, R));
+  if (node->op == ">")
+    return isFloat ? builder.CreateFCmpOGT(L, R)
+                   : (isUnsigned ? builder.CreateICmpUGT(L, R)
+                                 : builder.CreateICmpSGT(L, R));
+  if (node->op == ">=")
+    return isFloat ? builder.CreateFCmpOGE(L, R)
+                   : (isUnsigned ? builder.CreateICmpUGE(L, R)
+                                 : builder.CreateICmpSGE(L, R));
 
   return nullptr;
 }

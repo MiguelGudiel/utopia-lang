@@ -438,6 +438,8 @@ ASTNode *Parser::parseStatement() {
     node = parseStructDecl();
   } else if (currentToken().type == TokenType::CLASS_KW) {
     node = parseClassDecl();
+  } else if (currentToken().type == TokenType::IF_KW) {
+    node = parseIfStatement();
   } else if (currentToken().type == TokenType::TYPE_KW ||
              currentToken().type == TokenType::CONST_KW ||
              currentToken().type == TokenType::EXTERN_KW ||
@@ -470,6 +472,120 @@ ASTNode *Parser::parseStatement() {
   }
 
   return node;
+}
+
+IfNode *Parser::parseIfStatement() {
+  int line = currentToken().line;
+  int col = currentToken().column;
+  advance();
+
+  expect(TokenType::LPAREN, "Expected '(' after 'if'");
+  auto cond = parseExpression();
+  expect(TokenType::RPAREN, "Expected ')' after if condition");
+
+  auto thenBlock = parseBlock();
+  ASTNode *elseBlock = nullptr;
+
+  if (match(TokenType::ELSE_KW)) {
+    if (currentToken().type == TokenType::IF_KW) {
+      elseBlock = parseIfStatement();
+    } else {
+      elseBlock = parseBlock();
+    }
+  }
+
+  int len = (elseBlock ? (elseBlock->column + elseBlock->length)
+                       : (thenBlock->column + thenBlock->length)) -
+            col;
+  return astCtx.create<IfNode>(cond, thenBlock, elseBlock, line, col, len);
+}
+
+ExprNode *Parser::parseExpression() { return parseLogicalOr(); }
+
+ExprNode *Parser::parseLogicalOr() {
+  auto left = parseLogicalAnd();
+  while (currentToken().type == TokenType::LOGICAL_OR) {
+    int line = left->line;
+    int col = left->column;
+    std::string_view op = currentToken().value;
+    advance();
+    auto right = parseLogicalAnd();
+    left = astCtx.create<BinaryOpNode>(op, left, right, line, col);
+  }
+  return left;
+}
+
+ExprNode *Parser::parseLogicalAnd() {
+  auto left = parseEquality();
+  while (currentToken().type == TokenType::LOGICAL_AND) {
+    int line = left->line;
+    int col = left->column;
+    std::string_view op = currentToken().value;
+    advance();
+    auto right = parseEquality();
+    left = astCtx.create<BinaryOpNode>(op, left, right, line, col);
+  }
+  return left;
+}
+
+ExprNode *Parser::parseEquality() {
+  auto left = parseRelational();
+  while (currentToken().type == TokenType::EQ ||
+         currentToken().type == TokenType::NEQ) {
+    int line = left->line;
+    int col = left->column;
+    std::string_view op = currentToken().value;
+    advance();
+    auto right = parseRelational();
+    left = astCtx.create<BinaryOpNode>(op, left, right, line, col);
+  }
+  return left;
+}
+
+ExprNode *Parser::parseRelational() {
+  auto left = parseAdditive();
+  while (currentToken().type == TokenType::LT ||
+         currentToken().type == TokenType::GT ||
+         currentToken().type == TokenType::LE ||
+         currentToken().type == TokenType::GE) {
+    int line = left->line;
+    int col = left->column;
+    std::string_view op = currentToken().value;
+    advance();
+    auto right = parseAdditive();
+    left = astCtx.create<BinaryOpNode>(op, left, right, line, col);
+  }
+  return left;
+}
+
+ExprNode *Parser::parseAdditive() {
+  auto left = parseTerm();
+  while (currentToken().type == TokenType::PLUS ||
+         currentToken().type == TokenType::MINUS) {
+    int line = left->line;
+    int col = left->column;
+    std::string_view op = currentToken().value;
+    advance();
+    auto right = parseTerm();
+    left = astCtx.create<BinaryOpNode>(op, left, right, line, col);
+  }
+  return left;
+}
+
+ExprNode *Parser::parseUnary() {
+  if (currentToken().type == TokenType::STAR ||
+      currentToken().type == TokenType::AMPERSAND ||
+      currentToken().type == TokenType::MINUS ||
+      currentToken().type == TokenType::PLUS ||
+      currentToken().type == TokenType::BANG) {
+    int line = currentToken().line;
+    int col = currentToken().column;
+    std::string_view op = currentToken().value;
+    advance();
+    auto expr = parseUnary();
+    return astCtx.create<UnaryOpNode>(op, expr, line, col);
+  }
+  return parsePostfix();
 }
 
 DeclNode *Parser::parseStructDecl() {
@@ -791,20 +907,6 @@ ExprNode *Parser::parseExpressionStatement() {
   return expr;
 }
 
-ExprNode *Parser::parseExpression() {
-  auto left = parseTerm();
-  while (currentToken().type == TokenType::PLUS ||
-         currentToken().type == TokenType::MINUS) {
-    int line = left->line;
-    int col = left->column;
-    std::string_view op = currentToken().value;
-    advance();
-    auto right = parseTerm();
-    left = astCtx.create<BinaryOpNode>(op, left, right, line, col);
-  }
-  return left;
-}
-
 ExprNode *Parser::parseTerm() {
   auto left = parseCast();
   while (currentToken().type == TokenType::STAR ||
@@ -833,21 +935,6 @@ ExprNode *Parser::parseCast() {
         (currentToken().column + currentToken().value.length()) - col);
   }
   return left;
-}
-
-ExprNode *Parser::parseUnary() {
-  if (currentToken().type == TokenType::STAR ||
-      currentToken().type == TokenType::AMPERSAND ||
-      currentToken().type == TokenType::MINUS ||
-      currentToken().type == TokenType::PLUS) {
-    int line = currentToken().line;
-    int col = currentToken().column;
-    std::string_view op = currentToken().value;
-    advance();
-    auto expr = parseUnary();
-    return astCtx.create<UnaryOpNode>(op, expr, line, col);
-  }
-  return parsePostfix();
 }
 
 ExprNode *Parser::parsePostfix() {

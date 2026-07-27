@@ -52,6 +52,7 @@ private:
   std::string consumeComments();
 
   ASTNode *parseStatement();
+  IfNode *parseIfStatement();
   llvm::ArrayRef<AnnotationNode *> parseAnnotations();
   AnnotationNode *parseAnnotation();
   DeclNode *parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations);
@@ -64,7 +65,13 @@ private:
   BlockNode *parseBlock();
   ReturnNode *parseReturn();
   ExprNode *parseExpressionStatement();
+
   ExprNode *parseExpression();
+  ExprNode *parseLogicalOr();
+  ExprNode *parseLogicalAnd();
+  ExprNode *parseEquality();
+  ExprNode *parseRelational();
+  ExprNode *parseAdditive();
   ExprNode *parseTerm();
   ExprNode *parseCast();
   ExprNode *parseUnary();

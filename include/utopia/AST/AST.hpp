@@ -21,6 +21,7 @@ enum class NodeKind : uint8_t {
   VarDecl,
   Assign,
   Block,
+  If,
   FunctionDecl,
   FunctionCall,
   Return,
@@ -211,6 +212,16 @@ struct CastNode : public ExprNode {
 
   CastNode(ExprNode *e, const Type *target, int l, int c, int len)
       : ExprNode(NodeKind::Cast, l, c, len), expr(e), targetType(target) {}
+};
+
+struct IfNode : public StmtNode {
+  ExprNode *condition;
+  BlockNode *thenBlock;
+  ASTNode *elseBlock;
+
+  IfNode(ExprNode *cond, BlockNode *tb, ASTNode *eb, int l, int c, int len)
+      : StmtNode(NodeKind::If, l, c, len), condition(cond), thenBlock(tb),
+        elseBlock(eb) {}
 };
 
 struct ModuleNode : public ASTNode {

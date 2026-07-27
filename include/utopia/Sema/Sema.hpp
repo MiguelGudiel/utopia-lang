@@ -85,6 +85,7 @@ public:
   void visit(const AssignNode *) {}
   void visit(const BlockNode *) {}
   void visit(const FunctionCallNode *) {}
+  void visit(const IfNode *node);
   void visit(const ReturnNode *) {}
   void visit(const CastNode *) {}
   void visit(const ParamDeclNode *) {}
@@ -113,6 +114,7 @@ public:
   SemaResult visit(const BlockNode *node);
   SemaResult visit(const FunctionDeclNode *node);
   SemaResult visit(const FunctionCallNode *node);
+  SemaResult visit(const IfNode *node);
   SemaResult visit(const ReturnNode *node);
   SemaResult visit(const CastNode *node);
   SemaResult visit(const ParamDeclNode *node);

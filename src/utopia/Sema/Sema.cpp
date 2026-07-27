@@ -163,6 +163,13 @@ void DeclCollectorPass::visit(const FunctionDeclNode *node) {
   ctx->addDecl(node->name, node);
 }
 
+void DeclCollectorPass::visit(const IfNode *node) {
+  dispatch(node->condition);
+  dispatch(node->thenBlock);
+  if (node->elseBlock)
+    dispatch(node->elseBlock);
+}
+
 void DeclCollectorPass::visit(const VarDeclNode *node) {
   ctx->addDecl(node->varName, node);
 }
@@ -387,6 +394,32 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
   return ty;
 }
 
+SemaResult TypeCheckPass::visit(const IfNode *node) {
+  auto condRes = dispatch(node->condition);
+  if (!condRes) {
+    return std::unexpected(ErrorInfo{node->line, node->column, node->length,
+                                     "Cascading error in if condition"});
+  }
+
+  if (!canImplicitlyCast(*condRes, ctx->astCtx.BoolTy)) {
+    return ctx->reportError(node->condition->line, node->condition->column,
+                            node->condition->length,
+                            "Condition must evaluate to a boolean type.");
+  }
+
+  auto thenRes = dispatch(node->thenBlock);
+  if (!thenRes)
+    return thenRes;
+
+  if (node->elseBlock) {
+    auto elseRes = dispatch(node->elseBlock);
+    if (!elseRes)
+      return elseRes;
+  }
+
+  return ctx->astCtx.VoidTy;
+}
+
 SemaResult TypeCheckPass::visit(const UnaryOpNode *node) {
   auto exprType = dispatch(node->expr);
   if (!exprType)
@@ -394,7 +427,14 @@ SemaResult TypeCheckPass::visit(const UnaryOpNode *node) {
                                      "Cascading error in unary op"});
 
   const Type *resType = nullptr;
-  if (node->op == "&") {
+  if (node->op == "!") {
+    if (!canImplicitlyCast(*exprType, ctx->astCtx.BoolTy)) {
+      return ctx->reportError(
+          node->line, node->column, node->length,
+          "Logical NOT operator requires a boolean operand.");
+    }
+    resType = ctx->astCtx.BoolTy;
+  } else if (node->op == "&") {
     if (node->expr->kind != NodeKind::Variable &&
         node->expr->kind != NodeKind::UnaryOp &&
         node->expr->kind != NodeKind::MemberAccess) {
@@ -444,11 +484,39 @@ SemaResult TypeCheckPass::visit(const BinaryOpNode *node) {
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,
                                      "Invalid operands for binary operation"});
 
-  // Prevent pointer arithmetic and other invalid binary ops
+  if (node->op == "&&" || node->op == "||") {
+    if (!canImplicitlyCast(*lhs, ctx->astCtx.BoolTy) ||
+        !canImplicitlyCast(*rhs, ctx->astCtx.BoolTy)) {
+      return ctx->reportError(node->line, node->column, node->length,
+                              "Logical operations require boolean operands.");
+    }
+    node->exprType = ctx->astCtx.BoolTy;
+    return ctx->astCtx.BoolTy;
+  }
+
+  if (node->op == "==" || node->op == "!=" || node->op == "<" ||
+      node->op == ">" || node->op == "<=" || node->op == ">=") {
+    if (!canImplicitlyCast(*lhs, *rhs)) {
+      return ctx->reportError(node->line, node->column, node->length,
+                              "Type mismatch in relational operation.");
+    }
+
+    if (node->op != "==" && node->op != "!=") {
+      if (!(*lhs)->isNumeric() || !(*rhs)->isNumeric()) {
+        return ctx->reportError(
+            node->line, node->column, node->length,
+            "Relational inequalities require numeric operands.");
+      }
+    }
+
+    node->exprType = ctx->astCtx.BoolTy;
+    return ctx->astCtx.BoolTy;
+  }
+
   if (!(*lhs)->isNumeric() || !(*rhs)->isNumeric()) {
-    return ctx->reportError(
-        node->line, node->column, node->length,
-        "Binary operations are currently restricted to numeric types.");
+    return ctx->reportError(node->line, node->column, node->length,
+                            "Binary arithmetic operations are currently "
+                            "restricted to numeric types.");
   }
 
   if (!canImplicitlyCast(*lhs, *rhs)) {

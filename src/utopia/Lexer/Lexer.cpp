@@ -161,6 +161,10 @@ Token Lexer::nextToken() {
     std::string_view id(start, len);
     if (id == "return")
       return {TokenType::RETURN, id, startLine, startCol};
+    if (id == "if")
+      return {TokenType::IF_KW, id, startLine, startCol};
+    if (id == "else")
+      return {TokenType::ELSE_KW, id, startLine, startCol};
     if (id == "as")
       return {TokenType::AS, id, startLine, startCol};
     if (id == "const")
@@ -238,12 +242,47 @@ Token Lexer::nextToken() {
   case '/':
     return {TokenType::SLASH, std::string_view(start, 1), startLine, startCol};
   case '&':
+    if (cursor < source.length() && source[cursor] == '&') {
+      advance();
+      return {TokenType::LOGICAL_AND, std::string_view(start, 2), startLine,
+              startCol};
+    }
     return {TokenType::AMPERSAND, std::string_view(start, 1), startLine,
             startCol};
+  case '|':
+    if (cursor < source.length() && source[cursor] == '|') {
+      advance();
+      return {TokenType::LOGICAL_OR, std::string_view(start, 2), startLine,
+              startCol};
+    }
+    return {TokenType::UNKNOWN, std::string_view(start, 1), startLine,
+            startCol};
+  case '=':
+    if (cursor < source.length() && source[cursor] == '=') {
+      advance();
+      return {TokenType::EQ, std::string_view(start, 2), startLine, startCol};
+    }
+    return {TokenType::ASSIGN, std::string_view(start, 1), startLine, startCol};
+  case '!':
+    if (cursor < source.length() && source[cursor] == '=') {
+      advance();
+      return {TokenType::NEQ, std::string_view(start, 2), startLine, startCol};
+    }
+    return {TokenType::BANG, std::string_view(start, 1), startLine, startCol};
+  case '<':
+    if (cursor < source.length() && source[cursor] == '=') {
+      advance();
+      return {TokenType::LE, std::string_view(start, 2), startLine, startCol};
+    }
+    return {TokenType::LT, std::string_view(start, 1), startLine, startCol};
+  case '>':
+    if (cursor < source.length() && source[cursor] == '=') {
+      advance();
+      return {TokenType::GE, std::string_view(start, 2), startLine, startCol};
+    }
+    return {TokenType::GT, std::string_view(start, 1), startLine, startCol};
   case '@':
     return {TokenType::AT, std::string_view(start, 1), startLine, startCol};
-  case '=':
-    return {TokenType::ASSIGN, std::string_view(start, 1), startLine, startCol};
   case '(':
     return {TokenType::LPAREN, std::string_view(start, 1), startLine, startCol};
   case ')':
@@ -255,8 +294,7 @@ Token Lexer::nextToken() {
   case ',':
     return {TokenType::COMMA, std::string_view(start, 1), startLine, startCol};
   case ':':
-    return {TokenType::COLON, std::string_view(start, 1), startLine,
-            startCol};
+    return {TokenType::COLON, std::string_view(start, 1), startLine, startCol};
   case '.':
     if (cursor + 1 < source.length() && source[cursor] == '.' &&
         source[cursor + 1] == '.') {
