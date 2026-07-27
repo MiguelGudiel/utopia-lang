@@ -18,6 +18,7 @@ enum class NodeKind : uint8_t {
   Module,
   Annotation,
   AnnotationDecl,
+  TypedefDecl,
   VarDecl,
   Assign,
   Block,
@@ -115,9 +116,23 @@ struct VariableNode : public ExprNode {
   bool isField = false;
   uint32_t fieldIndex = 0;
   const Type *parentType = nullptr;
+  mutable const DeclNode *resolvedDecl =
+      nullptr; // Register target decl statically
 
   VariableNode(std::string_view n, int l, int c, int len)
       : ExprNode(NodeKind::Variable, l, c, len), name(n) {}
+};
+
+struct TypedefDeclNode : public DeclNode {
+  std::string_view aliasName;
+  mutable const Type *targetType;
+  std::string_view targetEntityName;
+  const AliasType *aliasType;
+
+  TypedefDeclNode(std::string_view name, const Type *target, int l, int c,
+                  int len)
+      : DeclNode(NodeKind::TypedefDecl, l, c, len), aliasName(name),
+        targetType(target), aliasType(nullptr) {}
 };
 
 struct UnaryOpNode : public ExprNode {

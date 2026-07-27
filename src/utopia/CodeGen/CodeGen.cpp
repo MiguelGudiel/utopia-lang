@@ -13,6 +13,18 @@ llvm::Type *CodeGen::getLLVMType(const Type *type) {
   if (type->getKind() == TypeKind::Const) {
     return getLLVMType(static_cast<const ConstType *>(type)->getBaseType());
   }
+  if (type->getKind() == TypeKind::Alias) {
+    return getLLVMType(static_cast<const AliasType *>(type)->getTarget());
+  }
+  if (type->getKind() == TypeKind::Function) {
+    auto *fTy = static_cast<const FunctionType *>(type);
+    std::vector<llvm::Type *> paramTys;
+    for (const auto *p : fTy->getParamTypes()) {
+      paramTys.push_back(getLLVMType(p));
+    }
+    return llvm::FunctionType::get(getLLVMType(fTy->getReturnType()), paramTys,
+                                   false);
+  }
 
   if (type->isBuiltinType()) {
     auto *bTy = static_cast<const BuiltinType *>(type);
@@ -215,6 +227,11 @@ llvm::Value *CodeGen::visit(const AnnotationDeclNode *node) {
   if (node->constructor) {
     dispatch(node->constructor);
   }
+  return nullptr;
+}
+
+llvm::Value *CodeGen::visit(const TypedefDeclNode *node) {
+  /* Type aliases emit no instructions, pure semantic abstraction */
   return nullptr;
 }
 
@@ -676,6 +693,14 @@ llvm::Value *CodeGen::visit(const VariableNode *node) {
     llvm::Value *gep = builder.CreateStructGEP(llvmBaseTy, thisPtr,
                                                node->fieldIndex, node->name);
     return builder.CreateLoad(getLLVMType(node->exprType), gep);
+  }
+
+  /* Return direct pointer evaluation if identifier statically targets a
+   * function declaration */
+  if (node->resolvedDecl &&
+      node->resolvedDecl->kind == NodeKind::FunctionDecl) {
+    return getOrCreateFunction(
+        static_cast<const FunctionDeclNode *>(node->resolvedDecl));
   }
 
   llvm::Value *lval = getLValue(node);
@@ -1277,69 +1302,83 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
         }
       }
     }
-  } else {
-    if (node->target->kind == NodeKind::Variable) {
-      func = mod.getFunction(
-          std::string(static_cast<const VariableNode *>(node->target)->name));
-    }
-    if (!func) {
-      std::cerr
-          << "[CodeGen Warning] Implicitly defining unlinked function call\n";
-    }
-  }
 
-  unsigned argIdx = argsArgs.empty() ? 0 : argsArgs.size();
-  for (const auto &arg : node->args) {
-    llvm::Value *argVal = nullptr;
+    unsigned argIdx = argsArgs.empty() ? 0 : argsArgs.size();
+    for (const auto &arg : node->args) {
+      llvm::Value *argVal = nullptr;
 
-    bool isRefParam = false;
-    if (node->resolvedFunc) {
+      bool isRefParam = false;
       size_t paramOffset =
           (node->resolvedFunc->isMethod && !node->resolvedFunc->isExtern) ? 1
                                                                           : 0;
+
       if (argIdx >= paramOffset &&
           (argIdx - paramOffset) < node->resolvedFunc->params.size()) {
         isRefParam = node->resolvedFunc->params[argIdx - paramOffset]
                          ->type->isReferenceType();
       }
-    }
 
-    if (isRefParam) {
-      argVal = getLValue(arg);
-    } else {
-      argVal = dispatch(arg);
+      if (isRefParam) {
+        argVal = getLValue(arg);
+      } else {
+        argVal = dispatch(arg);
 
-      if (func && argVal) {
-        if (argIdx < func->arg_size()) {
-          llvm::Type *paramTy = func->getFunctionType()->getParamType(argIdx);
-          argVal = createImplicitCast(argVal, paramTy);
-        } else if (func->isVarArg()) {
-          if (argVal->getType()->isFloatTy()) {
-            argVal = builder.CreateFPExt(argVal, builder.getDoubleTy());
+        if (func && argVal) {
+          if (argIdx < func->arg_size()) {
+            llvm::Type *paramTy = func->getFunctionType()->getParamType(argIdx);
+            argVal = createImplicitCast(argVal, paramTy);
+          } else if (func->isVarArg()) {
+            if (argVal->getType()->isFloatTy()) {
+              argVal = builder.CreateFPExt(argVal, builder.getDoubleTy());
+            }
           }
         }
       }
+
+      if (!argVal) {
+        diags.report({DiagLevel::Error, arg->line, arg->column, arg->length,
+                      "Failed to evaluate argument for function call.", ""});
+        return nullptr;
+      }
+      argsArgs.push_back(argVal);
+      argIdx++;
     }
 
-    if (!argVal) {
-      diags.report({DiagLevel::Error, arg->line, arg->column, arg->length,
-                    "Failed to evaluate argument for function call.", ""});
+    auto callRes = builder.CreateCall(func, argsArgs);
+
+    if (node->resolvedFunc->isMethod &&
+        node->resolvedFunc->returnType->isVoid()) {
+      if (!node->exprType->isVoid()) {
+        return builder.CreateLoad(getLLVMType(node->exprType), argsArgs[0]);
+      }
+    }
+
+    return callRes;
+
+  } else {
+    /* Evaluate invocation through a dynamic function pointer */
+    llvm::Value *dynamicFuncPtr = dispatch(node->target);
+    if (!dynamicFuncPtr)
       return nullptr;
+
+    const Type *targetTy = node->target->exprType->getUnqualifiedType();
+    const FunctionType *fTy = static_cast<const FunctionType *>(
+        static_cast<const PointerType *>(targetTy)->getPointeeType());
+    llvm::FunctionType *llvmFTy =
+        static_cast<llvm::FunctionType *>(getLLVMType(fTy));
+
+    unsigned argIdx = 0;
+    for (const auto &arg : node->args) {
+      llvm::Value *argVal = dispatch(arg);
+      if (argIdx < llvmFTy->getNumParams()) {
+        argVal = createImplicitCast(argVal, llvmFTy->getParamType(argIdx));
+      }
+      argsArgs.push_back(argVal);
+      argIdx++;
     }
-    argsArgs.push_back(argVal);
-    argIdx++;
+
+    return builder.CreateCall(llvmFTy, dynamicFuncPtr, argsArgs);
   }
-
-  auto callRes = builder.CreateCall(func, argsArgs);
-
-  if (node->resolvedFunc && node->resolvedFunc->isMethod &&
-      node->resolvedFunc->returnType->isVoid()) {
-    if (!node->exprType->isVoid()) {
-      return builder.CreateLoad(getLLVMType(node->exprType), argsArgs[0]);
-    }
-  }
-
-  return callRes;
 }
 
 llvm::Value *CodeGen::visit(const CastNode *node) {

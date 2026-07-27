@@ -49,6 +49,18 @@ std::string Mangler::mangle(const FunctionDeclNode *node,
 }
 
 std::string Mangler::mangleType(const Type *t) {
+  if (t->getKind() == TypeKind::Alias) {
+    return mangleType(static_cast<const AliasType *>(t)->getTarget());
+  }
+  if (t->getKind() == TypeKind::Function) {
+    auto fTy = static_cast<const FunctionType *>(t);
+    std::string res = "F" + mangleType(fTy->getReturnType());
+    for (const auto *p : fTy->getParamTypes()) {
+      res += mangleType(p);
+    }
+    res += "E";
+    return res;
+  }
   if (t->getKind() == TypeKind::Array) {
     auto arrTy = static_cast<const ArrayType *>(t);
     return "A" + std::to_string(arrTy->getSize()) + "_" +

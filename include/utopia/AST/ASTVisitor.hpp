@@ -49,6 +49,9 @@ public:
     case NodeKind::AnnotationDecl:
       return static_cast<Derived *>(this)->visit(
           static_cast<const AnnotationDeclNode *>(node));
+    case NodeKind::TypedefDecl:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const TypedefDeclNode *>(node));
     case NodeKind::VarDecl:
       return static_cast<Derived *>(this)->visit(
           static_cast<const VarDeclNode *>(node));

@@ -57,6 +57,7 @@ private:
   llvm::ArrayRef<AnnotationNode *> parseAnnotations();
   AnnotationNode *parseAnnotation();
   DeclNode *parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations);
+  DeclNode *parseTypedefDecl();
   std::vector<ParamDeclNode *> parseParameterList(const Type *classTy,
                                                   bool &isVariadic);
 

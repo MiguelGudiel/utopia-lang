@@ -22,7 +22,9 @@ enum class TypeKind {
   Const,
   Struct,
   Class,
-  Array
+  Array,
+  Function,
+  Alias
 };
 
 enum class BuiltinKind {
@@ -149,11 +151,41 @@ public:
   explicit ClassType(std::string_view n) : RecordType(TypeKind::Class, n) {}
 };
 
+class FunctionType : public Type {
+  const Type *returnType;
+  llvm::ArrayRef<const Type *> paramTypes;
+
+public:
+  explicit FunctionType(const Type *ret, llvm::ArrayRef<const Type *> params)
+      : Type(TypeKind::Function), returnType(ret), paramTypes(params) {}
+  const Type *getReturnType() const { return returnType; }
+  llvm::ArrayRef<const Type *> getParamTypes() const { return paramTypes; }
+};
+
+class AliasType : public Type {
+  std::string_view aliasName;
+  mutable const Type *target;
+
+public:
+  explicit AliasType(std::string_view n)
+      : Type(TypeKind::Alias), aliasName(n), target(nullptr) {}
+  std::string_view getName() const { return aliasName; }
+  const Type *getTarget() const { return target; }
+  void setTarget(const Type *t) const { target = t; }
+};
+
 inline bool Type::isConstQualified() const { return kind == TypeKind::Const; }
 
 inline const Type *Type::getUnqualifiedType() const {
   if (kind == TypeKind::Const)
-    return static_cast<const ConstType *>(this)->getBaseType();
+    return static_cast<const ConstType *>(this)
+        ->getBaseType()
+        ->getUnqualifiedType();
+  if (kind == TypeKind::Alias) {
+    const Type *tgt = static_cast<const AliasType *>(this)->getTarget();
+    if (tgt)
+      return tgt->getUnqualifiedType();
+  }
   return this;
 }
 
@@ -182,6 +214,21 @@ inline bool Type::isVoid() const {
 }
 
 inline std::string Type::toString() const {
+  if (kind == TypeKind::Alias) {
+    return std::string(static_cast<const AliasType *>(this)->getName());
+  }
+  if (kind == TypeKind::Function) {
+    auto fTy = static_cast<const FunctionType *>(this);
+    std::string res = fTy->getReturnType()->toString() + "(";
+    auto params = fTy->getParamTypes();
+    for (size_t i = 0; i < params.size(); ++i) {
+      res += params[i]->toString();
+      if (i < params.size() - 1)
+        res += ", ";
+    }
+    res += ")";
+    return res;
+  }
   if (kind == TypeKind::Const) {
     return "const " +
            static_cast<const ConstType *>(this)->getBaseType()->toString();

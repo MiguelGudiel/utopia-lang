@@ -68,6 +68,9 @@ const Type *Parser::parseType(bool inNewExpr) {
   if (!ty) {
     ty = astCtx.getRecordType(base);
   }
+  if (!ty) {
+    ty = astCtx.getTypeAlias(base);
+  }
 
   if (!ty) {
     reportError(currentToken().line, currentToken().column, (int)base.length(),
@@ -472,7 +475,9 @@ ASTNode *Parser::parseStatement() {
 
   ASTNode *node = nullptr;
 
-  if (currentToken().type == TokenType::ANNOTATION_KW) {
+  if (currentToken().type == TokenType::TYPEDEF_KW) {
+    node = parseTypedefDecl();
+  } else if (currentToken().type == TokenType::ANNOTATION_KW) {
     node = parseAnnotationDecl(annotations);
   } else if (currentToken().type == TokenType::STRUCT_KW) {
     node = parseStructDecl();
@@ -517,6 +522,58 @@ ASTNode *Parser::parseStatement() {
   }
 
   return node;
+}
+
+DeclNode *Parser::parseTypedefDecl() {
+  int line = currentToken().line;
+  int col = currentToken().column;
+  advance(); /* consume 'typedef' */
+
+  std::string_view name = currentToken().value;
+  expect(TokenType::IDENTIFIER, "Expected alias name after 'typedef'");
+
+  expect(TokenType::ASSIGN, "Expected '=' in typedef declaration");
+
+  const Type *targetType = nullptr;
+  std::string_view targetEntity = "";
+
+  /* Fallback peek to distinguish known types from plain function identifiers */
+  const Type *knownBase = nullptr;
+  if (currentToken().type == TokenType::IDENTIFIER) {
+    knownBase = astCtx.getBuiltinTypeByName(currentToken().value);
+    if (!knownBase)
+      knownBase = astCtx.getRecordType(currentToken().value);
+    if (!knownBase)
+      knownBase = astCtx.getTypeAlias(currentToken().value);
+  }
+
+  if (knownBase || currentToken().type == TokenType::CONST_KW ||
+      currentToken().type == TokenType::TYPE_KW) {
+    targetType = parseType();
+  } else if (currentToken().type == TokenType::IDENTIFIER) {
+    targetEntity = currentToken().value;
+    advance();
+  } else {
+    reportError(currentToken().line, currentToken().column,
+                currentToken().value.length(),
+                "Expected type or function identifier in typedef");
+    throw ParseException();
+  }
+
+  int endCol = currentToken().column + (int)currentToken().value.length();
+  expect(TokenType::SEMICOLON, "Expected ';' after typedef target");
+
+  auto aliasTy = astCtx.create<AliasType>(name);
+  if (targetType)
+    aliasTy->setTarget(targetType);
+
+  astCtx.addTypeAlias(name, aliasTy);
+
+  auto decl =
+      astCtx.create<TypedefDeclNode>(name, targetType, line, col, endCol - col);
+  decl->targetEntityName = targetEntity;
+  decl->aliasType = aliasTy;
+  return decl;
 }
 
 IfNode *Parser::parseIfStatement() {

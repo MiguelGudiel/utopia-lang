@@ -71,6 +71,25 @@ static bool canImplicitlyCast(const Type *from, const Type *to) {
     if (toPointee->isVoid() || fromPointee->isVoid())
       return true;
 
+    /* Enforce strict parameter structural equality for function pointer
+     * assignments */
+    if (fromPointee->getKind() == TypeKind::Function &&
+        toPointee->getKind() == TypeKind::Function) {
+      auto fF = static_cast<const FunctionType *>(fromPointee);
+      auto fT = static_cast<const FunctionType *>(toPointee);
+      if (fF->getReturnType()->getUnqualifiedType() !=
+          fT->getReturnType()->getUnqualifiedType())
+        return false;
+      if (fF->getParamTypes().size() != fT->getParamTypes().size())
+        return false;
+      for (size_t i = 0; i < fF->getParamTypes().size(); i++) {
+        if (fF->getParamTypes()[i]->getUnqualifiedType() !=
+            fT->getParamTypes()[i]->getUnqualifiedType())
+          return false;
+      }
+      return true;
+    }
+
     return fromPointee->getUnqualifiedType() == toPointee->getUnqualifiedType();
   }
 
@@ -98,6 +117,7 @@ public:
   void visit(const VarDeclNode *node);
   void visit(const StructDeclNode *node);
   void visit(const ClassDeclNode *node);
+  void visit(const TypedefDeclNode *node);
   void visit(const AnnotationDeclNode *node);
 
   void visit(const AnnotationNode *node) {}
@@ -159,6 +179,7 @@ public:
   SemaResult visit(const ClassDeclNode *node);
   SemaResult visit(const MemberAccessNode *node);
   SemaResult visit(const AnnotationDeclNode *node);
+  SemaResult visit(const TypedefDeclNode *node);
   SemaResult visit(const AnnotationNode *node);
   SemaResult visit(const ArraySubscriptNode *node);
   SemaResult visit(const ArrayLiteralNode *node);

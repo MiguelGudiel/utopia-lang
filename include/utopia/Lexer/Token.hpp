@@ -55,6 +55,7 @@ enum class TokenType : uint8_t {
   NEW_KW,    /* new */
   DELETE_KW, /* delete */
   NULL_KW,   /* null */
+  TYPEDEF_KW,/* typedef */
   COMMA,
   SEMICOLON,
   RETURN,

@@ -161,6 +161,21 @@ public:
     return arrTy;
   }
 
+  const FunctionType *getFunctionType(const Type *ret,
+                                      llvm::ArrayRef<const Type *> params) {
+    auto *mem = allocator.Allocate<FunctionType>();
+    return new (mem) FunctionType(ret, copyArray(params));
+  }
+
+  void addTypeAlias(std::string_view name, const Type *type) {
+    typeAliases[name] = type;
+  }
+
+  const Type *getTypeAlias(std::string_view name) const {
+    auto it = typeAliases.find(name);
+    return it != typeAliases.end() ? it->second : nullptr;
+  }
+
 private:
   llvm::BumpPtrAllocator allocator;
   std::vector<const ArrayType *> arrayTypes;
@@ -168,6 +183,7 @@ private:
   std::unordered_map<const Type *, const ReferenceType *> referenceTypes;
   std::unordered_map<const Type *, const ConstType *> constTypes;
   std::unordered_map<std::string_view, RecordType *> recordTypes;
+  std::unordered_map<std::string_view, const Type *> typeAliases;
 };
 
 } // namespace utopia

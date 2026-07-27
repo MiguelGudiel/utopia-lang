@@ -40,6 +40,7 @@ public:
   llvm::Value *visit(const StructDeclNode *node);
   llvm::Value *visit(const ClassDeclNode *node);
   llvm::Value *visit(const AnnotationDeclNode *node);
+  llvm::Value *visit(const TypedefDeclNode *node);
   llvm::Value *visit(const AnnotationNode *node);
   llvm::Value *visit(const ArraySubscriptNode *node);
   llvm::Value *visit(const NewExprNode *node);

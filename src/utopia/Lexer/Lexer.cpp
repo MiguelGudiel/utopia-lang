@@ -161,6 +161,8 @@ Token Lexer::nextToken() {
     std::string_view id(start, len);
     if (id == "return")
       return {TokenType::RETURN, id, startLine, startCol};
+    if (id == "typedef")
+      return {TokenType::TYPEDEF_KW, id, startLine, startCol};
     if (id == "for")
       return {TokenType::FOR_KW, id, startLine, startCol};
     if (id == "while")

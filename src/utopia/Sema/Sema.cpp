@@ -71,12 +71,17 @@ void DeclCollectorPass::visit(const ModuleNode *node) {
     if (stmt->kind == NodeKind::FunctionDecl ||
         stmt->kind == NodeKind::VarDecl || stmt->kind == NodeKind::StructDecl ||
         stmt->kind == NodeKind::ClassDecl ||
-        stmt->kind == NodeKind::AnnotationDecl) {
+        stmt->kind == NodeKind::AnnotationDecl ||
+        stmt->kind == NodeKind::TypedefDecl) {
       dispatch(stmt);
     }
   }
 
   ctx->setCurrentFile(prevFile);
+}
+
+void DeclCollectorPass::visit(const TypedefDeclNode *node) {
+  ctx->addDecl(node->aliasName, node);
 }
 
 void DeclCollectorPass::visit(const AnnotationDeclNode *node) {
@@ -449,17 +454,47 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
   const Type *ty = nullptr;
   const DeclNode *target = decls.front();
 
+  /* Unwrap typedefs recursively to their underlying entities */
+  while (target && target->kind == NodeKind::TypedefDecl) {
+    auto td = static_cast<const TypedefDeclNode *>(target);
+    if (!td->targetEntityName.empty()) {
+      auto aliased = ctx->lookup(td->targetEntityName);
+      if (!aliased.empty()) {
+        target = aliased.front();
+      } else {
+        break;
+      }
+    } else {
+      return ctx->reportError(node->line, node->column, node->length,
+                              "Type alias '" + std::string(node->name) +
+                                  "' cannot be used as an expression.");
+    }
+  }
+
+  const_cast<VariableNode *>(node)->resolvedDecl = target;
+
   if (target->kind == NodeKind::VarDecl) {
     ty = static_cast<const VarDeclNode *>(target)->type;
   } else if (target->kind == NodeKind::ParamDecl) {
     ty = static_cast<const ParamDeclNode *>(target)->type;
+  } else if (target->kind == NodeKind::FunctionDecl) {
+    auto fDecl = static_cast<const FunctionDeclNode *>(target);
+    std::vector<const Type *> pTypes;
+    for (auto *p : fDecl->params)
+      pTypes.push_back(p->type);
+
+    /* Variables mapping directly to a function identifier decay to a function
+     * pointer */
+    const Type *funcTy = ctx->astCtx.getFunctionType(
+        fDecl->returnType, ctx->astCtx.copyArray<const Type *>(pTypes));
+    ty = ctx->astCtx.getPointerType(funcTy);
   } else if (target->kind == NodeKind::StructDecl ||
              target->kind == NodeKind::ClassDecl) {
     return ctx->astCtx.VoidTy;
   } else {
     return ctx->reportError(node->line, node->column, node->length,
                             "Identifier '" + std::string(node->name) +
-                                "' is not a variable");
+                                "' cannot be evaluated as an expression");
   }
 
   node->exprType = ty;
@@ -901,6 +936,53 @@ SemaResult TypeCheckPass::visit(const FunctionDeclNode *node) {
   return node->returnType;
 }
 
+SemaResult TypeCheckPass::visit(const TypedefDeclNode *node) {
+  if (!node->targetEntityName.empty()) {
+    auto decls = ctx->lookup(node->targetEntityName);
+    if (decls.empty()) {
+      return ctx->reportError(node->line, node->column, node->length,
+                              "Undefined identifier in typedef: '" +
+                                  std::string(node->targetEntityName) + "'");
+    }
+
+    const DeclNode *target = decls.front();
+
+    /* Unwrap target if it's another typedef */
+    while (target && target->kind == NodeKind::TypedefDecl) {
+      auto td = static_cast<const TypedefDeclNode *>(target);
+      if (!td->targetEntityName.empty()) {
+        auto aliased = ctx->lookup(td->targetEntityName);
+        if (!aliased.empty()) {
+          target = aliased.front();
+        } else {
+          break;
+        }
+      } else {
+        break;
+      }
+    }
+
+    if (target->kind == NodeKind::FunctionDecl) {
+      auto fDecl = static_cast<const FunctionDeclNode *>(target);
+      std::vector<const Type *> pTypes;
+      for (auto *p : fDecl->params)
+        pTypes.push_back(p->type);
+
+      const Type *funcTy = ctx->astCtx.getFunctionType(
+          fDecl->returnType, ctx->astCtx.copyArray<const Type *>(pTypes));
+      const Type *ptrFuncTy = ctx->astCtx.getPointerType(funcTy);
+
+      node->aliasType->setTarget(ptrFuncTy);
+      node->targetType = ptrFuncTy;
+    } else {
+      return ctx->reportError(
+          node->line, node->column, node->length,
+          "Typedef target entity must be a function declaration.");
+    }
+  }
+  return ctx->astCtx.VoidTy;
+}
+
 SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
   std::vector<const Type *> argTypes;
   bool hasErrors = false;
@@ -1110,6 +1192,25 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
         static_cast<const VariableNode *>(node->target)->name;
     auto decls = ctx->lookup(name);
 
+    /* Unwrap typedefs to their underlying entity overload sets */
+    if (!decls.empty()) {
+      const DeclNode *target = decls.front();
+      while (target && target->kind == NodeKind::TypedefDecl) {
+        auto td = static_cast<const TypedefDeclNode *>(target);
+        if (!td->targetEntityName.empty()) {
+          auto aliased = ctx->lookup(td->targetEntityName);
+          if (!aliased.empty()) {
+            target = aliased.front();
+            decls = aliased; // Update overload set!
+          } else {
+            break;
+          }
+        } else {
+          break;
+        }
+      }
+    }
+
     if (decls.empty()) {
       return ctx->reportError(node->line, node->column, node->length,
                               "Undefined function: '" + std::string(name) +
@@ -1144,6 +1245,44 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
         node->exprType = bestMatch->returnType;
       }
       return node->exprType;
+    }
+
+    /* Fallback: Assess if target resolves to a dynamic function pointer */
+    const DeclNode *firstDecl = decls.front();
+    if (firstDecl->kind == NodeKind::VarDecl ||
+        firstDecl->kind == NodeKind::ParamDecl) {
+      const Type *varTy = nullptr;
+      if (firstDecl->kind == NodeKind::VarDecl)
+        varTy = static_cast<const VarDeclNode *>(firstDecl)->type;
+      else
+        varTy = static_cast<const ParamDeclNode *>(firstDecl)->type;
+
+      const Type *unqual = varTy->getUnqualifiedType();
+      if (unqual->isPointerType()) {
+        const Type *pointee =
+            static_cast<const PointerType *>(unqual)->getPointeeType();
+        if (pointee->getKind() == TypeKind::Function) {
+          auto fTy = static_cast<const FunctionType *>(pointee);
+
+          if (argTypes.size() != fTy->getParamTypes().size()) {
+            return ctx->reportError(
+                node->line, node->column, node->length,
+                "Argument count mismatch for function pointer call.");
+          }
+          for (size_t i = 0; i < argTypes.size(); i++) {
+            if (!canImplicitlyCast(argTypes[i], fTy->getParamTypes()[i])) {
+              return ctx->reportError(
+                  node->line, node->column, node->length,
+                  "Type mismatch in function pointer call.");
+            }
+          }
+
+          const_cast<FunctionCallNode *>(node)->args =
+              ctx->astCtx.copyArray<ExprNode *>(node->args);
+          node->exprType = fTy->getReturnType();
+          return node->exprType;
+        }
+      }
     }
 
     if (overloadErrors.size() == 1) {
