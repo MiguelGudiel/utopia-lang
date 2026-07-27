@@ -716,6 +716,82 @@ llvm::Value *CodeGen::visit(const IfNode *node) {
   return nullptr;
 }
 
+llvm::Value *CodeGen::visit(const ForNode *node) {
+  CGScopeGuard guard(cgCtx);
+
+  if (node->initStatement) {
+    dispatch(node->initStatement);
+  }
+
+  llvm::Function *theFunction = builder.GetInsertBlock()->getParent();
+  llvm::BasicBlock *condBB =
+      llvm::BasicBlock::Create(ctx, "for.cond", theFunction);
+  llvm::BasicBlock *bodyBB = llvm::BasicBlock::Create(ctx, "for.body");
+  llvm::BasicBlock *incBB = llvm::BasicBlock::Create(ctx, "for.inc");
+  llvm::BasicBlock *endBB = llvm::BasicBlock::Create(ctx, "for.end");
+
+  builder.CreateBr(condBB);
+  builder.SetInsertPoint(condBB);
+
+  if (node->condition) {
+    llvm::Value *condV = dispatch(node->condition);
+    if (!condV)
+      return nullptr;
+    condV = createImplicitCast(condV, builder.getInt1Ty());
+    builder.CreateCondBr(condV, bodyBB, endBB);
+  } else {
+    builder.CreateBr(bodyBB);
+  }
+
+  theFunction->insert(theFunction->end(), bodyBB);
+  builder.SetInsertPoint(bodyBB);
+  dispatch(node->body);
+  if (!builder.GetInsertBlock()->getTerminator()) {
+    builder.CreateBr(incBB);
+  }
+
+  theFunction->insert(theFunction->end(), incBB);
+  builder.SetInsertPoint(incBB);
+  if (node->increment) {
+    dispatch(node->increment);
+  }
+  builder.CreateBr(condBB);
+
+  theFunction->insert(theFunction->end(), endBB);
+  builder.SetInsertPoint(endBB);
+
+  return nullptr;
+}
+
+llvm::Value *CodeGen::visit(const WhileNode *node) {
+  llvm::Function *theFunction = builder.GetInsertBlock()->getParent();
+  llvm::BasicBlock *condBB =
+      llvm::BasicBlock::Create(ctx, "while.cond", theFunction);
+  llvm::BasicBlock *bodyBB = llvm::BasicBlock::Create(ctx, "while.body");
+  llvm::BasicBlock *endBB = llvm::BasicBlock::Create(ctx, "while.end");
+
+  builder.CreateBr(condBB);
+  builder.SetInsertPoint(condBB);
+
+  llvm::Value *condV = dispatch(node->condition);
+  if (!condV)
+    return nullptr;
+  condV = createImplicitCast(condV, builder.getInt1Ty());
+  builder.CreateCondBr(condV, bodyBB, endBB);
+
+  theFunction->insert(theFunction->end(), bodyBB);
+  builder.SetInsertPoint(bodyBB);
+  dispatch(node->body);
+  if (!builder.GetInsertBlock()->getTerminator()) {
+    builder.CreateBr(condBB);
+  }
+
+  theFunction->insert(theFunction->end(), endBB);
+  builder.SetInsertPoint(endBB);
+
+  return nullptr;
+}
+
 llvm::Value *CodeGen::visit(const UnaryOpNode *node) {
   if (node->op == "!") {
     llvm::Value *val = dispatch(node->expr);

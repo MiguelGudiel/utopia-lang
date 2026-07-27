@@ -440,6 +440,10 @@ ASTNode *Parser::parseStatement() {
     node = parseClassDecl();
   } else if (currentToken().type == TokenType::IF_KW) {
     node = parseIfStatement();
+  } else if (currentToken().type == TokenType::FOR_KW) {
+    node = parseForStatement();
+  } else if (currentToken().type == TokenType::WHILE_KW) {
+    node = parseWhileStatement();
   } else if (currentToken().type == TokenType::TYPE_KW ||
              currentToken().type == TokenType::CONST_KW ||
              currentToken().type == TokenType::EXTERN_KW ||
@@ -500,7 +504,59 @@ IfNode *Parser::parseIfStatement() {
   return astCtx.create<IfNode>(cond, thenBlock, elseBlock, line, col, len);
 }
 
-ExprNode *Parser::parseExpression() { return parseLogicalOr(); }
+ForNode *Parser::parseForStatement() {
+  int line = currentToken().line;
+  int col = currentToken().column;
+  advance(); // consume 'for'
+
+  expect(TokenType::LPAREN, "Expected '(' after 'for'");
+
+  ASTNode *initStmt = nullptr;
+  if (currentToken().type != TokenType::SEMICOLON) {
+    if (currentToken().type == TokenType::TYPE_KW ||
+        currentToken().type == TokenType::CONST_KW ||
+        (currentToken().type == TokenType::IDENTIFIER &&
+         peekToken().type == TokenType::IDENTIFIER)) {
+      initStmt = parseDeclarationOrFunction();
+    } else {
+      initStmt = parseExpressionStatement();
+    }
+  } else {
+    expect(TokenType::SEMICOLON, "Expected ';'");
+  }
+
+  ExprNode *cond = nullptr;
+  if (currentToken().type != TokenType::SEMICOLON) {
+    cond = parseExpression();
+  }
+  expect(TokenType::SEMICOLON, "Expected ';'");
+
+  ExprNode *inc = nullptr;
+  if (currentToken().type != TokenType::RPAREN) {
+    inc = parseExpression();
+  }
+  expect(TokenType::RPAREN, "Expected ')' after for clauses");
+
+  auto body = parseBlock();
+
+  int len = (body->column + body->length) - col;
+  return astCtx.create<ForNode>(initStmt, cond, inc, body, line, col, len);
+}
+
+WhileNode *Parser::parseWhileStatement() {
+  int line = currentToken().line;
+  int col = currentToken().column;
+  advance(); // consume 'while'
+
+  expect(TokenType::LPAREN, "Expected '(' after 'while'");
+  auto cond = parseExpression();
+  expect(TokenType::RPAREN, "Expected ')' after while condition");
+
+  auto body = parseBlock();
+
+  int len = (body->column + body->length) - col;
+  return astCtx.create<WhileNode>(cond, body, line, col, len);
+}
 
 ExprNode *Parser::parseLogicalOr() {
   auto left = parseLogicalAnd();
@@ -894,16 +950,24 @@ ReturnNode *Parser::parseReturn() {
 
 ExprNode *Parser::parseExpressionStatement() {
   auto expr = parseExpression();
+  expect(TokenType::SEMICOLON, "Expected ';'");
+  return expr;
+}
+
+ExprNode *Parser::parseExpression() { return parseAssignment(); }
+
+ExprNode *Parser::parseAssignment() {
+  auto expr = parseLogicalOr();
+
   if (currentToken().type == TokenType::ASSIGN) {
     int line = expr->line;
     int col = expr->column;
     advance();
-    auto value = parseExpression();
-    int endCol = currentToken().column + (int)currentToken().value.length();
-    expect(TokenType::SEMICOLON, "Expected ';'");
+    auto value = parseAssignment();
+    int endCol = value->column + value->length;
     return astCtx.create<AssignNode>(expr, value, line, col, endCol - col);
   }
-  expect(TokenType::SEMICOLON, "Expected ';'");
+
   return expr;
 }
 

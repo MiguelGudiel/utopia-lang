@@ -65,8 +65,11 @@ private:
   BlockNode *parseBlock();
   ReturnNode *parseReturn();
   ExprNode *parseExpressionStatement();
+  ForNode *parseForStatement();
+  WhileNode *parseWhileStatement();
 
   ExprNode *parseExpression();
+  ExprNode *parseAssignment();
   ExprNode *parseLogicalOr();
   ExprNode *parseLogicalAnd();
   ExprNode *parseEquality();

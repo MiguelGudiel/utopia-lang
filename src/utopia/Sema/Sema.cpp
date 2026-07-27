@@ -170,6 +170,21 @@ void DeclCollectorPass::visit(const IfNode *node) {
     dispatch(node->elseBlock);
 }
 
+void DeclCollectorPass::visit(const ForNode *node) {
+  if (node->initStatement)
+    dispatch(node->initStatement);
+  if (node->condition)
+    dispatch(node->condition);
+  if (node->increment)
+    dispatch(node->increment);
+  dispatch(node->body);
+}
+
+void DeclCollectorPass::visit(const WhileNode *node) {
+  dispatch(node->condition);
+  dispatch(node->body);
+}
+
 void DeclCollectorPass::visit(const VarDeclNode *node) {
   ctx->addDecl(node->varName, node);
 }
@@ -416,6 +431,58 @@ SemaResult TypeCheckPass::visit(const IfNode *node) {
     if (!elseRes)
       return elseRes;
   }
+
+  return ctx->astCtx.VoidTy;
+}
+
+SemaResult TypeCheckPass::visit(const ForNode *node) {
+  ScopeGuard guard(*ctx);
+
+  if (node->initStatement) {
+    auto initRes = dispatch(node->initStatement);
+    if (!initRes)
+      return std::unexpected(initRes.error());
+  }
+
+  if (node->condition) {
+    auto condRes = dispatch(node->condition);
+    if (!condRes)
+      return std::unexpected(condRes.error());
+    if (!canImplicitlyCast(*condRes, ctx->astCtx.BoolTy)) {
+      return ctx->reportError(
+          node->condition->line, node->condition->column,
+          node->condition->length,
+          "For loop condition must evaluate to a boolean type.");
+    }
+  }
+
+  if (node->increment) {
+    auto incRes = dispatch(node->increment);
+    if (!incRes)
+      return std::unexpected(incRes.error());
+  }
+
+  auto bodyRes = dispatch(node->body);
+  if (!bodyRes)
+    return bodyRes;
+
+  return ctx->astCtx.VoidTy;
+}
+
+SemaResult TypeCheckPass::visit(const WhileNode *node) {
+  auto condRes = dispatch(node->condition);
+  if (!condRes)
+    return std::unexpected(condRes.error());
+
+  if (!canImplicitlyCast(*condRes, ctx->astCtx.BoolTy)) {
+    return ctx->reportError(
+        node->condition->line, node->condition->column, node->condition->length,
+        "While loop condition must evaluate to a boolean type.");
+  }
+
+  auto bodyRes = dispatch(node->body);
+  if (!bodyRes)
+    return bodyRes;
 
   return ctx->astCtx.VoidTy;
 }

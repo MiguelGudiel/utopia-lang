@@ -22,6 +22,8 @@ enum class NodeKind : uint8_t {
   Assign,
   Block,
   If,
+  For,
+  While,
   FunctionDecl,
   FunctionCall,
   Return,
@@ -212,6 +214,26 @@ struct CastNode : public ExprNode {
 
   CastNode(ExprNode *e, const Type *target, int l, int c, int len)
       : ExprNode(NodeKind::Cast, l, c, len), expr(e), targetType(target) {}
+};
+
+struct ForNode : public StmtNode {
+  ASTNode *initStatement; // It can be a VarDeclNode or an ExprNode (or null).
+  ExprNode *condition;    // Optional
+  ExprNode *increment;    // Optional
+  BlockNode *body;
+
+  ForNode(ASTNode *init, ExprNode *cond, ExprNode *inc, BlockNode *b, int l,
+          int c, int len)
+      : StmtNode(NodeKind::For, l, c, len), initStatement(init),
+        condition(cond), increment(inc), body(b) {}
+};
+
+struct WhileNode : public StmtNode {
+  ExprNode *condition;
+  BlockNode *body;
+
+  WhileNode(ExprNode *cond, BlockNode *b, int l, int c, int len)
+      : StmtNode(NodeKind::While, l, c, len), condition(cond), body(b) {}
 };
 
 struct IfNode : public StmtNode {

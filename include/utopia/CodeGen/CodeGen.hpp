@@ -30,6 +30,8 @@ public:
   llvm::Value *visit(const FunctionDeclNode *node);
   llvm::Value *visit(const FunctionCallNode *node);
   llvm::Value *visit(const IfNode *node);
+  llvm::Value *visit(const ForNode *node);
+  llvm::Value *visit(const WhileNode *node);
   llvm::Value *visit(const ReturnNode *node);
   llvm::Value *visit(const CastNode *node);
   llvm::Value *visit(const ParamDeclNode *node);

@@ -61,6 +61,12 @@ public:
     case NodeKind::If:
       return static_cast<Derived *>(this)->visit(
           static_cast<const IfNode *>(node));
+    case NodeKind::For:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const ForNode *>(node));
+    case NodeKind::While:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const WhileNode *>(node));
     case NodeKind::FunctionDecl:
       return static_cast<Derived *>(this)->visit(
           static_cast<const FunctionDeclNode *>(node));

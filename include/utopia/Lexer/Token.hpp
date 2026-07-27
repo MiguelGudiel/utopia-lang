@@ -16,6 +16,8 @@ enum class TokenType : uint8_t {
   ANNOTATION_KW,
   EXTERN_KW,
   REQUIRED_KW,
+  FOR_KW,
+  WHILE_KW,
   IF_KW,
   ELSE_KW,
   ELLIPSIS,
