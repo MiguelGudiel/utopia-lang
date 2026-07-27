@@ -3,13 +3,18 @@ project(UtopiaCompiler VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Usar C++20 (o C++17 si lo prefieres)
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Opciones del proyecto
 option(BUILD_TESTS "Build unit tests" OFF)
+option(ENABLE_SANITIZERS "Enable Address and Undefined Behavior Sanitizers" ON)
+
+if(ENABLE_SANITIZERS)
+    add_compile_options(-fsanitize=undefined -fno-omit-frame-pointer -g)
+    add_link_options(-fsanitize=undefined)
+endif()
 
 # Encontrar LLVM
 find_package(LLVM REQUIRED CONFIG)
@@ -24,6 +29,8 @@ llvm_map_components_to_libnames(llvm_libs
     mc
     targetparser
     passes
+    OrcJit
+    OrcShared
     ${LLVM_TARGETS_TO_BUILD}
 )
 
@@ -40,7 +47,7 @@ set(YAML_CPP_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
 add_subdirectory(thirdparty/yaml-cpp)
 add_subdirectory(src)
 add_subdirectory(tools/utopia)
-add_subdirectory(tools/lsp)
+#add_subdirectory(tools/lsp)
 
 if(BUILD_TESTS)
     enable_testing()

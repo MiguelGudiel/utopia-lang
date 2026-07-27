@@ -1,5 +1,5 @@
 project:
-  name: "utopia"
+  name: "prelude"
   version: "0.1.0"
 
 build:
@@ -8,4 +8,4 @@ build:
   include_dirs:
     - "."
   sources:
-    - "std/test.utp"
+    - "lib/prelude.utp"

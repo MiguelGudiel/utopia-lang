@@ -1,8 +1,0 @@
-class Entity {
-  char* name;
-
-  @virtual
-  void Update() {
-    print("Entity updated", this.name);
-  }
-}

@@ -2,13 +2,25 @@
   "version": "0.2.0",
   "configurations": [
     {
+      "name": "Debug Utopia Compiler (C++)",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/tools/utopia/utopia",
+      "args": [
+        "${file}"
+      ],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "build-compiler-cpp",
+      "stopOnEntry": false
+    },
+    {
       "name": "Debug Utopia Binary",
       "type": "lldb",
       "request": "launch",
       "program": "${fileDirname}/build/${fileBasenameNoExtension}",
       "args": [],
       "cwd": "${fileDirname}",
-      "preLaunchTask": "compile-utopia",
+      "preLaunchTask": "compile-utopia-file",
       "stopOnEntry": false
     }
   ]

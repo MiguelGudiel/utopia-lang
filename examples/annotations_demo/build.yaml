@@ -1,11 +1,11 @@
 project:
-  name: "big-example"
+  name: "annotations"
   version: "0.1.0"
 
 build:
   target: executable
   output_dir: "build"
-  optimization: 2
+  optimization: 0
   linker_flags:
     - "-lm"
     - "-lpthread"
@@ -13,4 +13,3 @@ build:
     - src/
   sources:
     - main.utp
-    - other.utp

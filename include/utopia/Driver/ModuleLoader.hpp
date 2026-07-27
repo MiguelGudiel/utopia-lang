@@ -1,42 +1,45 @@
 #pragma once
 #include "utopia/AST/AST.hpp"
+#include "utopia/AST/ASTContext.hpp"
+#include "utopia/Common/Diagnostics.hpp"
+#include <expected>
 #include <filesystem>
-#include <map>
-#include <memory>
 #include <string>
-#include <vector>
+#include <string_view>
+#include <unordered_map>
 
 namespace utopia {
 
+struct ModuleLoaderConfig {
+  std::filesystem::path projectRoot;
+  std::filesystem::path stdlibRoot;
+};
+
 class ModuleLoader {
 public:
-  void addSearchPath(const std::filesystem::path &path);
-  void setSystemPath(const std::filesystem::path &path);
+  explicit ModuleLoader(ASTContext &context, const ModuleLoaderConfig &cfg,
+                        DiagnosticsEngine &de)
+      : astCtx(context), config(cfg), diags(de) {}
 
-  // Register a package alias pointing to its root directory
-  void registerPackage(const std::string &name,
-                       const std::filesystem::path &root);
-
-  ModuleNode *loadModule(const std::string &importPath,
-                         const std::filesystem::path &currentFileDir);
-
-  ModuleNode *getRootModule() const { return rootModule; }
-  void setRootModule(ModuleNode *module) { rootModule = module; }
-
-  const std::vector<ModuleNode *> &getAllModules() const { return allModules; }
+  /**
+   * Resolves, parses, and recursively loads a module and its dependencies.
+   * Returns a cached AST root pointer. Returns nullptr if a compilation error
+   * occurs.
+   */
+  ModuleNode *loadModule(const std::string &importURI,
+                         const std::filesystem::path &currentFileDir = "");
 
 private:
-  std::vector<std::filesystem::path> searchPaths;
-  std::filesystem::path systemPath;
-  std::map<std::string, std::filesystem::path> packages; // name -> root path
-  std::map<std::string, std::unique_ptr<ModuleNode>> loadedModules;
-  ModuleNode *rootModule = nullptr;
-  std::vector<ModuleNode *> allModules;
+  ASTContext &astCtx;
+  ModuleLoaderConfig config;
+  DiagnosticsEngine &diags;
 
-  std::filesystem::path
-  resolveImportPath(const std::string &importPath,
-                    const std::filesystem::path &currentDir);
-  std::unique_ptr<ModuleNode> parseModule(const std::filesystem::path &absPath);
+  std::unordered_map<std::string, std::string> sourceCache;
+  std::unordered_map<std::string, ModuleNode *> moduleCache;
+
+  std::expected<std::filesystem::path, std::string>
+  resolveImportURI(std::string_view uri,
+                   const std::filesystem::path &currentDir);
 };
 
 } // namespace utopia

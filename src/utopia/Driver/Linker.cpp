@@ -1,4 +1,4 @@
-#include "Linker.hpp"
+#include "utopia/Driver/Linker.hpp"
 #include <array>
 #include <iostream>
 
@@ -40,10 +40,10 @@ bool Linker::link(const std::vector<std::string> &objPaths,
   int status = pclose(pipe);
 
   /* Termination status resolution.
-   * On POSIX-compliant systems, pclose() returns the full termination status 
-   * as defined by wait4() rather than a raw exit code. Direct comparison 
-   * against zero is unreliable as it may fail to detect abnormal termination 
-   * or signal interference. We use WEXITSTATUS to guarantee we are evaluating 
+   * On POSIX-compliant systems, pclose() returns the full termination status
+   * as defined by wait4() rather than a raw exit code. Direct comparison
+   * against zero is unreliable as it may fail to detect abnormal termination
+   * or signal interference. We use WEXITSTATUS to guarantee we are evaluating
    * the actual return code from the linker process.
    */
 #ifdef _WIN32
@@ -69,10 +69,10 @@ std::string Linker::executeAndCapture(const std::string &cmd) {
   while (fgets(buffer.data(), buffer.size(), pipe) != nullptr) {
     result += buffer.data();
   }
-  
+
   int status = pclose(pipe);
 #ifndef _WIN32
-  (void)WIFEXITED(status); 
+  (void)WIFEXITED(status);
 #endif
 
   return result;

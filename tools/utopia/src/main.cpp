@@ -1,114 +1,100 @@
 #include "ProjectManager.hpp"
 #include "utopia/Driver/CompilerDriver.hpp"
-#include <chrono>
-#include <filesystem>
 #include <iostream>
+#include <llvm/Support/ErrorHandling.h>
+#include <optional>
+#include <string>
+#include <vector>
 
-namespace fs = std::filesystem;
+using namespace utopia;
 
-void printHelp() {
-  std::cout << "Utopia Compiler v0.1.0\n"
-            << "Uso: utopia <file.utp> [options]\n\n"
-            << "Opciones:\n"
-            << "  -o <path>    Especificar nombre del ejecutable.\n"
-            << "  -O[0-3]      Nivel de optimización.\n"
-            << "  --run        Ejecutar tras compilar.\n"
-            << "  --emit-llvm   Guardar archivo LLVM IR (.ll)\n"
-            << "  --emit-asm    Guardar archivo ensamblador (.s)\n";
+void utopiaFatalErrorHandler(void *user_data, const char *reason,
+                             bool gen_crash_diag) {
+  std::cerr << "\033[1;31m[LLVM Fatal Error]\033[0m " << reason << std::endl;
+  exit(1);
 }
 
 int main(int argc, char **argv) {
-  if (argc < 2) {
-    printHelp();
-    return 1;
-  }
+  llvm::install_fatal_error_handler(utopiaFatalErrorHandler, nullptr);
 
   try {
-    utopia::CompileOptions opts;
-    bool shouldRun = false;
-    bool optOverride = false;
+    std::vector<std::string> args(argv + 1, argv + argc);
+    CompileOptions options;
+    std::optional<int> cliOptLevel;
+    fs::path startPath = fs::current_path();
 
-    for (int i = 1; i < argc; ++i) {
-      std::string arg = argv[i];
-      if (arg == "-o" && i + 1 < argc)
-        opts.outputPath = argv[++i];
-      else if (arg == "--run")
-        shouldRun = true;
-      else if (arg.substr(0, 2) == "-O") {
-        opts.optLevel = std::stoi(arg.substr(2));
-        optOverride = true;
-      } else if (opts.sourcePath.empty())
-        opts.sourcePath = arg;
-      else if (arg == "--emit-llvm")
-        opts.emitLLVM = true;
-      else if (arg == "--emit-asm")
-        opts.emitAsm = true;
-    }
-
-    fs::path projectRoot = utopia::findProjectRoot(opts.sourcePath);
-    utopia::ProjectConfig config;
-
-    if (!projectRoot.empty()) {
-      opts.projectRoot = projectRoot.string();
-      config = utopia::parseBuildManifest(projectRoot / "build.yaml");
-      opts.includeDirs = config.includeDirs;
-      opts.linkerFlags = config.linkerFlags;
-
-      fs::path inputPath(opts.sourcePath);
-      if (inputPath.extension() == ".yaml" || inputPath.extension() == ".yml") {
-        if (!config.resolvedSources.empty()) {
-          opts.sourcePath = config.resolvedSources[0].path;
-        } else {
-          throw std::runtime_error("Manifest does not define source files.");
+    for (auto it = args.begin(); it != args.end(); ++it) {
+      std::string_view arg = *it;
+      if (arg == "--emit-llvm") {
+        options.emitLLVM = true;
+      } else if (arg == "--emit-asm") {
+        options.emitAsm = true;
+      } else if (arg == "--jit") {
+        options.isJIT = true;
+      } else if (arg.starts_with("-O")) {
+        if (arg.length() > 2 && std::isdigit(arg[2])) {
+          cliOptLevel = std::stoi(std::string(arg.substr(2)));
         }
+      } else if (!arg.empty() && arg[0] != '-') {
+        startPath = fs::absolute(std::string(arg));
       }
-
-      if (!optOverride)
-        opts.optLevel = config.optLevel;
     }
 
-    opts.isDebug = (opts.optLevel == 0);
-
-    if (opts.outputPath.empty()) {
-      fs::path base = projectRoot.empty()
-                          ? fs::path(opts.sourcePath).parent_path()
-                          : projectRoot;
-      std::string subDir =
-          config.outputDir.empty() ? "build" : config.outputDir;
-      std::string binName = config.name.empty()
-                                ? fs::path(opts.sourcePath).stem().string()
-                                : config.name;
-      opts.outputPath = (base / subDir / binName).string();
-    }
-
-    fs::path outDir = fs::path(opts.outputPath).parent_path();
-    if (!outDir.empty() && !fs::exists(outDir)) {
-      fs::create_directories(outDir);
-    }
-
-    auto start = std::chrono::high_resolution_clock::now();
-
-    utopia::CompilerDriver driver(opts);
-    if (!driver.run())
+    fs::path projRoot = findProjectRoot(startPath);
+    if (projRoot.empty()) {
+      std::cerr << "Fatal: build.yaml not found in path chain.\n";
       return 1;
-
-    auto end = std::chrono::high_resolution_clock::now();
-    auto diff = std::chrono::duration<double, std::milli>(end - start).count();
-
-    std::cout << "[Success] Project built in " << diff << " ms\n";
-
-    if (shouldRun) {
-      std::string cmd = opts.outputPath;
-      if (!fs::path(cmd).is_absolute())
-        cmd = "./" + cmd;
-      cmd = "\"" + cmd + "\"";
-      return std::system(cmd.c_str());
     }
 
+    ProjectConfig config;
+    try {
+      config = parseBuildManifest(projRoot / "build.yaml");
+    } catch (const std::exception &e) {
+      std::cerr << "Manifest Error: " << e.what() << "\n";
+      return 1;
+    }
+
+    options.projectName = config.name;
+    options.projectRoot = projRoot.string();
+    options.outputDir = (projRoot / config.outputDir).string();
+
+    /* Resolution of stdlib path using CMake definition */
+#ifdef UTOPIA_SOURCE_DIR
+    fs::path stdlibPath =
+        fs::path(UTOPIA_SOURCE_DIR) / "libs" / "stdlib" / "lib";
+#else
+    fs::path stdlibPath =
+        projRoot.parent_path().parent_path() / "libs" / "stdlib" / "lib";
+#endif
+
+    options.stdlibRoot = stdlibPath.string();
+
+    options.linkerFlags = config.linkerFlags;
+    options.includeDirs = config.includeDirs;
+    options.optLevel = cliOptLevel.value_or(config.optLevel);
+
+    if (config.resolvedSources.empty()) {
+      std::cerr << "Fatal: No sources found in build.yaml\n";
+      return 1;
+    }
+
+    options.sourcePath = config.resolvedSources.front().path;
+    options.outputPath = (fs::path(options.outputDir) / config.name).string();
+
+    CompilerDriver driver(options);
+    if (!driver.run()) {
+      return 1;
+    }
   } catch (const std::exception &e) {
-    std::cerr << "[Fatal Error] " << e.what() << "\n";
+    std::cerr << "\033[1;31m[Utopia Runtime Error]\033[0m " << e.what()
+              << std::endl;
+    return 1;
+  } catch (...) {
+    std::cerr << "[Unknown Fatal Error] Utopia se cerró inesperadamente."
+              << std::endl;
     return 1;
   }
 
+  llvm::remove_fatal_error_handler();
   return 0;
 }

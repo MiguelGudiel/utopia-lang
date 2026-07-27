@@ -1,84 +1,95 @@
 #pragma once
+#include "utopia/AST/AST.hpp"
+#include <cstdlib>
+#include <iostream>
 
 namespace utopia {
 
-// Forward declarations for the vtable mapping
-// We only need pointers here, so don't include AST.hpp
-class ThisNode;
-class SuperNode;
-class StructDeclNode;
-class ExtensionNode;
-class MemberAccessNode;
-class BlockNode;
-class NullLiteralNode;
-class IfNode;
-class WhileNode;
-class ForNode;
-class BreakNode;
-class ContinueNode;
-class NullAssertNode;
-class LogicalNotNode;
-class NumberNode;
-class FloatNode;
-class BoolNode;
-class StringNode;
-class UnaryMinusNode;
-class SubscriptNode;
-class VariableNode;
-class AddressOfNode;
-class DerefNode;
-class NewNode;
-class DeleteNode;
-class MoveNode;
-class BinaryOpNode;
-class CallNode;
-class CastNode;
-class AssignNode;
-class VarDeclNode;
-class ReturnNode;
-class FunctionNode;
-class ProgramNode;
-class ModuleNode;
-
-class ASTVisitor {
+template <typename Derived, typename R> class ASTVisitor {
 public:
-  virtual ~ASTVisitor() = default;
+  R dispatch(const ASTNode *node) {
+    /* Trap null pointers at the traversal boundary to prevent silent
+     * propagation of unhandled expected types across the pipeline */
+    if (!node) [[unlikely]] {
+      std::cerr << "[Fatal] ASTVisitor dispatch encountered a null AST node.\n";
+      std::abort();
+    }
 
-  virtual void visit(ThisNode *node) = 0;
-  virtual void visit(SuperNode *node) = 0;
-  virtual void visit(StructDeclNode *node) = 0;
-  virtual void visit(ExtensionNode *node) = 0;
-  virtual void visit(MemberAccessNode *node) = 0;
-  virtual void visit(BlockNode *node) = 0;
-  virtual void visit(NullLiteralNode *node) = 0;
-  virtual void visit(IfNode *node) = 0;
-  virtual void visit(WhileNode *node) = 0;
-  virtual void visit(ForNode *node) = 0;
-  virtual void visit(BreakNode *node) = 0;
-  virtual void visit(ContinueNode *node) = 0;
-  virtual void visit(NullAssertNode *node) = 0;
-  virtual void visit(LogicalNotNode *node) = 0;
-  virtual void visit(NumberNode *node) = 0;
-  virtual void visit(FloatNode *node) = 0;
-  virtual void visit(BoolNode *node) = 0;
-  virtual void visit(StringNode *node) = 0;
-  virtual void visit(UnaryMinusNode *node) = 0;
-  virtual void visit(SubscriptNode *node) = 0;
-  virtual void visit(VariableNode *node) = 0;
-  virtual void visit(AddressOfNode *node) = 0;
-  virtual void visit(DerefNode *node) = 0;
-  virtual void visit(NewNode *node) = 0;
-  virtual void visit(DeleteNode *node) = 0;
-  virtual void visit(MoveNode *node) = 0;
-  virtual void visit(BinaryOpNode *node) = 0;
-  virtual void visit(CallNode *node) = 0;
-  virtual void visit(CastNode *node) = 0;
-  virtual void visit(AssignNode *node) = 0;
-  virtual void visit(VarDeclNode *node) = 0;
-  virtual void visit(ReturnNode *node) = 0;
-  virtual void visit(FunctionNode *node) = 0;
-  virtual void visit(ProgramNode *node) = 0;
-  virtual void visit(ModuleNode *node) = 0;
+    switch (node->kind) {
+    case NodeKind::Number:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const NumberNode *>(node));
+    case NodeKind::Boolean:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const BoolNode *>(node));
+    case NodeKind::Char:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const CharNode *>(node));
+    case NodeKind::Rune:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const RuneNode *>(node));
+    case NodeKind::String:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const StringNode *>(node));
+    case NodeKind::Variable:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const VariableNode *>(node));
+    case NodeKind::UnaryOp:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const UnaryOpNode *>(node));
+    case NodeKind::BinaryOp:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const BinaryOpNode *>(node));
+    case NodeKind::Module:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const ModuleNode *>(node));
+    case NodeKind::Annotation:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const AnnotationNode *>(node));
+    case NodeKind::AnnotationDecl:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const AnnotationDeclNode *>(node));
+    case NodeKind::VarDecl:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const VarDeclNode *>(node));
+    case NodeKind::Assign:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const AssignNode *>(node));
+    case NodeKind::Block:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const BlockNode *>(node));
+    case NodeKind::FunctionDecl:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const FunctionDeclNode *>(node));
+    case NodeKind::FunctionCall:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const FunctionCallNode *>(node));
+    case NodeKind::Return:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const ReturnNode *>(node));
+    case NodeKind::Cast:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const CastNode *>(node));
+    case NodeKind::ParamDecl:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const ParamDeclNode *>(node));
+    case NodeKind::StructDecl:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const StructDeclNode *>(node));
+    case NodeKind::ClassDecl:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const ClassDeclNode *>(node));
+    case NodeKind::MemberAccess:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const MemberAccessNode *>(node));
+    default:
+      /* Dispatch failure routing to prevent silent segfaults on unmapped nodes
+       */
+      std::cerr << "[Fatal] ASTVisitor dispatch failure. Unhandled NodeKind: "
+                << static_cast<int>(node->kind) << '\n';
+      std::abort();
+    }
+  }
 };
 
 } // namespace utopia

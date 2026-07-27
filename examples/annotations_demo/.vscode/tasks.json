@@ -4,12 +4,13 @@
     {
       "label": "compile-utopia",
       "type": "shell",
-      "command": "/home/miguelgudiel/Documentos/dev/allparuna/utopia/utopia-lang/build/tools/utopia/utopia",
+      "command": "/home/miguelgudiel/Documentos/dev/allparuna/utopia/utopia-lang/build/Debug/tools/utopia/utopia",
       "args": [
         "${file}",
         "-O0",
         "--emit-llvm",
-        "--emit-asm"
+        "--emit-asm",
+        //"--jit"
       ],
       "group": {
         "kind": "build",
