@@ -383,6 +383,12 @@ SemaResult TypeCheckPass::visit(const UnaryOpNode *node) {
     if (unqualExprType->isPointerType()) {
       resType =
           static_cast<const PointerType *>(unqualExprType)->getPointeeType();
+
+      // Explicitly prevent dereferencing void*
+      if (resType->isVoid()) {
+        return ctx->reportError(node->line, node->column, node->length,
+                                "Cannot dereference a void pointer");
+      }
     } else if (unqualExprType->isReferenceType()) {
       resType =
           static_cast<const ReferenceType *>(unqualExprType)->getPointeeType();
@@ -414,6 +420,13 @@ SemaResult TypeCheckPass::visit(const BinaryOpNode *node) {
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,
                                      "Invalid operands for binary operation"});
 
+  // Prevent pointer arithmetic and other invalid binary ops
+  if (!(*lhs)->isNumeric() || !(*rhs)->isNumeric()) {
+    return ctx->reportError(
+        node->line, node->column, node->length,
+        "Binary operations are currently restricted to numeric types.");
+  }
+
   if (!canImplicitlyCast(*lhs, *rhs)) {
     return ctx->reportError(node->line, node->column, node->length,
                             "Type mismatch: " + (*lhs)->toString() + " vs " +
@@ -427,6 +440,12 @@ SemaResult TypeCheckPass::visit(const BinaryOpNode *node) {
 
 SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
   const Type *declType = node->type;
+
+  // Prevent variables of type 'void'
+  if (declType->isVoid()) {
+    return ctx->reportError(node->line, node->column, node->length,
+                            "Variables cannot be of type 'void'");
+  }
 
   if (declType->isConstQualified() && !node->initializer &&
       !declType->isReferenceType()) {
@@ -574,6 +593,11 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
 }
 
 SemaResult TypeCheckPass::visit(const ParamDeclNode *node) {
+  // Prevent parameters of type 'void'
+  if (node->type->isVoid()) {
+    return ctx->reportError(node->line, node->column, node->length,
+                            "Parameters cannot be of type 'void'");
+  }
   return node->type;
 }
 
@@ -756,13 +780,21 @@ SemaResult TypeCheckPass::visit(const CastNode *node) {
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,
                                      "Cascading error in cast"});
 
-  if (!(*srcType)->isNumeric() || !destType->isNumeric()) {
-    return ctx->reportError(node->line, node->column, node->length,
-                            "Casts are currently restricted to numeric types");
+  bool isSrcNumeric = (*srcType)->isNumeric();
+  bool isDestNumeric = destType->isNumeric();
+  bool isSrcPtr = (*srcType)->isPointerType();
+  bool isDestPtr = destType->isPointerType();
+
+  // Support numeric conversions, pointer <-> pointer casts (e.g. T* to void* or
+  // void* to T*), and pointer <-> integer conversions.
+  if ((isSrcNumeric && isDestNumeric) || (isSrcPtr && isDestPtr) ||
+      (isSrcPtr && isDestNumeric) || (isSrcNumeric && isDestPtr)) {
+    node->exprType = destType;
+    return destType;
   }
 
-  node->exprType = destType;
-  return destType;
+  return ctx->reportError(node->line, node->column, node->length,
+                          "Invalid cast: unsupported type conversion");
 }
 
 SemaResult TypeCheckPass::visit(const ReturnNode *node) {

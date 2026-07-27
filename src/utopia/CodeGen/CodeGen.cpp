@@ -77,6 +77,19 @@ llvm::Value *CodeGen::createImplicitCast(llvm::Value *src, llvm::Type *destTy) {
   if (srcTy == destTy)
     return src;
 
+  // Pointer cast support (e.g. T* to void* or void* to T*)
+  if (srcTy->isPointerTy() && destTy->isPointerTy()) {
+    return builder.CreateBitCast(src, destTy);
+  }
+  // Pointer to integer casts (reinterpret_cast equivalent)
+  if (srcTy->isPointerTy() && destTy->isIntegerTy()) {
+    return builder.CreatePtrToInt(src, destTy);
+  }
+  // Integer to pointer casts
+  if (srcTy->isIntegerTy() && destTy->isPointerTy()) {
+    return builder.CreateIntToPtr(src, destTy);
+  }
+
   if (srcTy->isIntegerTy() && destTy->isIntegerTy()) {
     return builder.CreateIntCast(src, destTy, true);
   }
