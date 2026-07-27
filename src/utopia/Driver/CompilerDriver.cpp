@@ -28,19 +28,22 @@ fs::path CompilerDriver::getObjPath(const std::string &filename,
   fs::path absInternal = fs::absolute(internalPath);
   fs::path absProj = fs::absolute(projRoot);
   fs::path absStdlib = fs::absolute(options.stdlibRoot);
+  fs::path absPrelude = fs::absolute(options.preludeRoot);
 
   std::string internalStr = absInternal.string();
   std::string projStr = absProj.string();
   std::string stdlibStr = absStdlib.string();
+  std::string preludeStr = absPrelude.string();
 
-  /* Map the artifact to its specific project domain to maintain clean build
-   * trees */
   if (internalStr.find(projStr) == 0) {
     relPath = fs::relative(absInternal, absProj);
     targetProjectName = options.projectName;
   } else if (internalStr.find(stdlibStr) == 0) {
     relPath = fs::relative(absInternal, absStdlib);
     targetProjectName = "stdlib";
+  } else if (internalStr.find(preludeStr) == 0) {
+    relPath = fs::relative(absInternal, absPrelude);
+    targetProjectName = "prelude";
   } else {
     relPath = absInternal.lexically_relative(fs::current_path());
     targetProjectName = "external";
@@ -84,6 +87,7 @@ bool CompilerDriver::run() {
   ModuleLoaderConfig modConfig;
   modConfig.projectRoot = options.projectRoot;
   modConfig.stdlibRoot = options.stdlibRoot;
+  modConfig.preludeRoot = options.preludeRoot;
 
   ModuleLoader loader(astCtx, modConfig, diagEngine);
 

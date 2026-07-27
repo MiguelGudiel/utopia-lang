@@ -13,6 +13,7 @@ namespace utopia {
 struct ModuleLoaderConfig {
   std::filesystem::path projectRoot;
   std::filesystem::path stdlibRoot;
+  std::filesystem::path preludeRoot;
 };
 
 class ModuleLoader {

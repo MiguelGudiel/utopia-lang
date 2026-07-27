@@ -58,16 +58,21 @@ int main(int argc, char **argv) {
     options.projectRoot = projRoot.string();
     options.outputDir = (projRoot / config.outputDir).string();
 
-    /* Resolution of stdlib path using CMake definition */
+    /* Resolution of stdlib and prelude paths */
 #ifdef UTOPIA_SOURCE_DIR
     fs::path stdlibPath =
         fs::path(UTOPIA_SOURCE_DIR) / "libs" / "stdlib" / "lib";
+    fs::path preludePath =
+        fs::path(UTOPIA_SOURCE_DIR) / "libs" / "prelude" / "lib";
 #else
     fs::path stdlibPath =
         projRoot.parent_path().parent_path() / "libs" / "stdlib" / "lib";
+    fs::path preludePath =
+        projRoot.parent_path().parent_path() / "libs" / "prelude" / "lib";
 #endif
 
     options.stdlibRoot = stdlibPath.string();
+    options.preludeRoot = preludePath.string();
 
     options.linkerFlags = config.linkerFlags;
     options.includeDirs = config.includeDirs;

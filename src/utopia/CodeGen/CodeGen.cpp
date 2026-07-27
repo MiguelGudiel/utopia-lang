@@ -105,8 +105,8 @@ llvm::Function *CodeGen::getOrCreateFunction(const FunctionDeclNode *node) {
     paramTypes.push_back(getLLVMType(p->type));
   }
 
-  llvm::FunctionType *funcType =
-      llvm::FunctionType::get(getLLVMType(node->returnType), paramTypes, false);
+  llvm::FunctionType *funcType = llvm::FunctionType::get(
+      getLLVMType(node->returnType), paramTypes, node->isVariadic);
 
   func = llvm::Function::Create(funcType, llvm::Function::ExternalLinkage,
                                 irName, mod);
@@ -872,9 +872,11 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
 
     if (node->target->kind == NodeKind::MemberAccess) {
       auto ma = static_cast<const MemberAccessNode *>(node->target);
-      llvm::Value *objPtr = getLValue(ma->object);
-      argsArgs.push_back(objPtr);
-    } else if (node->resolvedFunc->isMethod) {
+      if (!node->resolvedFunc->isExtern) {
+        llvm::Value *objPtr = getLValue(ma->object);
+        argsArgs.push_back(objPtr);
+      }
+    } else if (node->resolvedFunc->isMethod && !node->resolvedFunc->isExtern) {
       llvm::Type *allocTy = getLLVMType(node->exprType);
       llvm::AllocaInst *instance = createEntryBlockAlloca(allocTy, "instance");
 
@@ -903,7 +905,7 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
     }
   }
 
-  unsigned argIdx = argsArgs.empty() ? 0 : 1;
+  unsigned argIdx = argsArgs.empty() ? 0 : argsArgs.size();
   for (const auto &arg : node->args) {
     llvm::Value *argVal = nullptr;
 
@@ -911,9 +913,16 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
       argVal = getLValue(arg);
     } else {
       argVal = dispatch(arg);
-      if (func && argVal && argIdx < func->arg_size()) {
-        llvm::Type *paramTy = func->getFunctionType()->getParamType(argIdx);
-        argVal = createImplicitCast(argVal, paramTy);
+
+      if (func && argVal) {
+        if (argIdx < func->arg_size()) {
+          llvm::Type *paramTy = func->getFunctionType()->getParamType(argIdx);
+          argVal = createImplicitCast(argVal, paramTy);
+        } else if (func->isVarArg()) {
+          if (argVal->getType()->isFloatTy()) {
+            argVal = builder.CreateFPExt(argVal, builder.getDoubleTy());
+          }
+        }
       }
     }
 

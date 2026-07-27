@@ -13,6 +13,14 @@ ModuleLoader::resolveImportURI(std::string_view uri,
                                const fs::path &currentDir) {
   std::string uriStr(uri);
 
+  if (uriStr == "prelude") {
+    fs::path target = config.preludeRoot / "prelude.utp";
+    if (fs::exists(target)) {
+      return fs::weakly_canonical(target);
+    }
+    return std::unexpected("Prelude module not found at: " + target.string());
+  }
+
   if (uriStr.starts_with("utopia:")) {
     std::string libName = uriStr.substr(7);
     fs::path target = config.stdlibRoot / libName;
@@ -100,6 +108,14 @@ ModuleNode *ModuleLoader::loadModule(const std::string &importURI,
 
   moduleCache[key] = module;
   std::vector<ModuleNode *> resolvedImports;
+
+  // Implicitly load the prelude into all modules except the prelude itself
+  if (importURI != "prelude") {
+    ModuleNode *preludeMod = loadModule("prelude", currentFileDir);
+    if (preludeMod) {
+      resolvedImports.push_back(preludeMod);
+    }
+  }
 
   for (std::string_view imp : module->rawImports) {
     ModuleNode *loaded = loadModule(std::string(imp), absPath.parent_path());

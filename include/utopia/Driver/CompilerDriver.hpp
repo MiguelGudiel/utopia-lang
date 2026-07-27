@@ -14,6 +14,7 @@ struct CompileOptions {
   std::string projectRoot;
   std::string outputDir;
   std::string stdlibRoot;
+  std::string preludeRoot;
   std::vector<std::string> includeDirs;
   std::vector<std::string> linkerFlags;
 

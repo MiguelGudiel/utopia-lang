@@ -14,6 +14,8 @@ enum class TokenType : uint8_t {
   TYPE_KW,
   CONST_KW,
   ANNOTATION_KW,
+  EXTERN_KW,
+  ELLIPSIS,
   AS,
   PLUS,
   MINUS,

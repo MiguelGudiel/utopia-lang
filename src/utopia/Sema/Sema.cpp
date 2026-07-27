@@ -116,7 +116,36 @@ SemaResult TypeCheckPass::visit(const AnnotationNode *node) {
 }
 
 void DeclCollectorPass::visit(const FunctionDeclNode *node) {
-  if (node->mangledName.empty()) {
+  if (node->isExtern) {
+    for (const auto *ann : node->annotations) {
+      if (ann->name == "extern") {
+        if (ann->args.size() == 1 && ann->args[0]->kind == NodeKind::String) {
+          node->externAlias =
+              static_cast<const StringNode *>(ann->args[0])->value;
+        } else {
+          SemaResult err = ctx->reportError(
+              ann->line, ann->column, ann->length,
+              "The @extern annotation requires exactly one string "
+              "literal argument.");
+        }
+      }
+    }
+
+    if (node->isMethod && node->externAlias.empty()) {
+      SemaResult err =
+          ctx->reportError(node->line, node->column, node->length,
+                           "Extern methods must specify an @extern annotation "
+                           "reflecting the target C function mapping.");
+    }
+
+    if (!node->externAlias.empty()) {
+      const_cast<FunctionDeclNode *>(node)->mangledName =
+          std::string(node->externAlias);
+    } else {
+      const_cast<FunctionDeclNode *>(node)->mangledName =
+          std::string(node->name);
+    }
+  } else if (node->mangledName.empty()) {
     const_cast<FunctionDeclNode *>(node)->mangledName = Mangler::mangle(node);
   }
   ctx->addDecl(node->name, node);
@@ -149,8 +178,34 @@ void DeclCollectorPass::visit(const ClassDeclNode *node) {
         Mangler::mangle(node->destructor, std::string(node->name));
   }
   for (auto *method : node->methods) {
-    const_cast<FunctionDeclNode *>(method)->mangledName =
-        Mangler::mangle(method, std::string(node->name));
+    if (method->isExtern) {
+      for (const auto *ann : method->annotations) {
+        if (ann->name == "extern") {
+          if (ann->args.size() == 1 && ann->args[0]->kind == NodeKind::String) {
+            const_cast<FunctionDeclNode *>(method)->externAlias =
+                static_cast<const StringNode *>(ann->args[0])->value;
+          } else {
+            SemaResult err =
+                ctx->reportError(ann->line, ann->column, ann->length,
+                                 "The @extern annotation requires exactly one "
+                                 "string literal argument.");
+          }
+        }
+      }
+
+      if (method->externAlias.empty()) {
+        SemaResult err = ctx->reportError(
+            method->line, method->column, method->length,
+            "Extern methods must specify an @extern annotation "
+            "reflecting the target C function mapping.");
+      } else {
+        const_cast<FunctionDeclNode *>(method)->mangledName =
+            std::string(method->externAlias);
+      }
+    } else {
+      const_cast<FunctionDeclNode *>(method)->mangledName =
+          Mangler::mangle(method, std::string(node->name));
+    }
   }
 }
 
@@ -159,8 +214,9 @@ bool TypeCheckPass::run(const ModuleNode *module, SemaContext &context) {
   auto result = dispatch(module);
 
   if (!result && !ctx->hasErrors()) {
-    ctx->reportError(result.error().line, result.error().column,
-                     result.error().length, result.error().message);
+    SemaResult err =
+        ctx->reportError(result.error().line, result.error().column,
+                         result.error().length, result.error().message);
   }
 
   return !ctx->hasErrors();
@@ -551,9 +607,10 @@ SemaResult TypeCheckPass::visit(const FunctionDeclNode *node) {
     }
 
     if (!node->returnType->isVoid() && !guaranteesReturn(node->body)) {
-      auto error = ctx->reportError(node->line, node->column, node->length,
-                       "Non-void function must explicitly return a value in "
-                       "all control paths.");
+      auto error = ctx->reportError(
+          node->line, node->column, node->length,
+          "Non-void function must explicitly return a value in "
+          "all control paths.");
     }
   }
 
@@ -598,11 +655,15 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
         const FunctionDeclNode *bestMatch = nullptr;
         for (const auto *method : clsDecl->methods) {
           if (method->name == ma->memberName) {
-            if (method->params.size() - 1 == argTypes.size()) {
+            size_t expectedArgs = method->isExtern ? method->params.size()
+                                                   : method->params.size() - 1;
+            if (expectedArgs == argTypes.size() ||
+                (method->isVariadic && argTypes.size() >= expectedArgs)) {
               bool match = true;
-              for (size_t i = 0; i < argTypes.size(); ++i) {
+              size_t paramOffset = method->isExtern ? 0 : 1;
+              for (size_t i = 0; i < expectedArgs; ++i) {
                 if (!canImplicitlyCast(argTypes[i],
-                                       method->params[i + 1]->type)) {
+                                       method->params[i + paramOffset]->type)) {
                   match = false;
                   break;
                 }
@@ -631,50 +692,54 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
         static_cast<const VariableNode *>(node->target)->name;
     auto decls = ctx->lookup(name);
 
-    if (!decls.empty()) {
-      const FunctionDeclNode *bestMatch = nullptr;
-      bool isConstructorCall = false;
+    if (decls.empty()) {
+      return ctx->reportError(node->line, node->column, node->length,
+                              "Undefined function: '" + std::string(name) +
+                                  "'");
+    }
 
-      for (auto targetDecl : decls) {
-        if (targetDecl->kind == NodeKind::FunctionDecl) {
-          auto fDecl = static_cast<const FunctionDeclNode *>(targetDecl);
-          size_t expectedArgs = fDecl->isMethod ? (fDecl->params.size() - 1)
-                                                : fDecl->params.size();
+    const FunctionDeclNode *bestMatch = nullptr;
+    bool isConstructorCall = false;
 
-          if (expectedArgs == argTypes.size()) {
-            bool match = true;
-            size_t paramOffset = fDecl->isMethod ? 1 : 0;
+    for (auto targetDecl : decls) {
+      if (targetDecl->kind == NodeKind::FunctionDecl) {
+        auto fDecl = static_cast<const FunctionDeclNode *>(targetDecl);
+        size_t expectedArgs = (fDecl->isMethod && !fDecl->isExtern)
+                                  ? (fDecl->params.size() - 1)
+                                  : fDecl->params.size();
 
-            for (size_t i = 0; i < argTypes.size(); ++i) {
-              if (!canImplicitlyCast(argTypes[i],
-                                     fDecl->params[i + paramOffset]->type)) {
-                match = false;
-                break;
-              }
-            }
+        if (expectedArgs == argTypes.size() ||
+            (fDecl->isVariadic && argTypes.size() >= expectedArgs)) {
+          bool match = true;
+          size_t paramOffset = (fDecl->isMethod && !fDecl->isExtern) ? 1 : 0;
 
-            if (match) {
-              bestMatch = fDecl;
-              /* Resolve strict constructor initialization constraints */
-              if (fDecl->isMethod &&
-                  ctx->astCtx.getRecordType(name) != nullptr) {
-                isConstructorCall = true;
-              }
+          for (size_t i = 0; i < expectedArgs; ++i) {
+            if (!canImplicitlyCast(argTypes[i],
+                                   fDecl->params[i + paramOffset]->type)) {
+              match = false;
               break;
             }
           }
-        }
-      }
 
-      if (bestMatch) {
-        const_cast<FunctionCallNode *>(node)->resolvedFunc = bestMatch;
-        if (isConstructorCall) {
-          node->exprType = ctx->astCtx.getRecordType(name);
-        } else {
-          node->exprType = bestMatch->returnType;
+          if (match) {
+            bestMatch = fDecl;
+            if (fDecl->isMethod && ctx->astCtx.getRecordType(name) != nullptr) {
+              isConstructorCall = true;
+            }
+            break;
+          }
         }
-        return node->exprType;
       }
+    }
+
+    if (bestMatch) {
+      const_cast<FunctionCallNode *>(node)->resolvedFunc = bestMatch;
+      if (isConstructorCall) {
+        node->exprType = ctx->astCtx.getRecordType(name);
+      } else {
+        node->exprType = bestMatch->returnType;
+      }
+      return node->exprType;
     }
   }
 

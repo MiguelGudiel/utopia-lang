@@ -38,3 +38,7 @@ const float32 FLOAT32_MAX = 3.40282347e+38;
 const float32 FLOAT32_MIN = 1.17549435e-38;
 const float64 FLOAT64_MAX = 1.7976931348623157e+308;
 const float64 FLOAT64_MIN = 2.2250738585072014e-308;
+
+// Foreign C Runtime Integration
+@extern("printf")
+extern int32 print(const uint8* format, ...);

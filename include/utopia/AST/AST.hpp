@@ -176,11 +176,16 @@ struct FunctionDeclNode : public DeclNode {
   BlockNode *body;
   bool isConst;
   bool isMethod;
+  bool isExtern;
+  bool isVariadic;
+  mutable std::string_view externAlias;
 
   FunctionDeclNode(const Type *ret, std::string_view n, int l, int c,
-                   bool isC = false, bool isMeth = false)
+                   bool isC = false, bool isMeth = false, bool isExt = false,
+                   bool isVar = false)
       : DeclNode(NodeKind::FunctionDecl, l, c), returnType(ret), name(n),
-        body(nullptr), isConst(isC), isMethod(isMeth) {}
+        body(nullptr), isConst(isC), isMethod(isMeth), isExtern(isExt),
+        isVariadic(isVar) {}
 };
 
 struct FunctionCallNode : public ExprNode {

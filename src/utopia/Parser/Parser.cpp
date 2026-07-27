@@ -166,7 +166,15 @@ AnnotationNode *Parser::parseAnnotation() {
   advance(); /* consume '@' */
 
   std::string_view name = currentToken().value;
-  expect(TokenType::IDENTIFIER, "Expected annotation name");
+  if (currentToken().type == TokenType::IDENTIFIER ||
+      currentToken().type == TokenType::EXTERN_KW ||
+      currentToken().type == TokenType::TYPE_KW ||
+      currentToken().type == TokenType::CONST_KW ||
+      currentToken().type == TokenType::ANNOTATION_KW) {
+    advance();
+  } else {
+    expect(TokenType::IDENTIFIER, "Expected annotation name");
+  }
 
   std::vector<ExprNode *> args;
   if (match(TokenType::LPAREN)) {
@@ -325,6 +333,7 @@ ASTNode *Parser::parseStatement() {
     node = parseClassDecl();
   } else if (currentToken().type == TokenType::TYPE_KW ||
              currentToken().type == TokenType::CONST_KW ||
+             currentToken().type == TokenType::EXTERN_KW ||
              (currentToken().type == TokenType::IDENTIFIER &&
               peekToken().type == TokenType::IDENTIFIER)) {
     node = parseDeclarationOrFunction();
@@ -523,6 +532,7 @@ DeclNode *Parser::parseClassDecl() {
       continue;
     }
 
+    bool isExtern = match(TokenType::EXTERN_KW);
     int mLine = currentToken().line;
     int mCol = currentToken().column;
     const Type *memType = parseType();
@@ -531,11 +541,20 @@ DeclNode *Parser::parseClassDecl() {
 
     if (match(TokenType::LPAREN)) {
       std::vector<ParamDeclNode *> params;
-      params.push_back(astCtx.create<ParamDeclNode>(
-          astCtx.getPointerType(classTy), "this", mLine, mCol, 4));
+      if (!isExtern) {
+        params.push_back(astCtx.create<ParamDeclNode>(
+            astCtx.getPointerType(classTy), "this", mLine, mCol, 4));
+      }
 
+      bool isVariadic = false;
       while (currentToken().type != TokenType::RPAREN &&
              currentToken().type != TokenType::EOF_TOK) {
+
+        if (match(TokenType::ELLIPSIS)) {
+          isVariadic = true;
+          break;
+        }
+
         const Type *pType = parseType();
         std::string_view pName = currentToken().value;
         expect(TokenType::IDENTIFIER, "Expected parameter name");
@@ -546,16 +565,26 @@ DeclNode *Parser::parseClassDecl() {
       }
       expect(TokenType::RPAREN, "Expected ')'");
 
-      auto method = astCtx.create<FunctionDeclNode>(memType, memName, mLine,
-                                                    mCol, false, true);
+      auto method = astCtx.create<FunctionDeclNode>(
+          memType, memName, mLine, mCol, false, true, isExtern, isVariadic);
       method->params = astCtx.copyArray<ParamDeclNode *>(params);
       method->annotations = memberAnnotations;
       if (!doc.empty())
         method->docString = astCtx.copyString(doc);
 
-      method->body = parseBlock();
+      if (isExtern) {
+        expect(TokenType::SEMICOLON,
+               "Expected ';' after extern method declaration");
+      } else {
+        method->body = parseBlock();
+      }
       methods.push_back(method);
     } else {
+      if (isExtern) {
+        reportError(mLine, mCol, memName.length(),
+                    "Variables cannot be declared as extern.");
+        throw ParseException();
+      }
       expect(TokenType::SEMICOLON, "Expected ';'");
 
       auto field = astCtx.create<VarDeclNode>(memType, memName, nullptr, mLine,
@@ -590,6 +619,7 @@ DeclNode *Parser::parseDeclarationOrFunction() {
   int line = currentToken().line;
   int col = currentToken().column;
 
+  bool isExtern = match(TokenType::EXTERN_KW);
   const Type *nodeType = parseType();
 
   std::string_view id = currentToken().value;
@@ -599,9 +629,16 @@ DeclNode *Parser::parseDeclarationOrFunction() {
   if (currentToken().type == TokenType::LPAREN) {
     advance();
     std::vector<ParamDeclNode *> params;
+    bool isVariadic = false;
 
     while (currentToken().type != TokenType::RPAREN &&
            currentToken().type != TokenType::EOF_TOK) {
+
+      if (match(TokenType::ELLIPSIS)) {
+        isVariadic = true;
+        break;
+      }
+
       int pLine = currentToken().line;
       int pCol = currentToken().column;
       const Type *pType = parseType();
@@ -619,12 +656,25 @@ DeclNode *Parser::parseDeclarationOrFunction() {
 
     bool isFuncConst = match(TokenType::CONST_KW);
 
-    auto funcDecl =
-        astCtx.create<FunctionDeclNode>(nodeType, id, line, col, isFuncConst);
+    auto funcDecl = astCtx.create<FunctionDeclNode>(
+        nodeType, id, line, col, isFuncConst, false, isExtern, isVariadic);
     funcDecl->params = astCtx.copyArray<ParamDeclNode *>(params);
-    funcDecl->body = parseBlock();
-    funcDecl->length = funcDecl->body->column + funcDecl->body->length - col;
+
+    if (isExtern) {
+      int endCol = currentToken().column + currentToken().value.length();
+      expect(TokenType::SEMICOLON,
+             "Expected ';' after extern function declaration");
+      funcDecl->length = endCol - col;
+    } else {
+      funcDecl->body = parseBlock();
+      funcDecl->length = funcDecl->body->column + funcDecl->body->length - col;
+    }
     return funcDecl;
+  }
+
+  if (isExtern) {
+    reportError(line, col, idLen, "Variables cannot be declared as extern.");
+    throw ParseException();
   }
 
   ExprNode *init = nullptr;
@@ -885,7 +935,42 @@ ExprNode *Parser::parsePrimary() {
     std::string_view inner = currentToken().value;
     int len = inner.length() + 2;
     advance();
-    return astCtx.create<StringNode>(inner, line, col, len);
+
+    std::string unescaped;
+    unescaped.reserve(inner.length());
+    for (size_t i = 0; i < inner.length(); ++i) {
+      if (inner[i] == '\\' && i + 1 < inner.length()) {
+        ++i;
+        switch (inner[i]) {
+        case 'n':
+          unescaped += '\n';
+          break;
+        case 't':
+          unescaped += '\t';
+          break;
+        case 'r':
+          unescaped += '\r';
+          break;
+        case '0':
+          unescaped += '\0';
+          break;
+        case '\\':
+          unescaped += '\\';
+          break;
+        case '"':
+          unescaped += '"';
+          break;
+        default:
+          unescaped += inner[i];
+          break;
+        }
+      } else {
+        unescaped += inner[i];
+      }
+    }
+
+    std::string_view finalStr = astCtx.copyString(unescaped);
+    return astCtx.create<StringNode>(finalStr, line, col, len);
   }
 
   if (currentToken().type == TokenType::IDENTIFIER) {
