@@ -362,7 +362,10 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
     if (varNode->isField) {
       SymbolInfo sym = cgCtx.lookupDetailed("this");
 
-      llvm::Value *thisPtr = sym.value;
+      llvm::Value *thisAddr = sym.value;
+      // Recuperar el puntero interno del "this" alojado
+      llvm::Value *thisPtr =
+          builder.CreateLoad(builder.getPtrTy(), thisAddr, "this.val");
       llvm::Type *llvmBaseTy = getLLVMType(varNode->parentType);
 
       return builder.CreateStructGEP(llvmBaseTy, thisPtr, varNode->fieldIndex,
@@ -512,9 +515,11 @@ llvm::Value *CodeGen::visit(const VariableNode *node) {
   if (node->isField) {
     SymbolInfo sym = cgCtx.lookupDetailed("this");
 
-    llvm::Value *thisPtr = sym.value;
-    llvm::Type *llvmBaseTy = getLLVMType(node->parentType);
+    llvm::Value *thisAddr = sym.value;
+    llvm::Value *thisPtr =
+        builder.CreateLoad(builder.getPtrTy(), thisAddr, "this.val");
 
+    llvm::Type *llvmBaseTy = getLLVMType(node->parentType);
     llvm::Value *gep = builder.CreateStructGEP(llvmBaseTy, thisPtr,
                                                node->fieldIndex, node->name);
     return builder.CreateLoad(getLLVMType(node->exprType), gep);
@@ -523,10 +528,6 @@ llvm::Value *CodeGen::visit(const VariableNode *node) {
   llvm::Value *lval = getLValue(node);
   if (!lval)
     return nullptr;
-
-  if (llvm::isa<llvm::Argument>(lval)) {
-    return lval;
-  }
 
   const Type *loadTy = node->exprType;
   if (loadTy->isReferenceType()) {
@@ -789,22 +790,6 @@ llvm::Value *CodeGen::visit(const AssignNode *node) {
     return nullptr;
   }
 
-  if (node->target->kind == NodeKind::Variable) {
-    std::string_view varName =
-        static_cast<const VariableNode *>(node->target)->name;
-    SymbolInfo sym = cgCtx.lookupDetailed(varName);
-
-    if (sym.isDirectAddress && llvm::isa<llvm::Argument>(lval)) {
-      llvm::Argument *arg = llvm::cast<llvm::Argument>(lval);
-      llvm::AllocaInst *alloca = createEntryBlockAlloca(
-          arg->getType(), std::string(arg->getName()) + ".addr");
-      builder.CreateStore(arg, alloca);
-
-      cgCtx.bind(varName, alloca, true);
-      lval = alloca;
-    }
-  }
-
   if (node->value->kind == NodeKind::FunctionCall) {
     auto *callNode = static_cast<const FunctionCallNode *>(node->value);
     if (callNode->target->kind == NodeKind::Variable) {
@@ -850,9 +835,18 @@ llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
 
   unsigned idx = 0;
   for (auto &arg : func->args()) {
-    std::string_view pName = node->params[idx++]->name;
+    const ParamDeclNode *paramDecl = node->params[idx];
+    std::string_view pName = paramDecl->name;
     arg.setName(pName);
-    cgCtx.bind(pName, &arg, true);
+
+    llvm::Type *argType = arg.getType();
+    llvm::AllocaInst *alloca =
+        createEntryBlockAlloca(argType, std::string(pName) + ".addr");
+    builder.CreateStore(&arg, alloca);
+
+    bool isRef = paramDecl->type->isReferenceType();
+    cgCtx.bind(pName, alloca, !isRef);
+    idx++;
   }
 
   dispatch(node->body);

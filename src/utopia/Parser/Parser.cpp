@@ -192,6 +192,120 @@ AnnotationNode *Parser::parseAnnotation() {
                                        line, col, len);
 }
 
+std::vector<ParamDeclNode *> Parser::parseParameterList(const Type *classTy,
+                                                        bool &isVariadic) {
+  std::vector<ParamDeclNode *> params;
+  isVariadic = false;
+  bool inNamedBlock = false;
+  bool optionalPositionalStarted = false;
+
+  if (classTy) {
+    params.push_back(astCtx.create<ParamDeclNode>(
+        astCtx.getPointerType(classTy), "this", nullptr, false, false,
+        currentToken().line, currentToken().column, 4));
+  }
+
+  while (currentToken().type == TokenType::COMMENT)
+    advance();
+
+  while (currentToken().type != TokenType::RPAREN &&
+         currentToken().type != TokenType::EOF_TOK) {
+
+    while (currentToken().type == TokenType::COMMENT)
+      advance();
+    if (currentToken().type == TokenType::RPAREN)
+      break;
+
+    if (match(TokenType::ELLIPSIS)) {
+      isVariadic = true;
+      break;
+    }
+
+    if (!inNamedBlock && match(TokenType::LBRACE)) {
+      inNamedBlock = true;
+      while (currentToken().type == TokenType::COMMENT)
+        advance();
+      if (currentToken().type == TokenType::RBRACE) {
+        // Empty named block permitted
+      }
+    }
+
+    if (inNamedBlock && currentToken().type == TokenType::RBRACE) {
+      advance();
+      break;
+    }
+
+    int pLine = currentToken().line;
+    int pCol = currentToken().column;
+
+    bool isRequired = match(TokenType::REQUIRED_KW);
+    if (isRequired && !inNamedBlock) {
+      reportError(
+          pLine, pCol, 8,
+          "The 'required' modifier can only be applied to named parameters.");
+      throw ParseException();
+    }
+
+    const Type *pType = parseType();
+    std::string_view pName = currentToken().value;
+    int pLen = (int)pName.length();
+    expect(TokenType::IDENTIFIER, "Expected parameter name.");
+
+    ExprNode *defVal = nullptr;
+    if (match(TokenType::ASSIGN)) {
+      defVal = parseExpression();
+    }
+
+    if (!inNamedBlock) {
+      if (defVal) {
+        optionalPositionalStarted = true;
+      } else if (optionalPositionalStarted) {
+        reportError(pLine, pCol, pLen,
+                    "Mandatory positional parameters cannot appear after "
+                    "optional positional parameters.");
+        throw ParseException();
+      }
+    } else {
+      if (isRequired && defVal) {
+        reportError(pLine, pCol, pLen,
+                    "Required named parameter '" + std::string(pName) +
+                        "' cannot have a default value.");
+        throw ParseException();
+      }
+    }
+
+    for (auto *p : params) {
+      if (p->name == pName) {
+        reportError(pLine, pCol, pLen,
+                    "Redefinition of parameter '" + std::string(pName) + "'.");
+        throw ParseException();
+      }
+    }
+
+    params.push_back(astCtx.create<ParamDeclNode>(
+        pType, pName, defVal, inNamedBlock, isRequired, pLine, pCol, pLen));
+
+    while (currentToken().type == TokenType::COMMENT)
+      advance();
+
+    if (!match(TokenType::COMMA)) {
+      if (inNamedBlock) {
+        expect(TokenType::RBRACE,
+               "Expected '}' to close named parameter list.");
+      }
+      break;
+    } else {
+      while (currentToken().type == TokenType::COMMENT)
+        advance();
+      if (inNamedBlock && currentToken().type == TokenType::RBRACE) {
+        advance();
+        break;
+      }
+    }
+  }
+  return params;
+}
+
 DeclNode *
 Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
   int line = currentToken().line;
@@ -240,19 +354,12 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
       advance(); /* name */
       expect(TokenType::LPAREN, "Expected '('");
 
-      std::vector<ParamDeclNode *> params;
-      params.push_back(astCtx.create<ParamDeclNode>(
-          astCtx.getPointerType(classTy), "this", cLine, cCol, 4));
-
-      while (currentToken().type != TokenType::RPAREN &&
-             currentToken().type != TokenType::EOF_TOK) {
-        const Type *pType = parseType();
-        std::string_view pName = currentToken().value;
-        expect(TokenType::IDENTIFIER, "Expected parameter name");
-        params.push_back(astCtx.create<ParamDeclNode>(pType, pName, cLine, cCol,
-                                                      pName.length()));
-        if (!match(TokenType::COMMA))
-          break;
+      bool isVariadic = false;
+      auto params = parseParameterList(classTy, isVariadic);
+      if (isVariadic) {
+        reportError(cLine, cCol, name.length(),
+                    "Annotation constructors cannot be variadic.");
+        throw ParseException();
       }
       expect(TokenType::RPAREN, "Expected ')'");
 
@@ -483,8 +590,9 @@ DeclNode *Parser::parseClassDecl() {
       /* Inject implicit contextual 'this' binding to maintain static soundness
        */
       std::vector<ParamDeclNode *> params;
-      params.push_back(astCtx.create<ParamDeclNode>(
-          astCtx.getPointerType(classTy), "this", dLine, dCol, 4));
+      params.push_back(
+          astCtx.create<ParamDeclNode>(astCtx.getPointerType(classTy), "this",
+                                       nullptr, false, false, dLine, dCol, 4));
 
       destructor->params = astCtx.copyArray<ParamDeclNode *>(params);
       destructor->annotations = memberAnnotations;
@@ -503,25 +611,12 @@ DeclNode *Parser::parseClassDecl() {
       advance();
       advance();
 
-      std::vector<ParamDeclNode *> params;
-      params.push_back(astCtx.create<ParamDeclNode>(
-          astCtx.getPointerType(classTy), "this", cLine, cCol, 4));
-
-      while (currentToken().type != TokenType::RPAREN &&
-             currentToken().type != TokenType::EOF_TOK) {
-        const Type *pType = parseType();
-        std::string_view pName = currentToken().value;
-        expect(TokenType::IDENTIFIER, "Expected parameter name");
-        params.push_back(astCtx.create<ParamDeclNode>(pType, pName, cLine, cCol,
-                                                      pName.length()));
-        if (!match(TokenType::COMMA))
-          break;
-      }
+      bool isVariadic = false;
+      auto params = parseParameterList(classTy, isVariadic);
       expect(TokenType::RPAREN, "Expected ')'");
 
       auto constructor = astCtx.create<FunctionDeclNode>(
-          astCtx.VoidTy, name, cLine, cCol, false, true);
-
+          astCtx.VoidTy, name, cLine, cCol, false, true, false, isVariadic);
       constructor->params = astCtx.copyArray<ParamDeclNode *>(params);
       constructor->annotations = memberAnnotations;
       if (!doc.empty())
@@ -537,32 +632,13 @@ DeclNode *Parser::parseClassDecl() {
     int mCol = currentToken().column;
     const Type *memType = parseType();
     std::string_view memName = currentToken().value;
+
     expect(TokenType::IDENTIFIER, "Expected member name");
 
     if (match(TokenType::LPAREN)) {
-      std::vector<ParamDeclNode *> params;
-      if (!isExtern) {
-        params.push_back(astCtx.create<ParamDeclNode>(
-            astCtx.getPointerType(classTy), "this", mLine, mCol, 4));
-      }
-
       bool isVariadic = false;
-      while (currentToken().type != TokenType::RPAREN &&
-             currentToken().type != TokenType::EOF_TOK) {
-
-        if (match(TokenType::ELLIPSIS)) {
-          isVariadic = true;
-          break;
-        }
-
-        const Type *pType = parseType();
-        std::string_view pName = currentToken().value;
-        expect(TokenType::IDENTIFIER, "Expected parameter name");
-        params.push_back(astCtx.create<ParamDeclNode>(pType, pName, mLine, mCol,
-                                                      pName.length()));
-        if (!match(TokenType::COMMA))
-          break;
-      }
+      auto params =
+          parseParameterList(isExtern ? nullptr : classTy, isVariadic);
       expect(TokenType::RPAREN, "Expected ')'");
 
       auto method = astCtx.create<FunctionDeclNode>(
@@ -626,32 +702,9 @@ DeclNode *Parser::parseDeclarationOrFunction() {
   int idLen = (int)id.length();
   expect(TokenType::IDENTIFIER, "Expected identifier after type");
 
-  if (currentToken().type == TokenType::LPAREN) {
-    advance();
-    std::vector<ParamDeclNode *> params;
+  if (match(TokenType::LPAREN)) {
     bool isVariadic = false;
-
-    while (currentToken().type != TokenType::RPAREN &&
-           currentToken().type != TokenType::EOF_TOK) {
-
-      if (match(TokenType::ELLIPSIS)) {
-        isVariadic = true;
-        break;
-      }
-
-      int pLine = currentToken().line;
-      int pCol = currentToken().column;
-      const Type *pType = parseType();
-      std::string_view pName = currentToken().value;
-      int pLen = (int)currentToken().value.length();
-      expect(TokenType::IDENTIFIER, "Expected parameter name");
-
-      params.push_back(
-          astCtx.create<ParamDeclNode>(pType, pName, pLine, pCol, pLen));
-      if (!match(TokenType::COMMA))
-        break;
-    }
-
+    auto params = parseParameterList(nullptr, isVariadic);
     expect(TokenType::RPAREN, "Expected ')' after parameters");
 
     bool isFuncConst = match(TokenType::CONST_KW);
@@ -800,6 +853,9 @@ ExprNode *Parser::parseUnary() {
 ExprNode *Parser::parsePostfix() {
   auto expr = parsePrimary();
   while (true) {
+    while (currentToken().type == TokenType::COMMENT)
+      advance();
+
     if (match(TokenType::DOT)) {
       int line = expr->line;
       int col = expr->column;
@@ -812,16 +868,52 @@ ExprNode *Parser::parsePostfix() {
       int line = expr->line;
       int col = expr->column;
       std::vector<ExprNode *> args;
+      std::vector<std::string_view> argNames;
+      bool namedStarted = false;
+
+      while (currentToken().type == TokenType::COMMENT)
+        advance();
+
       if (currentToken().type != TokenType::RPAREN) {
         do {
-          args.push_back(parseExpression());
+          while (currentToken().type == TokenType::COMMENT)
+            advance();
+          if (currentToken().type == TokenType::RPAREN)
+            break;
+
+          if (currentToken().type == TokenType::IDENTIFIER &&
+              peekToken().type == TokenType::COLON) {
+            namedStarted = true;
+            argNames.push_back(currentToken().value);
+            advance();
+            advance();
+            while (currentToken().type == TokenType::COMMENT)
+              advance();
+            args.push_back(parseExpression());
+          } else {
+            if (namedStarted) {
+              reportError(
+                  currentToken().line, currentToken().column,
+                  currentToken().value.length(),
+                  "Positional arguments cannot appear after named arguments.");
+              throw ParseException();
+            }
+            argNames.push_back("");
+            args.push_back(parseExpression());
+          }
+
+          while (currentToken().type == TokenType::COMMENT)
+            advance();
         } while (match(TokenType::COMMA));
       }
+      while (currentToken().type == TokenType::COMMENT)
+        advance();
       int endCol = currentToken().column + (int)currentToken().value.length();
       expect(TokenType::RPAREN, "Expected ')'");
 
       auto argsRef = astCtx.copyArray<ExprNode *>(args);
-      expr = astCtx.create<FunctionCallNode>(expr, argsRef, line, col,
+      auto namesRef = astCtx.copyArray<std::string_view>(argNames);
+      expr = astCtx.create<FunctionCallNode>(expr, argsRef, namesRef, line, col,
                                              endCol - col);
     } else {
       break;

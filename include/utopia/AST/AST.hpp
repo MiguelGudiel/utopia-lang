@@ -163,9 +163,14 @@ struct ReturnNode : public StmtNode {
 struct ParamDeclNode : public DeclNode {
   const Type *type;
   std::string_view name;
+  ExprNode *defaultValue;
+  bool isNamed;
+  bool isRequired;
 
-  ParamDeclNode(const Type *t, std::string_view n, int l, int c, int len)
-      : DeclNode(NodeKind::ParamDecl, l, c, len), type(t), name(n) {}
+  ParamDeclNode(const Type *t, std::string_view n, ExprNode *defVal, bool isN,
+                bool isReq, int l, int c, int len)
+      : DeclNode(NodeKind::ParamDecl, l, c, len), type(t), name(n),
+        defaultValue(defVal), isNamed(isN), isRequired(isReq) {}
 };
 
 struct FunctionDeclNode : public DeclNode {
@@ -191,11 +196,13 @@ struct FunctionDeclNode : public DeclNode {
 struct FunctionCallNode : public ExprNode {
   ExprNode *target;
   llvm::ArrayRef<ExprNode *> args;
+  llvm::ArrayRef<std::string_view> argNames;
   const FunctionDeclNode *resolvedFunc = nullptr;
 
-  FunctionCallNode(ExprNode *t, llvm::ArrayRef<ExprNode *> a, int l, int c,
-                   int len)
-      : ExprNode(NodeKind::FunctionCall, l, c, len), target(t), args(a) {}
+  FunctionCallNode(ExprNode *t, llvm::ArrayRef<ExprNode *> a,
+                   llvm::ArrayRef<std::string_view> n, int l, int c, int len)
+      : ExprNode(NodeKind::FunctionCall, l, c, len), target(t), args(a),
+        argNames(n) {}
 };
 
 struct CastNode : public ExprNode {

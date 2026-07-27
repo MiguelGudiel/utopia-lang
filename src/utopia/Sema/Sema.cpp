@@ -93,24 +93,36 @@ void DeclCollectorPass::visit(const AnnotationDeclNode *node) {
 }
 
 SemaResult TypeCheckPass::visit(const AnnotationDeclNode *node) {
+  bool hasErrors = false;
   for (const auto *field : node->fields) {
     auto res = dispatch(field);
     if (!res)
-      return res;
+      hasErrors = true;
   }
   if (node->constructor) {
     auto res = dispatch(node->constructor);
     if (!res)
-      return res;
+      hasErrors = true;
+  }
+
+  if (hasErrors) {
+    return std::unexpected(ErrorInfo{node->line, node->column, node->length,
+                                     "Errors in annotation declaration"});
   }
   return ctx->astCtx.VoidTy;
 }
 
 SemaResult TypeCheckPass::visit(const AnnotationNode *node) {
+  bool hasErrors = false;
   for (const auto *arg : node->args) {
     auto res = dispatch(arg);
     if (!res)
-      return res;
+      hasErrors = true;
+  }
+
+  if (hasErrors) {
+    return std::unexpected(ErrorInfo{node->line, node->column, node->length,
+                                     "Errors in annotation arguments"});
   }
   return ctx->astCtx.VoidTy;
 }
@@ -282,34 +294,46 @@ SemaResult TypeCheckPass::visit(const StringNode *node) {
 }
 
 SemaResult TypeCheckPass::visit(const StructDeclNode *node) {
+  bool hasErrors = false;
   for (const auto *field : node->fields) {
     auto res = dispatch(field);
     if (!res)
-      return res;
+      hasErrors = true;
+  }
+
+  if (hasErrors) {
+    return std::unexpected(ErrorInfo{node->line, node->column, node->length,
+                                     "Errors in struct declaration"});
   }
   return ctx->astCtx.VoidTy;
 }
 
 SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
+  bool hasErrors = false;
   for (const auto *field : node->fields) {
     auto res = dispatch(field);
     if (!res)
-      return res;
+      hasErrors = true;
   }
   for (const auto *ctor : node->constructors) {
     auto res = dispatch(ctor);
     if (!res)
-      return res;
+      hasErrors = true;
   }
   if (node->destructor) {
     auto res = dispatch(node->destructor);
     if (!res)
-      return res;
+      hasErrors = true;
   }
   for (const auto *method : node->methods) {
     auto res = dispatch(method);
     if (!res)
-      return res;
+      hasErrors = true;
+  }
+
+  if (hasErrors) {
+    return std::unexpected(ErrorInfo{node->line, node->column, node->length,
+                                     "Errors in class declaration"});
   }
   return ctx->astCtx.VoidTy;
 }
@@ -537,10 +561,16 @@ SemaResult TypeCheckPass::visit(const AssignNode *node) {
 
 SemaResult TypeCheckPass::visit(const BlockNode *node) {
   ScopeGuard guard(*ctx);
+  bool hasErrors = false;
   for (const auto &stmt : node->statements) {
     auto res = dispatch(stmt);
     if (!res)
-      return res;
+      hasErrors = true;
+  }
+
+  if (hasErrors) {
+    return std::unexpected(ErrorInfo{node->line, node->column, node->length,
+                                     "Errors in block statements"});
   }
   return ctx->astCtx.VoidTy;
 }
@@ -620,22 +650,42 @@ SemaResult TypeCheckPass::visit(const FunctionDeclNode *node) {
   ctx->setFunctionReturnType(node->returnType);
 
   ScopeGuard guard(*ctx);
+  bool hasErrors = false;
+
   for (const auto *param : node->params) {
+    if (param->defaultValue) {
+      auto defRes = dispatch(param->defaultValue);
+      if (!defRes) {
+        hasErrors = true;
+      } else if (!canImplicitlyCast(*defRes, param->type)) {
+        SemaResult err =
+            ctx->reportError(param->line, param->column, param->length,
+                             "Default value type mismatch for parameter '" +
+                                 std::string(param->name) + "'.");
+        hasErrors = true;
+      }
+    }
     ctx->addDecl(param->name, param);
   }
 
   if (node->body) {
     auto bodyRes = dispatch(node->body);
     if (!bodyRes) {
-      return bodyRes;
+      hasErrors = true;
     }
 
     if (!node->returnType->isVoid() && !guaranteesReturn(node->body)) {
-      auto error = ctx->reportError(
-          node->line, node->column, node->length,
-          "Non-void function must explicitly return a value in "
-          "all control paths.");
+      SemaResult err =
+          ctx->reportError(node->line, node->column, node->length,
+                           "Non-void function must explicitly return "
+                           "a value in all control paths.");
+      hasErrors = true;
     }
+  }
+
+  if (hasErrors) {
+    return std::unexpected(ErrorInfo{node->line, node->column, node->length,
+                                     "Errors in function declaration"});
   }
 
   return node->returnType;
@@ -643,13 +693,129 @@ SemaResult TypeCheckPass::visit(const FunctionDeclNode *node) {
 
 SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
   std::vector<const Type *> argTypes;
+  bool hasErrors = false;
+
   for (const auto &arg : node->args) {
     auto argType = dispatch(arg);
-    if (!argType)
-      return std::unexpected(
-          ErrorInfo{node->line, node->column, node->length, "Argument error"});
-    argTypes.push_back(*argType);
+    if (!argType) {
+      hasErrors = true;
+    } else {
+      argTypes.push_back(*argType);
+    }
   }
+
+  // Prevent subsequent checks if evaluating any argument fails
+  if (hasErrors) {
+    return std::unexpected(ErrorInfo{node->line, node->column, node->length,
+                                     "Argument evaluation failed."});
+  }
+
+  auto checkMatch =
+      [&](const FunctionDeclNode *fDecl) -> std::vector<std::string> {
+    size_t paramOffset = (fDecl->isMethod && !fDecl->isExtern) ? 1 : 0;
+    size_t expectedParams = fDecl->params.size() - paramOffset;
+
+    std::vector<ExprNode *> resolvedArgs(expectedParams, nullptr);
+    std::vector<const Type *> resolvedTypes(expectedParams, nullptr);
+
+    size_t posArgCount = 0;
+    std::unordered_set<std::string_view> providedNamedArgs;
+    std::vector<std::string> errors;
+
+    for (size_t i = 0; i < node->args.size(); ++i) {
+      if (node->argNames[i].empty()) {
+        if (posArgCount >= expectedParams) {
+          if (fDecl->isVariadic) {
+            resolvedArgs.push_back(node->args[i]);
+            resolvedTypes.push_back(argTypes[i]);
+            posArgCount++;
+            continue;
+          }
+          errors.push_back("Too many arguments provided.");
+          return errors;
+        }
+        if (fDecl->params[paramOffset + posArgCount]->isNamed) {
+          errors.push_back(
+              "Positional argument provided for named parameter '" +
+              std::string(fDecl->params[paramOffset + posArgCount]->name) +
+              "'.");
+          return errors;
+        }
+        resolvedArgs[posArgCount] = node->args[i];
+        resolvedTypes[posArgCount] = argTypes[i];
+        posArgCount++;
+      } else {
+        auto name = node->argNames[i];
+        if (providedNamedArgs.contains(name)) {
+          errors.push_back("Duplicate named argument '" + std::string(name) +
+                           "'.");
+          continue;
+        }
+        providedNamedArgs.insert(name);
+
+        bool found = false;
+        for (size_t p = 0; p < expectedParams; ++p) {
+          if (fDecl->params[paramOffset + p]->name == name) {
+            if (!fDecl->params[paramOffset + p]->isNamed) {
+              errors.push_back("Parameter '" + std::string(name) +
+                               "' cannot be passed as a named argument.");
+            }
+            resolvedArgs[p] = node->args[i];
+            resolvedTypes[p] = argTypes[i];
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          errors.push_back("No such named parameter '" + std::string(name) +
+                           "'.");
+        }
+      }
+    }
+
+    for (size_t p = 0; p < expectedParams; ++p) {
+      if (!resolvedArgs[p]) {
+        if (fDecl->params[paramOffset + p]->defaultValue) {
+          resolvedArgs[p] = fDecl->params[paramOffset + p]->defaultValue;
+          resolvedTypes[p] =
+              fDecl->params[paramOffset + p]->defaultValue->exprType;
+        } else {
+          auto pName = std::string(fDecl->params[paramOffset + p]->name);
+          if (fDecl->params[paramOffset + p]->isRequired) {
+            errors.push_back("Missing required named parameter '" + pName +
+                             "'.");
+          } else if (!fDecl->params[paramOffset + p]->isNamed) {
+            errors.push_back("Missing mandatory positional parameter '" +
+                             pName + "'.");
+          } else {
+            errors.push_back("Missing parameter '" + pName + "'.");
+          }
+        }
+      }
+    }
+
+    if (!errors.empty())
+      return errors;
+
+    for (size_t p = 0; p < expectedParams; ++p) {
+      if (!canImplicitlyCast(resolvedTypes[p],
+                             fDecl->params[paramOffset + p]->type)) {
+        errors.push_back("Type mismatch for parameter '" +
+                         std::string(fDecl->params[paramOffset + p]->name) +
+                         "': expected '" +
+                         fDecl->params[paramOffset + p]->type->toString() +
+                         "', but got '" + resolvedTypes[p]->toString() + "'.");
+      }
+    }
+
+    if (!errors.empty())
+      return errors;
+
+    const_cast<FunctionCallNode *>(node)->args =
+        ctx->astCtx.copyArray<ExprNode *>(resolvedArgs);
+    const_cast<FunctionCallNode *>(node)->argNames = {};
+    return errors;
+  };
 
   if (node->target->kind == NodeKind::MemberAccess) {
     auto ma = static_cast<const MemberAccessNode *>(node->target);
@@ -677,25 +843,16 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
 
       if (clsDecl) {
         const FunctionDeclNode *bestMatch = nullptr;
+        std::vector<std::vector<std::string>> overloadErrors;
+
         for (const auto *method : clsDecl->methods) {
           if (method->name == ma->memberName) {
-            size_t expectedArgs = method->isExtern ? method->params.size()
-                                                   : method->params.size() - 1;
-            if (expectedArgs == argTypes.size() ||
-                (method->isVariadic && argTypes.size() >= expectedArgs)) {
-              bool match = true;
-              size_t paramOffset = method->isExtern ? 0 : 1;
-              for (size_t i = 0; i < expectedArgs; ++i) {
-                if (!canImplicitlyCast(argTypes[i],
-                                       method->params[i + paramOffset]->type)) {
-                  match = false;
-                  break;
-                }
-              }
-              if (match) {
-                bestMatch = method;
-                break;
-              }
+            auto errs = checkMatch(method);
+            if (errs.empty()) {
+              bestMatch = method;
+              break;
+            } else {
+              overloadErrors.push_back(errs);
             }
           }
         }
@@ -705,9 +862,36 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
           node->exprType = bestMatch->returnType;
           return node->exprType;
         }
+
+        if (overloadErrors.size() == 1) {
+          for (size_t i = 0; i < overloadErrors[0].size(); ++i) {
+            if (i == overloadErrors[0].size() - 1) {
+              return ctx->reportError(node->line, node->column, node->length,
+                                      overloadErrors[0][i]);
+            } else {
+              ctx->reportError(node->line, node->column, node->length,
+                               overloadErrors[0][i]);
+            }
+          }
+        } else {
+          std::string finalErr = "No matching method overload found for '" +
+                                 std::string(ma->memberName) + "'.";
+          if (!overloadErrors.empty()) {
+            finalErr += " Candidates failed with:\n";
+            for (const auto &errList : overloadErrors) {
+              finalErr += "- ";
+              for (size_t i = 0; i < errList.size(); ++i) {
+                finalErr += errList[i];
+                if (i < errList.size() - 1)
+                  finalErr += ", ";
+              }
+              finalErr += "\n";
+            }
+          }
+          return ctx->reportError(node->line, node->column, node->length,
+                                  finalErr);
+        }
       }
-      return ctx->reportError(node->line, node->column, node->length,
-                              "No matching method overload found.");
     }
   }
 
@@ -724,34 +908,20 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
 
     const FunctionDeclNode *bestMatch = nullptr;
     bool isConstructorCall = false;
+    std::vector<std::vector<std::string>> overloadErrors;
 
     for (auto targetDecl : decls) {
       if (targetDecl->kind == NodeKind::FunctionDecl) {
         auto fDecl = static_cast<const FunctionDeclNode *>(targetDecl);
-        size_t expectedArgs = (fDecl->isMethod && !fDecl->isExtern)
-                                  ? (fDecl->params.size() - 1)
-                                  : fDecl->params.size();
-
-        if (expectedArgs == argTypes.size() ||
-            (fDecl->isVariadic && argTypes.size() >= expectedArgs)) {
-          bool match = true;
-          size_t paramOffset = (fDecl->isMethod && !fDecl->isExtern) ? 1 : 0;
-
-          for (size_t i = 0; i < expectedArgs; ++i) {
-            if (!canImplicitlyCast(argTypes[i],
-                                   fDecl->params[i + paramOffset]->type)) {
-              match = false;
-              break;
-            }
+        auto errs = checkMatch(fDecl);
+        if (errs.empty()) {
+          bestMatch = fDecl;
+          if (fDecl->isMethod && ctx->astCtx.getRecordType(name) != nullptr) {
+            isConstructorCall = true;
           }
-
-          if (match) {
-            bestMatch = fDecl;
-            if (fDecl->isMethod && ctx->astCtx.getRecordType(name) != nullptr) {
-              isConstructorCall = true;
-            }
-            break;
-          }
+          break;
+        } else {
+          overloadErrors.push_back(errs);
         }
       }
     }
@@ -765,11 +935,38 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
       }
       return node->exprType;
     }
+
+    if (overloadErrors.size() == 1) {
+      for (size_t i = 0; i < overloadErrors[0].size(); ++i) {
+        if (i == overloadErrors[0].size() - 1) {
+          return ctx->reportError(node->line, node->column, node->length,
+                                  overloadErrors[0][i]);
+        } else {
+          ctx->reportError(node->line, node->column, node->length,
+                           overloadErrors[0][i]);
+        }
+      }
+    } else {
+      std::string finalErr = "No matching function overload found for '" +
+                             std::string(name) + "'.";
+      if (!overloadErrors.empty()) {
+        finalErr += " Candidates failed with:\n";
+        for (const auto &errList : overloadErrors) {
+          finalErr += "- ";
+          for (size_t i = 0; i < errList.size(); ++i) {
+            finalErr += errList[i];
+            if (i < errList.size() - 1)
+              finalErr += ", ";
+          }
+          finalErr += "\n";
+        }
+      }
+      return ctx->reportError(node->line, node->column, node->length, finalErr);
+    }
   }
 
-  return ctx->reportError(
-      node->line, node->column, node->length,
-      "Invalid function call target or ambiguous overload.");
+  return ctx->reportError(node->line, node->column, node->length,
+                          "Invalid function call target.");
 }
 
 SemaResult TypeCheckPass::visit(const CastNode *node) {
@@ -841,10 +1038,12 @@ SemaResult TypeCheckPass::visit(const ModuleNode *node) {
     return ctx->astCtx.VoidTy;
   visitedModules.insert(node);
 
+  bool hasErrors = false;
+
   for (const auto *imp : node->importedModules) {
     auto res = dispatch(imp);
     if (!res)
-      return res;
+      hasErrors = true;
   }
 
   auto prevFile = ctx->currentFile;
@@ -853,10 +1052,16 @@ SemaResult TypeCheckPass::visit(const ModuleNode *node) {
   for (const auto &stmt : node->statements) {
     auto res = dispatch(stmt);
     if (!res)
-      return res;
+      hasErrors = true;
   }
 
   ctx->setCurrentFile(prevFile);
+
+  if (hasErrors) {
+    return std::unexpected(ErrorInfo{node->line, node->column, node->length,
+                                     "Errors in module statements"});
+  }
+
   return ctx->astCtx.VoidTy;
 }
 

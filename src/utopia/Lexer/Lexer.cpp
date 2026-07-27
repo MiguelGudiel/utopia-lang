@@ -169,6 +169,8 @@ Token Lexer::nextToken() {
       return {TokenType::ANNOTATION_KW, id, startLine, startCol};
     if (id == "extern")
       return {TokenType::EXTERN_KW, id, startLine, startCol};
+    if (id == "required")
+      return {TokenType::REQUIRED_KW, id, startLine, startCol};
     if (id == "true")
       return {TokenType::TRUE_KW, id, startLine, startCol};
     if (id == "false")
@@ -252,6 +254,9 @@ Token Lexer::nextToken() {
     return {TokenType::RBRACE, std::string_view(start, 1), startLine, startCol};
   case ',':
     return {TokenType::COMMA, std::string_view(start, 1), startLine, startCol};
+  case ':':
+    return {TokenType::COLON, std::string_view(start, 1), startLine,
+            startCol};
   case '.':
     if (cursor + 1 < source.length() && source[cursor] == '.' &&
         source[cursor + 1] == '.') {
