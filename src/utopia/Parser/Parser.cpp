@@ -1418,6 +1418,12 @@ ExprNode *Parser::parsePrimary() {
   int line = currentToken().line;
   int col = currentToken().column;
 
+  if (currentToken().type == TokenType::NULL_KW) {
+    int len = currentToken().value.length();
+    advance();
+    return astCtx.create<NullNode>(line, col, len);
+  }
+
   if (currentToken().type == TokenType::LBRACKET) {
     return parseArrayLiteral();
   }

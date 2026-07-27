@@ -35,7 +35,8 @@ enum class NodeKind : uint8_t {
   ArraySubscript,
   ArrayLiteral,
   New,
-  Delete
+  Delete,
+  Null
 };
 
 struct ASTNode {
@@ -103,6 +104,10 @@ struct StringNode : public ExprNode {
   std::string_view value;
   StringNode(std::string_view v, int l, int c, int len)
       : ExprNode(NodeKind::String, l, c, len), value(v) {}
+};
+
+struct NullNode : public ExprNode {
+  NullNode(int l, int c, int len) : ExprNode(NodeKind::Null, l, c, len) {}
 };
 
 struct VariableNode : public ExprNode {

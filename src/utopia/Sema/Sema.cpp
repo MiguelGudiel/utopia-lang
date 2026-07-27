@@ -707,6 +707,12 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
   return declType;
 }
 
+SemaResult TypeCheckPass::visit(const NullNode *node) {
+  const Type *ty = ctx->astCtx.getPointerType(ctx->astCtx.VoidTy);
+  node->exprType = ty;
+  return ty;
+}
+
 SemaResult TypeCheckPass::visit(const AssignNode *node) {
   auto lhsType = dispatch(node->target);
   auto rhsType = dispatch(node->value);

@@ -229,7 +229,6 @@ void CodeGen::emitConstructorCall(const FunctionCallNode *node,
   if (!node->resolvedFunc)
     return;
 
-  // Evalúa valores por defecto y ceros previos a la ejecución del constructor
   emitDefaultInitialization(targetAddr, node->exprType);
 
   llvm::Function *func = getOrCreateFunction(node->resolvedFunc);
@@ -241,7 +240,12 @@ void CodeGen::emitConstructorCall(const FunctionCallNode *node,
   for (const auto &arg : node->args) {
     llvm::Value *argVal = nullptr;
 
-    if (arg->kind == NodeKind::Variable && arg->exprType->isReferenceType()) {
+    bool isRefParam = false;
+    if (node->resolvedFunc && argIdx < node->resolvedFunc->params.size()) {
+      isRefParam = node->resolvedFunc->params[argIdx]->type->isReferenceType();
+    }
+
+    if (isRefParam) {
       argVal = getLValue(arg);
     } else {
       argVal = dispatch(arg);
@@ -266,6 +270,10 @@ void CodeGen::emitConstructorCall(const FunctionCallNode *node,
 llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
   if (!node)
     return nullptr;
+
+  if (node->kind == NodeKind::Null) {
+    return llvm::ConstantPointerNull::get(builder.getPtrTy());
+  }
 
   if (node->kind == NodeKind::Boolean) {
     auto *boolNode = static_cast<const BoolNode *>(node);
@@ -1160,6 +1168,10 @@ llvm::Value *CodeGen::visit(const ArrayLiteralNode *node) {
                                    {builder.getInt32(0), builder.getInt32(0)});
 }
 
+llvm::Value *CodeGen::visit(const NullNode *node) {
+  return llvm::ConstantPointerNull::get(builder.getPtrTy());
+}
+
 llvm::Value *CodeGen::visit(const ParamDeclNode *node) { return nullptr; }
 
 llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
@@ -1224,7 +1236,19 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
     if (node->target->kind == NodeKind::MemberAccess) {
       auto ma = static_cast<const MemberAccessNode *>(node->target);
       if (!node->resolvedFunc->isExtern) {
-        llvm::Value *objPtr = getLValue(ma->object);
+        llvm::Value *objPtr = nullptr;
+
+        /*
+         * Retrieve the object address for the 'this' argument.
+         * If the object is already a pointer, dispatch it directly to get its
+         * value. Otherwise, fetch its l-value (memory address).
+         */
+        if (ma->object->exprType->isPointerType()) {
+          objPtr = dispatch(ma->object);
+        } else {
+          objPtr = getLValue(ma->object);
+        }
+
         argsArgs.push_back(objPtr);
       }
     } else if (node->resolvedFunc->isMethod && !node->resolvedFunc->isExtern) {
@@ -1268,7 +1292,19 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
   for (const auto &arg : node->args) {
     llvm::Value *argVal = nullptr;
 
-    if (arg->kind == NodeKind::Variable && arg->exprType->isReferenceType()) {
+    bool isRefParam = false;
+    if (node->resolvedFunc) {
+      size_t paramOffset =
+          (node->resolvedFunc->isMethod && !node->resolvedFunc->isExtern) ? 1
+                                                                          : 0;
+      if (argIdx >= paramOffset &&
+          (argIdx - paramOffset) < node->resolvedFunc->params.size()) {
+        isRefParam = node->resolvedFunc->params[argIdx - paramOffset]
+                         ->type->isReferenceType();
+      }
+    }
+
+    if (isRefParam) {
       argVal = getLValue(arg);
     } else {
       argVal = dispatch(arg);
@@ -1405,13 +1441,17 @@ llvm::Value *CodeGen::visit(const ArraySubscriptNode *node) {
 llvm::Value *CodeGen::visit(const NewExprNode *node) {
   llvm::Type *allocTy = getLLVMType(node->allocatedType);
   llvm::Value *sizeVal = nullptr;
+  llvm::Value *arrSize64 = nullptr;
 
   if (node->arraySize) {
     llvm::Value *arrSize = dispatch(node->arraySize);
     llvm::Value *elemSize =
         builder.getInt64(mod.getDataLayout().getTypeAllocSize(allocTy));
-    arrSize = builder.CreateIntCast(arrSize, builder.getInt64Ty(), false);
-    sizeVal = builder.CreateMul(arrSize, elemSize);
+    arrSize64 = builder.CreateIntCast(arrSize, builder.getInt64Ty(), false);
+    llvm::Value *totalElemSize = builder.CreateMul(arrSize64, elemSize);
+
+    // Over-allocate by 8 bytes to store the array length prefix
+    sizeVal = builder.CreateAdd(totalElemSize, builder.getInt64(8));
   } else {
     sizeVal = builder.getInt64(mod.getDataLayout().getTypeAllocSize(allocTy));
   }
@@ -1425,9 +1465,22 @@ llvm::Value *CodeGen::visit(const NewExprNode *node) {
   }
 
   llvm::Value *allocatedMem = builder.CreateCall(mallocFunc, {sizeVal});
+  llvm::Value *userMem = allocatedMem;
+
+  if (node->arraySize) {
+    // Store the element count at the base of the allocated block
+    builder.CreateStore(arrSize64, allocatedMem);
+    // Offset the pointer by 8 bytes to return to the user context
+    userMem = builder.CreateInBoundsGEP(builder.getInt8Ty(), allocatedMem,
+                                        builder.getInt64(8));
+  }
 
   if (node->hasParens) {
-    builder.CreateMemSet(allocatedMem, builder.getInt8(0), sizeVal,
+    llvm::Value *memsetSize = sizeVal;
+    if (node->arraySize) {
+      memsetSize = builder.CreateSub(sizeVal, builder.getInt64(8));
+    }
+    builder.CreateMemSet(userMem, builder.getInt8(0), memsetSize,
                          llvm::Align(1));
 
     if (!node->arraySize) {
@@ -1435,7 +1488,7 @@ llvm::Value *CodeGen::visit(const NewExprNode *node) {
         llvm::Function *ctorFunc =
             getOrCreateFunction(node->resolvedConstructor);
         llvm::Value *typedMem =
-            builder.CreateBitCast(allocatedMem, getLLVMType(node->exprType));
+            builder.CreateBitCast(userMem, getLLVMType(node->exprType));
 
         std::vector<llvm::Value *> argsArgs;
         argsArgs.push_back(typedMem);
@@ -1444,8 +1497,14 @@ llvm::Value *CodeGen::visit(const NewExprNode *node) {
         for (const auto &arg : node->args) {
           llvm::Value *argVal = nullptr;
 
-          if (arg->kind == NodeKind::Variable &&
-              arg->exprType->isReferenceType()) {
+          bool isRefParam = false;
+          if (node->resolvedConstructor &&
+              argIdx < node->resolvedConstructor->params.size()) {
+            isRefParam = node->resolvedConstructor->params[argIdx]
+                             ->type->isReferenceType();
+          }
+
+          if (isRefParam) {
             argVal = getLValue(arg);
           } else {
             argVal = dispatch(arg);
@@ -1471,13 +1530,24 @@ llvm::Value *CodeGen::visit(const NewExprNode *node) {
     }
   }
 
-  return builder.CreateBitCast(allocatedMem, getLLVMType(node->exprType));
+  return builder.CreateBitCast(userMem, getLLVMType(node->exprType));
 }
 
 llvm::Value *CodeGen::visit(const DeleteExprNode *node) {
   llvm::Value *ptr = dispatch(node->ptr);
   if (!ptr)
     return nullptr;
+
+  llvm::Function *theFunction = builder.GetInsertBlock()->getParent();
+  llvm::BasicBlock *deleteBB =
+      llvm::BasicBlock::Create(ctx, "delete.notnull", theFunction);
+  llvm::BasicBlock *mergeBB = llvm::BasicBlock::Create(ctx, "delete.cont");
+
+  // Prevent SIGSEGV by ensuring the pointer is valid before dereferencing
+  llvm::Value *isNotNull = builder.CreateIsNotNull(ptr, "ptr.notnull");
+  builder.CreateCondBr(isNotNull, deleteBB, mergeBB);
+
+  builder.SetInsertPoint(deleteBB);
 
   llvm::Function *freeFunc = mod.getFunction("free");
   if (!freeFunc) {
@@ -1487,7 +1557,103 @@ llvm::Value *CodeGen::visit(const DeleteExprNode *node) {
                                       "free", mod);
   }
 
-  builder.CreateCall(freeFunc, {ptr});
+  if (node->isArray) {
+    // Shift pointer back by 8 bytes to get the raw allocation start and the
+    // count
+    llvm::Value *rawPtr = builder.CreateInBoundsGEP(
+        builder.getInt8Ty(), ptr, builder.getInt64(-8), "raw.ptr");
+    llvm::Value *count =
+        builder.CreateLoad(builder.getInt64Ty(), rawPtr, "array.count");
+
+    const Type *pointeeTy =
+        static_cast<const PointerType *>(node->ptr->exprType)->getPointeeType();
+    const Type *unqual = pointeeTy->getUnqualifiedType();
+
+    const FunctionDeclNode *dtor = nullptr;
+    if (unqual->getKind() == TypeKind::Class ||
+        unqual->getKind() == TypeKind::Struct) {
+      auto *recTy = static_cast<const RecordType *>(unqual);
+
+      if (auto *decl = recTy->getDeclaration()) {
+        if (decl->kind == NodeKind::ClassDecl) {
+          dtor = static_cast<const ClassDeclNode *>(decl)->destructor;
+        } else if (decl->kind == NodeKind::StructDecl) {
+          dtor = static_cast<const StructDeclNode *>(decl)->destructor;
+        }
+      }
+    }
+
+    if (dtor) {
+      llvm::BasicBlock *condBB =
+          llvm::BasicBlock::Create(ctx, "delete.array.cond", theFunction);
+      llvm::BasicBlock *bodyBB =
+          llvm::BasicBlock::Create(ctx, "delete.array.body", theFunction);
+      llvm::BasicBlock *endBB =
+          llvm::BasicBlock::Create(ctx, "delete.array.end", theFunction);
+
+      llvm::IRBuilder<> TmpB(&theFunction->getEntryBlock(),
+                             theFunction->getEntryBlock().begin());
+      llvm::AllocaInst *idxAlloca =
+          TmpB.CreateAlloca(builder.getInt64Ty(), nullptr, "delete.idx");
+
+      // Initialize loop counter with the array count to traverse backwards
+      builder.CreateStore(count, idxAlloca);
+      builder.CreateBr(condBB);
+
+      builder.SetInsertPoint(condBB);
+      llvm::Value *idxVal = builder.CreateLoad(builder.getInt64Ty(), idxAlloca);
+      llvm::Value *cmp = builder.CreateICmpSGT(idxVal, builder.getInt64(0));
+      builder.CreateCondBr(cmp, bodyBB, endBB);
+
+      builder.SetInsertPoint(bodyBB);
+      llvm::Value *nextIdx = builder.CreateSub(idxVal, builder.getInt64(1));
+      builder.CreateStore(nextIdx, idxAlloca);
+
+      llvm::Type *llvmElemTy = getLLVMType(unqual);
+      llvm::Value *elemPtr =
+          builder.CreateInBoundsGEP(llvmElemTy, ptr, nextIdx);
+
+      emitCleanupCall(elemPtr, dtor);
+      builder.CreateBr(condBB);
+
+      builder.SetInsertPoint(endBB);
+    }
+
+    // Free the original un-offset memory block
+    builder.CreateCall(freeFunc, {rawPtr});
+  } else {
+    if (node->ptr->exprType && node->ptr->exprType->isPointerType()) {
+      const Type *pointeeTy =
+          static_cast<const PointerType *>(node->ptr->exprType)
+              ->getPointeeType();
+      const Type *unqual = pointeeTy->getUnqualifiedType();
+
+      if (unqual->getKind() == TypeKind::Class ||
+          unqual->getKind() == TypeKind::Struct) {
+        auto *recTy = static_cast<const RecordType *>(unqual);
+
+        if (auto *decl = recTy->getDeclaration()) {
+          const FunctionDeclNode *dtor = nullptr;
+          if (decl->kind == NodeKind::ClassDecl) {
+            dtor = static_cast<const ClassDeclNode *>(decl)->destructor;
+          } else if (decl->kind == NodeKind::StructDecl) {
+            dtor = static_cast<const StructDeclNode *>(decl)->destructor;
+          }
+
+          if (dtor) {
+            emitCleanupCall(ptr, dtor);
+          }
+        }
+      }
+    }
+    builder.CreateCall(freeFunc, {ptr});
+  }
+
+  builder.CreateBr(mergeBB);
+
+  theFunction->insert(theFunction->end(), mergeBB);
+  builder.SetInsertPoint(mergeBB);
+
   return nullptr;
 }
 

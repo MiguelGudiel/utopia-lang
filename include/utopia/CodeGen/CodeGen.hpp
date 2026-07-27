@@ -45,6 +45,7 @@ public:
   llvm::Value *visit(const NewExprNode *node);
   llvm::Value *visit(const DeleteExprNode *node);
   llvm::Value *visit(const ArrayLiteralNode *node);
+  llvm::Value *visit(const NullNode *node);
 
   llvm::Value *createImplicitCast(llvm::Value *src, llvm::Type *destTy);
 

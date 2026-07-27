@@ -103,6 +103,9 @@ public:
     case NodeKind::Delete:
       return static_cast<Derived *>(this)->visit(
           static_cast<const DeleteExprNode *>(node));
+    case NodeKind::Null:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const NullNode *>(node));
     default:
       /* Dispatch failure routing to prevent silent segfaults on unmapped nodes
        */

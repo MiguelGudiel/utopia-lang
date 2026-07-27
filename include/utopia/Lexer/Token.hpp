@@ -54,6 +54,7 @@ enum class TokenType : uint8_t {
   RBRACKET,  /* ] */
   NEW_KW,    /* new */
   DELETE_KW, /* delete */
+  NULL_KW,   /* null */
   COMMA,
   SEMICOLON,
   RETURN,

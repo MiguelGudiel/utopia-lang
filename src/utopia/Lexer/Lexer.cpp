@@ -193,6 +193,8 @@ Token Lexer::nextToken() {
       return {TokenType::NEW_KW, id, startLine, startCol};
     if (id == "delete")
       return {TokenType::DELETE_KW, id, startLine, startCol};
+    if (id == "null")
+      return {TokenType::NULL_KW, id, startLine, startCol};
     if (isTypeKeyword(id))
       return {TokenType::TYPE_KW, id, startLine, startCol};
     return {TokenType::IDENTIFIER, id, startLine, startCol};

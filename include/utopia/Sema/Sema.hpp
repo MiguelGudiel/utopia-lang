@@ -67,7 +67,8 @@ static bool canImplicitlyCast(const Type *from, const Type *to) {
     const Type *toPointee =
         static_cast<const PointerType *>(baseTo)->getPointeeType();
 
-    if (toPointee->isVoid())
+    /* Universal null pointer interoperability */
+    if (toPointee->isVoid() || fromPointee->isVoid())
       return true;
 
     return fromPointee->getUnqualifiedType() == toPointee->getUnqualifiedType();
@@ -122,6 +123,7 @@ public:
   void visit(const ArrayLiteralNode *) {}
   void visit(const NewExprNode *) {}
   void visit(const DeleteExprNode *) {}
+  void visit(const NullNode *) {}
 };
 
 class TypeCheckPass : public SemaPass,
@@ -162,6 +164,7 @@ public:
   SemaResult visit(const ArrayLiteralNode *node);
   SemaResult visit(const NewExprNode *node);
   SemaResult visit(const DeleteExprNode *node);
+  SemaResult visit(const NullNode *node);
 };
 
 class SemaPipeline {
