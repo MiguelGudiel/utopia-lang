@@ -78,7 +78,7 @@ llvm::Type *CodeGen::getLLVMType(const Type *type) {
     /* Materialize the body if it is currently opaque. An empty body is a valid
      * structural configuration in LLVM, so it must be committed even if fields
      * are empty. */
-    if (structTy->isOpaque()) {
+    if (structTy->isOpaque() && !rec->isOpaque()) {
       std::vector<llvm::Type *> elements;
       for (const auto &f : rec->getFields()) {
         elements.push_back(getLLVMType(f.type));
@@ -767,6 +767,9 @@ llvm::Value *CodeGen::visit(const StructDeclNode *node) {
     getLLVMType(node->recordType);
   }
 
+  if (node->isOpaque)
+    return nullptr;
+
   for (const auto *ctor : node->constructors)
     dispatch(ctor);
   if (node->destructor)
@@ -783,6 +786,9 @@ llvm::Value *CodeGen::visit(const ClassDeclNode *node) {
   if (node->recordType) {
     getLLVMType(node->recordType);
   }
+
+  if (node->isOpaque)
+    return nullptr;
 
   for (const auto *ctor : node->constructors)
     dispatch(ctor);

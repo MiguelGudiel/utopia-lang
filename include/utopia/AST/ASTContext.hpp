@@ -105,6 +105,10 @@ public:
   }
 
   RecordType *createRecordType(TypeKind kind, std::string_view name) {
+    auto it = recordTypes.find(name);
+    if (it != recordTypes.end()) {
+      return it->second;
+    }
     RecordType *rec = nullptr;
     if (kind == TypeKind::Struct) {
       rec = create<StructType>(name);

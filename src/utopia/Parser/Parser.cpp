@@ -415,6 +415,7 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
   expect(TokenType::IDENTIFIER, "Expected annotation class name");
 
   RecordType *classTy = astCtx.createRecordType(TypeKind::Class, name);
+  classTy->setOpaque(false);
 
   expect(TokenType::LBRACE, "Expected '{'");
 
@@ -945,6 +946,16 @@ DeclNode *Parser::parseStructDecl() {
 
   RecordType *structTy = astCtx.createRecordType(TypeKind::Struct, name);
 
+  if (match(TokenType::SEMICOLON)) {
+    auto node = astCtx.create<StructDeclNode>(name, line, col,
+                                              currentToken().column - col);
+    node->isOpaque = true;
+    node->recordType = structTy;
+    return node;
+  }
+
+  structTy->setOpaque(false);
+
   expect(TokenType::LBRACE, "Expected '{'");
 
   std::vector<VarDeclNode *> fields;
@@ -1145,6 +1156,16 @@ DeclNode *Parser::parseClassDecl() {
   expect(TokenType::IDENTIFIER, "Expected class name");
 
   RecordType *classTy = astCtx.createRecordType(TypeKind::Class, name);
+
+  if (match(TokenType::SEMICOLON)) {
+    auto node = astCtx.create<ClassDeclNode>(name, line, col,
+                                             currentToken().column - col);
+    node->isOpaque = true;
+    node->recordType = classTy;
+    return node;
+  }
+
+  classTy->setOpaque(false);
 
   expect(TokenType::LBRACE, "Expected '{'");
 

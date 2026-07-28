@@ -122,6 +122,7 @@ protected:
   std::string_view name;
   llvm::ArrayRef<FieldInfo> fields;
   const DeclNode *declaration = nullptr;
+  bool opaque = true;
 
   explicit RecordType(TypeKind k, std::string_view n) : Type(k), name(n) {}
 
@@ -132,6 +133,9 @@ public:
 
   const DeclNode *getDeclaration() const { return declaration; }
   void setDeclaration(const DeclNode *decl) { declaration = decl; }
+
+  bool isOpaque() const { return opaque; }
+  void setOpaque(bool op) { opaque = op; }
 
   const FieldInfo *getField(std::string_view fName) const {
     for (const auto &f : fields) {

@@ -200,6 +200,9 @@ void DeclCollectorPass::visit(const StructDeclNode *node) {
   const_cast<StructDeclNode *>(node)->recordType =
       ctx->astCtx.getRecordType(node->name);
 
+  if (node->isOpaque)
+    return;
+
   for (auto *ctor : node->constructors) {
     const_cast<FunctionDeclNode *>(ctor)->mangledName =
         Mangler::mangle(ctor, std::string(node->name));
@@ -249,6 +252,9 @@ void DeclCollectorPass::visit(const ClassDeclNode *node) {
   auto *recTy = ctx->astCtx.getRecordType(node->name);
   const_cast<ClassDeclNode *>(node)->recordType = recTy;
   recTy->setDeclaration(node);
+
+  if (node->isOpaque)
+    return;
 
   for (auto *ctor : node->constructors) {
     const_cast<FunctionDeclNode *>(ctor)->mangledName =
@@ -373,6 +379,9 @@ SemaResult TypeCheckPass::visit(const StringNode *node) {
 SemaResult TypeCheckPass::visit(const StructDeclNode *node) {
   bool hasErrors = false;
 
+  if (node->isOpaque)
+    return ctx->astCtx.VoidTy;
+
   /* Validate structural decorators */
   for (const auto *ann : node->annotations) {
     if (ann->name == "align") {
@@ -431,6 +440,9 @@ SemaResult TypeCheckPass::visit(const StructDeclNode *node) {
 
 SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
   bool hasErrors = false;
+
+  if (node->isOpaque)
+    return ctx->astCtx.VoidTy;
 
   /* Validate structural decorators */
   for (const auto *ann : node->annotations) {
@@ -859,6 +871,22 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
                             "Variables cannot be of type 'void'");
   }
 
+  const Type *baseUnqualTy = declType->getUnqualifiedType();
+  while (baseUnqualTy->getKind() == TypeKind::Array) {
+    baseUnqualTy = static_cast<const ArrayType *>(baseUnqualTy)
+                       ->getElementType()
+                       ->getUnqualifiedType();
+  }
+  if (baseUnqualTy->getKind() == TypeKind::Struct ||
+      baseUnqualTy->getKind() == TypeKind::Class) {
+    auto *recTy = static_cast<const RecordType *>(baseUnqualTy);
+    if (recTy->isOpaque()) {
+      return ctx->reportError(
+          node->line, node->column, node->length,
+          "Cannot declare variable of incomplete (opaque) type.");
+    }
+  }
+
   for (const auto *ann : node->annotations) {
     if (ann->name == "align") {
       if (ann->args.size() != 1 || ann->args[0]->kind != NodeKind::Number ||
@@ -1075,6 +1103,11 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
   }
 
   auto recordTy = static_cast<const RecordType *>(baseTy);
+
+  if (recordTy->isOpaque()) {
+    return ctx->reportError(node->line, node->column, node->length,
+                            "Cannot access member of incomplete (opaque) type");
+  }
 
   if (auto field = recordTy->getField(node->memberName)) {
     const_cast<MemberAccessNode *>(node)->fieldIndex = field->index;
@@ -1759,9 +1792,22 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
   }
 
   const Type *unqual = node->allocatedType->getUnqualifiedType();
-  if (unqual->getKind() == TypeKind::Class ||
-      unqual->getKind() == TypeKind::Struct) {
-    auto *recTy = static_cast<const RecordType *>(unqual);
+  const Type *baseUnqualTy = unqual;
+  while (baseUnqualTy->getKind() == TypeKind::Array) {
+    baseUnqualTy = static_cast<const ArrayType *>(baseUnqualTy)
+                       ->getElementType()
+                       ->getUnqualifiedType();
+  }
+
+  if (baseUnqualTy->getKind() == TypeKind::Class ||
+      baseUnqualTy->getKind() == TypeKind::Struct) {
+    auto *recTy = static_cast<const RecordType *>(baseUnqualTy);
+
+    if (recTy->isOpaque()) {
+      return ctx->reportError(node->line, node->column, node->length,
+                              "Cannot allocate incomplete (opaque) type.");
+    }
+
     auto *decl = recTy->getDeclaration();
 
     if (decl) {

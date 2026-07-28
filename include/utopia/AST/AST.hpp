@@ -339,6 +339,7 @@ struct StructDeclNode : public DeclNode {
   FunctionDeclNode *destructor;
 
   mutable const RecordType *recordType = nullptr;
+  bool isOpaque = false;
 
   StructDeclNode(std::string_view n, int l, int c, int len)
       : DeclNode(NodeKind::StructDecl, l, c, len), name(n),
@@ -353,6 +354,7 @@ struct ClassDeclNode : public DeclNode {
   FunctionDeclNode *destructor;
 
   mutable const RecordType *recordType = nullptr;
+  bool isOpaque = false;
 
   ClassDeclNode(std::string_view n, int l, int c, int len)
       : DeclNode(NodeKind::ClassDecl, l, c, len), name(n), destructor(nullptr) {
