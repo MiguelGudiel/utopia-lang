@@ -1,6 +1,7 @@
 #include "utopia/CodeGen/CodeGen.hpp"
 #include <iostream>
 #include <llvm/ADT/APSInt.h>
+#include <llvm/IR/Intrinsics.h>
 #include <optional>
 #include <string>
 
@@ -692,7 +693,7 @@ llvm::Value *CodeGen::visit(const VariableNode *node) {
     llvm::Type *llvmBaseTy = getLLVMType(node->parentType);
     llvm::Value *gep = builder.CreateStructGEP(llvmBaseTy, thisPtr,
                                                node->fieldIndex, node->name);
-    return builder.CreateLoad(getLLVMType(node->exprType), gep);
+    return createTBAALoad(getLLVMType(node->exprType), gep, node->exprType);
   }
 
   /* Return direct pointer evaluation if identifier statically targets a
@@ -720,7 +721,7 @@ llvm::Value *CodeGen::visit(const VariableNode *node) {
   }
 
   llvm::Type *llvmTy = getLLVMType(loadTy);
-  return builder.CreateLoad(llvmTy, lval, node->name);
+  return createTBAALoad(llvmTy, lval, loadTy, node->name);
 }
 
 llvm::Value *CodeGen::visit(const MemberAccessNode *node) {
@@ -754,7 +755,7 @@ llvm::Value *CodeGen::visit(const MemberAccessNode *node) {
         arrTy, gep, {builder.getInt32(0), builder.getInt32(0)});
   }
 
-  return builder.CreateLoad(getLLVMType(node->exprType), gep);
+  return createTBAALoad(getLLVMType(node->exprType), gep, node->exprType);
 }
 
 llvm::Value *CodeGen::visit(const IfNode *node) {
@@ -893,7 +894,7 @@ llvm::Value *CodeGen::visit(const UnaryOpNode *node) {
       return nullptr;
     }
     llvm::Type *loadTy = getLLVMType(node->exprType);
-    return builder.CreateLoad(loadTy, ptr);
+    return createTBAALoad(loadTy, ptr, node->exprType);
   }
   if (node->op == "-") {
     llvm::Value *val = dispatch(node->expr);
@@ -1004,7 +1005,12 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
     llvm::Type *ptrTy = builder.getPtrTy();
     llvm::AllocaInst *alloca =
         createEntryBlockAlloca(ptrTy, std::string(node->varName));
-    builder.CreateStore(initAddr, alloca);
+
+    uint64_t allocSize = mod.getDataLayout().getTypeAllocSize(ptrTy);
+    emitLifetimeStart(alloca, allocSize);
+    cgCtx.addLifetime(alloca, allocSize);
+
+    createTBAAStore(initAddr, alloca, node->type);
     cgCtx.bind(node->varName, alloca, false);
 
     return alloca;
@@ -1069,6 +1075,10 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
       createEntryBlockAlloca(ty, std::string(node->varName));
   cgCtx.bind(node->varName, alloca, true);
 
+  uint64_t allocSize = mod.getDataLayout().getTypeAllocSize(ty);
+  emitLifetimeStart(alloca, allocSize);
+  cgCtx.addLifetime(alloca, allocSize);
+
   const auto *unqualTy = node->type->getUnqualifiedType();
   if (unqualTy->getKind() == TypeKind::Class ||
       unqualTy->getKind() == TypeKind::Struct) {
@@ -1108,7 +1118,7 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
         llvm::Value *initVal = dispatch(node->initializer);
         if (initVal) {
           initVal = createImplicitCast(initVal, ty);
-          builder.CreateStore(initVal, alloca);
+          createTBAAStore(initVal, alloca, node->type);
         } else {
           diags.report({DiagLevel::Error, node->line, node->column,
                         node->length, "Initialization failed for variable.",
@@ -1165,7 +1175,8 @@ llvm::Value *CodeGen::visit(const AssignNode *node) {
       if (callNode->resolvedFunc && callNode->resolvedFunc->isMethod &&
           callNode->resolvedFunc->returnType->isVoid()) {
         emitConstructorCall(callNode, lval);
-        return builder.CreateLoad(getLLVMType(node->exprType), lval);
+        return createTBAALoad(getLLVMType(node->exprType), lval,
+                              node->exprType);
       }
     }
   }
@@ -1180,7 +1191,8 @@ llvm::Value *CodeGen::visit(const AssignNode *node) {
 
   llvm::Type *destTy = getLLVMType(node->target->exprType);
   rval = createImplicitCast(rval, destTy);
-  builder.CreateStore(rval, lval);
+
+  createTBAAStore(rval, lval, node->target->exprType);
 
   return rval;
 }
@@ -1349,7 +1361,8 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
     if (node->resolvedFunc->isMethod &&
         node->resolvedFunc->returnType->isVoid()) {
       if (!node->exprType->isVoid()) {
-        return builder.CreateLoad(getLLVMType(node->exprType), argsArgs[0]);
+        return createTBAALoad(getLLVMType(node->exprType), argsArgs[0],
+                              node->exprType);
       }
     }
 
@@ -1424,6 +1437,12 @@ llvm::Value *CodeGen::visit(const ReturnNode *node) {
          cleanupIt != scopeIt->cleanups.rend(); ++cleanupIt) {
       emitCleanupCall(cleanupIt->instancePtr, cleanupIt->destructor);
     }
+
+    /* Ensure deterministic lifetime closure upon early returns */
+    for (auto lifeIt = scopeIt->lifetimes.rbegin();
+         lifeIt != scopeIt->lifetimes.rend(); ++lifeIt) {
+      emitLifetimeEnd(lifeIt->allocaInst, lifeIt->size);
+    }
   }
 
   if (retVal) {
@@ -1474,7 +1493,7 @@ llvm::Value *CodeGen::visit(const ArraySubscriptNode *node) {
         arrTy, lval, {builder.getInt32(0), builder.getInt32(0)});
   }
 
-  return builder.CreateLoad(getLLVMType(node->exprType), lval);
+  return createTBAALoad(getLLVMType(node->exprType), lval, node->exprType);
 }
 
 llvm::Value *CodeGen::visit(const NewExprNode *node) {
@@ -1696,6 +1715,86 @@ llvm::Value *CodeGen::visit(const DeleteExprNode *node) {
   return nullptr;
 }
 
+llvm::MDNode *CodeGen::getTBAATypeNode(const Type *type) {
+  if (!type || type->isVoid())
+    return nullptr;
+
+  const Type *unqual = type->getUnqualifiedType();
+  if (tbaaTypes.contains(unqual))
+    return tbaaTypes[unqual];
+
+  /* Enforce hierarchical scalar derivations to enable aggressive pointer
+   * disjointing */
+  llvm::MDNode *charNode =
+      mdBuilder.createTBAAScalarTypeNode("omnipotent char", tbaaRoot);
+  llvm::MDNode *node = nullptr;
+
+  if (unqual->isPointerType() || unqual->isReferenceType()) {
+    node = mdBuilder.createTBAAScalarTypeNode("any pointer", charNode);
+  } else if (unqual->isBuiltinType()) {
+    node = mdBuilder.createTBAAScalarTypeNode(unqual->toString(), charNode);
+  } else if (unqual->getKind() == TypeKind::Class ||
+             unqual->getKind() == TypeKind::Struct) {
+    node = mdBuilder.createTBAAScalarTypeNode(
+        static_cast<const RecordType *>(unqual)->getName(), charNode);
+  } else {
+    node = charNode;
+  }
+
+  tbaaTypes[unqual] = node;
+  return node;
+}
+
+llvm::MDNode *CodeGen::getTBAAAccessTag(const Type *type) {
+  if (!type || type->isVoid())
+    return nullptr;
+  llvm::MDNode *typeNode = getTBAATypeNode(type);
+  return mdBuilder.createTBAAAccessTag(typeNode, typeNode, 0, 0);
+}
+
+llvm::LoadInst *CodeGen::createTBAALoad(llvm::Type *llTy, llvm::Value *ptr,
+                                        const Type *utopiaTy,
+                                        const llvm::Twine &name) {
+  auto *load = builder.CreateLoad(llTy, ptr, name);
+  if (utopiaTy) {
+    if (llvm::MDNode *tag = getTBAAAccessTag(utopiaTy)) {
+      load->setMetadata(llvm::LLVMContext::MD_tbaa, tag);
+    }
+  }
+  return load;
+}
+
+llvm::StoreInst *CodeGen::createTBAAStore(llvm::Value *val, llvm::Value *ptr,
+                                          const Type *utopiaTy) {
+  auto *store = builder.CreateStore(val, ptr);
+  if (utopiaTy) {
+    if (llvm::MDNode *tag = getTBAAAccessTag(utopiaTy)) {
+      store->setMetadata(llvm::LLVMContext::MD_tbaa, tag);
+    }
+  }
+  return store;
+}
+
+void CodeGen::emitLifetimeStart(llvm::AllocaInst *allocaInst, uint64_t size) {
+  if (size == 0 || !allocaInst)
+    return;
+
+  llvm::Function *lifetimeStart = llvm::Intrinsic::getOrInsertDeclaration(
+      &mod, llvm::Intrinsic::lifetime_start, {builder.getPtrTy()});
+
+  builder.CreateCall(lifetimeStart, {builder.getInt64(size), allocaInst});
+}
+
+void CodeGen::emitLifetimeEnd(llvm::AllocaInst *allocaInst, uint64_t size) {
+  if (size == 0 || !allocaInst)
+    return;
+
+  llvm::Function *lifetimeEnd = llvm::Intrinsic::getOrInsertDeclaration(
+      &mod, llvm::Intrinsic::lifetime_end, {builder.getPtrTy()});
+
+  builder.CreateCall(lifetimeEnd, {builder.getInt64(size), allocaInst});
+}
+
 llvm::AllocaInst *CodeGen::createEntryBlockAlloca(llvm::Type *type,
                                                   const std::string &varName) {
   llvm::Function *TheFunction = builder.GetInsertBlock()->getParent();
@@ -1746,7 +1845,7 @@ void CodeGen::emitDefaultInitialization(llvm::Value *ptr, const Type *type) {
           initVal = createImplicitCast(initVal, destTy);
           llvm::Value *gep = builder.CreateStructGEP(
               llTy, ptr, i, std::string(fieldDecl->varName));
-          builder.CreateStore(initVal, gep);
+          createTBAAStore(initVal, gep, fieldDecl->type);
         }
       }
     }
@@ -1791,7 +1890,7 @@ void CodeGen::emitArrayLiteralInit(llvm::Value *targetAddr,
           llvm::Value *val = dispatch(lit->elements[i]);
           if (val) {
             val = createImplicitCast(val, getLLVMType(elemTy));
-            builder.CreateStore(val, elemPtr);
+            createTBAAStore(val, elemPtr, elemTy);
           }
         }
       }
@@ -1801,7 +1900,7 @@ void CodeGen::emitArrayLiteralInit(llvm::Value *targetAddr,
     if (srcVal) {
       llvm::Type *destTy = getLLVMType(unqualTarget);
       srcVal = createImplicitCast(srcVal, destTy);
-      builder.CreateStore(srcVal, targetAddr);
+      createTBAAStore(srcVal, targetAddr, targetType);
     }
   }
 }
@@ -1817,6 +1916,11 @@ void CodeGen::emitScopeCleanups() {
   const auto &scope = cgCtx.getCurrentScope();
   for (auto it = scope.cleanups.rbegin(); it != scope.cleanups.rend(); ++it) {
     emitCleanupCall(it->instancePtr, it->destructor);
+  }
+
+  /* Flush lifetimes back to the execution environment upon natural closure */
+  for (auto it = scope.lifetimes.rbegin(); it != scope.lifetimes.rend(); ++it) {
+    emitLifetimeEnd(it->allocaInst, it->size);
   }
 }
 

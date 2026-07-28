@@ -55,6 +55,9 @@ bool Backend::process(llvm::Module *mod, BackendContext &backendCtx,
   llvm::CGSCCAnalysisManager cgam;
   llvm::ModuleAnalysisManager mam;
 
+  llvm::TargetLibraryInfoImpl tlii(triple);
+  fam.registerPass([&] { return llvm::TargetLibraryAnalysis(tlii); });
+
   pb.registerModuleAnalyses(mam);
   pb.registerCGSCCAnalyses(cgam);
   pb.registerFunctionAnalyses(fam);
@@ -112,12 +115,6 @@ bool Backend::process(llvm::Module *mod, BackendContext &backendCtx,
     }
 
     if (options.emitAsm) {
-      /*
-       * Cloned module MUST be declared before the PassManager to ensure it
-       * outlives the PassManager during scope destruction, preventing
-       * use-after-free segfaults when the PassManager cleans up cached machine
-       * functions.
-       */
       auto clonedMod = llvm::CloneModule(*mod);
 
       std::error_code ec;

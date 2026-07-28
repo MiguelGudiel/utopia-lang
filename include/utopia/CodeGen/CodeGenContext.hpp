@@ -1,5 +1,6 @@
 #pragma once
 #include "utopia/AST/AST.hpp"
+#include <llvm/IR/Instructions.h>
 #include <llvm/IR/Value.h>
 #include <string>
 #include <string_view>
@@ -19,10 +20,16 @@ struct CleanupInfo {
   const FunctionDeclNode *destructor = nullptr;
 };
 
+struct LifetimeInfo {
+  llvm::AllocaInst *allocaInst = nullptr;
+  uint64_t size = 0;
+};
+
 /* Extended lexical scope with RAII support */
 struct CGLocalScope {
   std::unordered_map<std::string, SymbolInfo> symbols;
   std::vector<CleanupInfo> cleanups;
+  std::vector<LifetimeInfo> lifetimes;
 };
 
 class CodeGenContext {
@@ -42,6 +49,14 @@ public:
   void addCleanup(llvm::Value *ptr, const FunctionDeclNode *dtor) {
     if (!scopes.empty()) {
       scopes.back().cleanups.push_back({ptr, dtor});
+    }
+  }
+
+  /* Registers stack memory spans to enforce precise intrinsic lifetime
+   * boundaries */
+  void addLifetime(llvm::AllocaInst *allocaInst, uint64_t size) {
+    if (!scopes.empty()) {
+      scopes.back().lifetimes.push_back({allocaInst, size});
     }
   }
 

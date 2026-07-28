@@ -5,16 +5,18 @@
 #include "utopia/Common/Diagnostics.hpp"
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/LLVMContext.h>
+#include <llvm/IR/MDBuilder.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Value.h>
 
 namespace utopia {
-
 class CodeGen : public ASTVisitor<CodeGen, llvm::Value *> {
 public:
   CodeGen(BackendContext &bCtx, llvm::Module &llvmMod, DiagnosticsEngine &diags)
       : backend(bCtx), ctx(bCtx.getLLVMContext()), mod(llvmMod), builder(ctx),
-        diags(diags) {}
+        diags(diags), mdBuilder(ctx) {
+    tbaaRoot = mdBuilder.createTBAARoot("Utopia TBAA");
+  }
 
   llvm::Value *visit(const NumberNode *node);
   llvm::Value *visit(const BoolNode *node);
@@ -59,10 +61,28 @@ private:
   DiagnosticsEngine &diags;
   const FunctionDeclNode *currentFunc = nullptr;
 
+  /* LLVM IR Metadata builders and trackers */
+  llvm::MDBuilder mdBuilder;
+  llvm::MDNode *tbaaRoot = nullptr;
+  std::unordered_map<const Type *, llvm::MDNode *> tbaaTypes;
+
   llvm::Type *getLLVMType(const Type *type);
   llvm::Value *getLValue(const ExprNode *node);
   llvm::Constant *evaluateAsConstant(const ExprNode *node);
   llvm::Function *getOrCreateFunction(const FunctionDeclNode *node);
+
+  /* TBAA Context Resolution */
+  llvm::MDNode *getTBAATypeNode(const Type *type);
+  llvm::MDNode *getTBAAAccessTag(const Type *type);
+  llvm::LoadInst *createTBAALoad(llvm::Type *llTy, llvm::Value *ptr,
+                                 const Type *utopiaTy,
+                                 const llvm::Twine &name = "");
+  llvm::StoreInst *createTBAAStore(llvm::Value *val, llvm::Value *ptr,
+                                   const Type *utopiaTy);
+
+  /* Lifetime Intrinsic Emission */
+  void emitLifetimeStart(llvm::AllocaInst *allocaInst, uint64_t size);
+  void emitLifetimeEnd(llvm::AllocaInst *allocaInst, uint64_t size);
 
   void emitConstructorCall(const FunctionCallNode *node,
                            llvm::Value *targetAddr);
