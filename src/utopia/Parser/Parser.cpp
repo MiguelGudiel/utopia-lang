@@ -1,4 +1,6 @@
 #include "utopia/Parser/Parser.hpp"
+#include "utopia/Driver/ModuleLoader.hpp"
+#include <filesystem>
 
 namespace utopia {
 
@@ -169,6 +171,17 @@ ModuleNode *Parser::parseModule(std::string_view filePath) {
 
         expect(TokenType::SEMICOLON, "Expected ';' after import statement");
         imports.push_back(path);
+
+        /* Synchronously invoke the module loader upon evaluating an import
+         * directive. This pre-populates the ASTContext with available
+         * foreign types and guarantees downstream identifier resolution.
+         */
+        if (moduleLoader) {
+          std::filesystem::path currentDir =
+              std::filesystem::path(filePath).parent_path();
+          moduleLoader->loadModule(std::string(path), currentDir);
+        }
+
       } else if (currentToken().type != TokenType::EOF_TOK) {
         auto stmt = parseStatement();
         if (stmt)
@@ -430,6 +443,16 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
     std::string doc = consumeComments();
     auto memberAnnotations = parseAnnotations();
 
+    bool isPub = false, isPriv = false;
+    while (currentToken().type == TokenType::PUBLIC_KW ||
+           currentToken().type == TokenType::PRIVATE_KW) {
+      if (currentToken().type == TokenType::PUBLIC_KW)
+        isPub = true;
+      if (currentToken().type == TokenType::PRIVATE_KW)
+        isPriv = true;
+      advance();
+    }
+
     /* Intercept floating metadata and comments guarding the scope closure */
     if (currentToken().type == TokenType::RBRACE ||
         currentToken().type == TokenType::EOF_TOK) {
@@ -465,6 +488,8 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
                                                     cCol, true, true);
       constructor->params = astCtx.copyArray<ParamDeclNode *>(params);
       constructor->annotations = memberAnnotations;
+      constructor->hasPublicMod = isPub;
+      constructor->hasPrivateMod = isPriv;
       if (!doc.empty())
         constructor->docString = astCtx.copyString(doc);
 
@@ -483,6 +508,8 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
     auto field = astCtx.create<VarDeclNode>(memType, memName, nullptr, mLine,
                                             mCol, memName.length());
     field->annotations = memberAnnotations;
+    field->hasPublicMod = isPub;
+    field->hasPrivateMod = isPriv;
     if (!doc.empty())
       field->docString = astCtx.copyString(doc);
 
@@ -494,7 +521,8 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
 
   std::vector<FieldInfo> fInfos;
   for (size_t i = 0; i < fields.size(); ++i) {
-    fInfos.push_back({fields[i]->varName, fields[i]->type, (uint32_t)i});
+    fInfos.push_back({fields[i]->varName, fields[i]->type, (uint32_t)i,
+                      fields[i]->isPublic(fields[i]->varName)});
   }
   classTy->setFields(astCtx.copyArray<FieldInfo>(fInfos));
 
@@ -516,6 +544,16 @@ ASTNode *Parser::parseStatement() {
   std::string doc = consumeComments();
   auto annotations = parseAnnotations();
 
+  bool isPub = false, isPriv = false;
+  while (currentToken().type == TokenType::PUBLIC_KW ||
+         currentToken().type == TokenType::PRIVATE_KW) {
+    if (currentToken().type == TokenType::PUBLIC_KW)
+      isPub = true;
+    if (currentToken().type == TokenType::PRIVATE_KW)
+      isPriv = true;
+    advance();
+  }
+
   /* Gracefully handle empty blocks or trailing comments mapping directly to
    * closure */
   if (currentToken().type == TokenType::RBRACE ||
@@ -524,6 +562,12 @@ ASTNode *Parser::parseStatement() {
       reportError(currentToken().line, currentToken().column,
                   (int)currentToken().value.length(),
                   "Annotations are strictly permitted on declarations only.");
+    }
+    if (isPub || isPriv) {
+      reportError(
+          currentToken().line, currentToken().column,
+          (int)currentToken().value.length(),
+          "Access modifiers are strictly permitted on declarations only.");
     }
     return nullptr;
   }
@@ -575,6 +619,26 @@ ASTNode *Parser::parseStatement() {
     } else {
       reportError(node->line, node->column, node->length,
                   "Annotations are strictly permitted on declarations only.");
+    }
+  }
+
+  if (isPub || isPriv) {
+    if (node && (node->kind == NodeKind::VarDecl ||
+                 node->kind == NodeKind::FunctionDecl ||
+                 node->kind == NodeKind::StructDecl ||
+                 node->kind == NodeKind::ClassDecl ||
+                 node->kind == NodeKind::AnnotationDecl ||
+                 node->kind == NodeKind::EnumDecl ||
+                 node->kind == NodeKind::TypedefDecl)) {
+      auto decl = static_cast<DeclNode *>(node);
+      decl->hasPublicMod = isPub;
+      decl->hasPrivateMod = isPriv;
+    } else {
+      reportError(
+          node ? node->line : currentToken().line,
+          node ? node->column : currentToken().column,
+          node ? node->length : currentToken().value.length(),
+          "Access modifiers are strictly permitted on declarations only.");
     }
   }
 
@@ -969,6 +1033,16 @@ DeclNode *Parser::parseStructDecl() {
     std::string doc = consumeComments();
     auto memberAnnotations = parseAnnotations();
 
+    bool isPub = false, isPriv = false;
+    while (currentToken().type == TokenType::PUBLIC_KW ||
+           currentToken().type == TokenType::PRIVATE_KW) {
+      if (currentToken().type == TokenType::PUBLIC_KW)
+        isPub = true;
+      if (currentToken().type == TokenType::PRIVATE_KW)
+        isPriv = true;
+      advance();
+    }
+
     if (currentToken().type == TokenType::RBRACE ||
         currentToken().type == TokenType::EOF_TOK) {
       if (!memberAnnotations.empty()) {
@@ -1007,6 +1081,8 @@ DeclNode *Parser::parseStructDecl() {
 
       destructor->params = astCtx.copyArray<ParamDeclNode *>(params);
       destructor->annotations = memberAnnotations;
+      destructor->hasPublicMod = isPub;
+      destructor->hasPrivateMod = isPriv;
       if (!doc.empty())
         destructor->docString = astCtx.copyString(doc);
 
@@ -1042,6 +1118,8 @@ DeclNode *Parser::parseStructDecl() {
                                           isConstCtor, true, false, isVariadic);
       constructor->params = astCtx.copyArray<ParamDeclNode *>(params);
       constructor->annotations = memberAnnotations;
+      constructor->hasPublicMod = isPub;
+      constructor->hasPrivateMod = isPriv;
       if (!doc.empty())
         constructor->docString = astCtx.copyString(doc);
 
@@ -1078,6 +1156,8 @@ DeclNode *Parser::parseStructDecl() {
           memType, memName, mLine, mCol, false, true, isExtern, isVariadic);
       method->params = astCtx.copyArray<ParamDeclNode *>(params);
       method->annotations = memberAnnotations;
+      method->hasPublicMod = isPub;
+      method->hasPrivateMod = isPriv;
       if (!doc.empty())
         method->docString = astCtx.copyString(doc);
 
@@ -1099,6 +1179,8 @@ DeclNode *Parser::parseStructDecl() {
       auto field = astCtx.create<VarDeclNode>(memType, memName, nullptr, mLine,
                                               mCol, memName.length());
       field->annotations = memberAnnotations;
+      field->hasPublicMod = isPub;
+      field->hasPrivateMod = isPriv;
       if (!doc.empty())
         field->docString = astCtx.copyString(doc);
 
@@ -1144,7 +1226,8 @@ DeclNode *Parser::parseStructDecl() {
 
   std::vector<FieldInfo> fInfos;
   for (size_t i = 0; i < fields.size(); ++i) {
-    fInfos.push_back({fields[i]->varName, fields[i]->type, (uint32_t)i});
+    fInfos.push_back({fields[i]->varName, fields[i]->type, (uint32_t)i,
+                      fields[i]->isPublic(fields[i]->varName)});
   }
   structTy->setFields(astCtx.copyArray<FieldInfo>(fInfos));
 
@@ -1192,6 +1275,16 @@ DeclNode *Parser::parseClassDecl() {
     std::string doc = consumeComments();
     auto memberAnnotations = parseAnnotations();
 
+    bool isPub = false, isPriv = false;
+    while (currentToken().type == TokenType::PUBLIC_KW ||
+           currentToken().type == TokenType::PRIVATE_KW) {
+      if (currentToken().type == TokenType::PUBLIC_KW)
+        isPub = true;
+      if (currentToken().type == TokenType::PRIVATE_KW)
+        isPriv = true;
+      advance();
+    }
+
     /* Intercept floating metadata and comments guarding the scope closure */
     if (currentToken().type == TokenType::RBRACE ||
         currentToken().type == TokenType::EOF_TOK) {
@@ -1233,6 +1326,8 @@ DeclNode *Parser::parseClassDecl() {
 
       destructor->params = astCtx.copyArray<ParamDeclNode *>(params);
       destructor->annotations = memberAnnotations;
+      destructor->hasPublicMod = isPub;
+      destructor->hasPrivateMod = isPriv;
       if (!doc.empty())
         destructor->docString = astCtx.copyString(doc);
 
@@ -1268,6 +1363,8 @@ DeclNode *Parser::parseClassDecl() {
                                           isConstCtor, true, false, isVariadic);
       constructor->params = astCtx.copyArray<ParamDeclNode *>(params);
       constructor->annotations = memberAnnotations;
+      constructor->hasPublicMod = isPub;
+      constructor->hasPrivateMod = isPriv;
       if (!doc.empty())
         constructor->docString = astCtx.copyString(doc);
 
@@ -1304,6 +1401,8 @@ DeclNode *Parser::parseClassDecl() {
           memType, memName, mLine, mCol, false, true, isExtern, isVariadic);
       method->params = astCtx.copyArray<ParamDeclNode *>(params);
       method->annotations = memberAnnotations;
+      method->hasPublicMod = isPub;
+      method->hasPrivateMod = isPriv;
       if (!doc.empty())
         method->docString = astCtx.copyString(doc);
 
@@ -1325,6 +1424,8 @@ DeclNode *Parser::parseClassDecl() {
       auto field = astCtx.create<VarDeclNode>(memType, memName, nullptr, mLine,
                                               mCol, memName.length());
       field->annotations = memberAnnotations;
+      field->hasPublicMod = isPub;
+      field->hasPrivateMod = isPriv;
       if (!doc.empty())
         field->docString = astCtx.copyString(doc);
 
@@ -1370,7 +1471,8 @@ DeclNode *Parser::parseClassDecl() {
 
   std::vector<FieldInfo> fInfos;
   for (size_t i = 0; i < fields.size(); ++i) {
-    fInfos.push_back({fields[i]->varName, fields[i]->type, (uint32_t)i});
+    fInfos.push_back({fields[i]->varName, fields[i]->type, (uint32_t)i,
+                      fields[i]->isPublic(fields[i]->varName)});
   }
   classTy->setFields(astCtx.copyArray<FieldInfo>(fInfos));
 
@@ -1415,6 +1517,16 @@ DeclNode *Parser::parseEnumDecl() {
     if (currentToken().type == TokenType::RBRACE)
       break;
 
+    bool isPub = false, isPriv = false;
+    while (currentToken().type == TokenType::PUBLIC_KW ||
+           currentToken().type == TokenType::PRIVATE_KW) {
+      if (currentToken().type == TokenType::PUBLIC_KW)
+        isPub = true;
+      if (currentToken().type == TokenType::PRIVATE_KW)
+        isPriv = true;
+      advance();
+    }
+
     int mLine = currentToken().line;
     int mCol = currentToken().column;
     std::string_view mName = currentToken().value;
@@ -1425,8 +1537,11 @@ DeclNode *Parser::parseEnumDecl() {
       init = parseExpression();
     }
 
-    members.push_back(astCtx.create<EnumMemberNode>(
-        mName, init, mLine, mCol, currentToken().column - mCol));
+    auto memberNode = astCtx.create<EnumMemberNode>(
+        mName, init, mLine, mCol, currentToken().column - mCol);
+    memberNode->hasPublicMod = isPub;
+    memberNode->hasPrivateMod = isPriv;
+    members.push_back(memberNode);
 
     if (!match(TokenType::COMMA)) {
       break;

@@ -71,6 +71,7 @@ struct FieldInfo {
   std::string_view name;
   const Type *type;
   uint32_t index;
+  bool isPublic;
 };
 
 class BuiltinType : public Type {

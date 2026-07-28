@@ -183,6 +183,10 @@ Token Lexer::nextToken() {
       return {TokenType::EXTERN_KW, id, startLine, startCol};
     if (id == "required")
       return {TokenType::REQUIRED_KW, id, startLine, startCol};
+    if (id == "public")
+      return {TokenType::PUBLIC_KW, id, startLine, startCol};
+    if (id == "private")
+      return {TokenType::PRIVATE_KW, id, startLine, startCol};
     if (id == "true")
       return {TokenType::TRUE_KW, id, startLine, startCol};
     if (id == "false")

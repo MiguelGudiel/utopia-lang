@@ -16,11 +16,15 @@ public:
   }
 };
 
+class ModuleLoader;
+
 class Parser {
 public:
   Parser(ASTContext &context, std::span<const Token> tokenStream,
-         DiagnosticsEngine &de, std::string_view path)
-      : astCtx(context), tokens(tokenStream), diags(de), filePath(path) {}
+         DiagnosticsEngine &de, std::string_view path,
+         ModuleLoader *loader = nullptr)
+      : astCtx(context), tokens(tokenStream), diags(de), filePath(path),
+        moduleLoader(loader) {}
 
   ModuleNode *parseModule(std::string_view filePath);
 
@@ -31,6 +35,7 @@ private:
 
   DiagnosticsEngine &diags;
   std::string_view filePath;
+  ModuleLoader *moduleLoader;
 
   const Token &currentToken() const;
   const Token &peekToken(size_t offset = 1) const;
@@ -61,7 +66,8 @@ private:
   std::vector<ParamDeclNode *> parseParameterList(const Type *classTy,
                                                   bool &isVariadic);
 
-  DeclNode *parseDeclarationOrFunction(llvm::ArrayRef<AnnotationNode *> annotations = {});
+  DeclNode *
+  parseDeclarationOrFunction(llvm::ArrayRef<AnnotationNode *> annotations = {});
   DeclNode *parseEnumDecl();
   DeclNode *parseStructDecl();
   DeclNode *parseClassDecl();

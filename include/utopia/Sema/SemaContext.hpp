@@ -25,6 +25,9 @@ public:
   void popScope() { symTable.popScope(); }
 
   void addDecl(std::string_view name, const DeclNode *decl) {
+    if (decl->declFilePath.empty()) {
+      const_cast<DeclNode *>(decl)->declFilePath = currentFile;
+    }
     symTable.addSymbol(name, decl);
   }
 
@@ -53,10 +56,18 @@ public:
 
   void setCurrentFile(std::string_view path) { currentFile = path; }
 
+  void setCurrentRecordContext(const RecordType *r) {
+    currentRecordContext = r;
+  }
+  const RecordType *getCurrentRecordContext() const {
+    return currentRecordContext;
+  }
+
 private:
   DiagnosticsEngine &diags;
   std::vector<ErrorInfo> errors;
   const Type *currentFunctionReturn;
+  const RecordType *currentRecordContext = nullptr;
 };
 
 class ScopeGuard {

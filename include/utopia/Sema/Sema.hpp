@@ -31,7 +31,8 @@ static bool canImplicitlyCast(const Type *from, const Type *to) {
   if (baseFrom == baseTo)
     return true;
 
-  /* Resolve underlying entity traits to bypass opaque typedefs and const qualifiers */
+  /* Resolve underlying entity traits to bypass opaque typedefs and const
+   * qualifiers */
   const Type *unqualFrom = baseFrom->getUnqualifiedType();
   const Type *unqualTo = baseTo->getUnqualifiedType();
 
@@ -165,6 +166,9 @@ class TypeCheckPass : public SemaPass,
 public:
   bool run(const ModuleNode *module, SemaContext &context) override;
   const char *getName() const override { return "TypeChecker"; }
+
+  // Check type access visibility to avoid escaping private types across files
+  bool checkTypeVisibility(const Type *type, const ASTNode *node);
 
   SemaResult visit(const NumberNode *node);
   SemaResult visit(const BoolNode *node);

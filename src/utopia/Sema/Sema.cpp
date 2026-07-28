@@ -205,7 +205,18 @@ void DeclCollectorPass::visit(const StructDeclNode *node) {
   if (node->isOpaque)
     return;
 
+  if (node->destructor && node->destructor->isImplicit) {
+    const_cast<FunctionDeclNode *>(node->destructor)->hasPublicMod =
+        node->hasPublicMod;
+    const_cast<FunctionDeclNode *>(node->destructor)->hasPrivateMod =
+        node->hasPrivateMod;
+  }
+
   for (auto *ctor : node->constructors) {
+    if (ctor->isImplicit) {
+      const_cast<FunctionDeclNode *>(ctor)->hasPublicMod = node->hasPublicMod;
+      const_cast<FunctionDeclNode *>(ctor)->hasPrivateMod = node->hasPrivateMod;
+    }
     const_cast<FunctionDeclNode *>(ctor)->mangledName =
         Mangler::mangle(ctor, std::string(node->name));
     ctx->addDecl(node->name, ctor);
@@ -265,7 +276,18 @@ void DeclCollectorPass::visit(const ClassDeclNode *node) {
   if (node->isOpaque)
     return;
 
+  if (node->destructor && node->destructor->isImplicit) {
+    const_cast<FunctionDeclNode *>(node->destructor)->hasPublicMod =
+        node->hasPublicMod;
+    const_cast<FunctionDeclNode *>(node->destructor)->hasPrivateMod =
+        node->hasPrivateMod;
+  }
+
   for (auto *ctor : node->constructors) {
+    if (ctor->isImplicit) {
+      const_cast<FunctionDeclNode *>(ctor)->hasPublicMod = node->hasPublicMod;
+      const_cast<FunctionDeclNode *>(ctor)->hasPrivateMod = node->hasPrivateMod;
+    }
     const_cast<FunctionDeclNode *>(ctor)->mangledName =
         Mangler::mangle(ctor, std::string(node->name));
     ctx->addDecl(node->name, ctor);
@@ -331,6 +353,42 @@ bool TypeCheckPass::run(const ModuleNode *module, SemaContext &context) {
   }
 
   return !ctx->hasErrors();
+}
+
+bool TypeCheckPass::checkTypeVisibility(const Type *type, const ASTNode *node) {
+  if (!type)
+    return true;
+  const Type *unqual = type->getUnqualifiedType();
+  while (unqual->getKind() == TypeKind::Array) {
+    unqual = static_cast<const ArrayType *>(unqual)
+                 ->getElementType()
+                 ->getUnqualifiedType();
+  }
+  if (unqual->getKind() == TypeKind::Class ||
+      unqual->getKind() == TypeKind::Struct) {
+    auto *recTy = static_cast<const RecordType *>(unqual);
+    auto *decl = recTy->getDeclaration();
+    if (decl && !decl->isPublic(recTy->getName()) &&
+        decl->declFilePath != ctx->currentFile) {
+      ctx->reportError(node->line, node->column, node->length,
+                       "Cannot access private type '" +
+                           std::string(recTy->getName()) +
+                           "' from outside its file.");
+      return false;
+    }
+  } else if (unqual->getKind() == TypeKind::Enum) {
+    auto *enumTy = static_cast<const EnumType *>(unqual);
+    auto *decl = enumTy->getDeclaration();
+    if (decl && !decl->isPublic(enumTy->getName()) &&
+        decl->declFilePath != ctx->currentFile) {
+      ctx->reportError(node->line, node->column, node->length,
+                       "Cannot access private enum '" +
+                           std::string(enumTy->getName()) +
+                           "' from outside its file.");
+      return false;
+    }
+  }
+  return true;
 }
 
 SemaResult TypeCheckPass::visit(const NumberNode *node) {
@@ -426,6 +484,9 @@ SemaResult TypeCheckPass::visit(const StructDeclNode *node) {
     }
   }
 
+  auto prevContext = ctx->getCurrentRecordContext();
+  ctx->setCurrentRecordContext(node->recordType);
+
   for (const auto *field : node->fields) {
     auto res = dispatch(field);
     if (!res)
@@ -446,6 +507,8 @@ SemaResult TypeCheckPass::visit(const StructDeclNode *node) {
     if (!res)
       hasErrors = true;
   }
+
+  ctx->setCurrentRecordContext(prevContext);
 
   if (hasErrors) {
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,
@@ -488,6 +551,9 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
     }
   }
 
+  auto prevContext = ctx->getCurrentRecordContext();
+  ctx->setCurrentRecordContext(node->recordType);
+
   for (const auto *field : node->fields) {
     auto res = dispatch(field);
     if (!res)
@@ -508,6 +574,8 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
     if (!res)
       hasErrors = true;
   }
+
+  ctx->setCurrentRecordContext(prevContext);
 
   if (hasErrors) {
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,
@@ -581,9 +649,15 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
         if (thisTy->isPointerType()) {
           const Type *pointee =
               static_cast<const PointerType *>(thisTy)->getPointeeType();
-          if (pointee->getKind() == TypeKind::Class) {
-            auto clsTy = static_cast<const ClassType *>(pointee);
+          if (pointee->getKind() == TypeKind::Class ||
+              pointee->getKind() == TypeKind::Struct) {
+            auto clsTy = static_cast<const RecordType *>(pointee);
             if (auto field = clsTy->getField(node->name)) {
+              if (!field->isPublic && ctx->getCurrentRecordContext() != clsTy) {
+                return ctx->reportError(node->line, node->column, node->length,
+                                        "Cannot access private field '" +
+                                            std::string(node->name) + "'");
+              }
               const_cast<VariableNode *>(node)->isField = true;
               const_cast<VariableNode *>(node)->fieldIndex = field->index;
               const_cast<VariableNode *>(node)->parentType = clsTy;
@@ -619,13 +693,26 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
     }
   }
 
-  const_cast<VariableNode *>(node)->resolvedDecl = target;
-
   if (target->kind == NodeKind::VarDecl) {
+    if (!target->isPublic(static_cast<const VarDeclNode *>(target)->varName) &&
+        target->declFilePath != ctx->currentFile) {
+      return ctx->reportError(node->line, node->column, node->length,
+                              "Cannot access private variable '" +
+                                  std::string(node->name) +
+                                  "' from outside its file.");
+    }
     ty = static_cast<const VarDeclNode *>(target)->type;
   } else if (target->kind == NodeKind::ParamDecl) {
     ty = static_cast<const ParamDeclNode *>(target)->type;
   } else if (target->kind == NodeKind::FunctionDecl) {
+    if (!target->isPublic(
+            static_cast<const FunctionDeclNode *>(target)->name) &&
+        target->declFilePath != ctx->currentFile) {
+      return ctx->reportError(node->line, node->column, node->length,
+                              "Cannot access private function '" +
+                                  std::string(node->name) +
+                                  "' from outside its file.");
+    }
     auto fDecl = static_cast<const FunctionDeclNode *>(target);
     std::vector<const Type *> pTypes;
     for (auto *p : fDecl->params)
@@ -636,6 +723,16 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
     const Type *funcTy = ctx->astCtx.getFunctionType(
         fDecl->returnType, ctx->astCtx.copyArray<const Type *>(pTypes));
     ty = ctx->astCtx.getPointerType(funcTy);
+  } else if (target->kind == NodeKind::TypedefDecl) {
+    if (!target->isPublic(
+            static_cast<const TypedefDeclNode *>(target)->aliasName) &&
+        target->declFilePath != ctx->currentFile) {
+      return ctx->reportError(node->line, node->column, node->length,
+                              "Cannot access private type alias '" +
+                                  std::string(node->name) +
+                                  "' from outside its file.");
+    }
+    return ctx->astCtx.VoidTy;
   } else if (target->kind == NodeKind::StructDecl ||
              target->kind == NodeKind::ClassDecl ||
              target->kind == NodeKind::EnumDecl) {
@@ -646,6 +743,7 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
                                 "' cannot be evaluated as an expression");
   }
 
+  const_cast<VariableNode *>(node)->resolvedDecl = target;
   node->exprType = ty;
   return ty;
 }
@@ -881,6 +979,11 @@ SemaResult TypeCheckPass::visit(const BinaryOpNode *node) {
 SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
   const Type *declType = node->type;
 
+  if (!checkTypeVisibility(declType, node)) {
+    return std::unexpected(ErrorInfo{node->line, node->column, node->length,
+                                     "Type visibility error"});
+  }
+
   // Prevent variables of type 'void'
   if (declType->isVoid()) {
     return ctx->reportError(node->line, node->column, node->length,
@@ -1093,6 +1196,13 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
       auto enumDecl = static_cast<const EnumDeclNode *>(varNode->resolvedDecl);
       for (auto *mem : enumDecl->members) {
         if (mem->name == node->memberName) {
+          if (!mem->isPublic(mem->name) &&
+              enumDecl->declFilePath != ctx->currentFile) {
+            return ctx->reportError(node->line, node->column, node->length,
+                                    "Cannot access private enum member '" +
+                                        std::string(mem->name) +
+                                        "' from outside its file.");
+          }
           const_cast<MemberAccessNode *>(node)->isEnumMember = true;
           const_cast<MemberAccessNode *>(node)->enumMember = mem;
           node->exprType = enumDecl->enumType;
@@ -1128,6 +1238,11 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
   }
 
   if (auto field = recordTy->getField(node->memberName)) {
+    if (!field->isPublic && ctx->getCurrentRecordContext() != recordTy) {
+      return ctx->reportError(node->line, node->column, node->length,
+                              "Cannot access private field '" +
+                                  std::string(node->memberName) + "'");
+    }
     const_cast<MemberAccessNode *>(node)->fieldIndex = field->index;
     node->exprType = field->type;
     return field->type;
@@ -1154,6 +1269,12 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
 
         for (const auto *method : methods) {
           if (method->name == node->memberName) {
+            if (!method->isPublic(method->name) &&
+                ctx->getCurrentRecordContext() != recordTy) {
+              return ctx->reportError(node->line, node->column, node->length,
+                                      "Cannot access private method '" +
+                                          std::string(method->name) + "'");
+            }
             const_cast<MemberAccessNode *>(node)->isMethodRef = true;
             const_cast<MemberAccessNode *>(node)->resolvedMethod = method;
             node->exprType = ctx->astCtx.VoidTy;
@@ -1170,6 +1291,11 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
 }
 
 SemaResult TypeCheckPass::visit(const ParamDeclNode *node) {
+  if (!checkTypeVisibility(node->type, node)) {
+    return std::unexpected(ErrorInfo{node->line, node->column, node->length,
+                                     "Type visibility error"});
+  }
+
   // Prevent parameters of type 'void'
   if (node->type->isVoid()) {
     return ctx->reportError(node->line, node->column, node->length,
@@ -1194,6 +1320,11 @@ static bool guaranteesReturn(const ASTNode *node) {
 }
 
 SemaResult TypeCheckPass::visit(const FunctionDeclNode *node) {
+  if (!checkTypeVisibility(node->returnType, node)) {
+    return std::unexpected(ErrorInfo{node->line, node->column, node->length,
+                                     "Type visibility error"});
+  }
+
   ctx->setFunctionReturnType(node->returnType);
 
   ScopeGuard guard(*ctx);
@@ -1308,7 +1439,6 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
     }
   }
 
-  // Prevent subsequent checks if evaluating any argument fails
   if (hasErrors) {
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,
                                      "Argument evaluation failed."});
@@ -1517,7 +1647,7 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
           auto aliased = ctx->lookup(td->targetEntityName);
           if (!aliased.empty()) {
             target = aliased.front();
-            decls = aliased; // Update overload set!
+            decls = aliased;
           } else {
             break;
           }
@@ -1543,6 +1673,22 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
       for (auto targetDecl : decls) {
         if (targetDecl->kind == NodeKind::FunctionDecl) {
           auto fDecl = static_cast<const FunctionDeclNode *>(targetDecl);
+
+          if (!fDecl->isPublic(fDecl->name)) {
+            if (fDecl->isMethod && !fDecl->isExtern) {
+              const RecordType *recTy = ctx->astCtx.getRecordType(name);
+              if (recTy && ctx->getCurrentRecordContext() != recTy) {
+                overloadErrors.push_back({"Constructor is private."});
+                continue;
+              }
+            } else {
+              if (fDecl->declFilePath != ctx->currentFile) {
+                overloadErrors.push_back({"Function is private to its file."});
+                continue;
+              }
+            }
+          }
+
           auto errs = checkMatch(fDecl);
           if (errs.empty()) {
             bestMatch = fDecl;
@@ -1804,6 +1950,11 @@ SemaResult TypeCheckPass::visit(const ArraySubscriptNode *node) {
 }
 
 SemaResult TypeCheckPass::visit(const NewExprNode *node) {
+  if (!checkTypeVisibility(node->allocatedType, node)) {
+    return std::unexpected(ErrorInfo{node->line, node->column, node->length,
+                                     "Type visibility error"});
+  }
+
   if (node->arraySize) {
     auto szType = dispatch(node->arraySize);
     if (!szType || !(*szType)->isInteger()) {
@@ -1861,6 +2012,12 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
       std::vector<std::vector<std::string>> overloadErrors;
 
       for (const auto *ctor : ctors) {
+        if (!ctor->isPublic(ctor->name) &&
+            ctx->getCurrentRecordContext() != recTy) {
+          overloadErrors.push_back({"Constructor is private."});
+          continue;
+        }
+
         size_t paramOffset = 1;
         size_t expectedParams = ctor->params.size() - paramOffset;
 

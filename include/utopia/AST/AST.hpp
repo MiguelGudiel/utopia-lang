@@ -74,8 +74,25 @@ struct AnnotationNode : public ASTNode {
 
 struct DeclNode : public ASTNode {
   llvm::ArrayRef<AnnotationNode *> annotations;
+  bool hasPublicMod = false;
+  bool hasPrivateMod = false;
+  std::string_view
+      declFilePath; // Tracks file origin for visibility enforcement
+
   explicit DeclNode(NodeKind k, int l = 0, int c = 0, int len = 0)
       : ASTNode(k, l, c, len) {}
+
+  /**
+   * Resolves visibility state based on modifier override and implicitly
+   * inferred privacy rules (`_` prefix).
+   */
+  bool isPublic(std::string_view declName) const {
+    if (hasPrivateMod)
+      return false;
+    if (hasPublicMod)
+      return true;
+    return !declName.starts_with("_");
+  }
 };
 
 struct EnumMemberNode : public DeclNode {

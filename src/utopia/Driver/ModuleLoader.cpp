@@ -90,6 +90,13 @@ ModuleNode *ModuleLoader::loadModule(const std::string &importURI,
     return it->second;
   }
 
+  /* Prevent infinite recursion resulting from circular dependencies */
+  if (sourceCache.contains(key)) {
+    diags.report({DiagLevel::Error, 0, 0, 0,
+                  "Circular import dependency detected: " + key, ""});
+    return nullptr;
+  }
+
   std::ifstream file(absPath);
   if (!file) {
     diags.report(
@@ -103,17 +110,29 @@ ModuleNode *ModuleLoader::loadModule(const std::string &importURI,
   auto [sourceIt, inserted] = sourceCache.insert({key, buffer.str()});
   std::string_view sourceView = sourceIt->second;
 
-  // Persist the file path in the AST context allocator to guarantee it outlives
-  // the parsing phase and safely feeds the zero-copy string_view in ModuleNode.
   std::string_view persistentFilePath = astCtx.copyString(key);
 
   Logger::debug("[ModuleLoader Debug] Persisted module path: " +
                 std::string(persistentFilePath));
 
+  std::vector<ModuleNode *> resolvedImports;
+
+  /*
+   * Initialize prelude strictly prior to parsing the target AST block.
+   * Pre-populates primitive core abstractions to satisfy early semantic
+   * lookups.
+   */
+  if (importURI != "prelude" && key.find("prelude.utp") == std::string::npos) {
+    ModuleNode *preludeMod = loadModule("prelude", currentFileDir);
+    if (preludeMod) {
+      resolvedImports.push_back(preludeMod);
+    }
+  }
+
   Lexer lexer(sourceView);
   auto tokens = lexer.tokenize();
 
-  Parser parser(astCtx, tokens, diags, persistentFilePath);
+  Parser parser(astCtx, tokens, diags, persistentFilePath, this);
   ModuleNode *module = parser.parseModule(persistentFilePath);
 
   if (diags.hasErrors()) {
@@ -121,20 +140,15 @@ ModuleNode *ModuleLoader::loadModule(const std::string &importURI,
   }
 
   moduleCache[key] = module;
-  std::vector<ModuleNode *> resolvedImports;
-
-  // Implicitly load the prelude into all modules except the prelude itself
-  if (importURI != "prelude") {
-    ModuleNode *preludeMod = loadModule("prelude", currentFileDir);
-    if (preludeMod) {
-      resolvedImports.push_back(preludeMod);
-    }
-  }
 
   for (std::string_view imp : module->rawImports) {
+    /* Cache hits are guaranteed here, fulfilling local module linkages. */
     ModuleNode *loaded = loadModule(std::string(imp), absPath.parent_path());
     if (loaded) {
-      resolvedImports.push_back(loaded);
+      if (std::find(resolvedImports.begin(), resolvedImports.end(), loaded) ==
+          resolvedImports.end()) {
+        resolvedImports.push_back(loaded);
+      }
     }
   }
 
