@@ -439,7 +439,17 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
     } else if (unNode->op == "!") {
       llvm::Constant *innerConst = evaluateAsConstant(unNode->expr);
       if (innerConst && innerConst->getType()->isIntegerTy(1)) {
-        return llvm::ConstantExpr::getNot(innerConst);
+        if (auto *ci = llvm::dyn_cast<llvm::ConstantInt>(innerConst)) {
+          return llvm::ConstantInt::get(builder.getInt1Ty(),
+                                        !ci->getZExtValue());
+        }
+      }
+    } else if (unNode->op == "~") {
+      llvm::Constant *innerConst = evaluateAsConstant(unNode->expr);
+      if (innerConst && innerConst->getType()->isIntegerTy()) {
+        if (auto *ci = llvm::dyn_cast<llvm::ConstantInt>(innerConst)) {
+          return llvm::ConstantInt::get(ctx, ~ci->getValue());
+        }
       }
     } else if (unNode->op == "-" || unNode->op == "+") {
       llvm::Constant *innerConst = evaluateAsConstant(unNode->expr);
@@ -466,6 +476,12 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
     llvm::Constant *R = evaluateAsConstant(binNode->right);
 
     if (L && R) {
+      /*
+       * LLVM 15+ has deprecated or removed many llvm::ConstantExpr interfaces
+       * (like getMul, getUDiv, etc.) in favor of explicitly folding APInts and
+       * APFloats manually to avoid relying on implicit instruction folding
+       * structures.
+       */
       if (auto *ciL = llvm::dyn_cast<llvm::ConstantInt>(L)) {
         if (auto *ciR = llvm::dyn_cast<llvm::ConstantInt>(R)) {
           llvm::APInt vL = ciL->getValue();
@@ -493,6 +509,24 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
             return llvm::ConstantInt::get(ctx, isUnsigned ? vL.udiv(vR)
                                                           : vL.sdiv(vR));
           }
+          if (binNode->op == "%") {
+            if (vR.isZero())
+              return nullptr;
+            return llvm::ConstantInt::get(ctx, isUnsigned ? vL.urem(vR)
+                                                          : vL.srem(vR));
+          }
+          if (binNode->op == "&")
+            return llvm::ConstantInt::get(ctx, vL & vR);
+          if (binNode->op == "|")
+            return llvm::ConstantInt::get(ctx, vL | vR);
+          if (binNode->op == "^")
+            return llvm::ConstantInt::get(ctx, vL ^ vR);
+          if (binNode->op == "<<")
+            return llvm::ConstantInt::get(ctx, vL.shl(vR));
+          if (binNode->op == ">>")
+            return llvm::ConstantInt::get(ctx, isUnsigned ? vL.lshr(vR)
+                                                          : vL.ashr(vR));
+
           if (binNode->op == "&&")
             return llvm::ConstantInt::get(builder.getInt1Ty(),
                                           (vL != 0) && (vR != 0));
@@ -535,6 +569,10 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
           }
           if (binNode->op == "/") {
             vL.divide(vR, llvm::APFloat::rmNearestTiesToEven);
+            return llvm::ConstantFP::get(ctx, vL);
+          }
+          if (binNode->op == "%") {
+            vL.mod(vR);
             return llvm::ConstantFP::get(ctx, vL);
           }
 
@@ -758,9 +796,7 @@ llvm::Value *CodeGen::visit(const ClassDeclNode *node) {
   return nullptr;
 }
 
-llvm::Value *CodeGen::visit(const EnumDeclNode *node) {
-  return nullptr;
-}
+llvm::Value *CodeGen::visit(const EnumDeclNode *node) { return nullptr; }
 
 llvm::Value *CodeGen::visit(const EnumMemberNode *node) { return nullptr; }
 
@@ -972,6 +1008,12 @@ llvm::Value *CodeGen::visit(const UnaryOpNode *node) {
       return nullptr;
     return builder.CreateNot(val);
   }
+  if (node->op == "~") {
+    llvm::Value *val = dispatch(node->expr);
+    if (!val)
+      return nullptr;
+    return builder.CreateNot(val);
+  }
   if (node->op == "&") {
     return getLValue(node->expr);
   }
@@ -1000,6 +1042,36 @@ llvm::Value *CodeGen::visit(const UnaryOpNode *node) {
   }
   if (node->op == "+") {
     return dispatch(node->expr);
+  }
+  if (node->op == "++" || node->op == "--") {
+    llvm::Value *lval = getLValue(node->expr);
+    if (!lval) {
+      diags.report(
+          {DiagLevel::Error, node->line, node->column, node->length,
+           "Invalid operand for " + std::string(node->op) + " operator.", ""});
+      return nullptr;
+    }
+
+    llvm::Type *valTy = getLLVMType(node->exprType);
+    llvm::Value *oldVal = createTBAALoad(valTy, lval, node->exprType);
+    llvm::Value *newVal = nullptr;
+
+    bool isFloat = valTy->isFloatingPointTy();
+    if (node->op == "++") {
+      if (isFloat)
+        newVal = builder.CreateFAdd(oldVal, llvm::ConstantFP::get(valTy, 1.0));
+      else
+        newVal = builder.CreateAdd(oldVal, llvm::ConstantInt::get(valTy, 1));
+    } else {
+      if (isFloat)
+        newVal = builder.CreateFSub(oldVal, llvm::ConstantFP::get(valTy, 1.0));
+      else
+        newVal = builder.CreateSub(oldVal, llvm::ConstantInt::get(valTy, 1));
+    }
+
+    createTBAAStore(newVal, lval, getTBAATagForExpr(node->expr));
+
+    return node->isPostfix ? oldVal : newVal;
   }
 
   return nullptr;
@@ -1041,6 +1113,20 @@ llvm::Value *CodeGen::visit(const BinaryOpNode *node) {
     return isFloat ? builder.CreateFDiv(L, R)
                    : (isUnsigned ? builder.CreateUDiv(L, R)
                                  : builder.CreateSDiv(L, R));
+  if (node->op == "%")
+    return isFloat ? builder.CreateFRem(L, R)
+                   : (isUnsigned ? builder.CreateURem(L, R)
+                                 : builder.CreateSRem(L, R));
+  if (node->op == "&")
+    return builder.CreateAnd(L, R);
+  if (node->op == "|")
+    return builder.CreateOr(L, R);
+  if (node->op == "^")
+    return builder.CreateXor(L, R);
+  if (node->op == "<<")
+    return builder.CreateShl(L, R);
+  if (node->op == ">>")
+    return isUnsigned ? builder.CreateLShr(L, R) : builder.CreateAShr(L, R);
 
   if (node->op == "==")
     return isFloat ? builder.CreateFCmpOEQ(L, R) : builder.CreateICmpEQ(L, R);
@@ -1366,8 +1452,55 @@ llvm::Value *CodeGen::visit(const AssignNode *node) {
     return nullptr;
   }
 
-  llvm::Type *destTy = getLLVMType(node->target->exprType);
-  rval = createImplicitCast(rval, destTy);
+  if (node->op != "=") {
+    llvm::Type *valTy = getLLVMType(node->target->exprType);
+    llvm::Value *oldVal = createTBAALoad(valTy, lval, node->target->exprType);
+    llvm::Value *castedRval = createImplicitCast(rval, valTy);
+    std::string_view binOp = node->op.substr(0, node->op.length() - 1);
+
+    bool isFloat = valTy->isFloatingPointTy();
+    bool isUnsigned = false;
+    if (node->target->exprType && node->target->exprType->isInteger()) {
+      auto bKind = static_cast<const BuiltinType *>(
+                       node->target->exprType->getUnqualifiedType())
+                       ->getBuiltinKind();
+      isUnsigned =
+          (bKind == BuiltinKind::UInt8 || bKind == BuiltinKind::UInt16 ||
+           bKind == BuiltinKind::UInt32 || bKind == BuiltinKind::UInt64);
+    }
+
+    if (binOp == "+")
+      rval = isFloat ? builder.CreateFAdd(oldVal, castedRval)
+                     : builder.CreateAdd(oldVal, castedRval);
+    else if (binOp == "-")
+      rval = isFloat ? builder.CreateFSub(oldVal, castedRval)
+                     : builder.CreateSub(oldVal, castedRval);
+    else if (binOp == "*")
+      rval = isFloat ? builder.CreateFMul(oldVal, castedRval)
+                     : builder.CreateMul(oldVal, castedRval);
+    else if (binOp == "/")
+      rval = isFloat ? builder.CreateFDiv(oldVal, castedRval)
+                     : (isUnsigned ? builder.CreateUDiv(oldVal, castedRval)
+                                   : builder.CreateSDiv(oldVal, castedRval));
+    else if (binOp == "%")
+      rval = isFloat ? builder.CreateFRem(oldVal, castedRval)
+                     : (isUnsigned ? builder.CreateURem(oldVal, castedRval)
+                                   : builder.CreateSRem(oldVal, castedRval));
+    else if (binOp == "&")
+      rval = builder.CreateAnd(oldVal, castedRval);
+    else if (binOp == "|")
+      rval = builder.CreateOr(oldVal, castedRval);
+    else if (binOp == "^")
+      rval = builder.CreateXor(oldVal, castedRval);
+    else if (binOp == "<<")
+      rval = builder.CreateShl(oldVal, castedRval);
+    else if (binOp == ">>")
+      rval = isUnsigned ? builder.CreateLShr(oldVal, castedRval)
+                        : builder.CreateAShr(oldVal, castedRval);
+  } else {
+    llvm::Type *destTy = getLLVMType(node->target->exprType);
+    rval = createImplicitCast(rval, destTy);
+  }
 
   createTBAAStore(rval, lval, getTBAATagForExpr(node->target));
 

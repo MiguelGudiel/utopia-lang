@@ -159,10 +159,16 @@ struct TypedefDeclNode : public DeclNode {
 struct UnaryOpNode : public ExprNode {
   std::string_view op;
   ExprNode *expr;
+  bool isPostfix;
 
-  UnaryOpNode(std::string_view o, ExprNode *e, int l, int c)
-      : ExprNode(NodeKind::UnaryOp, l, c), op(o), expr(e) {
-    this->length = (e->column + e->length) - c;
+  UnaryOpNode(std::string_view o, ExprNode *e, int l, int c,
+              bool postfix = false)
+      : ExprNode(NodeKind::UnaryOp, l, c), op(o), expr(e), isPostfix(postfix) {
+    if (postfix) {
+      this->length = (e->column + e->length) - c + o.length();
+    } else {
+      this->length = (e->column + e->length) - c;
+    }
   }
 };
 
@@ -190,11 +196,13 @@ struct VarDeclNode : public DeclNode {
 };
 
 struct AssignNode : public ExprNode {
+  std::string_view op;
   ExprNode *target;
   ExprNode *value;
 
-  AssignNode(ExprNode *t, ExprNode *v, int l, int c, int len)
-      : ExprNode(NodeKind::Assign, l, c, len), target(t), value(v) {}
+  AssignNode(std::string_view o, ExprNode *t, ExprNode *v, int l, int c,
+             int len)
+      : ExprNode(NodeKind::Assign, l, c, len), op(o), target(t), value(v) {}
 };
 
 struct BlockNode : public StmtNode {

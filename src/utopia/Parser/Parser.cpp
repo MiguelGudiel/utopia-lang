@@ -727,13 +727,13 @@ ExprNode *Parser::parseLogicalOr() {
 }
 
 ExprNode *Parser::parseLogicalAnd() {
-  auto left = parseEquality();
+  auto left = parseBitwiseOr();
   while (currentToken().type == TokenType::LOGICAL_AND) {
     int line = left->line;
     int col = left->column;
     std::string_view op = currentToken().value;
     advance();
-    auto right = parseEquality();
+    auto right = parseBitwiseOr();
     left = astCtx.create<BinaryOpNode>(op, left, right, line, col);
   }
   return left;
@@ -754,11 +754,64 @@ ExprNode *Parser::parseEquality() {
 }
 
 ExprNode *Parser::parseRelational() {
-  auto left = parseAdditive();
+  auto left = parseShift();
   while (currentToken().type == TokenType::LT ||
          currentToken().type == TokenType::GT ||
          currentToken().type == TokenType::LE ||
          currentToken().type == TokenType::GE) {
+    int line = left->line;
+    int col = left->column;
+    std::string_view op = currentToken().value;
+    advance();
+    auto right = parseShift();
+    left = astCtx.create<BinaryOpNode>(op, left, right, line, col);
+  }
+  return left;
+}
+
+ExprNode *Parser::parseBitwiseOr() {
+  auto left = parseBitwiseXor();
+  while (currentToken().type == TokenType::PIPE) {
+    int line = left->line;
+    int col = left->column;
+    std::string_view op = currentToken().value;
+    advance();
+    auto right = parseBitwiseXor();
+    left = astCtx.create<BinaryOpNode>(op, left, right, line, col);
+  }
+  return left;
+}
+
+ExprNode *Parser::parseBitwiseXor() {
+  auto left = parseBitwiseAnd();
+  while (currentToken().type == TokenType::CARET) {
+    int line = left->line;
+    int col = left->column;
+    std::string_view op = currentToken().value;
+    advance();
+    auto right = parseBitwiseAnd();
+    left = astCtx.create<BinaryOpNode>(op, left, right, line, col);
+  }
+  return left;
+}
+
+ExprNode *Parser::parseBitwiseAnd() {
+  auto left = parseEquality();
+  while (currentToken().type == TokenType::AMPERSAND) {
+    int line = left->line;
+    int col = left->column;
+    std::string_view op = currentToken().value;
+    advance();
+    auto right = parseEquality();
+    left = astCtx.create<BinaryOpNode>(op, left, right, line, col);
+  }
+  return left;
+}
+
+ExprNode *Parser::parseShift() {
+  auto left = parseAdditive();
+  while (currentToken().type == TokenType::LSHIFT ||
+         currentToken().type == TokenType::RSHIFT) {
     int line = left->line;
     int col = left->column;
     std::string_view op = currentToken().value;
@@ -867,7 +920,10 @@ ExprNode *Parser::parseUnary() {
       currentToken().type == TokenType::AMPERSAND ||
       currentToken().type == TokenType::MINUS ||
       currentToken().type == TokenType::PLUS ||
-      currentToken().type == TokenType::BANG) {
+      currentToken().type == TokenType::BANG ||
+      currentToken().type == TokenType::TILDE ||
+      currentToken().type == TokenType::PLUS_PLUS ||
+      currentToken().type == TokenType::MINUS_MINUS) {
     int line = currentToken().line;
     int col = currentToken().column;
     std::string_view op = currentToken().value;
@@ -1442,16 +1498,29 @@ ExprNode *Parser::parseExpression() { return parseAssignment(); }
 ExprNode *Parser::parseAssignment() {
   auto expr = parseLogicalOr();
 
-  if (currentToken().type == TokenType::ASSIGN) {
+  switch (currentToken().type) {
+  case TokenType::ASSIGN:
+  case TokenType::PLUS_EQ:
+  case TokenType::MINUS_EQ:
+  case TokenType::STAR_EQ:
+  case TokenType::SLASH_EQ:
+  case TokenType::PERCENT_EQ:
+  case TokenType::AMPERSAND_EQ:
+  case TokenType::PIPE_EQ:
+  case TokenType::CARET_EQ:
+  case TokenType::LSHIFT_EQ:
+  case TokenType::RSHIFT_EQ: {
     int line = expr->line;
     int col = expr->column;
+    std::string_view op = currentToken().value;
     advance();
     auto value = parseAssignment();
     int endCol = value->column + value->length;
-    return astCtx.create<AssignNode>(expr, value, line, col, endCol - col);
+    return astCtx.create<AssignNode>(op, expr, value, line, col, endCol - col);
   }
-
-  return expr;
+  default:
+    return expr;
+  }
 }
 
 ExprNode *Parser::parseArrayLiteral() {
@@ -1480,9 +1549,10 @@ ExprNode *Parser::parseArrayLiteral() {
 ExprNode *Parser::parseTerm() {
   auto left = parseCast();
   while (currentToken().type == TokenType::STAR ||
-         currentToken().type == TokenType::SLASH) {
-    int line = currentToken().line;
-    int col = currentToken().column;
+         currentToken().type == TokenType::SLASH ||
+         currentToken().type == TokenType::PERCENT) {
+    int line = left->line;
+    int col = left->column;
     std::string_view op = currentToken().value;
     advance();
     auto right = parseCast();
@@ -1580,6 +1650,14 @@ ExprNode *Parser::parsePostfix() {
       auto namesRef = astCtx.copyArray<std::string_view>(argNames);
       expr = astCtx.create<FunctionCallNode>(expr, argsRef, namesRef, line, col,
                                              endCol - col);
+    } else if (currentToken().type == TokenType::PLUS_PLUS ||
+               currentToken().type == TokenType::MINUS_MINUS) {
+      int line = expr->line;
+      int col = expr->column;
+      std::string_view op = currentToken().value;
+      advance();
+      /* Evaluate postfix increments properly by passing isPostfix=true */
+      expr = astCtx.create<UnaryOpNode>(op, expr, line, col, true);
     } else {
       break;
     }

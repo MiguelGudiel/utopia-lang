@@ -66,7 +66,7 @@ private:
   DeclNode *parseStructDecl();
   DeclNode *parseClassDecl();
   BlockNode *parseBlock();
-  BlockNode *parseFunctionBody(const Type* returnType);
+  BlockNode *parseFunctionBody(const Type *returnType);
   ReturnNode *parseReturn();
   ExprNode *parseExpressionStatement();
   ForNode *parseForStatement();
@@ -76,8 +76,12 @@ private:
   ExprNode *parseAssignment();
   ExprNode *parseLogicalOr();
   ExprNode *parseLogicalAnd();
+  ExprNode *parseBitwiseOr();
+  ExprNode *parseBitwiseXor();
+  ExprNode *parseBitwiseAnd();
   ExprNode *parseEquality();
   ExprNode *parseRelational();
+  ExprNode *parseShift();
   ExprNode *parseAdditive();
   ExprNode *parseTerm();
   ExprNode *parseCast();

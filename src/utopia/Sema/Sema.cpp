@@ -749,6 +749,37 @@ SemaResult TypeCheckPass::visit(const UnaryOpNode *node) {
                                   "' requires a numeric operand");
     }
     resType = *exprType;
+  } else if (node->op == "~") {
+    if (!(*exprType)->isInteger()) {
+      return ctx->reportError(
+          node->line, node->column, node->length,
+          "Bitwise NOT operator '~' requires an integer operand");
+    }
+    resType = *exprType;
+  } else if (node->op == "++" || node->op == "--") {
+    if (!(*exprType)->isNumeric()) {
+      return ctx->reportError(node->line, node->column, node->length,
+                              "Unary operator '" + std::string(node->op) +
+                                  "' requires a numeric operand");
+    }
+    if (node->expr->kind != NodeKind::Variable &&
+        node->expr->kind != NodeKind::MemberAccess &&
+        node->expr->kind != NodeKind::ArraySubscript &&
+        !(node->expr->kind == NodeKind::UnaryOp &&
+          static_cast<const UnaryOpNode *>(node->expr)->op == "*")) {
+      return ctx->reportError(
+          node->line, node->column, node->length,
+          "Expression is not assignable (must be an l-value)");
+    }
+    if ((*exprType)->isConstQualified() ||
+        ((*exprType)->isReferenceType() &&
+         static_cast<const ReferenceType *>(*exprType)
+             ->getPointeeType()
+             ->isConstQualified())) {
+      return ctx->reportError(node->line, node->column, node->length,
+                              "Cannot modify a constant variable");
+    }
+    resType = *exprType;
   } else {
     return ctx->reportError(node->line, node->column, node->length,
                             "Unknown unary operator");
@@ -795,7 +826,14 @@ SemaResult TypeCheckPass::visit(const BinaryOpNode *node) {
     return ctx->astCtx.BoolTy;
   }
 
-  if (!(*lhs)->isNumeric() || !(*rhs)->isNumeric()) {
+  if (node->op == "<<" || node->op == ">>" || node->op == "&" ||
+      node->op == "|" || node->op == "^" || node->op == "%") {
+    if (!(*lhs)->isInteger() || !(*rhs)->isInteger()) {
+      return ctx->reportError(
+          node->line, node->column, node->length,
+          "Bitwise and modulo operations require integer operands.");
+    }
+  } else if (!(*lhs)->isNumeric() || !(*rhs)->isNumeric()) {
     return ctx->reportError(node->line, node->column, node->length,
                             "Binary arithmetic operations are currently "
                             "restricted to numeric types.");
@@ -934,6 +972,24 @@ SemaResult TypeCheckPass::visit(const AssignNode *node) {
     return ctx->reportError(node->target->line, node->target->column,
                             node->target->length,
                             "Cannot assign to a constant variable");
+  }
+
+  if (node->op != "=") {
+    std::string_view binOp = node->op.substr(0, node->op.length() - 1);
+    if (binOp == "%" || binOp == "&" || binOp == "|" || binOp == "^" ||
+        binOp == "<<" || binOp == ">>") {
+      if (!(*lhsType)->isInteger() || !(*rhsType)->isInteger()) {
+        return ctx->reportError(
+            node->line, node->column, node->length,
+            "Bitwise and modulo assignments require integer operands.");
+      }
+    } else {
+      if (!(*lhsType)->isNumeric() || !(*rhsType)->isNumeric()) {
+        return ctx->reportError(
+            node->line, node->column, node->length,
+            "Arithmetic assignments require numeric operands.");
+      }
+    }
   }
 
   if (!canImplicitlyCast(*rhsType, *lhsType)) {

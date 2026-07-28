@@ -72,6 +72,9 @@ void EffectAnalyzer::visit(const ForNode *n) {
 void EffectAnalyzer::visit(const UnaryOpNode *n) {
   if (n->op == "*") {
     readsMem = true;
+  } else if (n->op == "++" || n->op == "--") {
+    readsMem = true;
+    writesMem = true;
   }
   dispatch(n->expr);
 }

@@ -250,17 +250,60 @@ Token Lexer::nextToken() {
   advance();
   switch (c) {
   case '+':
+    if (cursor < source.length() && source[cursor] == '+') {
+      advance();
+      return {TokenType::PLUS_PLUS, std::string_view(start, 2), startLine,
+              startCol};
+    }
+    if (cursor < source.length() && source[cursor] == '=') {
+      advance();
+      return {TokenType::PLUS_EQ, std::string_view(start, 2), startLine,
+              startCol};
+    }
     return {TokenType::PLUS, std::string_view(start, 1), startLine, startCol};
   case '-':
+    if (cursor < source.length() && source[cursor] == '-') {
+      advance();
+      return {TokenType::MINUS_MINUS, std::string_view(start, 2), startLine,
+              startCol};
+    }
+    if (cursor < source.length() && source[cursor] == '=') {
+      advance();
+      return {TokenType::MINUS_EQ, std::string_view(start, 2), startLine,
+              startCol};
+    }
     return {TokenType::MINUS, std::string_view(start, 1), startLine, startCol};
   case '*':
+    if (cursor < source.length() && source[cursor] == '=') {
+      advance();
+      return {TokenType::STAR_EQ, std::string_view(start, 2), startLine,
+              startCol};
+    }
     return {TokenType::STAR, std::string_view(start, 1), startLine, startCol};
   case '/':
+    if (cursor < source.length() && source[cursor] == '=') {
+      advance();
+      return {TokenType::SLASH_EQ, std::string_view(start, 2), startLine,
+              startCol};
+    }
     return {TokenType::SLASH, std::string_view(start, 1), startLine, startCol};
+  case '%':
+    if (cursor < source.length() && source[cursor] == '=') {
+      advance();
+      return {TokenType::PERCENT_EQ, std::string_view(start, 2), startLine,
+              startCol};
+    }
+    return {TokenType::PERCENT, std::string_view(start, 1), startLine,
+            startCol};
   case '&':
     if (cursor < source.length() && source[cursor] == '&') {
       advance();
       return {TokenType::LOGICAL_AND, std::string_view(start, 2), startLine,
+              startCol};
+    }
+    if (cursor < source.length() && source[cursor] == '=') {
+      advance();
+      return {TokenType::AMPERSAND_EQ, std::string_view(start, 2), startLine,
               startCol};
     }
     return {TokenType::AMPERSAND, std::string_view(start, 1), startLine,
@@ -271,8 +314,51 @@ Token Lexer::nextToken() {
       return {TokenType::LOGICAL_OR, std::string_view(start, 2), startLine,
               startCol};
     }
-    return {TokenType::UNKNOWN, std::string_view(start, 1), startLine,
-            startCol};
+    if (cursor < source.length() && source[cursor] == '=') {
+      advance();
+      return {TokenType::PIPE_EQ, std::string_view(start, 2), startLine,
+              startCol};
+    }
+    return {TokenType::PIPE, std::string_view(start, 1), startLine, startCol};
+  case '^':
+    if (cursor < source.length() && source[cursor] == '=') {
+      advance();
+      return {TokenType::CARET_EQ, std::string_view(start, 2), startLine,
+              startCol};
+    }
+    return {TokenType::CARET, std::string_view(start, 1), startLine, startCol};
+  case '<':
+    if (cursor < source.length() && source[cursor] == '<') {
+      advance();
+      if (cursor < source.length() && source[cursor] == '=') {
+        advance();
+        return {TokenType::LSHIFT_EQ, std::string_view(start, 3), startLine,
+                startCol};
+      }
+      return {TokenType::LSHIFT, std::string_view(start, 2), startLine,
+              startCol};
+    }
+    if (cursor < source.length() && source[cursor] == '=') {
+      advance();
+      return {TokenType::LE, std::string_view(start, 2), startLine, startCol};
+    }
+    return {TokenType::LT, std::string_view(start, 1), startLine, startCol};
+  case '>':
+    if (cursor < source.length() && source[cursor] == '>') {
+      advance();
+      if (cursor < source.length() && source[cursor] == '=') {
+        advance();
+        return {TokenType::RSHIFT_EQ, std::string_view(start, 3), startLine,
+                startCol};
+      }
+      return {TokenType::RSHIFT, std::string_view(start, 2), startLine,
+              startCol};
+    }
+    if (cursor < source.length() && source[cursor] == '=') {
+      advance();
+      return {TokenType::GE, std::string_view(start, 2), startLine, startCol};
+    }
+    return {TokenType::GT, std::string_view(start, 1), startLine, startCol};
   case '=':
     if (cursor < source.length() && source[cursor] == '=') {
       advance();
@@ -290,18 +376,6 @@ Token Lexer::nextToken() {
       return {TokenType::NEQ, std::string_view(start, 2), startLine, startCol};
     }
     return {TokenType::BANG, std::string_view(start, 1), startLine, startCol};
-  case '<':
-    if (cursor < source.length() && source[cursor] == '=') {
-      advance();
-      return {TokenType::LE, std::string_view(start, 2), startLine, startCol};
-    }
-    return {TokenType::LT, std::string_view(start, 1), startLine, startCol};
-  case '>':
-    if (cursor < source.length() && source[cursor] == '=') {
-      advance();
-      return {TokenType::GE, std::string_view(start, 2), startLine, startCol};
-    }
-    return {TokenType::GT, std::string_view(start, 1), startLine, startCol};
   case '@':
     return {TokenType::AT, std::string_view(start, 1), startLine, startCol};
   case '(':

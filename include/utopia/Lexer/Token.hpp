@@ -26,7 +26,12 @@ enum class TokenType : uint8_t {
   MINUS,
   STAR,
   SLASH,
+  PERCENT, // %
   AMPERSAND,
+  PIPE,   // |
+  CARET,  // ^
+  LSHIFT, // <<
+  RSHIFT, // >>
   LOGICAL_AND,
   LOGICAL_OR,
   EQ,
@@ -43,6 +48,16 @@ enum class TokenType : uint8_t {
   DOT,
   TILDE,
   ASSIGN,
+  PLUS_EQ,      // +=
+  MINUS_EQ,     // -=
+  STAR_EQ,      // *=
+  SLASH_EQ,     // /=
+  PERCENT_EQ,   // %=
+  AMPERSAND_EQ, // &=
+  PIPE_EQ,      // |=
+  CARET_EQ,     // ^=
+  LSHIFT_EQ,    // <<=
+  RSHIFT_EQ,    // >>=
   ARROW,
   COLON,
   TRUE_KW,
@@ -51,18 +66,20 @@ enum class TokenType : uint8_t {
   RPAREN,
   LBRACE,
   RBRACE,
-  LBRACKET,  /* [ */
-  RBRACKET,  /* ] */
-  NEW_KW,    /* new */
-  DELETE_KW, /* delete */
-  NULL_KW,   /* null */
-  TYPEDEF_KW,/* typedef */
+  LBRACKET,   /* [ */
+  RBRACKET,   /* ] */
+  NEW_KW,     /* new */
+  DELETE_KW,  /* delete */
+  NULL_KW,    /* null */
+  TYPEDEF_KW, /* typedef */
   ENUM_KW,    /* enum */
   FUNCTION_KW,
   COMMA,
   SEMICOLON,
   RETURN,
   COMMENT,
+  PLUS_PLUS,   /*++*/
+  MINUS_MINUS, /*--*/
   UNKNOWN
 };
 

@@ -1,7 +1,6 @@
 #pragma once
 #include "utopia/Common/Logger.hpp"
 #include <chrono>
-#include <iostream>
 #include <string>
 
 namespace utopia {
