@@ -44,6 +44,8 @@ public:
   void visit(const StructDeclNode *) {}
   void visit(const ClassDeclNode *) {}
   void visit(const FunctionDeclNode *) {}
+  void visit(const EnumDeclNode *) {}
+  void visit(const EnumMemberNode *) {}
 };
 
 } // namespace utopia

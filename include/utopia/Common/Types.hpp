@@ -24,7 +24,8 @@ enum class TypeKind {
   Class,
   Array,
   Function,
-  Alias
+  Alias,
+  Enum
 };
 
 enum class BuiltinKind {
@@ -174,6 +175,22 @@ public:
   void setTarget(const Type *t) const { target = t; }
 };
 
+class EnumType : public Type {
+  std::string_view name;
+  const Type *underlyingType;
+  mutable const DeclNode *declaration;
+
+public:
+  explicit EnumType(std::string_view n, const Type *u)
+      : Type(TypeKind::Enum), name(n), underlyingType(u), declaration(nullptr) {
+  }
+
+  std::string_view getName() const { return name; }
+  const Type *getUnderlyingType() const { return underlyingType; }
+  const DeclNode *getDeclaration() const { return declaration; }
+  void setDeclaration(const DeclNode *decl) const { declaration = decl; }
+};
+
 inline bool Type::isConstQualified() const { return kind == TypeKind::Const; }
 
 inline const Type *Type::getUnqualifiedType() const {
@@ -238,6 +255,9 @@ inline std::string Type::toString() const {
            "[" +
            std::to_string(static_cast<const ArrayType *>(this)->getSize()) +
            "]";
+  }
+  if (kind == TypeKind::Enum) {
+    return std::string(static_cast<const EnumType *>(this)->getName());
   }
   if (isBuiltinType()) {
     switch (static_cast<const BuiltinType *>(this)->getBuiltinKind()) {

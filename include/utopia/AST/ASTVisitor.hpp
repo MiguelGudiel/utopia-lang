@@ -55,6 +55,12 @@ public:
     case NodeKind::VarDecl:
       return static_cast<Derived *>(this)->visit(
           static_cast<const VarDeclNode *>(node));
+    case NodeKind::EnumDecl:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const EnumDeclNode *>(node));
+    case NodeKind::EnumMember:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const EnumMemberNode *>(node));
     case NodeKind::Assign:
       return static_cast<Derived *>(this)->visit(
           static_cast<const AssignNode *>(node));

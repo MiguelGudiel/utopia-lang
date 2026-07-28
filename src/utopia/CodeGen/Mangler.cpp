@@ -107,6 +107,10 @@ std::string Mangler::mangleType(const Type *t) {
     auto name = static_cast<const RecordType *>(t)->getName();
     return std::to_string(name.length()) + std::string(name);
   }
+  if (t->getKind() == TypeKind::Enum) {
+    auto name = static_cast<const EnumType *>(t)->getName();
+    return std::to_string(name.length()) + std::string(name);
+  }
   return "u";
 }
 

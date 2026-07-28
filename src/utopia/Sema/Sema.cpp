@@ -72,7 +72,8 @@ void DeclCollectorPass::visit(const ModuleNode *node) {
         stmt->kind == NodeKind::VarDecl || stmt->kind == NodeKind::StructDecl ||
         stmt->kind == NodeKind::ClassDecl ||
         stmt->kind == NodeKind::AnnotationDecl ||
-        stmt->kind == NodeKind::TypedefDecl) {
+        stmt->kind == NodeKind::TypedefDecl ||
+        stmt->kind == NodeKind::EnumDecl) {
       dispatch(stmt);
     }
   }
@@ -290,6 +291,13 @@ void DeclCollectorPass::visit(const ClassDeclNode *node) {
   }
 }
 
+void DeclCollectorPass::visit(const EnumDeclNode *node) {
+  ctx->addDecl(node->name, node);
+  const_cast<EnumDeclNode *>(node)->enumType =
+      ctx->astCtx.getEnumType(node->name, node->underlyingType);
+  const_cast<EnumType *>(node->enumType)->setDeclaration(node);
+}
+
 bool TypeCheckPass::run(const ModuleNode *module, SemaContext &context) {
   ctx = &context;
   auto result = dispatch(module);
@@ -480,6 +488,60 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
   return ctx->astCtx.VoidTy;
 }
 
+SemaResult TypeCheckPass::visit(const EnumDeclNode *node) {
+  int64_t nextValue = 0;
+  bool hasErrors = false;
+
+  for (auto *mem : node->members) {
+    if (mem->initializer) {
+      auto res = dispatch(mem->initializer);
+      if (!res) {
+        hasErrors = true;
+        continue;
+      }
+
+      int64_t val = 0;
+      auto *init = mem->initializer;
+
+      // Basic compile-time evaluation for enum values
+      if (init->kind == NodeKind::Number) {
+        val =
+            std::stoll(std::string(static_cast<const NumberNode *>(init)->raw));
+      } else if (init->kind == NodeKind::UnaryOp) {
+        auto uop = static_cast<const UnaryOpNode *>(init);
+        if (uop->op == "-" && uop->expr->kind == NodeKind::Number) {
+          val = -std::stoll(
+              std::string(static_cast<const NumberNode *>(uop->expr)->raw));
+        } else {
+          ctx->reportError(
+              init->line, init->column, init->length,
+              "Enum member initializers must be simple integer constants.");
+          hasErrors = true;
+        }
+      } else {
+        ctx->reportError(
+            init->line, init->column, init->length,
+            "Enum member initializers must be simple integer constants.");
+        hasErrors = true;
+      }
+      mem->evaluatedValue = val;
+      nextValue = val + 1;
+    } else {
+      mem->evaluatedValue = nextValue++;
+    }
+  }
+
+  if (hasErrors) {
+    return std::unexpected(ErrorInfo{node->line, node->column, node->length,
+                                     "Errors in enum declaration"});
+  }
+  return ctx->astCtx.VoidTy;
+}
+
+SemaResult TypeCheckPass::visit(const EnumMemberNode *node) {
+  return ctx->astCtx.VoidTy;
+}
+
 SemaResult TypeCheckPass::visit(const VariableNode *node) {
   auto decls = ctx->lookup(node->name);
   if (decls.empty()) {
@@ -547,7 +609,8 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
         fDecl->returnType, ctx->astCtx.copyArray<const Type *>(pTypes));
     ty = ctx->astCtx.getPointerType(funcTy);
   } else if (target->kind == NodeKind::StructDecl ||
-             target->kind == NodeKind::ClassDecl) {
+             target->kind == NodeKind::ClassDecl ||
+             target->kind == NodeKind::EnumDecl) {
     return ctx->astCtx.VoidTy;
   } else {
     return ctx->reportError(node->line, node->column, node->length,
@@ -856,6 +919,13 @@ SemaResult TypeCheckPass::visit(const AssignNode *node) {
         "Expression is not assignable (must be an l-value)");
   }
 
+  if (node->target->kind == NodeKind::MemberAccess &&
+      static_cast<const MemberAccessNode *>(node->target)->isEnumMember) {
+    return ctx->reportError(node->target->line, node->target->column,
+                            node->target->length,
+                            "Cannot assign to an enum member");
+  }
+
   if ((*lhsType)->isConstQualified() ||
       ((*lhsType)->isReferenceType() &&
        static_cast<const ReferenceType *>(*lhsType)
@@ -915,6 +985,26 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
   if (!objType)
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,
                                      "Invalid object in member access"});
+
+  if (node->object->kind == NodeKind::Variable) {
+    auto varNode = static_cast<const VariableNode *>(node->object);
+    if (varNode->resolvedDecl &&
+        varNode->resolvedDecl->kind == NodeKind::EnumDecl) {
+      auto enumDecl = static_cast<const EnumDeclNode *>(varNode->resolvedDecl);
+      for (auto *mem : enumDecl->members) {
+        if (mem->name == node->memberName) {
+          const_cast<MemberAccessNode *>(node)->isEnumMember = true;
+          const_cast<MemberAccessNode *>(node)->enumMember = mem;
+          node->exprType = enumDecl->enumType;
+          return node->exprType;
+        }
+      }
+      return ctx->reportError(node->line, node->column, node->length,
+                              "Enum '" + std::string(enumDecl->name) +
+                                  "' does not contain member '" +
+                                  std::string(node->memberName) + "'");
+    }
+  }
 
   const Type *baseTy = *objType;
   if (baseTy->isPointerType())
@@ -1447,11 +1537,15 @@ SemaResult TypeCheckPass::visit(const CastNode *node) {
   bool isDestNumeric = destType->isNumeric();
   bool isSrcPtr = (*srcType)->isPointerType();
   bool isDestPtr = destType->isPointerType();
+  bool isSrcEnum = (*srcType)->getKind() == TypeKind::Enum;
+  bool isDestEnum = destType->getKind() == TypeKind::Enum;
 
   // Support numeric conversions, pointer <-> pointer casts (e.g. T* to void* or
   // void* to T*), and pointer <-> integer conversions.
   if ((isSrcNumeric && isDestNumeric) || (isSrcPtr && isDestPtr) ||
-      (isSrcPtr && isDestNumeric) || (isSrcNumeric && isDestPtr)) {
+      (isSrcPtr && isDestNumeric) || (isSrcNumeric && isDestPtr) ||
+      (isSrcEnum && isDestNumeric) || (isSrcNumeric && isDestEnum) ||
+      (isSrcEnum && isDestEnum)) {
     node->exprType = destType;
     return destType;
   }

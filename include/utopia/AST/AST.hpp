@@ -37,7 +37,9 @@ enum class NodeKind : uint8_t {
   ArrayLiteral,
   New,
   Delete,
-  Null
+  Null,
+  EnumDecl,
+  EnumMember
 };
 
 struct ASTNode {
@@ -74,6 +76,25 @@ struct DeclNode : public ASTNode {
   llvm::ArrayRef<AnnotationNode *> annotations;
   explicit DeclNode(NodeKind k, int l = 0, int c = 0, int len = 0)
       : ASTNode(k, l, c, len) {}
+};
+
+struct EnumMemberNode : public DeclNode {
+  std::string_view name;
+  ExprNode *initializer;
+  mutable int64_t evaluatedValue = 0; // Evaluated statically during Sema
+
+  EnumMemberNode(std::string_view n, ExprNode *init, int l, int c, int len)
+      : DeclNode(NodeKind::EnumMember, l, c, len), name(n), initializer(init) {}
+};
+
+struct EnumDeclNode : public DeclNode {
+  std::string_view name;
+  const Type *underlyingType;
+  llvm::ArrayRef<EnumMemberNode *> members;
+  mutable const EnumType *enumType = nullptr;
+
+  EnumDeclNode(std::string_view n, const Type *u, int l, int c, int len)
+      : DeclNode(NodeKind::EnumDecl, l, c, len), name(n), underlyingType(u) {}
 };
 
 struct NumberNode : public ExprNode {
@@ -336,6 +357,9 @@ struct MemberAccessNode : public ExprNode {
   bool isMethodRef = false;
   const FunctionDeclNode *resolvedMethod = nullptr;
   uint32_t fieldIndex = 0;
+
+  bool isEnumMember = false;
+  const EnumMemberNode *enumMember = nullptr;
 
   MemberAccessNode(ExprNode *obj, std::string_view mem, int l, int c, int len)
       : ExprNode(NodeKind::MemberAccess, l, c, len), object(obj),

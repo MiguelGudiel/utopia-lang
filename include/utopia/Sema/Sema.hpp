@@ -31,6 +31,11 @@ static bool canImplicitlyCast(const Type *from, const Type *to) {
   if (baseFrom == baseTo)
     return true;
 
+  if (baseFrom->getKind() == TypeKind::Enum &&
+      baseTo->getKind() == TypeKind::Enum) {
+    return baseFrom == baseTo;
+  }
+
   if (baseFrom->getKind() == TypeKind::Array &&
       baseTo->getKind() == TypeKind::Array) {
     auto *arrFrom = static_cast<const ArrayType *>(baseFrom);
@@ -119,6 +124,8 @@ public:
   void visit(const ClassDeclNode *node);
   void visit(const TypedefDeclNode *node);
   void visit(const AnnotationDeclNode *node);
+  void visit(const EnumDeclNode *node);
+  void visit(const EnumMemberNode *node) {}
 
   void visit(const AnnotationNode *node) {}
   void visit(const NumberNode *) {}
@@ -186,6 +193,8 @@ public:
   SemaResult visit(const NewExprNode *node);
   SemaResult visit(const DeleteExprNode *node);
   SemaResult visit(const NullNode *node);
+  SemaResult visit(const EnumDeclNode *node);
+  SemaResult visit(const EnumMemberNode *node);
 };
 
 class SemaPipeline {

@@ -62,6 +62,7 @@ private:
                                                   bool &isVariadic);
 
   DeclNode *parseDeclarationOrFunction();
+  DeclNode *parseEnumDecl();
   DeclNode *parseStructDecl();
   DeclNode *parseClassDecl();
   BlockNode *parseBlock();

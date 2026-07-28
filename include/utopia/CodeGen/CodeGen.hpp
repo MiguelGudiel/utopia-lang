@@ -62,6 +62,8 @@ public:
   llvm::Value *visit(const DeleteExprNode *node);
   llvm::Value *visit(const ArrayLiteralNode *node);
   llvm::Value *visit(const NullNode *node);
+  llvm::Value *visit(const EnumDeclNode *node);
+  llvm::Value *visit(const EnumMemberNode *node);
 
   llvm::Value *createImplicitCast(llvm::Value *src, llvm::Type *destTy);
 

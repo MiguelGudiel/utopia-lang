@@ -71,6 +71,9 @@ const Type *Parser::parseType(bool inNewExpr) {
   if (!ty) {
     ty = astCtx.getTypeAlias(base);
   }
+  if (!ty) {
+    ty = astCtx.getEnumTypeByName(base);
+  }
 
   if (!ty) {
     reportError(currentToken().line, currentToken().column, (int)base.length(),
@@ -528,6 +531,8 @@ ASTNode *Parser::parseStatement() {
 
   if (currentToken().type == TokenType::TYPEDEF_KW) {
     node = parseTypedefDecl();
+  } else if (currentToken().type == TokenType::ENUM_KW) {
+    node = parseEnumDecl();
   } else if (currentToken().type == TokenType::ANNOTATION_KW) {
     node = parseAnnotationDecl(annotations);
   } else if (currentToken().type == TokenType::STRUCT_KW) {
@@ -1278,6 +1283,66 @@ DeclNode *Parser::parseClassDecl() {
   node->constructors = astCtx.copyArray<FunctionDeclNode *>(constructors);
   node->destructor = destructor;
 
+  return node;
+}
+
+DeclNode *Parser::parseEnumDecl() {
+  int line = currentToken().line;
+  int col = currentToken().column;
+  advance(); /* consume 'enum' */
+
+  std::string_view name = currentToken().value;
+  expect(TokenType::IDENTIFIER, "Expected enum name");
+
+  const Type *underlyingType = astCtx.Int32Ty;
+  if (match(TokenType::COLON)) {
+    underlyingType = parseType();
+    if (!underlyingType->isInteger()) {
+      reportError(line, col, currentToken().column - col,
+                  "Enum underlying type must be an integer type");
+      throw ParseException();
+    }
+  }
+
+  /* Eagerly register the enum type so subsequent parameters/variables can use
+   * it as a valid type */
+  astCtx.getEnumType(name, underlyingType);
+
+  expect(TokenType::LBRACE, "Expected '{'");
+
+  std::vector<EnumMemberNode *> members;
+  while (currentToken().type != TokenType::RBRACE &&
+         currentToken().type != TokenType::EOF_TOK) {
+    while (currentToken().type == TokenType::COMMENT)
+      advance();
+    if (currentToken().type == TokenType::RBRACE)
+      break;
+
+    int mLine = currentToken().line;
+    int mCol = currentToken().column;
+    std::string_view mName = currentToken().value;
+    expect(TokenType::IDENTIFIER, "Expected enum member name");
+
+    ExprNode *init = nullptr;
+    if (match(TokenType::ASSIGN)) {
+      init = parseExpression();
+    }
+
+    members.push_back(astCtx.create<EnumMemberNode>(
+        mName, init, mLine, mCol, currentToken().column - mCol));
+
+    if (!match(TokenType::COMMA)) {
+      break;
+    }
+  }
+
+  int endCol = currentToken().column + 1;
+  expect(TokenType::RBRACE, "Expected '}'");
+
+  auto node = astCtx.create<EnumDeclNode>(name, underlyingType, line, col,
+                                          endCol - col);
+  node->members = astCtx.copyArray<EnumMemberNode *>(members);
+  node->enumType = astCtx.getEnumType(name, underlyingType);
   return node;
 }
 

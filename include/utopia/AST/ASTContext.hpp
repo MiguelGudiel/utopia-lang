@@ -167,6 +167,21 @@ public:
     return new (mem) FunctionType(ret, copyArray(params));
   }
 
+  const EnumType *getEnumType(std::string_view name, const Type *underlying) {
+    auto it = enumTypes.find(name);
+    if (it != enumTypes.end())
+      return it->second;
+
+    auto *enumTy = create<EnumType>(name, underlying);
+    enumTypes[name] = enumTy;
+    return enumTy;
+  }
+
+  const EnumType *getEnumTypeByName(std::string_view name) const {
+    auto it = enumTypes.find(name);
+    return it != enumTypes.end() ? it->second : nullptr;
+  }
+
   void addTypeAlias(std::string_view name, const Type *type) {
     typeAliases[name] = type;
   }
@@ -184,6 +199,7 @@ private:
   std::unordered_map<const Type *, const ConstType *> constTypes;
   std::unordered_map<std::string_view, RecordType *> recordTypes;
   std::unordered_map<std::string_view, const Type *> typeAliases;
+  std::unordered_map<std::string_view, const EnumType *> enumTypes;
 };
 
 } // namespace utopia

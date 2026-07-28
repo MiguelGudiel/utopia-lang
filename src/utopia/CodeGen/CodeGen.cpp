@@ -15,6 +15,10 @@ llvm::Type *CodeGen::getLLVMType(const Type *type) {
   if (type->getKind() == TypeKind::Const) {
     return getLLVMType(static_cast<const ConstType *>(type)->getBaseType());
   }
+  if (type->getKind() == TypeKind::Enum) {
+    return getLLVMType(
+        static_cast<const EnumType *>(type)->getUnderlyingType());
+  }
   if (type->getKind() == TypeKind::Alias) {
     return getLLVMType(static_cast<const AliasType *>(type)->getTarget());
   }
@@ -414,6 +418,12 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
   }
 
   if (node->kind == NodeKind::MemberAccess) {
+    auto *maNode = static_cast<const MemberAccessNode *>(node);
+    if (maNode->isEnumMember) {
+      llvm::Type *llTy = getLLVMType(maNode->exprType);
+      return llvm::ConstantInt::get(llTy, maNode->enumMember->evaluatedValue,
+                                    true);
+    }
     return nullptr;
   }
 
@@ -748,6 +758,12 @@ llvm::Value *CodeGen::visit(const ClassDeclNode *node) {
   return nullptr;
 }
 
+llvm::Value *CodeGen::visit(const EnumDeclNode *node) {
+  return nullptr;
+}
+
+llvm::Value *CodeGen::visit(const EnumMemberNode *node) { return nullptr; }
+
 llvm::Value *CodeGen::visit(const VariableNode *node) {
   if (node->isField) {
     SymbolInfo sym = cgCtx.lookupDetailed("this");
@@ -792,6 +808,11 @@ llvm::Value *CodeGen::visit(const VariableNode *node) {
 }
 
 llvm::Value *CodeGen::visit(const MemberAccessNode *node) {
+  if (node->isEnumMember) {
+    llvm::Type *llTy = getLLVMType(node->exprType);
+    return llvm::ConstantInt::get(llTy, node->enumMember->evaluatedValue, true);
+  }
+
   if (node->isMethodRef)
     return nullptr;
 
