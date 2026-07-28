@@ -43,6 +43,7 @@ enum class TokenType : uint8_t {
   DOT,
   TILDE,
   ASSIGN,
+  ARROW,
   COLON,
   TRUE_KW,
   FALSE_KW,

@@ -276,6 +276,11 @@ Token Lexer::nextToken() {
       advance();
       return {TokenType::EQ, std::string_view(start, 2), startLine, startCol};
     }
+    if (cursor < source.length() && source[cursor] == '>') {
+      advance();
+      return {TokenType::ARROW, std::string_view(start, 2), startLine,
+              startCol};
+    }
     return {TokenType::ASSIGN, std::string_view(start, 1), startLine, startCol};
   case '!':
     if (cursor < source.length() && source[cursor] == '=') {

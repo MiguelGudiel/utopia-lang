@@ -368,6 +368,38 @@ std::vector<ParamDeclNode *> Parser::parseParameterList(const Type *classTy,
   return params;
 }
 
+/*
+ * Abstracted body parsing mechanism to handle both traditional blocks
+ * and expression-bodied functions transparently.
+ */
+BlockNode *Parser::parseFunctionBody(const Type *returnType) {
+  if (match(TokenType::ARROW)) {
+    int line = currentToken().line;
+    int col = currentToken().column;
+
+    auto expr = parseExpression();
+
+    int endCol = currentToken().column + currentToken().value.length();
+    expect(TokenType::SEMICOLON, "Expected ';' after '=>' expression");
+
+    auto block = astCtx.create<BlockNode>(line, col);
+    ASTNode *stmt = expr;
+
+    /* Transparently inject a ReturnNode if the function intrinsically expects a
+     * value */
+    if (returnType && !returnType->isVoid()) {
+      stmt = astCtx.create<ReturnNode>(expr, line, col, endCol - col);
+    }
+
+    block->statements = astCtx.copyArray<ASTNode *>(stmt);
+    block->finalize(endCol);
+
+    return block;
+  }
+
+  return parseBlock();
+}
+
 DeclNode *
 Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
   int line = currentToken().line;
@@ -432,7 +464,7 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
       if (!doc.empty())
         constructor->docString = astCtx.copyString(doc);
 
-      constructor->body = parseBlock();
+      constructor->body = parseFunctionBody(astCtx.VoidTy);
       continue;
     }
 
@@ -906,7 +938,7 @@ DeclNode *Parser::parseStructDecl() {
       if (!doc.empty())
         destructor->docString = astCtx.copyString(doc);
 
-      destructor->body = parseBlock();
+      destructor->body = parseFunctionBody(astCtx.VoidTy);
       continue;
     }
 
@@ -941,7 +973,7 @@ DeclNode *Parser::parseStructDecl() {
       if (!doc.empty())
         constructor->docString = astCtx.copyString(doc);
 
-      constructor->body = parseBlock();
+      constructor->body = parseFunctionBody(astCtx.VoidTy);
       constructors.push_back(constructor);
       continue;
     }
@@ -971,7 +1003,7 @@ DeclNode *Parser::parseStructDecl() {
         expect(TokenType::SEMICOLON,
                "Expected ';' after extern method declaration");
       } else {
-        method->body = parseBlock();
+        method->body = parseFunctionBody(memType);
       }
       methods.push_back(method);
     } else {
@@ -1112,7 +1144,7 @@ DeclNode *Parser::parseClassDecl() {
       if (!doc.empty())
         destructor->docString = astCtx.copyString(doc);
 
-      destructor->body = parseBlock();
+      destructor->body = parseFunctionBody(astCtx.VoidTy);
       continue;
     }
 
@@ -1147,7 +1179,7 @@ DeclNode *Parser::parseClassDecl() {
       if (!doc.empty())
         constructor->docString = astCtx.copyString(doc);
 
-      constructor->body = parseBlock();
+      constructor->body = parseFunctionBody(astCtx.VoidTy);
       constructors.push_back(constructor);
       continue;
     }
@@ -1177,7 +1209,7 @@ DeclNode *Parser::parseClassDecl() {
         expect(TokenType::SEMICOLON,
                "Expected ';' after extern method declaration");
       } else {
-        method->body = parseBlock();
+        method->body = parseFunctionBody(memType);
       }
       methods.push_back(method);
     } else {
@@ -1277,7 +1309,7 @@ DeclNode *Parser::parseDeclarationOrFunction() {
              "Expected ';' after extern function declaration");
       funcDecl->length = endCol - col;
     } else {
-      funcDecl->body = parseBlock();
+      funcDecl->body = parseFunctionBody(nodeType); // <--- Actualizado
       funcDecl->length = funcDecl->body->column + funcDecl->body->length - col;
     }
     return funcDecl;
