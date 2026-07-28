@@ -4,6 +4,7 @@
 #include "utopia/CodeGen/CodeGenContext.hpp"
 #include "utopia/Common/Diagnostics.hpp"
 #include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/InstrTypes.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/MDBuilder.h>
 #include <llvm/IR/Module.h>
@@ -16,6 +17,18 @@ public:
       : backend(bCtx), ctx(bCtx.getLLVMContext()), mod(llvmMod), builder(ctx),
         diags(diags), mdBuilder(ctx) {
     tbaaRoot = mdBuilder.createTBAARoot("Utopia TBAA");
+
+    /*
+     * Enable Fast-Math globally on the IRBuilder.
+     * This instructs LLVM to assume relaxed floating-point math properties
+     * (nnan, ninf, nsz, arcp, contract, afn, reassoc), allowing the
+     * auto-vectorizer to freely replace costly operations (e.g., division,
+     * square roots) with fast hardware-native intrinsics during optimization
+     * passes.
+     */
+    llvm::FastMathFlags fmf;
+    fmf.setFast();
+    builder.setFastMathFlags(fmf);
   }
 
   llvm::Value *visit(const NumberNode *node);
