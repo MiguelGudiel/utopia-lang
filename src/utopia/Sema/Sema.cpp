@@ -365,6 +365,35 @@ SemaResult TypeCheckPass::visit(const StringNode *node) {
 
 SemaResult TypeCheckPass::visit(const StructDeclNode *node) {
   bool hasErrors = false;
+
+  /* Validate structural decorators */
+  for (const auto *ann : node->annotations) {
+    if (ann->name == "align") {
+      if (ann->args.size() != 1 || ann->args[0]->kind != NodeKind::Number ||
+          static_cast<const NumberNode *>(ann->args[0])->isFloat) {
+        auto err = ctx->reportError(
+            ann->line, ann->column, ann->length,
+            "The @align annotation requires a single integer constant.");
+        hasErrors = true;
+      } else {
+        uint64_t alignVal = std::stoull(
+            std::string(static_cast<const NumberNode *>(ann->args[0])->raw));
+        if (alignVal == 0 || (alignVal & (alignVal - 1)) != 0) {
+          auto err = ctx->reportError(ann->line, ann->column, ann->length,
+                                      "Alignment must be a power of 2.");
+          hasErrors = true;
+        }
+      }
+    } else if (ann->name == "packed") {
+      if (!ann->args.empty()) {
+        auto err =
+            ctx->reportError(ann->line, ann->column, ann->length,
+                             "The @packed annotation does not take arguments.");
+        hasErrors = true;
+      }
+    }
+  }
+
   for (const auto *field : node->fields) {
     auto res = dispatch(field);
     if (!res)
@@ -395,6 +424,35 @@ SemaResult TypeCheckPass::visit(const StructDeclNode *node) {
 
 SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
   bool hasErrors = false;
+
+  /* Validate structural decorators */
+  for (const auto *ann : node->annotations) {
+    if (ann->name == "align") {
+      if (ann->args.size() != 1 || ann->args[0]->kind != NodeKind::Number ||
+          static_cast<const NumberNode *>(ann->args[0])->isFloat) {
+        auto err = ctx->reportError(
+            ann->line, ann->column, ann->length,
+            "The @align annotation requires a single integer constant.");
+        hasErrors = true;
+      } else {
+        uint64_t alignVal = std::stoull(
+            std::string(static_cast<const NumberNode *>(ann->args[0])->raw));
+        if (alignVal == 0 || (alignVal & (alignVal - 1)) != 0) {
+          auto err = ctx->reportError(ann->line, ann->column, ann->length,
+                                      "Alignment must be a power of 2.");
+          hasErrors = true;
+        }
+      }
+    } else if (ann->name == "packed") {
+      if (!ann->args.empty()) {
+        auto err =
+            ctx->reportError(ann->line, ann->column, ann->length,
+                             "The @packed annotation does not take arguments.");
+        hasErrors = true;
+      }
+    }
+  }
+
   for (const auto *field : node->fields) {
     auto res = dispatch(field);
     if (!res)
@@ -701,6 +759,29 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
                             "Variables cannot be of type 'void'");
   }
 
+  for (const auto *ann : node->annotations) {
+    if (ann->name == "align") {
+      if (ann->args.size() != 1 || ann->args[0]->kind != NodeKind::Number ||
+          static_cast<const NumberNode *>(ann->args[0])->isFloat) {
+        SemaResult err = ctx->reportError(
+            ann->line, ann->column, ann->length,
+            "The @align annotation requires a single integer constant.");
+      } else {
+        uint64_t alignVal = std::stoull(
+            std::string(static_cast<const NumberNode *>(ann->args[0])->raw));
+        if (alignVal == 0 || (alignVal & (alignVal - 1)) != 0) {
+          SemaResult err = ctx->reportError(ann->line, ann->column, ann->length,
+                                            "Alignment must be a power of 2.");
+        }
+      }
+    } else if (ann->name == "packed") {
+      SemaResult err =
+          ctx->reportError(ann->line, ann->column, ann->length,
+                           "The @packed annotation can only be applied to "
+                           "record declarations (struct/class).");
+    }
+  }
+
   /* Mark variables defined at module scope to enable accurate side-effect
    * analysis */
   if (ctx->getScopeDepth() == 1) {
@@ -709,8 +790,9 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
 
   if (declType->isConstQualified() && !node->initializer &&
       !declType->isReferenceType()) {
-    ctx->reportError(node->line, node->column, node->length,
-                     "Constant variables must be initialized.");
+    SemaResult err =
+        ctx->reportError(node->line, node->column, node->length,
+                         "Constant variables must be initialized.");
   }
 
   if (node->initializer) {
@@ -726,21 +808,23 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
           node->initializer->kind != NodeKind::FunctionCall &&
           node->initializer->kind != NodeKind::MemberAccess &&
           node->initializer->kind != NodeKind::ArraySubscript) {
-        ctx->reportError(node->line, node->column, node->length,
-                         "Cannot bind a non-lvalue to a reference.");
+        SemaResult err =
+            ctx->reportError(node->line, node->column, node->length,
+                             "Cannot bind a non-lvalue to a reference.");
       }
     } else {
       if (!canImplicitlyCast(*initRes, declType)) {
         std::string initTypeStr = *initRes ? (*initRes)->toString() : "unknown";
-        ctx->reportError(node->line, node->column, node->length,
-                         "Cannot initialize variable of type '" +
-                             declType->toString() + "' with type '" +
-                             initTypeStr + "'");
+        SemaResult err = ctx->reportError(
+            node->line, node->column, node->length,
+            "Cannot initialize variable of type '" + declType->toString() +
+                "' with type '" + initTypeStr + "'");
       }
     }
   } else if (declType->isReferenceType()) {
-    ctx->reportError(node->line, node->column, node->length,
-                     "References must be initialized upon declaration.");
+    SemaResult err =
+        ctx->reportError(node->line, node->column, node->length,
+                         "References must be initialized upon declaration.");
   }
 
   if (ctx->getScopeDepth() > 1) {

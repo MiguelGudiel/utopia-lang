@@ -79,7 +79,18 @@ llvm::Type *CodeGen::getLLVMType(const Type *type) {
       for (const auto &f : rec->getFields()) {
         elements.push_back(getLLVMType(f.type));
       }
-      structTy->setBody(elements, false);
+
+      bool isPacked = false;
+      if (const DeclNode *decl = rec->getDeclaration()) {
+        for (const auto *ann : decl->annotations) {
+          if (ann->name == "packed") {
+            isPacked = true;
+            break;
+          }
+        }
+      }
+
+      structTy->setBody(elements, isPacked);
     }
 
     return structTy;
@@ -1035,6 +1046,44 @@ llvm::Value *CodeGen::visit(const BinaryOpNode *node) {
 llvm::Value *CodeGen::visit(const VarDeclNode *node) {
   bool isGlobal = !builder.GetInsertBlock();
 
+  uint64_t customAlign = 0;
+
+  const Type *baseUnqualTy = node->type->getUnqualifiedType();
+  const Type *elemTyForAlign = baseUnqualTy;
+  while (elemTyForAlign->getKind() == TypeKind::Array) {
+    elemTyForAlign = static_cast<const ArrayType *>(elemTyForAlign)
+                         ->getElementType()
+                         ->getUnqualifiedType();
+  }
+
+  if (elemTyForAlign->getKind() == TypeKind::Struct ||
+      elemTyForAlign->getKind() == TypeKind::Class) {
+    if (const DeclNode *decl =
+            static_cast<const RecordType *>(elemTyForAlign)->getDeclaration()) {
+      for (const auto *ann : decl->annotations) {
+        if (ann->name == "align" && !ann->args.empty() &&
+            ann->args[0]->kind == NodeKind::Number) {
+          uint64_t typeAlign = std::stoull(
+              std::string(static_cast<const NumberNode *>(ann->args[0])->raw));
+          if (typeAlign > customAlign) {
+            customAlign = typeAlign;
+          }
+        }
+      }
+    }
+  }
+
+  for (const auto *ann : node->annotations) {
+    if (ann->name == "align" && !ann->args.empty() &&
+        ann->args[0]->kind == NodeKind::Number) {
+      uint64_t varAlign = std::stoull(
+          std::string(static_cast<const NumberNode *>(ann->args[0])->raw));
+      if (varAlign > customAlign) {
+        customAlign = varAlign;
+      }
+    }
+  }
+
   if (node->type->isReferenceType()) {
     if (!node->initializer) {
       diags.report({DiagLevel::Error, node->line, node->column, node->length,
@@ -1060,6 +1109,10 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
     llvm::Type *ptrTy = builder.getPtrTy();
     llvm::AllocaInst *alloca =
         createEntryBlockAlloca(ptrTy, std::string(node->varName));
+
+    if (customAlign > 0) {
+      alloca->setAlignment(llvm::Align(customAlign));
+    }
 
     uint64_t allocSize = mod.getDataLayout().getTypeAllocSize(ptrTy);
     emitLifetimeStart(alloca, allocSize);
@@ -1122,12 +1175,22 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
     auto *gvar = new llvm::GlobalVariable(mod, ty, isConstant,
                                           llvm::GlobalValue::ExternalLinkage,
                                           initConst, node->varName);
+
+    if (customAlign > 0) {
+      gvar->setAlignment(llvm::Align(customAlign));
+    }
+
     cgCtx.bind(node->varName, gvar, true);
     return gvar;
   }
 
   llvm::AllocaInst *alloca =
       createEntryBlockAlloca(ty, std::string(node->varName));
+
+  if (customAlign > 0) {
+    alloca->setAlignment(llvm::Align(customAlign));
+  }
+
   cgCtx.bind(node->varName, alloca, true);
 
   uint64_t allocSize = mod.getDataLayout().getTypeAllocSize(ty);
@@ -1170,14 +1233,29 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
       }
 
       if (!isRVO) {
-        llvm::Value *initVal = dispatch(node->initializer);
-        if (initVal) {
-          initVal = createImplicitCast(initVal, ty);
-          createTBAAStore(initVal, alloca, node->type);
+        /* Bypass SSA register inflation for contiguous aggregate types by
+         * mapping direct memory block transfers. */
+        bool isAggregate = (unqualTy->getKind() == TypeKind::Struct ||
+                            unqualTy->getKind() == TypeKind::Class);
+        if (isAggregate &&
+            (node->initializer->kind == NodeKind::Variable ||
+             node->initializer->kind == NodeKind::MemberAccess ||
+             node->initializer->kind == NodeKind::ArraySubscript)) {
+          llvm::Value *rvalAddr = getLValue(node->initializer);
+          if (rvalAddr) {
+            llvm::Align align = mod.getDataLayout().getABITypeAlign(ty);
+            builder.CreateMemCpy(alloca, align, rvalAddr, align, allocSize);
+          }
         } else {
-          diags.report({DiagLevel::Error, node->line, node->column,
-                        node->length, "Initialization failed for variable.",
-                        ""});
+          llvm::Value *initVal = dispatch(node->initializer);
+          if (initVal) {
+            initVal = createImplicitCast(initVal, ty);
+            createTBAAStore(initVal, alloca, node->type);
+          } else {
+            diags.report({DiagLevel::Error, node->line, node->column,
+                          node->length, "Initialization failed for variable.",
+                          ""});
+          }
         }
       }
     }
@@ -1233,6 +1311,27 @@ llvm::Value *CodeGen::visit(const AssignNode *node) {
         return createTBAALoad(getLLVMType(node->exprType), lval,
                               node->exprType);
       }
+    }
+  }
+
+  const Type *unqualTargetTy = node->target->exprType->getUnqualifiedType();
+  bool isAggregate = (unqualTargetTy->getKind() == TypeKind::Struct ||
+                      unqualTargetTy->getKind() == TypeKind::Class ||
+                      unqualTargetTy->getKind() == TypeKind::Array);
+
+  /* Map assignment to deep memory copy for aggregate types to preserve locality
+   * and prevent SSA explosion. */
+  if (isAggregate && (node->value->kind == NodeKind::Variable ||
+                      node->value->kind == NodeKind::MemberAccess ||
+                      node->value->kind == NodeKind::ArraySubscript)) {
+    llvm::Value *rvalAddr = getLValue(node->value);
+    if (rvalAddr) {
+      llvm::Type *llvmDestTy = getLLVMType(unqualTargetTy);
+      uint64_t size = mod.getDataLayout().getTypeAllocSize(llvmDestTy);
+      llvm::Align align = mod.getDataLayout().getABITypeAlign(llvmDestTy);
+
+      builder.CreateMemCpy(lval, align, rvalAddr, align, size);
+      return nullptr;
     }
   }
 
