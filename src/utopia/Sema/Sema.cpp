@@ -2,6 +2,8 @@
 #include "utopia/CodeGen/Mangler.hpp"
 #include "utopia/Sema/EffectAnalyzer.hpp"
 
+#include "utopia/Common/Logger.hpp"
+
 namespace utopia {
 
 SemaPipeline::SemaPipeline() {
@@ -10,18 +12,16 @@ SemaPipeline::SemaPipeline() {
 }
 
 bool SemaPipeline::run(const ModuleNode *module, SemaContext &ctx) {
-  std::cout << "[Sema Debug] Initiating semantic analysis pipeline...\n"
-            << std::flush;
+  Logger::debug("[Sema Debug] Initiating semantic analysis pipeline...");
 
   for (auto &pass : passes) {
-    std::cout << "[Sema Debug] Executing pass: " << pass->getName() << "\n"
-              << std::flush;
+    Logger::debug("[Sema Debug] Executing pass: " +
+                  std::string(pass->getName()));
 
     try {
       if (!pass->run(module, ctx)) {
-        std::cerr << "[Sema Debug] Pass aborted due to unexpected failure: "
-                  << pass->getName() << "\n"
-                  << std::flush;
+        Logger::debug("[Sema Debug] Pass aborted due to unexpected failure: " +
+                      std::string(pass->getName()));
         return false;
       }
     } catch (const std::exception &e) {
@@ -37,15 +37,14 @@ bool SemaPipeline::run(const ModuleNode *module, SemaContext &ctx) {
     }
 
     if (ctx.hasErrors()) {
-      std::cerr << "[Sema Debug] Semantic integrity compromised during pass: "
-                << pass->getName() << "\n"
-                << std::flush;
+      Logger::debug(
+          "[Sema Debug] Semantic integrity compromised during pass: " +
+          std::string(pass->getName()));
       return false;
     }
 
-    std::cout << "[Sema Debug] Pass completed successfully: " << pass->getName()
-              << "\n"
-              << std::flush;
+    Logger::debug("[Sema Debug] Pass completed successfully: " +
+                  std::string(pass->getName()));
   }
   return true;
 }

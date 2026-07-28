@@ -1,6 +1,7 @@
 set(CLI_SOURCES
     src/main.cpp
     src/ProjectManager.cpp
+    src/BuildScriptRunner.cpp
 )
 
 add_executable(utopia ${CLI_SOURCES})

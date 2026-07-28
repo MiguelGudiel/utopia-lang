@@ -1,5 +1,6 @@
 #include "utopia/Driver/CompilerDriver.hpp"
 #include "utopia/CodeGen/BackendContext.hpp"
+#include "utopia/Common/Logger.hpp"
 #include "utopia/Common/Timer.hpp"
 #include "utopia/Driver/Backend.hpp"
 #include "utopia/Driver/Compiler.hpp"
@@ -63,8 +64,8 @@ fs::path CompilerDriver::getObjPath(const std::string &filename,
   }
 
   fs::path finalPath = targetDir / filename;
-  std::cerr << "[Driver Debug] Mapped artifact base path: "
-            << finalPath.string() << std::endl;
+  Logger::debug("[Driver Debug] Mapped artifact base path: " +
+                finalPath.string());
   return finalPath;
 }
 
@@ -74,8 +75,7 @@ bool CompilerDriver::run() {
     fs::create_directories(outDir);
   }
 
-  std::cout << "[Driver] Starting compilation for: " << options.sourcePath
-            << std::endl;
+  Logger::debug("[Driver] Starting compilation for: " + options.sourcePath);
 
   fs::path entryPath = fs::absolute(options.sourcePath);
   std::string entryStr = entryPath.string();
@@ -100,7 +100,8 @@ bool CompilerDriver::run() {
     std::cerr << "[Fatal] Syntax or import errors found." << std::endl;
     return false;
   }
-  std::cout << "[Driver] AST generated successfully." << std::endl;
+
+  Logger::debug("[Driver] AST generated successfully.");
 
   {
     ScopedTimer timer("Semantic Analysis Pipeline");
@@ -111,7 +112,7 @@ bool CompilerDriver::run() {
       std::cerr << "[Fatal] Semantic errors found." << std::endl;
       return false;
     }
-    std::cout << "[Driver] Semantic Analysis passed." << std::endl;
+    Logger::debug("[Driver] Semantic Analysis passed.");
   }
 
   BackendContext backendCtx;
@@ -133,8 +134,8 @@ bool CompilerDriver::run() {
     fs::path unitPath = fs::absolute(std::string(modNode->filePath));
     std::string baseName = unitPath.stem().string();
 
-    std::cout << "[Driver Debug] Starting IR generation for unit: " << baseName
-              << std::endl;
+    Logger::debug("[Driver Debug] Starting IR generation for unit: " +
+                  baseName);
 
     llvm::Module *llvmMod =
         Compiler::compileToIR(const_cast<ModuleNode *>(modNode), backendCtx,
@@ -150,8 +151,8 @@ bool CompilerDriver::run() {
     fs::path targetBasePath =
         getObjPath(baseName, unitPath, projRootFs, outDir);
 
-    std::cout << "[Driver Debug] Executing backend passes for unit: "
-              << baseName << std::endl;
+    Logger::debug("[Driver Debug] Executing backend passes for unit: " +
+                  baseName);
 
     if (!Backend::process(llvmMod, backendCtx, options,
                           targetBasePath.string())) {
@@ -217,8 +218,8 @@ bool CompilerDriver::run() {
     int (*mainFn)() = mainSym->toPtr<int (*)()>();
     int result = mainFn();
 
-    std::cout << "\033[1;32m[JIT Execution Finished]\033[0m Exit code: "
-              << result << std::endl;
+    Logger::debug("\033[1;32m[JIT Execution Finished]\033[0m Exit code: " +
+                  std::to_string(result));
   } else {
     ScopedTimer timer("Linking");
     fs::path binOut = outDir / "bin";
@@ -232,8 +233,7 @@ bool CompilerDriver::run() {
       std::cerr << "\033[1;31m[Fatal]\033[0m Linker step failed.\n";
       return false;
     }
-    std::cout << "\033[1;32m[Build Success]\033[0m " << executablePath
-              << std::endl;
+    Logger::debug("\033[1;32m[Build Success]\033[0m " + executablePath);
   }
 
   return true;

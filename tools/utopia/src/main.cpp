@@ -1,7 +1,13 @@
+#include "BuildScriptRunner.hpp"
 #include "ProjectManager.hpp"
 #include "utopia/Driver/CompilerDriver.hpp"
+#include "utopia/Common/Logger.hpp"
 #include <iostream>
+#include <llvm/ExecutionEngine/Orc/ExecutionUtils.h>
+#include <llvm/ExecutionEngine/Orc/LLJIT.h>
+#include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
 #include <llvm/Support/ErrorHandling.h>
+#include <llvm/Support/TargetSelect.h>
 #include <optional>
 #include <string>
 #include <vector>
@@ -64,19 +70,33 @@ int main(int argc, char **argv) {
         fs::path(UTOPIA_SOURCE_DIR) / "libs" / "stdlib" / "lib";
     fs::path preludePath =
         fs::path(UTOPIA_SOURCE_DIR) / "libs" / "prelude" / "lib";
+    fs::path buildLibPath =
+        fs::path(UTOPIA_SOURCE_DIR) / "libs" / "build" / "lib";
 #else
     fs::path stdlibPath =
         projRoot.parent_path().parent_path() / "libs" / "stdlib" / "lib";
     fs::path preludePath =
         projRoot.parent_path().parent_path() / "libs" / "prelude" / "lib";
+    fs::path buildLibPath =
+        projRoot.parent_path().parent_path() / "libs" / "build" / "lib";
 #endif
 
     options.stdlibRoot = stdlibPath.string();
     options.preludeRoot = preludePath.string();
+    options.buildLibRoot = buildLibPath.string();
 
     options.linkerFlags = config.linkerFlags;
     options.includeDirs = config.includeDirs;
     options.optLevel = cliOptLevel.value_or(config.optLevel);
+
+    fs::path buildUtpPath = projRoot / "build.utp";
+    if (fs::exists(buildUtpPath)) {
+      Logger::debug("[Utopia] Executing project build script (build.utp)...");
+      if (!BuildScriptRunner::run(buildUtpPath, options, projRoot)) {
+        std::cerr << "Fatal: Failed to execute build.utp successfully.\n";
+        return 1;
+      }
+    }
 
     if (config.resolvedSources.empty()) {
       std::cerr << "Fatal: No sources found in build.yaml\n";

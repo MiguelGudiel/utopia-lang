@@ -1,4 +1,5 @@
 #include "utopia/Driver/ModuleLoader.hpp"
+#include "utopia/Common/Logger.hpp"
 #include "utopia/Lexer/Lexer.hpp"
 #include "utopia/Parser/Parser.hpp"
 #include <fstream>
@@ -12,6 +13,19 @@ std::expected<fs::path, std::string>
 ModuleLoader::resolveImportURI(std::string_view uri,
                                const fs::path &currentDir) {
   std::string uriStr(uri);
+
+  if (uriStr == "utopia:build") {
+    if (!config.isBuildScript) {
+      return std::unexpected("The 'utopia:build' module can only be imported "
+                             "from build.utp scripts.");
+    }
+    fs::path target = config.buildLibRoot / "build.utp";
+    if (fs::exists(target)) {
+      return fs::weakly_canonical(target);
+    }
+    return std::unexpected("Build library module not found at: " +
+                           target.string());
+  }
 
   if (uriStr == "prelude") {
     fs::path target = config.preludeRoot / "prelude.utp";
@@ -93,8 +107,8 @@ ModuleNode *ModuleLoader::loadModule(const std::string &importURI,
   // the parsing phase and safely feeds the zero-copy string_view in ModuleNode.
   std::string_view persistentFilePath = astCtx.copyString(key);
 
-  std::cerr << "[ModuleLoader Debug] Persisted module path: "
-            << persistentFilePath << "\n";
+  Logger::debug("[ModuleLoader Debug] Persisted module path: " +
+                std::string(persistentFilePath));
 
   Lexer lexer(sourceView);
   auto tokens = lexer.tokenize();

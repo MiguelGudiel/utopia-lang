@@ -52,3 +52,6 @@ extern int32 print(const uint8* format, ...);
 
 @extern("sleep")
 extern uint32 sleep(uint32 seconds);
+
+@extern("system")
+extern int32 system(const uint8* command);

@@ -14,6 +14,8 @@ struct ModuleLoaderConfig {
   std::filesystem::path projectRoot;
   std::filesystem::path stdlibRoot;
   std::filesystem::path preludeRoot;
+  std::filesystem::path buildLibRoot;
+  bool isBuildScript = false;
 };
 
 class ModuleLoader {
