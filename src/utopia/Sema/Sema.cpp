@@ -1091,10 +1091,12 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
   }
 
   const Type *baseTy = *objType;
-  if (baseTy->isPointerType())
-    baseTy = static_cast<const PointerType *>(baseTy)->getPointeeType();
-  else if (baseTy->isReferenceType())
-    baseTy = static_cast<const ReferenceType *>(baseTy)->getPointeeType();
+  const Type *unqualObj = baseTy->getUnqualifiedType();
+
+  if (unqualObj->isPointerType())
+    baseTy = static_cast<const PointerType *>(unqualObj)->getPointeeType();
+  else if (unqualObj->isReferenceType())
+    baseTy = static_cast<const ReferenceType *>(unqualObj)->getPointeeType();
 
   if (baseTy->getKind() != TypeKind::Struct &&
       baseTy->getKind() != TypeKind::Class) {
@@ -1622,12 +1624,17 @@ SemaResult TypeCheckPass::visit(const CastNode *node) {
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,
                                      "Cascading error in cast"});
 
-  bool isSrcNumeric = (*srcType)->isNumeric();
-  bool isDestNumeric = destType->isNumeric();
-  bool isSrcPtr = (*srcType)->isPointerType();
-  bool isDestPtr = destType->isPointerType();
-  bool isSrcEnum = (*srcType)->getKind() == TypeKind::Enum;
-  bool isDestEnum = destType->getKind() == TypeKind::Enum;
+  /* Evaluate raw entity profiles to support implicit pointer casts through
+   * external C-API typedefs */
+  const Type *srcUnqual = (*srcType)->getUnqualifiedType();
+  const Type *destUnqual = destType->getUnqualifiedType();
+
+  bool isSrcNumeric = srcUnqual->isNumeric();
+  bool isDestNumeric = destUnqual->isNumeric();
+  bool isSrcPtr = srcUnqual->isPointerType();
+  bool isDestPtr = destUnqual->isPointerType();
+  bool isSrcEnum = srcUnqual->getKind() == TypeKind::Enum;
+  bool isDestEnum = destUnqual->getKind() == TypeKind::Enum;
 
   // Support numeric conversions, pointer <-> pointer casts (e.g. T* to void* or
   // void* to T*), and pointer <-> integer conversions.
@@ -1983,7 +1990,7 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
 
 SemaResult TypeCheckPass::visit(const DeleteExprNode *node) {
   auto ptrTy = dispatch(node->ptr);
-  if (!ptrTy || !(*ptrTy)->isPointerType()) {
+  if (!ptrTy || !(*ptrTy)->getUnqualifiedType()->isPointerType()) {
     return ctx->reportError(node->line, node->column, node->length,
                             "Cannot delete non-pointer type");
   }

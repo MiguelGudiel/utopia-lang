@@ -31,15 +31,19 @@ static bool canImplicitlyCast(const Type *from, const Type *to) {
   if (baseFrom == baseTo)
     return true;
 
-  if (baseFrom->getKind() == TypeKind::Enum &&
-      baseTo->getKind() == TypeKind::Enum) {
-    return baseFrom == baseTo;
+  /* Resolve underlying entity traits to bypass opaque typedefs and const qualifiers */
+  const Type *unqualFrom = baseFrom->getUnqualifiedType();
+  const Type *unqualTo = baseTo->getUnqualifiedType();
+
+  if (unqualFrom->getKind() == TypeKind::Enum &&
+      unqualTo->getKind() == TypeKind::Enum) {
+    return unqualFrom == unqualTo;
   }
 
-  if (baseFrom->getKind() == TypeKind::Array &&
-      baseTo->getKind() == TypeKind::Array) {
-    auto *arrFrom = static_cast<const ArrayType *>(baseFrom);
-    auto *arrTo = static_cast<const ArrayType *>(baseTo);
+  if (unqualFrom->getKind() == TypeKind::Array &&
+      unqualTo->getKind() == TypeKind::Array) {
+    auto *arrFrom = static_cast<const ArrayType *>(unqualFrom);
+    auto *arrTo = static_cast<const ArrayType *>(unqualTo);
 
     /* Allow empty or un-typed array literals to bind to expected target array
      * type */
@@ -51,26 +55,26 @@ static bool canImplicitlyCast(const Type *from, const Type *to) {
                                arrTo->getElementType());
   }
 
-  if (baseFrom->getUnqualifiedType() == baseTo->getUnqualifiedType()) {
+  if (unqualFrom == unqualTo) {
     if (!baseFrom->isConstQualified() || baseTo->isConstQualified())
       return true;
   }
 
-  if (baseFrom->getKind() == TypeKind::Array && baseTo->isPointerType()) {
+  if (unqualFrom->getKind() == TypeKind::Array && unqualTo->isPointerType()) {
     const Type *elemTy =
-        static_cast<const ArrayType *>(baseFrom)->getElementType();
+        static_cast<const ArrayType *>(unqualFrom)->getElementType();
     const Type *toPointee =
-        static_cast<const PointerType *>(baseTo)->getPointeeType();
+        static_cast<const PointerType *>(unqualTo)->getPointeeType();
     if (toPointee->isVoid() ||
         elemTy->getUnqualifiedType() == toPointee->getUnqualifiedType())
       return true;
   }
 
-  if (baseFrom->isPointerType() && baseTo->isPointerType()) {
+  if (unqualFrom->isPointerType() && unqualTo->isPointerType()) {
     const Type *fromPointee =
-        static_cast<const PointerType *>(baseFrom)->getPointeeType();
+        static_cast<const PointerType *>(unqualFrom)->getPointeeType();
     const Type *toPointee =
-        static_cast<const PointerType *>(baseTo)->getPointeeType();
+        static_cast<const PointerType *>(unqualTo)->getPointeeType();
 
     /* Universal null pointer interoperability */
     if (toPointee->isVoid() || fromPointee->isVoid())
@@ -98,7 +102,7 @@ static bool canImplicitlyCast(const Type *from, const Type *to) {
     return fromPointee->getUnqualifiedType() == toPointee->getUnqualifiedType();
   }
 
-  return baseFrom->isNumeric() && baseTo->isNumeric();
+  return unqualFrom->isNumeric() && unqualTo->isNumeric();
 }
 
 class SemaPass {
