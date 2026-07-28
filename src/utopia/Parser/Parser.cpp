@@ -83,6 +83,25 @@ const Type *Parser::parseType(bool inNewExpr) {
     ty = astCtx.getConstType(ty);
   }
 
+  /* Parse function type definitions (e.g., int Function(int, float))
+   */
+  if (match(TokenType::FUNCTION_KW)) {
+    expect(TokenType::LPAREN, "Expected '(' after 'Function'");
+    std::vector<const Type *> paramTypes;
+    if (currentToken().type != TokenType::RPAREN &&
+        currentToken().type != TokenType::EOF_TOK) {
+      do {
+        paramTypes.push_back(parseType());
+      } while (match(TokenType::COMMA));
+    }
+    expect(TokenType::RPAREN, "Expected ')' after function parameters");
+
+    ty = astCtx.getFunctionType(ty, astCtx.copyArray<const Type *>(paramTypes));
+    /* Function variables inherently decay to pointers to support C-ABI and
+     * dynamic dispatch */
+    ty = astCtx.getPointerType(ty);
+  }
+
   /*
    * Array brackets are strictly omitted from type construction if evaluated
    * within a dynamic heap allocation context (new expression).

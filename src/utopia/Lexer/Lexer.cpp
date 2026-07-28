@@ -197,6 +197,8 @@ Token Lexer::nextToken() {
       return {TokenType::DELETE_KW, id, startLine, startCol};
     if (id == "null")
       return {TokenType::NULL_KW, id, startLine, startCol};
+    if (id == "Function")
+      return {TokenType::FUNCTION_KW, id, startLine, startCol};
     if (isTypeKeyword(id))
       return {TokenType::TYPE_KW, id, startLine, startCol};
     return {TokenType::IDENTIFIER, id, startLine, startCol};

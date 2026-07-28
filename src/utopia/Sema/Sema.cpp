@@ -1185,9 +1185,7 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
         }
       }
     }
-  }
-
-  if (node->target->kind == NodeKind::Variable) {
+  } else if (node->target->kind == NodeKind::Variable) {
     std::string_view name =
         static_cast<const VariableNode *>(node->target)->name;
     auto decls = ctx->lookup(name);
@@ -1211,106 +1209,96 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
       }
     }
 
-    if (decls.empty()) {
-      return ctx->reportError(node->line, node->column, node->length,
-                              "Undefined function: '" + std::string(name) +
-                                  "'");
-    }
+    if (!decls.empty() && decls.front()->kind == NodeKind::FunctionDecl) {
+      const FunctionDeclNode *bestMatch = nullptr;
+      bool isConstructorCall = false;
+      std::vector<std::vector<std::string>> overloadErrors;
 
-    const FunctionDeclNode *bestMatch = nullptr;
-    bool isConstructorCall = false;
-    std::vector<std::vector<std::string>> overloadErrors;
-
-    for (auto targetDecl : decls) {
-      if (targetDecl->kind == NodeKind::FunctionDecl) {
-        auto fDecl = static_cast<const FunctionDeclNode *>(targetDecl);
-        auto errs = checkMatch(fDecl);
-        if (errs.empty()) {
-          bestMatch = fDecl;
-          if (fDecl->isMethod && ctx->astCtx.getRecordType(name) != nullptr) {
-            isConstructorCall = true;
-          }
-          break;
-        } else {
-          overloadErrors.push_back(errs);
-        }
-      }
-    }
-
-    if (bestMatch) {
-      const_cast<FunctionCallNode *>(node)->resolvedFunc = bestMatch;
-      if (isConstructorCall) {
-        node->exprType = ctx->astCtx.getRecordType(name);
-      } else {
-        node->exprType = bestMatch->returnType;
-      }
-      return node->exprType;
-    }
-
-    /* Fallback: Assess if target resolves to a dynamic function pointer */
-    const DeclNode *firstDecl = decls.front();
-    if (firstDecl->kind == NodeKind::VarDecl ||
-        firstDecl->kind == NodeKind::ParamDecl) {
-      const Type *varTy = nullptr;
-      if (firstDecl->kind == NodeKind::VarDecl)
-        varTy = static_cast<const VarDeclNode *>(firstDecl)->type;
-      else
-        varTy = static_cast<const ParamDeclNode *>(firstDecl)->type;
-
-      const Type *unqual = varTy->getUnqualifiedType();
-      if (unqual->isPointerType()) {
-        const Type *pointee =
-            static_cast<const PointerType *>(unqual)->getPointeeType();
-        if (pointee->getKind() == TypeKind::Function) {
-          auto fTy = static_cast<const FunctionType *>(pointee);
-
-          if (argTypes.size() != fTy->getParamTypes().size()) {
-            return ctx->reportError(
-                node->line, node->column, node->length,
-                "Argument count mismatch for function pointer call.");
-          }
-          for (size_t i = 0; i < argTypes.size(); i++) {
-            if (!canImplicitlyCast(argTypes[i], fTy->getParamTypes()[i])) {
-              return ctx->reportError(
-                  node->line, node->column, node->length,
-                  "Type mismatch in function pointer call.");
+      for (auto targetDecl : decls) {
+        if (targetDecl->kind == NodeKind::FunctionDecl) {
+          auto fDecl = static_cast<const FunctionDeclNode *>(targetDecl);
+          auto errs = checkMatch(fDecl);
+          if (errs.empty()) {
+            bestMatch = fDecl;
+            if (fDecl->isMethod && ctx->astCtx.getRecordType(name) != nullptr) {
+              isConstructorCall = true;
             }
+            break;
+          } else {
+            overloadErrors.push_back(errs);
           }
-
-          const_cast<FunctionCallNode *>(node)->args =
-              ctx->astCtx.copyArray<ExprNode *>(node->args);
-          node->exprType = fTy->getReturnType();
-          return node->exprType;
         }
+      }
+
+      if (bestMatch) {
+        const_cast<FunctionCallNode *>(node)->resolvedFunc = bestMatch;
+        if (isConstructorCall) {
+          node->exprType = ctx->astCtx.getRecordType(name);
+        } else {
+          node->exprType = bestMatch->returnType;
+        }
+        return node->exprType;
+      }
+
+      if (overloadErrors.size() == 1) {
+        for (size_t i = 0; i < overloadErrors[0].size(); ++i) {
+          if (i == overloadErrors[0].size() - 1) {
+            return ctx->reportError(node->line, node->column, node->length,
+                                    overloadErrors[0][i]);
+          } else {
+            ctx->reportError(node->line, node->column, node->length,
+                             overloadErrors[0][i]);
+          }
+        }
+      } else {
+        std::string finalErr = "No matching function overload found for '" +
+                               std::string(name) + "'.";
+        if (!overloadErrors.empty()) {
+          finalErr += " Candidates failed with:\n";
+          for (const auto &errList : overloadErrors) {
+            finalErr += "- ";
+            for (size_t i = 0; i < errList.size(); ++i) {
+              finalErr += errList[i];
+              if (i < errList.size() - 1)
+                finalErr += ", ";
+            }
+            finalErr += "\n";
+          }
+        }
+        return ctx->reportError(node->line, node->column, node->length,
+                                finalErr);
       }
     }
+  }
 
-    if (overloadErrors.size() == 1) {
-      for (size_t i = 0; i < overloadErrors[0].size(); ++i) {
-        if (i == overloadErrors[0].size() - 1) {
-          return ctx->reportError(node->line, node->column, node->length,
-                                  overloadErrors[0][i]);
-        } else {
-          ctx->reportError(node->line, node->column, node->length,
-                           overloadErrors[0][i]);
+  /* General Fallback: Assess if target evaluates to a dynamic function pointer
+   */
+  auto targetTyRes = dispatch(node->target);
+  if (targetTyRes) {
+    const Type *unqual = (*targetTyRes)->getUnqualifiedType();
+    if (unqual->isPointerType()) {
+      const Type *pointee =
+          static_cast<const PointerType *>(unqual)->getPointeeType();
+      if (pointee->getKind() == TypeKind::Function) {
+        auto fTy = static_cast<const FunctionType *>(pointee);
+
+        if (argTypes.size() != fTy->getParamTypes().size()) {
+          return ctx->reportError(
+              node->line, node->column, node->length,
+              "Argument count mismatch for function pointer call.");
         }
-      }
-    } else {
-      std::string finalErr = "No matching function overload found for '" +
-                             std::string(name) + "'.";
-      if (!overloadErrors.empty()) {
-        finalErr += " Candidates failed with:\n";
-        for (const auto &errList : overloadErrors) {
-          finalErr += "- ";
-          for (size_t i = 0; i < errList.size(); ++i) {
-            finalErr += errList[i];
-            if (i < errList.size() - 1)
-              finalErr += ", ";
+        for (size_t i = 0; i < argTypes.size(); i++) {
+          if (!canImplicitlyCast(argTypes[i], fTy->getParamTypes()[i])) {
+            return ctx->reportError(node->line, node->column, node->length,
+                                    "Type mismatch in function pointer call.");
           }
-          finalErr += "\n";
         }
+
+        const_cast<FunctionCallNode *>(node)->args =
+            ctx->astCtx.copyArray<ExprNode *>(node->args);
+        node->exprType = fTy->getReturnType();
+        return node->exprType;
       }
-      return ctx->reportError(node->line, node->column, node->length, finalErr);
     }
   }
 
