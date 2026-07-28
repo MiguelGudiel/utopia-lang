@@ -41,17 +41,17 @@ const float64 FLOAT64_MIN = 2.2250738585072014e-308;
 
 // Foreign C Runtime Integration
 
-@extern("malloc")
-extern void* malloc(uint64 size);
+@extern
+void* malloc(uint64 size);
 
-@extern("free")
-extern void free(void* ptr);
+@extern
+void free(void* ptr);
 
 @extern("printf")
-extern int32 print(const uint8* format, ...);
+int32 print(const uint8* format, ...);
 
-@extern("sleep")
-extern uint32 sleep(uint32 seconds);
+@extern
+uint32 sleep(uint32 seconds);
 
-@extern("system")
-extern int32 system(const uint8* command);
+@extern
+int32 system(const uint8* command);

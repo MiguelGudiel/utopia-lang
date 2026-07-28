@@ -134,38 +134,40 @@ SemaResult TypeCheckPass::visit(const AnnotationNode *node) {
 }
 
 void DeclCollectorPass::visit(const FunctionDeclNode *node) {
-  if (node->isExtern) {
-    for (const auto *ann : node->annotations) {
-      if (ann->name == "extern") {
-        if (ann->args.size() == 1 && ann->args[0]->kind == NodeKind::String) {
-          node->externAlias =
-              static_cast<const StringNode *>(ann->args[0])->value;
-        } else {
-          SemaResult err = ctx->reportError(
-              ann->line, ann->column, ann->length,
-              "The @extern annotation requires exactly one string "
-              "literal argument.");
-        }
+  bool isExport = false;
+
+  for (const auto *ann : node->annotations) {
+    if (ann->name == "export") {
+      isExport = true;
+    }
+
+    if (ann->name == "extern") {
+      if (ann->args.size() == 1 && ann->args[0]->kind == NodeKind::String) {
+        const_cast<FunctionDeclNode *>(node)->externAlias =
+            static_cast<const StringNode *>(ann->args[0])->value;
+      } else if (ann->args.empty()) {
+        const_cast<FunctionDeclNode *>(node)->externAlias = node->name;
+      } else {
+        SemaResult err =
+            ctx->reportError(ann->line, ann->column, ann->length,
+                             "The @extern annotation requires either zero or "
+                             "one string literal argument.");
       }
     }
+  }
 
-    if (node->isMethod && node->externAlias.empty()) {
-      SemaResult err =
-          ctx->reportError(node->line, node->column, node->length,
-                           "Extern methods must specify an @extern annotation "
-                           "reflecting the target C function mapping.");
+  if (node->isExtern) {
+    if (node->externAlias.empty()) {
+      const_cast<FunctionDeclNode *>(node)->externAlias = node->name;
     }
-
-    if (!node->externAlias.empty()) {
-      const_cast<FunctionDeclNode *>(node)->mangledName =
-          std::string(node->externAlias);
-    } else {
-      const_cast<FunctionDeclNode *>(node)->mangledName =
-          std::string(node->name);
-    }
+    const_cast<FunctionDeclNode *>(node)->mangledName =
+        std::string(node->externAlias);
+  } else if (isExport) {
+    const_cast<FunctionDeclNode *>(node)->mangledName = std::string(node->name);
   } else if (node->mangledName.empty()) {
     const_cast<FunctionDeclNode *>(node)->mangledName = Mangler::mangle(node);
   }
+
   ctx->addDecl(node->name, node);
 }
 
@@ -215,30 +217,37 @@ void DeclCollectorPass::visit(const StructDeclNode *node) {
   }
 
   for (auto *method : node->methods) {
-    if (method->isExtern) {
-      for (const auto *ann : method->annotations) {
-        if (ann->name == "extern") {
-          if (ann->args.size() == 1 && ann->args[0]->kind == NodeKind::String) {
-            const_cast<FunctionDeclNode *>(method)->externAlias =
-                static_cast<const StringNode *>(ann->args[0])->value;
-          } else {
-            SemaResult err =
-                ctx->reportError(ann->line, ann->column, ann->length,
-                                 "The @extern annotation requires exactly one "
-                                 "string literal argument.");
-          }
-        }
+    bool isExport = false;
+
+    for (const auto *ann : method->annotations) {
+      if (ann->name == "export") {
+        isExport = true;
       }
 
-      if (method->externAlias.empty()) {
-        SemaResult err = ctx->reportError(
-            method->line, method->column, method->length,
-            "Extern methods must specify an @extern annotation "
-            "reflecting the target C function mapping.");
-      } else {
-        const_cast<FunctionDeclNode *>(method)->mangledName =
-            std::string(method->externAlias);
+      if (ann->name == "extern") {
+        if (ann->args.size() == 1 && ann->args[0]->kind == NodeKind::String) {
+          const_cast<FunctionDeclNode *>(method)->externAlias =
+              static_cast<const StringNode *>(ann->args[0])->value;
+        } else if (ann->args.empty()) {
+          const_cast<FunctionDeclNode *>(method)->externAlias = method->name;
+        } else {
+          SemaResult err =
+              ctx->reportError(ann->line, ann->column, ann->length,
+                               "The @extern annotation requires either zero or "
+                               "one string literal argument.");
+        }
       }
+    }
+
+    if (method->isExtern) {
+      if (method->externAlias.empty()) {
+        const_cast<FunctionDeclNode *>(method)->externAlias = method->name;
+      }
+      const_cast<FunctionDeclNode *>(method)->mangledName =
+          std::string(method->externAlias);
+    } else if (isExport) {
+      const_cast<FunctionDeclNode *>(method)->mangledName =
+          std::string(method->name);
     } else {
       const_cast<FunctionDeclNode *>(method)->mangledName =
           Mangler::mangle(method, std::string(node->name));
@@ -266,30 +275,37 @@ void DeclCollectorPass::visit(const ClassDeclNode *node) {
         Mangler::mangle(node->destructor, std::string(node->name));
   }
   for (auto *method : node->methods) {
-    if (method->isExtern) {
-      for (const auto *ann : method->annotations) {
-        if (ann->name == "extern") {
-          if (ann->args.size() == 1 && ann->args[0]->kind == NodeKind::String) {
-            const_cast<FunctionDeclNode *>(method)->externAlias =
-                static_cast<const StringNode *>(ann->args[0])->value;
-          } else {
-            SemaResult err =
-                ctx->reportError(ann->line, ann->column, ann->length,
-                                 "The @extern annotation requires exactly one "
-                                 "string literal argument.");
-          }
-        }
+    bool isExport = false;
+
+    for (const auto *ann : method->annotations) {
+      if (ann->name == "export") {
+        isExport = true;
       }
 
-      if (method->externAlias.empty()) {
-        SemaResult err = ctx->reportError(
-            method->line, method->column, method->length,
-            "Extern methods must specify an @extern annotation "
-            "reflecting the target C function mapping.");
-      } else {
-        const_cast<FunctionDeclNode *>(method)->mangledName =
-            std::string(method->externAlias);
+      if (ann->name == "extern") {
+        if (ann->args.size() == 1 && ann->args[0]->kind == NodeKind::String) {
+          const_cast<FunctionDeclNode *>(method)->externAlias =
+              static_cast<const StringNode *>(ann->args[0])->value;
+        } else if (ann->args.empty()) {
+          const_cast<FunctionDeclNode *>(method)->externAlias = method->name;
+        } else {
+          SemaResult err =
+              ctx->reportError(ann->line, ann->column, ann->length,
+                               "The @extern annotation requires either zero or "
+                               "one string literal argument.");
+        }
       }
+    }
+
+    if (method->isExtern) {
+      if (method->externAlias.empty()) {
+        const_cast<FunctionDeclNode *>(method)->externAlias = method->name;
+      }
+      const_cast<FunctionDeclNode *>(method)->mangledName =
+          std::string(method->externAlias);
+    } else if (isExport) {
+      const_cast<FunctionDeclNode *>(method)->mangledName =
+          std::string(method->name);
     } else {
       const_cast<FunctionDeclNode *>(method)->mangledName =
           Mangler::mangle(method, std::string(node->name));

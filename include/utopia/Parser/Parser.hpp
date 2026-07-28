@@ -61,7 +61,7 @@ private:
   std::vector<ParamDeclNode *> parseParameterList(const Type *classTy,
                                                   bool &isVariadic);
 
-  DeclNode *parseDeclarationOrFunction();
+  DeclNode *parseDeclarationOrFunction(llvm::ArrayRef<AnnotationNode *> annotations = {});
   DeclNode *parseEnumDecl();
   DeclNode *parseStructDecl();
   DeclNode *parseClassDecl();

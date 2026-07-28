@@ -552,7 +552,7 @@ ASTNode *Parser::parseStatement() {
              (currentToken().type == TokenType::IDENTIFIER &&
               (peekToken().type == TokenType::IDENTIFIER ||
                astCtx.getRecordType(currentToken().value) != nullptr))) {
-    node = parseDeclarationOrFunction();
+    node = parseDeclarationOrFunction(annotations);
   } else if (currentToken().type == TokenType::RETURN) {
     node = parseReturn();
   } else if (currentToken().type == TokenType::LBRACE) {
@@ -1051,6 +1051,16 @@ DeclNode *Parser::parseStructDecl() {
     }
 
     bool isExtern = match(TokenType::EXTERN_KW);
+
+    if (!isExtern) {
+      for (const auto *ann : memberAnnotations) {
+        if (ann->name == "extern") {
+          isExtern = true;
+          break;
+        }
+      }
+    }
+
     int mLine = currentToken().line;
     int mCol = currentToken().column;
     const Type *memType = parseType();
@@ -1267,6 +1277,16 @@ DeclNode *Parser::parseClassDecl() {
     }
 
     bool isExtern = match(TokenType::EXTERN_KW);
+
+    if (!isExtern) {
+      for (const auto *ann : memberAnnotations) {
+        if (ann->name == "extern") {
+          isExtern = true;
+          break;
+        }
+      }
+    }
+
     int mLine = currentToken().line;
     int mCol = currentToken().column;
     const Type *memType = parseType();
@@ -1423,11 +1443,23 @@ DeclNode *Parser::parseEnumDecl() {
   return node;
 }
 
-DeclNode *Parser::parseDeclarationOrFunction() {
+DeclNode *Parser::parseDeclarationOrFunction(
+    llvm::ArrayRef<AnnotationNode *> annotations) {
   int line = currentToken().line;
   int col = currentToken().column;
 
   bool isExtern = match(TokenType::EXTERN_KW);
+
+  /* Fallback to checking the presence of the @extern annotation */
+  if (!isExtern) {
+    for (const auto *ann : annotations) {
+      if (ann->name == "extern") {
+        isExtern = true;
+        break;
+      }
+    }
+  }
+
   const Type *nodeType = parseType();
 
   std::string_view id = currentToken().value;
@@ -1451,7 +1483,7 @@ DeclNode *Parser::parseDeclarationOrFunction() {
              "Expected ';' after extern function declaration");
       funcDecl->length = endCol - col;
     } else {
-      funcDecl->body = parseFunctionBody(nodeType); // <--- Actualizado
+      funcDecl->body = parseFunctionBody(nodeType);
       funcDecl->length = funcDecl->body->column + funcDecl->body->length - col;
     }
     return funcDecl;
