@@ -759,7 +759,8 @@ llvm::Value *CodeGen::visit(const VariableNode *node) {
     llvm::Type *llvmBaseTy = getLLVMType(node->parentType);
     llvm::Value *gep = builder.CreateStructGEP(llvmBaseTy, thisPtr,
                                                node->fieldIndex, node->name);
-    return createTBAALoad(getLLVMType(node->exprType), gep, node->exprType);
+    return createTBAALoad(getLLVMType(node->exprType), gep,
+                          getTBAATagForExpr(node), node->name);
   }
 
   /* Return direct pointer evaluation if identifier statically targets a
@@ -821,7 +822,8 @@ llvm::Value *CodeGen::visit(const MemberAccessNode *node) {
         arrTy, gep, {builder.getInt32(0), builder.getInt32(0)});
   }
 
-  return createTBAALoad(getLLVMType(node->exprType), gep, node->exprType);
+  return createTBAALoad(getLLVMType(node->exprType), gep,
+                        getTBAATagForExpr(node), node->memberName);
 }
 
 llvm::Value *CodeGen::visit(const IfNode *node) {
@@ -1309,7 +1311,7 @@ llvm::Value *CodeGen::visit(const AssignNode *node) {
           callNode->resolvedFunc->returnType->isVoid()) {
         emitConstructorCall(callNode, lval);
         return createTBAALoad(getLLVMType(node->exprType), lval,
-                              node->exprType);
+                              getTBAATagForExpr(node->target));
       }
     }
   }
@@ -1346,7 +1348,7 @@ llvm::Value *CodeGen::visit(const AssignNode *node) {
   llvm::Type *destTy = getLLVMType(node->target->exprType);
   rval = createImplicitCast(rval, destTy);
 
-  createTBAAStore(rval, lval, node->target->exprType);
+  createTBAAStore(rval, lval, getTBAATagForExpr(node->target));
 
   return rval;
 }
@@ -1889,8 +1891,20 @@ llvm::MDNode *CodeGen::getTBAATypeNode(const Type *type) {
     node = mdBuilder.createTBAAScalarTypeNode(unqual->toString(), charNode);
   } else if (unqual->getKind() == TypeKind::Class ||
              unqual->getKind() == TypeKind::Struct) {
-    node = mdBuilder.createTBAAScalarTypeNode(
-        static_cast<const RecordType *>(unqual)->getName(), charNode);
+    /* Struct-Path TBAA: Build precise topological map of the record type */
+    auto *recTy = static_cast<const RecordType *>(unqual);
+    llvm::StructType *structTy =
+        llvm::cast<llvm::StructType>(getLLVMType(recTy));
+    const llvm::StructLayout *layout =
+        mod.getDataLayout().getStructLayout(structTy);
+
+    std::vector<std::pair<llvm::MDNode *, uint64_t>> fields;
+    for (const auto &f : recTy->getFields()) {
+      uint64_t offset = layout->getElementOffset(f.index);
+      llvm::MDNode *fieldTypeNode = getTBAATypeNode(f.type);
+      fields.push_back({fieldTypeNode, offset});
+    }
+    node = mdBuilder.createTBAAStructTypeNode(recTy->getName(), fields);
   } else {
     node = charNode;
   }
@@ -1902,31 +1916,115 @@ llvm::MDNode *CodeGen::getTBAATypeNode(const Type *type) {
 llvm::MDNode *CodeGen::getTBAAAccessTag(const Type *type) {
   if (!type || type->isVoid())
     return nullptr;
+
+  const Type *unqual = type->getUnqualifiedType();
+  if (unqual->getKind() == TypeKind::Struct ||
+      unqual->getKind() == TypeKind::Class ||
+      unqual->getKind() == TypeKind::Array) {
+    return nullptr;
+  }
+
   llvm::MDNode *typeNode = getTBAATypeNode(type);
-  return mdBuilder.createTBAAAccessTag(typeNode, typeNode, 0, 0);
+  return mdBuilder.createTBAAStructTagNode(typeNode, typeNode, 0);
+}
+
+llvm::MDNode *CodeGen::getTBAAStructAccessTag(const Type *baseType,
+                                              const Type *accessType,
+                                              uint64_t offset) {
+  if (!baseType || !accessType)
+    return nullptr;
+
+  const Type *unqualAccess = accessType->getUnqualifiedType();
+  if (unqualAccess->getKind() == TypeKind::Struct ||
+      unqualAccess->getKind() == TypeKind::Class ||
+      unqualAccess->getKind() == TypeKind::Array) {
+    return nullptr;
+  }
+
+  llvm::MDNode *baseNode = getTBAATypeNode(baseType);
+  llvm::MDNode *accessNode = getTBAATypeNode(accessType);
+
+  return mdBuilder.createTBAAStructTagNode(baseNode, accessNode, offset);
+}
+
+llvm::MDNode *CodeGen::getTBAATagForExpr(const ExprNode *node) {
+  if (!node || !node->exprType)
+    return nullptr;
+
+  const Type *unqual = node->exprType->getUnqualifiedType();
+  if (unqual->getKind() == TypeKind::Struct ||
+      unqual->getKind() == TypeKind::Class ||
+      unqual->getKind() == TypeKind::Array) {
+    return nullptr;
+  }
+
+  if (node->kind == NodeKind::MemberAccess) {
+    auto *ma = static_cast<const MemberAccessNode *>(node);
+    if (ma->isMethodRef)
+      return nullptr;
+
+    const Type *baseTy = ma->object->exprType;
+    if (baseTy->isPointerType()) {
+      baseTy = static_cast<const PointerType *>(baseTy)->getPointeeType();
+    } else if (baseTy->isReferenceType()) {
+      baseTy = static_cast<const ReferenceType *>(baseTy)->getPointeeType();
+    }
+
+    llvm::StructType *llBaseTy =
+        llvm::cast<llvm::StructType>(getLLVMType(baseTy));
+    uint64_t offset =
+        mod.getDataLayout().getStructLayout(llBaseTy)->getElementOffset(
+            ma->fieldIndex);
+
+    return getTBAAStructAccessTag(baseTy, ma->exprType, offset);
+  }
+
+  if (node->kind == NodeKind::Variable) {
+    auto *varNode = static_cast<const VariableNode *>(node);
+    if (varNode->isField) {
+      llvm::StructType *llBaseTy =
+          llvm::cast<llvm::StructType>(getLLVMType(varNode->parentType));
+      uint64_t offset =
+          mod.getDataLayout().getStructLayout(llBaseTy)->getElementOffset(
+              varNode->fieldIndex);
+      return getTBAAStructAccessTag(varNode->parentType, varNode->exprType,
+                                    offset);
+    }
+  }
+
+  /* Fallback to strict scalar TBAA for arrays, pointers, and direct variables
+   */
+  return getTBAAAccessTag(node->exprType);
+}
+
+llvm::LoadInst *CodeGen::createTBAALoad(llvm::Type *llTy, llvm::Value *ptr,
+                                        llvm::MDNode *tbaaTag,
+                                        const llvm::Twine &name) {
+  auto *load = builder.CreateLoad(llTy, ptr, name);
+  if (tbaaTag) {
+    load->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaTag);
+  }
+  return load;
 }
 
 llvm::LoadInst *CodeGen::createTBAALoad(llvm::Type *llTy, llvm::Value *ptr,
                                         const Type *utopiaTy,
                                         const llvm::Twine &name) {
-  auto *load = builder.CreateLoad(llTy, ptr, name);
-  if (utopiaTy) {
-    if (llvm::MDNode *tag = getTBAAAccessTag(utopiaTy)) {
-      load->setMetadata(llvm::LLVMContext::MD_tbaa, tag);
-    }
+  return createTBAALoad(llTy, ptr, getTBAAAccessTag(utopiaTy), name);
+}
+
+llvm::StoreInst *CodeGen::createTBAAStore(llvm::Value *val, llvm::Value *ptr,
+                                          llvm::MDNode *tbaaTag) {
+  auto *store = builder.CreateStore(val, ptr);
+  if (tbaaTag) {
+    store->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaTag);
   }
-  return load;
+  return store;
 }
 
 llvm::StoreInst *CodeGen::createTBAAStore(llvm::Value *val, llvm::Value *ptr,
                                           const Type *utopiaTy) {
-  auto *store = builder.CreateStore(val, ptr);
-  if (utopiaTy) {
-    if (llvm::MDNode *tag = getTBAAAccessTag(utopiaTy)) {
-      store->setMetadata(llvm::LLVMContext::MD_tbaa, tag);
-    }
-  }
-  return store;
+  return createTBAAStore(val, ptr, getTBAAAccessTag(utopiaTy));
 }
 
 void CodeGen::emitLifetimeStart(llvm::AllocaInst *allocaInst, uint64_t size) {
@@ -1990,6 +2088,10 @@ void CodeGen::emitDefaultInitialization(llvm::Value *ptr, const Type *type) {
       fields = static_cast<const ClassDeclNode *>(decl)->fields;
     }
 
+    llvm::StructType *llRecTy = llvm::cast<llvm::StructType>(llTy);
+    const llvm::StructLayout *layout =
+        mod.getDataLayout().getStructLayout(llRecTy);
+
     for (size_t i = 0; i < fields.size(); ++i) {
       auto *fieldDecl = fields[i];
       if (fieldDecl->initializer) {
@@ -1997,9 +2099,15 @@ void CodeGen::emitDefaultInitialization(llvm::Value *ptr, const Type *type) {
         if (initVal) {
           llvm::Type *destTy = getLLVMType(fieldDecl->type);
           initVal = createImplicitCast(initVal, destTy);
+
           llvm::Value *gep = builder.CreateStructGEP(
               llTy, ptr, i, std::string(fieldDecl->varName));
-          createTBAAStore(initVal, gep, fieldDecl->type);
+
+          uint64_t offset = layout->getElementOffset(i);
+          llvm::MDNode *tbaaTag =
+              getTBAAStructAccessTag(type, fieldDecl->type, offset);
+
+          createTBAAStore(initVal, gep, tbaaTag);
         }
       }
     }

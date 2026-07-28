@@ -74,11 +74,21 @@ private:
   /* TBAA Context Resolution */
   llvm::MDNode *getTBAATypeNode(const Type *type);
   llvm::MDNode *getTBAAAccessTag(const Type *type);
+  llvm::MDNode *getTBAAStructAccessTag(const Type *baseType,
+                                       const Type *accessType, uint64_t offset);
+  llvm::MDNode *getTBAATagForExpr(const ExprNode *node);
+
   llvm::LoadInst *createTBAALoad(llvm::Type *llTy, llvm::Value *ptr,
                                  const Type *utopiaTy,
                                  const llvm::Twine &name = "");
+  llvm::LoadInst *createTBAALoad(llvm::Type *llTy, llvm::Value *ptr,
+                                 llvm::MDNode *tbaaTag,
+                                 const llvm::Twine &name = "");
+
   llvm::StoreInst *createTBAAStore(llvm::Value *val, llvm::Value *ptr,
                                    const Type *utopiaTy);
+  llvm::StoreInst *createTBAAStore(llvm::Value *val, llvm::Value *ptr,
+                                   llvm::MDNode *tbaaTag);
 
   /* Lifetime Intrinsic Emission */
   void emitLifetimeStart(llvm::AllocaInst *allocaInst, uint64_t size);
