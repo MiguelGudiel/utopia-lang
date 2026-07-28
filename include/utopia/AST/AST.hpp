@@ -160,6 +160,7 @@ struct VarDeclNode : public DeclNode {
   const Type *type;
   std::string_view varName;
   ExprNode *initializer;
+  bool isGlobal = false;
 
   VarDeclNode(const Type *t, std::string_view n, ExprNode *init, int l, int c,
               int len)
@@ -212,6 +213,14 @@ struct FunctionDeclNode : public DeclNode {
   bool isVariadic;
   bool isImplicit;
   mutable std::string_view externAlias;
+
+  /* Intrinsic function attributes inferred during semantic analysis */
+  mutable bool isReadNone = false;
+  mutable bool isReadOnly = false;
+  mutable bool isNoFree = false;
+  mutable bool isNoSync = false;
+  mutable bool isWillReturn = false;
+  mutable bool isMustProgress = false;
 
   FunctionDeclNode(const Type *ret, std::string_view n, int l, int c,
                    bool isC = false, bool isMeth = false, bool isExt = false,

@@ -1,5 +1,6 @@
 #include "utopia/Sema/Sema.hpp"
 #include "utopia/CodeGen/Mangler.hpp"
+#include "utopia/Sema/EffectAnalyzer.hpp"
 
 namespace utopia {
 
@@ -700,6 +701,12 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
                             "Variables cannot be of type 'void'");
   }
 
+  /* Mark variables defined at module scope to enable accurate side-effect
+   * analysis */
+  if (ctx->getScopeDepth() == 1) {
+    const_cast<VarDeclNode *>(node)->isGlobal = true;
+  }
+
   if (declType->isConstQualified() && !node->initializer &&
       !declType->isReferenceType()) {
     ctx->reportError(node->line, node->column, node->length,
@@ -846,17 +853,32 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
     return field->type;
   }
 
-  if (baseTy->getKind() == TypeKind::Class) {
-    auto clsDeclDecls = ctx->lookup(recordTy->getName());
-    if (!clsDeclDecls.empty() &&
-        clsDeclDecls.front()->kind == NodeKind::ClassDecl) {
-      auto clsDecl = static_cast<const ClassDeclNode *>(clsDeclDecls.front());
-      for (const auto *method : clsDecl->methods) {
-        if (method->name == node->memberName) {
-          const_cast<MemberAccessNode *>(node)->isMethodRef = true;
-          const_cast<MemberAccessNode *>(node)->resolvedMethod = method;
-          node->exprType = ctx->astCtx.VoidTy;
-          return ctx->astCtx.VoidTy;
+  if (baseTy->getKind() == TypeKind::Class ||
+      baseTy->getKind() == TypeKind::Struct) {
+    auto recordDecls = ctx->lookup(recordTy->getName());
+    if (!recordDecls.empty()) {
+      const DeclNode *recDecl = nullptr;
+      for (auto *d : recordDecls) {
+        if (d->kind == NodeKind::ClassDecl || d->kind == NodeKind::StructDecl) {
+          recDecl = d;
+          break;
+        }
+      }
+
+      if (recDecl) {
+        llvm::ArrayRef<FunctionDeclNode *> methods;
+        if (recDecl->kind == NodeKind::ClassDecl)
+          methods = static_cast<const ClassDeclNode *>(recDecl)->methods;
+        else
+          methods = static_cast<const StructDeclNode *>(recDecl)->methods;
+
+        for (const auto *method : methods) {
+          if (method->name == node->memberName) {
+            const_cast<MemberAccessNode *>(node)->isMethodRef = true;
+            const_cast<MemberAccessNode *>(node)->resolvedMethod = method;
+            node->exprType = ctx->astCtx.VoidTy;
+            return ctx->astCtx.VoidTy;
+          }
         }
       }
     }
@@ -926,6 +948,16 @@ SemaResult TypeCheckPass::visit(const FunctionDeclNode *node) {
                            "a value in all control paths.");
       hasErrors = true;
     }
+
+    EffectAnalyzer ea;
+    ea.dispatch(node->body);
+
+    node->isReadNone = !ea.readsMem && !ea.writesMem;
+    node->isReadOnly = ea.readsMem && !ea.writesMem;
+    node->isNoFree = !ea.freesMem;
+    node->isNoSync = !ea.hasSync;
+    node->isWillReturn = !ea.potentiallyInfinite;
+    node->isMustProgress = true;
   }
 
   if (hasErrors) {
@@ -1123,21 +1155,27 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
         baseTy = static_cast<const ReferenceType *>(baseTy)->getPointeeType();
 
       auto recordTy = static_cast<const RecordType *>(baseTy);
-      auto clsDeclDecls = ctx->lookup(recordTy->getName());
+      auto recordDecls = ctx->lookup(recordTy->getName());
 
-      const ClassDeclNode *clsDecl = nullptr;
-      for (auto *d : clsDeclDecls) {
-        if (d->kind == NodeKind::ClassDecl) {
-          clsDecl = static_cast<const ClassDeclNode *>(d);
+      const DeclNode *recDecl = nullptr;
+      for (auto *d : recordDecls) {
+        if (d->kind == NodeKind::ClassDecl || d->kind == NodeKind::StructDecl) {
+          recDecl = d;
           break;
         }
       }
 
-      if (clsDecl) {
+      if (recDecl) {
         const FunctionDeclNode *bestMatch = nullptr;
         std::vector<std::vector<std::string>> overloadErrors;
 
-        for (const auto *method : clsDecl->methods) {
+        llvm::ArrayRef<FunctionDeclNode *> methods;
+        if (recDecl->kind == NodeKind::ClassDecl)
+          methods = static_cast<const ClassDeclNode *>(recDecl)->methods;
+        else
+          methods = static_cast<const StructDeclNode *>(recDecl)->methods;
+
+        for (const auto *method : methods) {
           if (method->name == ma->memberName) {
             auto errs = checkMatch(method);
             if (errs.empty()) {
@@ -1209,7 +1247,15 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
       }
     }
 
-    if (!decls.empty() && decls.front()->kind == NodeKind::FunctionDecl) {
+    bool hasCallable = false;
+    for (auto *d : decls) {
+      if (d->kind == NodeKind::FunctionDecl) {
+        hasCallable = true;
+        break;
+      }
+    }
+
+    if (hasCallable) {
       const FunctionDeclNode *bestMatch = nullptr;
       bool isConstructorCall = false;
       std::vector<std::vector<std::string>> overloadErrors;

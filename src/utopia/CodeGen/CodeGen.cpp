@@ -2,6 +2,7 @@
 #include <iostream>
 #include <llvm/ADT/APSInt.h>
 #include <llvm/IR/Intrinsics.h>
+#include <llvm/Support/ModRef.h>
 #include <optional>
 #include <string>
 
@@ -141,20 +142,46 @@ llvm::Function *CodeGen::getOrCreateFunction(const FunctionDeclNode *node) {
   func = llvm::Function::Create(funcType, llvm::Function::ExternalLinkage,
                                 irName, mod);
 
-  /* Zero-cost annotation traversal mapping directly to LLVM IR attributes */
-  for (const auto *ann : node->annotations) {
-    if (ann->name == "inline") {
-      func->addFnAttr(llvm::Attribute::AlwaysInline);
-    }
-  }
-
   func->addFnAttr(llvm::Attribute::NoUnwind);
 
-  auto addRefAttributes = [&](const Type *type,
-                              std::optional<unsigned> paramIdx) {
-    if (!type->isReferenceType())
-      return;
+  for (const auto *ann : node->annotations) {
+    if (ann->name == "inline")
+      func->addFnAttr(llvm::Attribute::AlwaysInline);
+    else if (ann->name == "readnone")
+      func->setMemoryEffects(llvm::MemoryEffects::none());
+    else if (ann->name == "readonly")
+      func->setMemoryEffects(llvm::MemoryEffects::readOnly());
+    else if (ann->name == "nosync")
+      func->addFnAttr(llvm::Attribute::NoSync);
+    else if (ann->name == "nofree")
+      func->addFnAttr(llvm::Attribute::NoFree);
+    else if (ann->name == "willreturn")
+      func->addFnAttr(llvm::Attribute::WillReturn);
+    else if (ann->name == "mustprogress")
+      func->addFnAttr(llvm::Attribute::MustProgress);
+  }
 
+  if (!node->isExtern) {
+    if (node->isReadNone)
+      func->setMemoryEffects(llvm::MemoryEffects::none());
+    else if (node->isReadOnly)
+      func->setMemoryEffects(llvm::MemoryEffects::readOnly());
+
+    if (node->isNoFree && !func->hasFnAttribute(llvm::Attribute::NoFree))
+      func->addFnAttr(llvm::Attribute::NoFree);
+    if (node->isNoSync && !func->hasFnAttribute(llvm::Attribute::NoSync))
+      func->addFnAttr(llvm::Attribute::NoSync);
+    if (node->isWillReturn &&
+        !func->hasFnAttribute(llvm::Attribute::WillReturn))
+      func->addFnAttr(llvm::Attribute::WillReturn);
+    if (node->isMustProgress &&
+        !func->hasFnAttribute(llvm::Attribute::MustProgress))
+      func->addFnAttr(llvm::Attribute::MustProgress);
+  }
+
+  auto addRefAttributes = [&](const Type *type,
+                              std::optional<unsigned> paramIdx,
+                              llvm::ArrayRef<AnnotationNode *> annotations) {
     auto addAttrObj = [&](llvm::Attribute attr) {
       if (paramIdx.has_value())
         func->addParamAttr(*paramIdx, attr);
@@ -162,19 +189,47 @@ llvm::Function *CodeGen::getOrCreateFunction(const FunctionDeclNode *node) {
         func->addRetAttr(attr);
     };
 
-    addAttrObj(llvm::Attribute::get(ctx, llvm::Attribute::NonNull));
-    addAttrObj(llvm::Attribute::get(ctx, llvm::Attribute::NoUndef));
+    for (const auto *ann : annotations) {
+      if (ann->name == "nocapture" && paramIdx.has_value()) {
+        addAttrObj(llvm::Attribute::getWithCaptureInfo(
+            ctx, llvm::CaptureInfo::none()));
+      } else if (ann->name == "nonnull") {
+        addAttrObj(llvm::Attribute::get(ctx, llvm::Attribute::NonNull));
+      } else if (ann->name == "dereferenceable" && !ann->args.empty()) {
+        if (ann->args[0]->kind == NodeKind::Number) {
+          auto *num = static_cast<const NumberNode *>(ann->args[0]);
+          if (!num->isFloat) {
+            uint64_t sz = std::stoull(std::string(num->raw));
+            addAttrObj(llvm::Attribute::getWithDereferenceableBytes(ctx, sz));
+          }
+        }
+      }
+    }
+
+    if (!type->isReferenceType() && !type->isPointerType())
+      return;
+
+    if (type->isReferenceType()) {
+      addAttrObj(llvm::Attribute::get(ctx, llvm::Attribute::NonNull));
+      addAttrObj(llvm::Attribute::get(ctx, llvm::Attribute::NoUndef));
+    }
 
     const Type *pointee =
-        static_cast<const ReferenceType *>(type)->getPointeeType();
+        type->isReferenceType()
+            ? static_cast<const ReferenceType *>(type)->getPointeeType()
+            : static_cast<const PointerType *>(type)->getPointeeType();
 
+    // The ReadOnly attribute is still perfectly valid and strictly required
+    // for const-qualified parameter variables in modern LLVM.
     if (pointee->isConstQualified() && paramIdx.has_value()) {
       addAttrObj(llvm::Attribute::get(ctx, llvm::Attribute::ReadOnly));
+      addAttrObj(
+          llvm::Attribute::getWithCaptureInfo(ctx, llvm::CaptureInfo::none()));
     }
 
     const Type *unqualPointee = pointee->getUnqualifiedType();
 
-    if (unqualPointee->isBuiltinType()) {
+    if (unqualPointee->isBuiltinType() && type->isReferenceType()) {
       auto kind =
           static_cast<const BuiltinType *>(unqualPointee)->getBuiltinKind();
       uint64_t size = 0;
@@ -210,11 +265,11 @@ llvm::Function *CodeGen::getOrCreateFunction(const FunctionDeclNode *node) {
     }
   };
 
-  addRefAttributes(node->returnType, std::nullopt);
+  addRefAttributes(node->returnType, std::nullopt, node->annotations);
 
   unsigned argIdx = 0;
   for (const auto *param : node->params) {
-    addRefAttributes(param->type, argIdx);
+    addRefAttributes(param->type, argIdx, param->annotations);
     argIdx++;
   }
 
