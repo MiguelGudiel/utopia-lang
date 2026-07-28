@@ -49,3 +49,6 @@ extern void free(void* ptr);
 
 @extern("printf")
 extern int32 print(const uint8* format, ...);
+
+@extern("sleep")
+extern uint32 sleep(uint32 seconds);
