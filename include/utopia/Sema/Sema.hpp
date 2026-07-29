@@ -9,8 +9,8 @@
 namespace utopia {
 
 /*
- * Strips indirection to evaluate core type compatibility.
- * References are transparently followed to their underlying pointee types.
+ * Strips indirection to evaluate core type compatibility, now safely stripping
+ * both LValue and RValue references.
  */
 static bool canImplicitlyCast(const Type *from, const Type *to) {
   if (!from || !to)
@@ -19,14 +19,19 @@ static bool canImplicitlyCast(const Type *from, const Type *to) {
   if (from == to)
     return true;
 
-  const Type *baseFrom =
-      from->isReferenceType()
-          ? static_cast<const ReferenceType *>(from)->getPointeeType()
-          : from;
-  const Type *baseTo =
-      to->isReferenceType()
-          ? static_cast<const ReferenceType *>(to)->getPointeeType()
-          : to;
+  const Type *baseFrom = from;
+  if (from->isReferenceType()) {
+    baseFrom = static_cast<const ReferenceType *>(from)->getPointeeType();
+  } else if (from->getKind() == TypeKind::RValueReference) {
+    baseFrom = static_cast<const RValueReferenceType *>(from)->getPointeeType();
+  }
+
+  const Type *baseTo = to;
+  if (to->isReferenceType()) {
+    baseTo = static_cast<const ReferenceType *>(to)->getPointeeType();
+  } else if (to->getKind() == TypeKind::RValueReference) {
+    baseTo = static_cast<const RValueReferenceType *>(to)->getPointeeType();
+  }
 
   if (baseFrom == baseTo)
     return true;
@@ -166,7 +171,7 @@ class TypeCheckPass : public SemaPass,
 private:
   const FunctionDeclNode *
   resolveOverloadedOperator(const Type *lhsType, std::string_view opName,
-                            const std::vector<const Type *> &argTypes);
+                            const std::vector<ExprNode *> &args);
 
 public:
   bool run(const ModuleNode *module, SemaContext &context) override;

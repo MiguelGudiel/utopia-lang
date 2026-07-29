@@ -94,6 +94,17 @@ public:
     return refTy;
   }
 
+  /* Returns the canonical r-value reference type for the given pointee. */
+  const RValueReferenceType *getRValueReferenceType(const Type *pointee) {
+    auto it = rvalueReferenceTypes.find(pointee);
+    if (it != rvalueReferenceTypes.end())
+      return it->second;
+
+    auto *refTy = create<RValueReferenceType>(pointee);
+    rvalueReferenceTypes[pointee] = refTy;
+    return refTy;
+  }
+
   const ConstType *getConstType(const Type *base) {
     auto it = constTypes.find(base);
     if (it != constTypes.end())
@@ -210,6 +221,8 @@ private:
   std::vector<const ArrayType *> arrayTypes;
   std::unordered_map<const Type *, const PointerType *> pointerTypes;
   std::unordered_map<const Type *, const ReferenceType *> referenceTypes;
+  std::unordered_map<const Type *, const RValueReferenceType *>
+      rvalueReferenceTypes;
   std::unordered_map<const Type *, const ConstType *> constTypes;
   std::unordered_map<std::string_view, RecordType *> recordTypes;
   std::unordered_map<std::string_view, const Type *> typeAliases;

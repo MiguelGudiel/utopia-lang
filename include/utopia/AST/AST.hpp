@@ -61,6 +61,8 @@ struct StmtNode : public ASTNode {
 
 struct ExprNode : public ASTNode {
   mutable const Type *exprType = nullptr;
+  mutable bool isLValue =
+      false; // Tracks if the expression represents a persistent memory location
   explicit ExprNode(NodeKind k, int l = 0, int c = 0, int len = 0)
       : ASTNode(k, l, c, len) {}
 };

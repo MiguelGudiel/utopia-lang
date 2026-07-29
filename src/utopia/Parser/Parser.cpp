@@ -280,11 +280,12 @@ const Type *Parser::parseType(bool inNewExpr) {
   }
 
   /*
-   * Array brackets are strictly omitted from type construction if evaluated
-   * within a dynamic heap allocation context (new expression).
+   * Process array brackets, pointers, references, and r-value references.
+   * TokenType::LOGICAL_AND is naturally emitted by the lexer for '&&'
    */
   while (currentToken().type == TokenType::STAR ||
          currentToken().type == TokenType::AMPERSAND ||
+         currentToken().type == TokenType::LOGICAL_AND ||
          currentToken().type == TokenType::CONST_KW ||
          (!inNewExpr && currentToken().type == TokenType::LBRACKET)) {
     if (currentToken().type == TokenType::CONST_KW) {
@@ -295,6 +296,9 @@ const Type *Parser::parseType(bool inNewExpr) {
       advance();
     } else if (currentToken().type == TokenType::AMPERSAND) {
       ty = astCtx.getReferenceType(ty);
+      advance();
+    } else if (currentToken().type == TokenType::LOGICAL_AND) {
+      ty = astCtx.getRValueReferenceType(ty);
       advance();
     } else if (!inNewExpr && currentToken().type == TokenType::LBRACKET) {
       ty = applyArrayDeclarator(ty);

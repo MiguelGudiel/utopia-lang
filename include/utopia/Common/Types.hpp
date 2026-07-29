@@ -19,6 +19,7 @@ enum class TypeKind {
   Builtin,
   Pointer,
   Reference,
+  RValueReference,
   Const,
   Struct,
   Class,
@@ -98,6 +99,15 @@ class ReferenceType : public Type {
 public:
   explicit ReferenceType(const Type *p)
       : Type(TypeKind::Reference), pointee(p) {}
+  const Type *getPointeeType() const { return pointee; }
+};
+
+class RValueReferenceType : public Type {
+  const Type *pointee;
+
+public:
+  explicit RValueReferenceType(const Type *p)
+      : Type(TypeKind::RValueReference), pointee(p) {}
   const Type *getPointeeType() const { return pointee; }
 };
 
@@ -349,6 +359,11 @@ inline std::string Type::toString() const {
                ->getPointeeType()
                ->toString() +
            "&";
+  } else if (kind == TypeKind::RValueReference) {
+    return static_cast<const RValueReferenceType *>(this)
+               ->getPointeeType()
+               ->toString() +
+           "&&";
   } else if (kind == TypeKind::Struct || kind == TypeKind::Class) {
     return std::string(static_cast<const RecordType *>(this)->getName());
   }

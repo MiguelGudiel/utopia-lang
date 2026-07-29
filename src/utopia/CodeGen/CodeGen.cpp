@@ -66,7 +66,8 @@ llvm::Type *CodeGen::getLLVMType(const Type *type) {
     case BuiltinKind::Void:
       return builder.getVoidTy();
     }
-  } else if (type->isPointerType() || type->isReferenceType()) {
+  } else if (type->isPointerType() || type->isReferenceType() ||
+             type->getKind() == TypeKind::RValueReference) {
     return builder.getPtrTy();
   } else if (type->getKind() == TypeKind::Array) {
     auto *arrTy = static_cast<const ArrayType *>(type);
@@ -238,21 +239,26 @@ llvm::Function *CodeGen::getOrCreateFunction(const FunctionDeclNode *node) {
       }
     }
 
-    if (!type->isReferenceType() && !type->isPointerType())
+    if (!type->isReferenceType() && !type->isPointerType() &&
+        type->getKind() != TypeKind::RValueReference)
       return;
 
-    if (type->isReferenceType()) {
+    if (type->isReferenceType() ||
+        type->getKind() == TypeKind::RValueReference) {
       addAttrObj(llvm::Attribute::get(ctx, llvm::Attribute::NonNull));
       addAttrObj(llvm::Attribute::get(ctx, llvm::Attribute::NoUndef));
     }
 
-    const Type *pointee =
-        type->isReferenceType()
-            ? static_cast<const ReferenceType *>(type)->getPointeeType()
-            : static_cast<const PointerType *>(type)->getPointeeType();
+    const Type *pointee = nullptr;
+    if (type->isReferenceType()) {
+      pointee = static_cast<const ReferenceType *>(type)->getPointeeType();
+    } else if (type->getKind() == TypeKind::RValueReference) {
+      pointee =
+          static_cast<const RValueReferenceType *>(type)->getPointeeType();
+    } else {
+      pointee = static_cast<const PointerType *>(type)->getPointeeType();
+    }
 
-    // The ReadOnly attribute is still perfectly valid and strictly required
-    // for const-qualified parameter variables in modern LLVM.
     if (pointee->isConstQualified() && paramIdx.has_value()) {
       addAttrObj(llvm::Attribute::get(ctx, llvm::Attribute::ReadOnly));
       addAttrObj(
@@ -261,7 +267,9 @@ llvm::Function *CodeGen::getOrCreateFunction(const FunctionDeclNode *node) {
 
     const Type *unqualPointee = pointee->getUnqualifiedType();
 
-    if (unqualPointee->isBuiltinType() && type->isReferenceType()) {
+    if (unqualPointee->isBuiltinType() &&
+        (type->isReferenceType() ||
+         type->getKind() == TypeKind::RValueReference)) {
       auto kind =
           static_cast<const BuiltinType *>(unqualPointee)->getBuiltinKind();
       uint64_t size = 0;
@@ -318,16 +326,9 @@ llvm::Value *CodeGen::visit(const AnnotationDeclNode *node) {
   return nullptr;
 }
 
-llvm::Value *CodeGen::visit(const TypedefDeclNode *node) {
-  /* Type aliases emit no instructions, pure semantic abstraction */
-  return nullptr;
-}
+llvm::Value *CodeGen::visit(const TypedefDeclNode *node) { return nullptr; }
 
-llvm::Value *CodeGen::visit(const AnnotationNode *node) {
-  /* Annotations act as static descriptors; dynamic execution cost is strictly 0
-   */
-  return nullptr;
-}
+llvm::Value *CodeGen::visit(const AnnotationNode *node) { return nullptr; }
 
 void CodeGen::emitConstructorCall(const FunctionCallNode *node,
                                   llvm::Value *targetAddr) {
@@ -347,11 +348,19 @@ void CodeGen::emitConstructorCall(const FunctionCallNode *node,
 
     bool isRefParam = false;
     if (node->resolvedFunc && argIdx < node->resolvedFunc->params.size()) {
-      isRefParam = node->resolvedFunc->params[argIdx]->type->isReferenceType();
+      isRefParam =
+          node->resolvedFunc->params[argIdx]->type->isReferenceType() ||
+          node->resolvedFunc->params[argIdx]->type->getKind() ==
+              TypeKind::RValueReference;
     }
 
     if (isRefParam) {
       argVal = getLValue(arg);
+      if (!argVal) {
+        llvm::Value *val = dispatch(arg);
+        argVal = createEntryBlockAlloca(val->getType(), "tmp.op.arg");
+        builder.CreateStore(val, argVal);
+      }
     } else {
       argVal = dispatch(arg);
       if (func && argVal && argIdx < func->arg_size()) {
@@ -493,12 +502,6 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
     llvm::Constant *R = evaluateAsConstant(binNode->right);
 
     if (L && R) {
-      /*
-       * LLVM 15+ has deprecated or removed many llvm::ConstantExpr interfaces
-       * (like getMul, getUDiv, etc.) in favor of explicitly folding APInts and
-       * APFloats manually to avoid relying on implicit instruction folding
-       * structures.
-       */
       if (auto *ciL = llvm::dyn_cast<llvm::ConstantInt>(L)) {
         if (auto *ciR = llvm::dyn_cast<llvm::ConstantInt>(R)) {
           llvm::APInt vL = ciL->getValue();
@@ -717,7 +720,8 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
     const Type *baseTy = maNode->object->exprType;
     if (baseTy->isPointerType())
       baseTy = static_cast<const PointerType *>(baseTy)->getPointeeType();
-    else if (baseTy->isReferenceType())
+    else if (baseTy->isReferenceType() ||
+             baseTy->getKind() == TypeKind::RValueReference)
       baseTy = static_cast<const ReferenceType *>(baseTy)->getPointeeType();
 
     llvm::Type *llvmBaseTy = getLLVMType(baseTy);
@@ -732,11 +736,12 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
     }
   }
 
-  if (node->exprType && node->exprType->isReferenceType()) {
+  if (node->exprType &&
+      (node->exprType->isReferenceType() ||
+       node->exprType->getKind() == TypeKind::RValueReference)) {
     return dispatch(node);
   }
 
-  std::cerr << "[CodeGen Error] Expression does not yield a valid l-value.\n";
   return nullptr;
 }
 
@@ -895,7 +900,8 @@ llvm::Value *CodeGen::visit(const VariableNode *node) {
   }
 
   const Type *loadTy = node->exprType;
-  if (loadTy->isReferenceType()) {
+  if (loadTy->isReferenceType() ||
+      loadTy->getKind() == TypeKind::RValueReference) {
     loadTy = static_cast<const ReferenceType *>(loadTy)->getPointeeType();
   }
 
@@ -936,7 +942,8 @@ llvm::Value *CodeGen::visit(const MemberAccessNode *node) {
   const Type *baseTy = node->object->exprType;
   if (baseTy->isPointerType())
     baseTy = static_cast<const PointerType *>(baseTy)->getPointeeType();
-  else if (baseTy->isReferenceType())
+  else if (baseTy->isReferenceType() ||
+           baseTy->getKind() == TypeKind::RValueReference)
     baseTy = static_cast<const ReferenceType *>(baseTy)->getPointeeType();
 
   llvm::Type *llvmBaseTy = getLLVMType(baseTy);
@@ -1200,7 +1207,10 @@ llvm::Value *CodeGen::visit(const BinaryOpNode *node) {
     llvm::Value *rhsVal = nullptr;
     bool isRefParam = false;
     if (node->overloadedOperator->params.size() > 1) {
-      isRefParam = node->overloadedOperator->params[1]->type->isReferenceType();
+      isRefParam =
+          node->overloadedOperator->params[1]->type->isReferenceType() ||
+          node->overloadedOperator->params[1]->type->getKind() ==
+              TypeKind::RValueReference;
     }
 
     if (isRefParam) {
@@ -1357,7 +1367,8 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
     }
   }
 
-  if (node->type->isReferenceType()) {
+  if (node->type->isReferenceType() ||
+      node->type->getKind() == TypeKind::RValueReference) {
     if (!node->initializer) {
       diags.report({DiagLevel::Error, node->line, node->column, node->length,
                     "Reference '" + std::string(node->varName) +
@@ -1368,9 +1379,9 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
 
     llvm::Value *initAddr = getLValue(node->initializer);
     if (!initAddr) {
-      diags.report({DiagLevel::Error, node->line, node->column, node->length,
-                    "Failed to resolve target address for reference.", ""});
-      return nullptr;
+      llvm::Value *val = dispatch(node->initializer);
+      initAddr = createEntryBlockAlloca(val->getType(), "tmp.rval.ref");
+      builder.CreateStore(val, initAddr);
     }
 
     if (isGlobal) {
@@ -1532,15 +1543,21 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
                 {DiagLevel::Error, node->line, node->column, node->length,
                  "Failed to resolve source for copy constructor.", ""});
           }
-        } else if (isAggregate &&
-                   (node->initializer->kind == NodeKind::Variable ||
-                    node->initializer->kind == NodeKind::MemberAccess ||
-                    node->initializer->kind == NodeKind::ArraySubscript)) {
+        } else if (isAggregate) {
           /* Fallback generic memcpy for records lacking a custom destructor */
           llvm::Value *rvalAddr = getLValue(node->initializer);
           if (rvalAddr) {
             llvm::Align align = mod.getDataLayout().getABITypeAlign(ty);
             builder.CreateMemCpy(alloca, align, rvalAddr, align, allocSize);
+          } else {
+            llvm::Value *initVal = dispatch(node->initializer);
+            if (initVal) {
+              createTBAAStore(initVal, alloca, node->type);
+            } else {
+              diags.report({DiagLevel::Error, node->line, node->column,
+                            node->length, "Initialization failed for variable.",
+                            ""});
+            }
           }
         } else {
           llvm::Value *initVal = dispatch(node->initializer);
@@ -1611,7 +1628,10 @@ llvm::Value *CodeGen::visit(const AssignNode *node) {
     llvm::Value *rhsVal = nullptr;
     bool isRefParam = false;
     if (node->overloadedOperator->params.size() > 1) {
-      isRefParam = node->overloadedOperator->params[1]->type->isReferenceType();
+      isRefParam =
+          node->overloadedOperator->params[1]->type->isReferenceType() ||
+          node->overloadedOperator->params[1]->type->getKind() ==
+              TypeKind::RValueReference;
     }
 
     if (isRefParam) {
@@ -1658,10 +1678,8 @@ llvm::Value *CodeGen::visit(const AssignNode *node) {
                       unqualTargetTy->getKind() == TypeKind::Array);
 
   /* Map assignment to deep memory copy for aggregate types to preserve locality
-   * and prevent SSA explosion. */
-  if (isAggregate && (node->value->kind == NodeKind::Variable ||
-                      node->value->kind == NodeKind::MemberAccess ||
-                      node->value->kind == NodeKind::ArraySubscript)) {
+   * and prevent SSA explosion. evaluates L-values to support references */
+  if (isAggregate) {
     llvm::Value *rvalAddr = getLValue(node->value);
     if (rvalAddr) {
       llvm::Type *llvmDestTy = getLLVMType(unqualTargetTy);
@@ -1779,7 +1797,8 @@ llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
         createEntryBlockAlloca(argType, std::string(pName) + ".addr");
     builder.CreateStore(&arg, alloca);
 
-    bool isRef = paramDecl->type->isReferenceType();
+    bool isRef = paramDecl->type->isReferenceType() ||
+                 paramDecl->type->getKind() == TypeKind::RValueReference;
     cgCtx.bind(pName, alloca, !isRef);
     idx++;
   }
@@ -1871,12 +1890,20 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
 
       if (argIdx >= paramOffset &&
           (argIdx - paramOffset) < node->resolvedFunc->params.size()) {
-        isRefParam = node->resolvedFunc->params[argIdx - paramOffset]
-                         ->type->isReferenceType();
+        isRefParam =
+            node->resolvedFunc->params[argIdx - paramOffset]
+                ->type->isReferenceType() ||
+            node->resolvedFunc->params[argIdx - paramOffset]->type->getKind() ==
+                TypeKind::RValueReference;
       }
 
       if (isRefParam) {
         argVal = getLValue(arg);
+        if (!argVal) {
+          llvm::Value *val = dispatch(arg);
+          argVal = createEntryBlockAlloca(val->getType(), "tmp.op.arg");
+          builder.CreateStore(val, argVal);
+        }
       } else {
         argVal = dispatch(arg);
 
@@ -1940,7 +1967,23 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
 }
 
 llvm::Value *CodeGen::visit(const CastNode *node) {
-  llvm::Value *src = dispatch(node->expr);
+  llvm::Value *src = nullptr;
+
+  if (node->targetType->isReferenceType() ||
+      node->targetType->getKind() == TypeKind::RValueReference) {
+    src = getLValue(node->expr);
+    if (!src) {
+      // Allocate temporary storage for materialized xvalues or prvalues
+      llvm::Value *val = dispatch(node->expr);
+      if (val) {
+        src = createEntryBlockAlloca(val->getType(), "tmp.cast.rval");
+        createTBAAStore(val, src, node->expr->exprType);
+      }
+    }
+  } else {
+    src = dispatch(node->expr);
+  }
+
   if (!src)
     return nullptr;
 
@@ -1952,7 +1995,9 @@ llvm::Value *CodeGen::visit(const ReturnNode *node) {
   llvm::Value *retVal = nullptr;
   if (node->value) {
     bool isRefReturn =
-        currentFunc && currentFunc->returnType->isReferenceType();
+        currentFunc &&
+        (currentFunc->returnType->isReferenceType() ||
+         currentFunc->returnType->getKind() == TypeKind::RValueReference);
 
     if (isRefReturn) {
       retVal = getLValue(node->value);
@@ -2115,12 +2160,20 @@ llvm::Value *CodeGen::visit(const NewExprNode *node) {
           bool isRefParam = false;
           if (node->resolvedConstructor &&
               argIdx < node->resolvedConstructor->params.size()) {
-            isRefParam = node->resolvedConstructor->params[argIdx]
-                             ->type->isReferenceType();
+            isRefParam =
+                node->resolvedConstructor->params[argIdx]
+                    ->type->isReferenceType() ||
+                node->resolvedConstructor->params[argIdx]->type->getKind() ==
+                    TypeKind::RValueReference;
           }
 
           if (isRefParam) {
             argVal = getLValue(arg);
+            if (!argVal) {
+              llvm::Value *val = dispatch(arg);
+              argVal = createEntryBlockAlloca(val->getType(), "tmp.op.arg");
+              builder.CreateStore(val, argVal);
+            }
           } else {
             argVal = dispatch(arg);
             if (ctorFunc && argVal && argIdx < ctorFunc->arg_size()) {
@@ -2286,7 +2339,8 @@ llvm::MDNode *CodeGen::getTBAATypeNode(const Type *type) {
       mdBuilder.createTBAAScalarTypeNode("omnipotent char", tbaaRoot);
   llvm::MDNode *node = nullptr;
 
-  if (unqual->isPointerType() || unqual->isReferenceType()) {
+  if (unqual->isPointerType() || unqual->isReferenceType() ||
+      unqual->getKind() == TypeKind::RValueReference) {
     node = mdBuilder.createTBAAScalarTypeNode("any pointer", charNode);
   } else if (unqual->isBuiltinType()) {
     node = mdBuilder.createTBAAScalarTypeNode(unqual->toString(), charNode);
@@ -2369,7 +2423,8 @@ llvm::MDNode *CodeGen::getTBAATagForExpr(const ExprNode *node) {
     const Type *baseTy = ma->object->exprType;
     if (baseTy->isPointerType()) {
       baseTy = static_cast<const PointerType *>(baseTy)->getPointeeType();
-    } else if (baseTy->isReferenceType()) {
+    } else if (baseTy->isReferenceType() ||
+               baseTy->getKind() == TypeKind::RValueReference) {
       baseTy = static_cast<const ReferenceType *>(baseTy)->getPointeeType();
     }
 

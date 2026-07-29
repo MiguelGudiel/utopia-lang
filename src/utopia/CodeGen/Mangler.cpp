@@ -86,6 +86,11 @@ std::string Mangler::mangleType(const Type *t) {
     return "R" +
            mangleType(static_cast<const ReferenceType *>(t)->getPointeeType());
   }
+  if (t->getKind() == TypeKind::RValueReference) {
+    return "O" +
+           mangleType(
+               static_cast<const RValueReferenceType *>(t)->getPointeeType());
+  }
   if (t->isBuiltinType()) {
     auto k = static_cast<const BuiltinType *>(t)->getBuiltinKind();
     switch (k) {

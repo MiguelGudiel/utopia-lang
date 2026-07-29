@@ -83,8 +83,7 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
         instTy->setResolvedType(existing);
         return existing;
       }
-      ctx->astCtx.createRecordType(
-          TypeKind::Class, mangledView); // Cut structural recursive loop
+      ctx->astCtx.createRecordType(TypeKind::Class, mangledView);
     }
 
     Parser parser(ctx->astCtx, tmplDecl->templateBodyTokens, ctx->diags,
@@ -107,7 +106,7 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
       instDecl->hasPublicMod = tmplDecl->hasPublicMod;
       instDecl->hasPrivateMod = tmplDecl->hasPrivateMod;
       instDecl->annotations = tmplDecl->annotations;
-      instDecl->declFilePath = tmplDecl->declFilePath; // Origin linkage
+      instDecl->declFilePath = tmplDecl->declFilePath;
 
       if (ctx->currentModule) {
         const_cast<ModuleNode *>(ctx->currentModule)
@@ -614,9 +613,10 @@ bool TypeCheckPass::run(const ModuleNode *module, SemaContext &context) {
   return !ctx->hasErrors();
 }
 
-const FunctionDeclNode *TypeCheckPass::resolveOverloadedOperator(
-    const Type *lhsType, std::string_view opName,
-    const std::vector<const Type *> &argTypes) {
+const FunctionDeclNode *
+TypeCheckPass::resolveOverloadedOperator(const Type *lhsType,
+                                         std::string_view opName,
+                                         const std::vector<ExprNode *> &args) {
   if (!lhsType)
     return nullptr;
 
@@ -627,6 +627,10 @@ const FunctionDeclNode *TypeCheckPass::resolveOverloadedOperator(
                  ->getUnqualifiedType();
   } else if (unqual->isReferenceType()) {
     unqual = static_cast<const ReferenceType *>(unqual)
+                 ->getPointeeType()
+                 ->getUnqualifiedType();
+  } else if (unqual->getKind() == TypeKind::RValueReference) {
+    unqual = static_cast<const RValueReferenceType *>(unqual)
                  ->getPointeeType()
                  ->getUnqualifiedType();
   }
@@ -651,22 +655,53 @@ const FunctionDeclNode *TypeCheckPass::resolveOverloadedOperator(
   std::string opFuncName = "operator" + std::string(opName);
 
   const FunctionDeclNode *bestMatch = nullptr;
+  int bestScore = -1;
+
   for (auto *m : methods) {
     if (m->name == opFuncName) {
       size_t paramOffset =
           (m->isMethod && !m->isExtern && !m->isStatic) ? 1 : 0;
-      if (m->params.size() - paramOffset == argTypes.size()) {
+      if (m->params.size() - paramOffset == args.size()) {
         bool match = true;
-        for (size_t i = 0; i < argTypes.size(); ++i) {
-          if (!canImplicitlyCast(argTypes[i],
-                                 m->params[paramOffset + i]->type)) {
+        int currentScore = 0;
+
+        for (size_t i = 0; i < args.size(); ++i) {
+          const Type *argType = args[i]->exprType;
+          const Type *paramType = m->params[paramOffset + i]->type;
+
+          if (!canImplicitlyCast(argType, paramType)) {
             match = false;
             break;
           }
+
+          /* Move semantics overload resolution scoring */
+          bool isLValue = args[i]->isLValue;
+          if (paramType->getKind() == TypeKind::RValueReference) {
+            if (isLValue) {
+              match = false;
+              break;
+            }
+            currentScore += 3;
+          } else if (paramType->isReferenceType()) {
+            const Type *pointee =
+                static_cast<const ReferenceType *>(paramType)->getPointeeType();
+            if (!pointee->isConstQualified()) {
+              if (!isLValue) {
+                match = false;
+                break;
+              }
+              currentScore += 3;
+            } else {
+              currentScore += 2;
+            }
+          } else {
+            currentScore += 1;
+          }
         }
-        if (match) {
+
+        if (match && currentScore > bestScore) {
+          bestScore = currentScore;
           bestMatch = m;
-          break;
         }
       }
     }
@@ -1011,7 +1046,7 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
           instDecl->hasPublicMod = tmplDecl->hasPublicMod;
           instDecl->hasPrivateMod = tmplDecl->hasPrivateMod;
           instDecl->annotations = tmplDecl->annotations;
-          instDecl->declFilePath = tmplDecl->declFilePath; // Origin linkage
+          instDecl->declFilePath = tmplDecl->declFilePath;
 
           if (ctx->currentModule) {
             const_cast<ModuleNode *>(ctx->currentModule)
@@ -1057,6 +1092,7 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
               const_cast<VariableNode *>(node)->fieldIndex = field->index;
               const_cast<VariableNode *>(node)->parentType = clsTy;
               node->exprType = field->type;
+              node->isLValue = true;
               return field->type;
             }
           }
@@ -1081,6 +1117,7 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
           if (f->isStatic && f->varName == node->name) {
             const_cast<VariableNode *>(node)->resolvedDecl = f;
             node->exprType = f->type;
+            node->isLValue = true;
             return f->type;
           }
         }
@@ -1093,6 +1130,7 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
             const Type *funcTy = ctx->astCtx.getFunctionType(
                 m->returnType, ctx->astCtx.copyArray<const Type *>(pTypes));
             node->exprType = ctx->astCtx.getPointerType(funcTy);
+            node->isLValue = true;
             return node->exprType;
           }
         }
@@ -1173,6 +1211,7 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
 
   const_cast<VariableNode *>(node)->resolvedDecl = target;
   node->exprType = ty;
+  node->isLValue = true;
   return ty;
 }
 
@@ -1281,6 +1320,7 @@ SemaResult TypeCheckPass::visit(const UnaryOpNode *node) {
     /* Allow array subscripts to be addressable as l-values */
     if (node->expr->kind != NodeKind::Variable &&
         node->expr->kind != NodeKind::UnaryOp &&
+        node->expr->kind != NodeKind::FunctionCall &&
         node->expr->kind != NodeKind::MemberAccess &&
         node->expr->kind != NodeKind::ArraySubscript) {
       return ctx->reportError(node->line, node->column, node->length,
@@ -1290,6 +1330,9 @@ SemaResult TypeCheckPass::visit(const UnaryOpNode *node) {
     const Type *baseTy = *exprType;
     if (baseTy->isReferenceType()) {
       baseTy = static_cast<const ReferenceType *>(baseTy)->getPointeeType();
+    } else if (baseTy->getKind() == TypeKind::RValueReference) {
+      baseTy =
+          static_cast<const RValueReferenceType *>(baseTy)->getPointeeType();
     }
     resType = ctx->astCtx.getPointerType(baseTy);
   } else if (node->op == "*") {
@@ -1354,6 +1397,8 @@ SemaResult TypeCheckPass::visit(const UnaryOpNode *node) {
   }
 
   node->exprType = resType;
+  if (node->op == "*")
+    node->isLValue = true;
   return resType;
 }
 
@@ -1365,7 +1410,7 @@ SemaResult TypeCheckPass::visit(const BinaryOpNode *node) {
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,
                                      "Invalid operands for binary operation"});
 
-  if (auto *opDecl = resolveOverloadedOperator(*lhs, node->op, {*rhs})) {
+  if (auto *opDecl = resolveOverloadedOperator(*lhs, node->op, {node->right})) {
     node->overloadedOperator = opDecl;
     node->exprType = opDecl->returnType;
     return opDecl->returnType;
@@ -1560,7 +1605,8 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
   }
 
   if (declType->isConstQualified() && !node->initializer &&
-      !declType->isReferenceType()) {
+      !declType->isReferenceType() &&
+      declType->getKind() != TypeKind::RValueReference) {
     SemaResult err =
         ctx->reportError(node->line, node->column, node->length,
                          "Constant variables must be initialized.");
@@ -1583,6 +1629,12 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
             ctx->reportError(node->line, node->column, node->length,
                              "Cannot bind a non-lvalue to a reference.");
       }
+    } else if (declType->getKind() == TypeKind::RValueReference) {
+      if (node->initializer->isLValue) {
+        SemaResult err =
+            ctx->reportError(node->line, node->column, node->length,
+                             "Cannot bind an l-value to an r-value reference.");
+      }
     } else {
       if (!canImplicitlyCast(*initRes, declType)) {
         std::string initTypeStr = *initRes ? (*initRes)->toString() : "unknown";
@@ -1597,7 +1649,20 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
          * with destructors */
         if (baseUnqualTy->getKind() == TypeKind::Class ||
             baseUnqualTy->getKind() == TypeKind::Struct) {
-          const Type *initUnqual = (*initRes)->getUnqualifiedType();
+
+          /* Extract underlying type from reference before evaluating overloads
+           */
+          const Type *initTypeStrp = *initRes;
+          if (initTypeStrp->isReferenceType()) {
+            initTypeStrp = static_cast<const ReferenceType *>(initTypeStrp)
+                               ->getPointeeType();
+          } else if (initTypeStrp->getKind() == TypeKind::RValueReference) {
+            initTypeStrp =
+                static_cast<const RValueReferenceType *>(initTypeStrp)
+                    ->getPointeeType();
+          }
+
+          const Type *initUnqual = initTypeStrp->getUnqualifiedType();
 
           if (baseUnqualTy == initUnqual) {
             auto *recTy = static_cast<const RecordType *>(baseUnqualTy);
@@ -1609,15 +1674,54 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
                 ctors = static_cast<const StructDeclNode *>(decl)->constructors;
 
               const FunctionDeclNode *copyCtor = nullptr;
+              int bestScore = -1;
+
               for (auto *ctor : ctors) {
                 if (ctor->params.size() == 2) {
                   const Type *pType = ctor->params[1]->type;
-                  if (pType->isReferenceType() &&
-                      static_cast<const ReferenceType *>(pType)
-                              ->getPointeeType()
-                              ->getUnqualifiedType() == baseUnqualTy) {
-                    copyCtor = ctor;
-                    break;
+                  const Type *pointee = nullptr;
+
+                  if (pType->isReferenceType()) {
+                    pointee = static_cast<const ReferenceType *>(pType)
+                                  ->getPointeeType();
+                  } else if (pType->getKind() == TypeKind::RValueReference) {
+                    pointee = static_cast<const RValueReferenceType *>(pType)
+                                  ->getPointeeType();
+                  }
+
+                  if (pointee &&
+                      pointee->getUnqualifiedType() == baseUnqualTy) {
+                    bool isLValue = node->initializer->isLValue;
+                    int currentScore = 0;
+                    bool match = true;
+
+                    if (pType->getKind() == TypeKind::RValueReference) {
+                      if (isLValue) {
+                        match =
+                            false; // Cannot bind l-value to r-value reference
+                      } else {
+                        currentScore = 3; // Perfect match for move constructor
+                      }
+                    } else if (pType->isReferenceType()) {
+                      if (!pointee->isConstQualified()) {
+                        if (!isLValue) {
+                          match = false; // Cannot bind r-value to non-const
+                                         // l-value reference
+                        } else {
+                          currentScore =
+                              3; // Perfect match for mutable l-value reference
+                        }
+                      } else {
+                        currentScore = 2; // Const reference fallback
+                      }
+                    } else {
+                      currentScore = 1;
+                    }
+
+                    if (match && currentScore > bestScore) {
+                      bestScore = currentScore;
+                      copyCtor = ctor;
+                    }
                   }
                 }
               }
@@ -1643,7 +1747,8 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
         }
       }
     }
-  } else if (declType->isReferenceType()) {
+  } else if (declType->isReferenceType() ||
+             declType->getKind() == TypeKind::RValueReference) {
     SemaResult err =
         ctx->reportError(node->line, node->column, node->length,
                          "References must be initialized upon declaration.");
@@ -1670,9 +1775,10 @@ SemaResult TypeCheckPass::visit(const AssignNode *node) {
                                      "Cascading error in assignment"});
 
   if (auto *opDecl =
-          resolveOverloadedOperator(*lhsType, node->op, {*rhsType})) {
+          resolveOverloadedOperator(*lhsType, node->op, {node->value})) {
     node->overloadedOperator = opDecl;
     node->exprType = opDecl->returnType;
+    node->isLValue = true;
     return opDecl->returnType;
   }
 
@@ -1754,6 +1860,7 @@ SemaResult TypeCheckPass::visit(const AssignNode *node) {
   }
 
   node->exprType = *lhsType;
+  node->isLValue = true;
   return *lhsType;
 }
 
@@ -1828,6 +1935,9 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
       baseTy = static_cast<const PointerType *>(unqualObj)->getPointeeType();
     else if (unqualObj->isReferenceType())
       baseTy = static_cast<const ReferenceType *>(unqualObj)->getPointeeType();
+    else if (unqualObj->getKind() == TypeKind::RValueReference)
+      baseTy =
+          static_cast<const RValueReferenceType *>(unqualObj)->getPointeeType();
 
     const Type *unqualBaseTy = baseTy->getUnqualifiedType();
 
@@ -1853,6 +1963,7 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
       }
       const_cast<MemberAccessNode *>(node)->fieldIndex = field->index;
       node->exprType = field->type;
+      node->isLValue = true;
       return field->type;
     }
   }
@@ -2211,8 +2322,10 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
                                      "Argument evaluation failed."});
   }
 
-  auto checkMatch =
-      [&](const FunctionDeclNode *fDecl) -> std::vector<std::string> {
+  auto checkMatch = [&](const FunctionDeclNode *fDecl, int &outScore,
+                        std::vector<ExprNode *> &outResolvedArgs)
+      -> std::vector<std::string> {
+    outScore = 0;
     size_t paramOffset =
         (fDecl->isMethod && !fDecl->isExtern && !fDecl->isStatic) ? 1 : 0;
     size_t expectedParams = fDecl->params.size() - paramOffset;
@@ -2225,7 +2338,7 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
     std::vector<std::string> errors;
 
     for (size_t i = 0; i < node->args.size(); ++i) {
-      if (node->argNames[i].empty()) {
+      if (node->argNames.empty() || node->argNames[i].empty()) {
         if (posArgCount >= expectedParams) {
           if (fDecl->isVariadic) {
             resolvedArgs.push_back(node->args[i]);
@@ -2300,13 +2413,39 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
       return errors;
 
     for (size_t p = 0; p < expectedParams; ++p) {
-      if (!canImplicitlyCast(resolvedTypes[p],
-                             fDecl->params[paramOffset + p]->type)) {
+      const Type *paramType = fDecl->params[paramOffset + p]->type;
+      if (!canImplicitlyCast(resolvedTypes[p], paramType)) {
         errors.push_back("Type mismatch for parameter '" +
                          std::string(fDecl->params[paramOffset + p]->name) +
-                         "': expected '" +
-                         fDecl->params[paramOffset + p]->type->toString() +
+                         "': expected '" + paramType->toString() +
                          "', but got '" + resolvedTypes[p]->toString() + "'.");
+      } else {
+        bool isLValue = resolvedArgs[p]->isLValue;
+        if (paramType->getKind() == TypeKind::RValueReference) {
+          if (isLValue) {
+            errors.push_back(
+                "Cannot bind an l-value to r-value reference parameter '" +
+                std::string(fDecl->params[paramOffset + p]->name) + "'.");
+          } else {
+            outScore += 3;
+          }
+        } else if (paramType->isReferenceType()) {
+          const Type *pointee =
+              static_cast<const ReferenceType *>(paramType)->getPointeeType();
+          if (!pointee->isConstQualified()) {
+            if (!isLValue) {
+              errors.push_back(
+                  "Cannot bind an r-value to non-const reference parameter '" +
+                  std::string(fDecl->params[paramOffset + p]->name) + "'.");
+            } else {
+              outScore += 3;
+            }
+          } else {
+            outScore += 2;
+          }
+        } else {
+          outScore += 1;
+        }
       }
     }
 
@@ -2319,9 +2458,7 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
                                resolvedArgs[p]);
     }
 
-    const_cast<FunctionCallNode *>(node)->args =
-        ctx->astCtx.copyArray<ExprNode *>(resolvedArgs);
-    const_cast<FunctionCallNode *>(node)->argNames = {};
+    outResolvedArgs = resolvedArgs;
     return errors;
   };
 
@@ -2358,6 +2495,9 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
         else if (unqualObj->isReferenceType())
           baseTy =
               static_cast<const ReferenceType *>(unqualObj)->getPointeeType();
+        else if (unqualObj->getKind() == TypeKind::RValueReference)
+          baseTy = static_cast<const RValueReferenceType *>(unqualObj)
+                       ->getPointeeType();
 
         const Type *unqualBaseTy = baseTy->getUnqualifiedType();
 
@@ -2378,7 +2518,9 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
 
       if (recDecl) {
         const FunctionDeclNode *bestMatch = nullptr;
+        int bestScore = -1;
         std::vector<std::vector<std::string>> overloadErrors;
+        std::vector<ExprNode *> bestResolvedArgs;
 
         llvm::ArrayRef<FunctionDeclNode *> methods;
         if (recDecl->kind == NodeKind::ClassDecl)
@@ -2388,10 +2530,16 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
 
         for (const auto *method : methods) {
           if (method->name == ma->memberName) {
-            auto errs = checkMatch(method);
+            int score = 0;
+            std::vector<ExprNode *> resolvedArgs;
+            auto errs = checkMatch(method, score, resolvedArgs);
             if (errs.empty()) {
-              bestMatch = method;
-              break;
+              if (score > bestScore) {
+                bestScore = score;
+                bestMatch = method;
+                bestResolvedArgs = resolvedArgs;
+                overloadErrors.clear();
+              }
             } else {
               overloadErrors.push_back(errs);
             }
@@ -2400,7 +2548,13 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
         if (bestMatch) {
           const_cast<MemberAccessNode *>(ma)->resolvedMethod = bestMatch;
           const_cast<FunctionCallNode *>(node)->resolvedFunc = bestMatch;
+
+          const_cast<FunctionCallNode *>(node)->args =
+              ctx->astCtx.copyArray<ExprNode *>(bestResolvedArgs);
+          const_cast<FunctionCallNode *>(node)->argNames = {};
+
           node->exprType = bestMatch->returnType;
+          node->isLValue = (node->exprType->isReferenceType());
           return node->exprType;
         }
 
@@ -2468,8 +2622,10 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
 
     if (hasCallable) {
       const FunctionDeclNode *bestMatch = nullptr;
+      int bestScore = -1;
       bool isConstructorCall = false;
       std::vector<std::vector<std::string>> overloadErrors;
+      std::vector<ExprNode *> bestResolvedArgs;
 
       for (auto targetDecl : decls) {
         if (targetDecl->kind == NodeKind::FunctionDecl) {
@@ -2490,13 +2646,20 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
             }
           }
 
-          auto errs = checkMatch(fDecl);
+          int score = 0;
+          std::vector<ExprNode *> resolvedArgs;
+          auto errs = checkMatch(fDecl, score, resolvedArgs);
           if (errs.empty()) {
-            bestMatch = fDecl;
-            if (fDecl->isMethod && ctx->astCtx.getRecordType(name) != nullptr) {
-              isConstructorCall = true;
+            if (score > bestScore) {
+              bestScore = score;
+              bestMatch = fDecl;
+              bestResolvedArgs = resolvedArgs;
+              if (fDecl->isMethod &&
+                  ctx->astCtx.getRecordType(name) != nullptr) {
+                isConstructorCall = true;
+              }
+              overloadErrors.clear();
             }
-            break;
           } else {
             overloadErrors.push_back(errs);
           }
@@ -2505,10 +2668,16 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
 
       if (bestMatch) {
         const_cast<FunctionCallNode *>(node)->resolvedFunc = bestMatch;
+        const_cast<FunctionCallNode *>(node)->args =
+            ctx->astCtx.copyArray<ExprNode *>(bestResolvedArgs);
+        const_cast<FunctionCallNode *>(node)->argNames = {};
+
         if (isConstructorCall) {
           node->exprType = ctx->astCtx.getRecordType(name);
+          node->isLValue = false;
         } else {
           node->exprType = bestMatch->returnType;
+          node->isLValue = (node->exprType->isReferenceType());
         }
         return node->exprType;
       }
@@ -2570,6 +2739,7 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
         const_cast<FunctionCallNode *>(node)->args =
             ctx->astCtx.copyArray<ExprNode *>(node->args);
         node->exprType = fTy->getReturnType();
+        node->isLValue = (node->exprType->isReferenceType());
         return node->exprType;
       }
     }
@@ -2607,7 +2777,18 @@ SemaResult TypeCheckPass::visit(const CastNode *node) {
   if ((isSrcNumeric && isDestNumeric) || (isSrcPtr && isDestPtr) ||
       (isSrcPtr && isDestNumeric) || (isSrcNumeric && isDestPtr) ||
       (isSrcEnum && isDestNumeric) || (isSrcNumeric && isDestEnum) ||
-      (isSrcEnum && isDestEnum)) {
+      (isSrcEnum && isDestEnum) ||
+      destType->getKind() == TypeKind::RValueReference ||
+      destType->isReferenceType()) {
+
+    if (destType->getKind() == TypeKind::RValueReference) {
+      node->isLValue = false;
+    } else if (destType->isReferenceType()) {
+      node->isLValue = true;
+    } else {
+      node->isLValue = false;
+    }
+
     node->exprType = destType;
     return destType;
   }
@@ -2755,6 +2936,7 @@ SemaResult TypeCheckPass::visit(const ArraySubscriptNode *node) {
                             "Array subscript must be an integer");
   }
 
+  node->isLValue = true;
   return node->exprType;
 }
 
@@ -2821,7 +3003,9 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
       }
 
       const FunctionDeclNode *bestMatch = nullptr;
+      int bestScore = -1;
       std::vector<std::vector<std::string>> overloadErrors;
+      std::vector<ExprNode *> bestResolvedArgs;
 
       for (const auto *ctor : ctors) {
         if (!ctor->isPublic(ctor->name) &&
@@ -2841,7 +3025,7 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
         std::vector<std::string> errors;
 
         for (size_t i = 0; i < node->args.size(); ++i) {
-          if (node->argNames[i].empty()) {
+          if (node->argNames.empty() || node->argNames[i].empty()) {
             if (posArgCount >= expectedParams) {
               if (ctor->isVariadic) {
                 resolvedArgs.push_back(node->args[i]);
@@ -2922,34 +3106,45 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
           continue;
         }
 
+        int currentScore = 0;
+        bool match = true;
+
         for (size_t p = 0; p < expectedParams; ++p) {
-          if (!canImplicitlyCast(resolvedTypes[p],
-                                 ctor->params[paramOffset + p]->type)) {
-            errors.push_back("Type mismatch for parameter '" +
-                             std::string(ctor->params[paramOffset + p]->name) +
-                             "': expected '" +
-                             ctor->params[paramOffset + p]->type->toString() +
-                             "', but got '" + resolvedTypes[p]->toString() +
-                             "'.");
+          const Type *paramType = ctor->params[paramOffset + p]->type;
+          if (!canImplicitlyCast(resolvedTypes[p], paramType)) {
+            match = false;
+            break;
+          }
+
+          bool isLValue = resolvedArgs[p]->isLValue;
+          if (paramType->getKind() == TypeKind::RValueReference) {
+            if (isLValue) {
+              match = false;
+              break;
+            }
+            currentScore += 3;
+          } else if (paramType->isReferenceType()) {
+            const Type *pointee =
+                static_cast<const ReferenceType *>(paramType)->getPointeeType();
+            if (!pointee->isConstQualified()) {
+              if (!isLValue) {
+                match = false;
+                break;
+              }
+              currentScore += 3;
+            } else {
+              currentScore += 2;
+            }
+          } else {
+            currentScore += 1;
           }
         }
 
-        if (!errors.empty()) {
-          overloadErrors.push_back(errors);
-          continue;
+        if (match && currentScore > bestScore) {
+          bestScore = currentScore;
+          bestMatch = ctor;
+          bestResolvedArgs = resolvedArgs;
         }
-
-        for (size_t p = 0; p < expectedParams; ++p) {
-          checkImplicitCastWarning(resolvedTypes[p],
-                                   ctor->params[paramOffset + p]->type,
-                                   resolvedArgs[p]);
-        }
-
-        bestMatch = ctor;
-        const_cast<NewExprNode *>(node)->args =
-            ctx->astCtx.copyArray<ExprNode *>(resolvedArgs);
-        const_cast<NewExprNode *>(node)->argNames = {};
-        break;
       }
 
       if (!bestMatch) {
@@ -2972,6 +3167,9 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
       }
 
       const_cast<NewExprNode *>(node)->resolvedConstructor = bestMatch;
+      const_cast<NewExprNode *>(node)->args =
+          ctx->astCtx.copyArray<ExprNode *>(bestResolvedArgs);
+      const_cast<NewExprNode *>(node)->argNames = {};
     }
   }
 
