@@ -1,21 +1,99 @@
-@extern
-void* dlopen(const uint8* filename, int32 flag);
+#if _WIN32
 
-@extern
-void* dlsym(void* handle, const uint8* symbol);
+@extern("LoadLibraryA")
+void* os_dlopen(const uint8* filename);
 
-@extern
-int32 dlclose(void* handle);
+@extern("GetProcAddress")
+void* os_dlsym(void* handle, const uint8* symbol);
 
-@extern
-int64 readlink(const uint8* path, uint8* buf, uint64 bufsize);
+@extern("FreeLibrary")
+int32 os_dlclose(void* handle);
+
+@extern("GetModuleFileNameA")
+uint32 GetModuleFileNameA(void* module, uint8* buf, uint32 size);
+
+#else
+
+@extern("dlopen")
+void* os_dlopen(const uint8* filename, int32 flag);
+
+@extern("dlsym")
+void* os_dlsym(void* handle, const uint8* symbol);
+
+@extern("dlclose")
+int32 os_dlclose(void* handle);
+
+#if __APPLE__
+@extern("_NSGetExecutablePath")
+int32 _NSGetExecutablePath(uint8* buf, uint32* bufsize);
+#else
+@extern("readlink")
+int64 os_readlink(const uint8* path, uint8* buf, uint64 bufsize);
+#endif
+
+#endif
 
 class DynamicLibrary {
   void* handle;
 
   static DynamicLibrary* open(const uint8* libName) {
+    #if _WIN32
+    
+    /* Attempt to load directly using the system's search paths or absolute path. */
+    void* h = os_dlopen(libName);
+    if (h != null) {
+      DynamicLibrary* lib = new DynamicLibrary();
+      lib.handle = h;
+      return lib;
+    }
+
+    /* Fallback: attempt to load relative to the executable's path. */
+    uint8[4096] exePath;
+    uint32 len = GetModuleFileNameA(null, &exePath[0], 4096);
+    if (len <= 0) {
+      return null;
+    }
+
+    int64 lastSlash = -1;
+    for (int64 i = 0; i < len as int64; i++) {
+      /* Windows paths may contain backslashes or forward slashes. */
+      if (exePath[i] == 92 || exePath[i] == 47) {
+        lastSlash = i;
+      }
+    }
+
+    if (lastSlash == -1) {
+      return null;
+    }
+
+    uint8[4096] finalPath;
+    for (int64 i = 0; i <= lastSlash; i++) {
+      finalPath[i] = exePath[i];
+    }
+
+    int64 j = 0;
+    while (libName[j] != 0) {
+      finalPath[lastSlash + 1 + j] = libName[j];
+      j++;
+    }
+    finalPath[lastSlash + 1 + j] = 0;
+
+    void* handle2 = os_dlopen(&finalPath[0]);
+    if (handle2 == null) {
+      return null;
+    }
+
+    DynamicLibrary* lib2 = new DynamicLibrary();
+    lib2.handle = handle2;
+    return lib2;
+
+    #else
+
+    /* POSIX environment: Linux, macOS, BSD. */
+    /* If the path is absolute, bypass executable path resolution. */
     if (libName[0] == 47) {
-      void* h = dlopen(libName, 2);
+      /* RTLD_NOW = 2 */
+      void* h = os_dlopen(libName, 2);
       if (h == null) { return null; }
 
       DynamicLibrary* lib = new DynamicLibrary();
@@ -24,7 +102,20 @@ class DynamicLibrary {
     }
 
     uint8[4096] exePath;
-    int64 len = readlink("/proc/self/exe", &exePath[0], 4096);
+    int64 len = 0;
+
+    #if __APPLE__
+    uint32 bufsize = 4096;
+    if (_NSGetExecutablePath(&exePath[0], &bufsize) == 0) {
+      /* Resolve actual path length returned by the macOS API. */
+      while (exePath[len] != 0 && len < 4096) {
+        len++;
+      }
+    }
+    #else
+    len = os_readlink("/proc/self/exe", &exePath[0], 4096);
+    #endif
+
     if (len <= 0) {
       return null;
     }
@@ -52,7 +143,8 @@ class DynamicLibrary {
     }
     finalPath[lastSlash + 1 + j] = 0;
 
-    void* handle = dlopen(&finalPath[0], 2);
+    /* RTLD_NOW = 2 */
+    void* handle = os_dlopen(&finalPath[0], 2);
     if (handle == null) {
       return null;
     }
@@ -60,16 +152,18 @@ class DynamicLibrary {
     DynamicLibrary* lib = new DynamicLibrary();
     lib.handle = handle;
     return lib;
+
+    #endif
   }
 
   T resolve<T>(const uint8* symName) {
-    void* sym = dlsym(this.handle, symName);
+    void* sym = os_dlsym(this.handle, symName);
     return sym as T;
   }
 
   void unload() {
     if (this.handle != null) {
-      dlclose(this.handle);
+      os_dlclose(this.handle);
       this.handle = null;
     }
   }
