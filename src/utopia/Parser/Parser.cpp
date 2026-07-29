@@ -1364,8 +1364,11 @@ DeclNode *Parser::parseClassDecl() {
   int col = currentToken().column;
   advance();
 
-  std::string_view name =
-      instantiatingName.empty() ? currentToken().value : instantiatingName;
+  std::string_view name = currentToken().value;
+  if (!instantiatingName.empty() && isTopLevelInst) {
+    name = instantiatingName;
+    isTopLevelInst = false;
+  }
   expect(TokenType::IDENTIFIER, "Expected class name");
 
   std::vector<std::string_view> tParams;
@@ -1797,8 +1800,12 @@ DeclNode *Parser::parseDeclarationOrFunction(
 
   const Type *nodeType = parseType();
 
-  std::string_view id =
-      instantiatingName.empty() ? currentToken().value : instantiatingName;
+  std::string_view id = currentToken().value;
+  if (!instantiatingName.empty() && isTopLevelInst) {
+    id = instantiatingName;
+    isTopLevelInst = false;
+  }
+
   int idLen = (int)id.length();
   expect(TokenType::IDENTIFIER, "Expected identifier after type");
 

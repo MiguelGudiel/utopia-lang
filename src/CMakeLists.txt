@@ -22,7 +22,7 @@ target_link_libraries(utopia_core PUBLIC ${llvm_libs} yaml-cpp)
 
 target_compile_definitions(utopia_core PUBLIC 
     $<$<CONFIG:Debug>:UTOPIA_DEBUG_BUILD>
-    UTOPIA_DEBUG_LOGS
+    #UTOPIA_DEBUG_LOGS
     $<$<CONFIG:Release>:UTOPIA_RELEASE_BUILD>
     UTOPIA_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
     UTOPIA_INTERNAL_LIB_PATH="${CMAKE_INSTALL_PREFIX}/lib/utopia"

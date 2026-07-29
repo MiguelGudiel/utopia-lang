@@ -84,7 +84,7 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
         return existing;
       }
       ctx->astCtx.createRecordType(
-          TypeKind::Class, mangledView); // Cortar bucle recursivo estructural
+          TypeKind::Class, mangledView); // Cut structural recursive loop
     }
 
     Parser parser(ctx->astCtx, tmplDecl->templateBodyTokens, ctx->diags,
@@ -115,8 +115,14 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
       }
       DeclCollectorPass dcp;
       dcp.ctx = ctx;
+
+      auto prevFile = ctx->currentFile;
+      ctx->setCurrentFile(instDecl->declFilePath);
+
       dcp.dispatch(instDecl);
       dispatch(instDecl);
+
+      ctx->setCurrentFile(prevFile);
     }
 
     const Type *res = ctx->astCtx.VoidTy;
@@ -189,7 +195,7 @@ void TypeCheckPass::checkImplicitCastWarning(const Type *from, const Type *to,
       bool isLiteralFit = false;
       const NumberNode *numNode = nullptr;
       bool isNegative = false;
-      
+
       if (node->kind == NodeKind::Number) {
         numNode = static_cast<const NumberNode *>(node);
       } else if (node->kind == NodeKind::UnaryOp) {
@@ -953,8 +959,14 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
           }
           DeclCollectorPass dcp;
           dcp.ctx = ctx;
+
+          auto prevFile = ctx->currentFile;
+          ctx->setCurrentFile(instDecl->declFilePath);
+
           dcp.dispatch(instDecl);
           dispatch(instDecl);
+
+          ctx->setCurrentFile(prevFile);
         }
       }
       const_cast<VariableNode *>(node)->name = mangledView;
@@ -1833,8 +1845,14 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
                   Mangler::mangle(fnDecl, std::string(recordTy->getName()));
 
               auto prevContext = ctx->getCurrentRecordContext();
+              auto prevFile = ctx->currentFile;
+
               ctx->setCurrentRecordContext(recordTy);
+              ctx->setCurrentFile(fnDecl->declFilePath);
+
               dispatch(fnDecl);
+
+              ctx->setCurrentFile(prevFile);
               ctx->setCurrentRecordContext(prevContext);
             }
           }
@@ -1919,6 +1937,13 @@ SemaResult TypeCheckPass::visit(const FunctionDeclNode *node) {
                                      "Type visibility error"});
   }
 
+  /*
+   * Save the current expected return type before processing this function.
+   * This is crucial to support on-the-fly template instantiations that occur
+   * within the body of other functions without polluting their semantic
+   * context.
+   */
+  const Type *prevRet = ctx->getFunctionReturnType();
   ctx->setFunctionReturnType(node->returnType);
 
   ScopeGuard guard(*ctx);
@@ -1964,6 +1989,9 @@ SemaResult TypeCheckPass::visit(const FunctionDeclNode *node) {
     node->isWillReturn = !ea.potentiallyInfinite;
     node->isMustProgress = true;
   }
+
+  /* Restore the previous return type from the outer context */
+  ctx->setFunctionReturnType(prevRet);
 
   if (hasErrors) {
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,

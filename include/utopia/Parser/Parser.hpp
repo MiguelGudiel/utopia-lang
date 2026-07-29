@@ -24,7 +24,7 @@ public:
          DiagnosticsEngine &de, std::string_view path,
          ModuleLoader *loader = nullptr)
       : astCtx(context), tokens(tokenStream), diags(de), filePath(path),
-        moduleLoader(loader) {}
+        moduleLoader(loader), isTopLevelInst(true) {}
 
   ModuleNode *parseModule(std::string_view filePath);
 
@@ -35,6 +35,7 @@ public:
   std::string_view instantiatingName = "";
   std::string_view templateBaseName = "";
   std::unordered_map<std::string_view, const Type *> templateArgs;
+  bool isTopLevelInst = true;
 
 private:
   ASTContext &astCtx;

@@ -1,0 +1,76 @@
+@extern
+void* dlopen(const uint8* filename, int32 flag);
+
+@extern
+void* dlsym(void* handle, const uint8* symbol);
+
+@extern
+int32 dlclose(void* handle);
+
+@extern
+int64 readlink(const uint8* path, uint8* buf, uint64 bufsize);
+
+class DynamicLibrary {
+  void* handle;
+
+  static DynamicLibrary* open(const uint8* libName) {
+    if (libName[0] == 47) {
+      void* h = dlopen(libName, 2);
+      if (h == null) { return null; }
+
+      DynamicLibrary* lib = new DynamicLibrary();
+      lib.handle = h;
+      return lib;
+    }
+
+    uint8[4096] exePath;
+    int64 len = readlink("/proc/self/exe", &exePath[0], 4096);
+    if (len <= 0) {
+      return null;
+    }
+
+    int64 lastSlash = -1;
+    for (int64 i = 0; i < len; i++) {
+      if (exePath[i] == 47) {
+        lastSlash = i;
+      }
+    }
+
+    if (lastSlash == -1) {
+      return null;
+    }
+
+    uint8[4096] finalPath;
+    for (int64 i = 0; i <= lastSlash; i++) {
+      finalPath[i] = exePath[i];
+    }
+
+    int64 j = 0;
+    while (libName[j] != 0) {
+      finalPath[lastSlash + 1 + j] = libName[j];
+      j++;
+    }
+    finalPath[lastSlash + 1 + j] = 0;
+
+    void* handle = dlopen(&finalPath[0], 2);
+    if (handle == null) {
+      return null;
+    }
+
+    DynamicLibrary* lib = new DynamicLibrary();
+    lib.handle = handle;
+    return lib;
+  }
+
+  T resolve<T>(const uint8* symName) {
+    void* sym = dlsym(this.handle, symName);
+    return sym as T;
+  }
+
+  void unload() {
+    if (this.handle != null) {
+      dlclose(this.handle);
+      this.handle = null;
+    }
+  }
+}
