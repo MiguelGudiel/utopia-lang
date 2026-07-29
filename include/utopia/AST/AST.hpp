@@ -73,6 +73,8 @@ struct AnnotationNode : public ASTNode {
       : ASTNode(NodeKind::Annotation, l, c, len), name(n), args(a) {}
 };
 
+struct FunctionDeclNode;
+
 struct DeclNode : public ASTNode {
   llvm::ArrayRef<AnnotationNode *> annotations;
   bool hasPublicMod = false;
@@ -182,6 +184,7 @@ struct UnaryOpNode : public ExprNode {
   std::string_view op;
   ExprNode *expr;
   bool isPostfix;
+  mutable const FunctionDeclNode *overloadedOperator = nullptr;
 
   UnaryOpNode(std::string_view o, ExprNode *e, int l, int c,
               bool postfix = false)
@@ -199,6 +202,7 @@ struct BinaryOpNode : public ExprNode {
   ExprNode *left;
   ExprNode *right;
   mutable const Type *promotedType = nullptr;
+  mutable const FunctionDeclNode *overloadedOperator = nullptr;
 
   BinaryOpNode(std::string_view o, ExprNode *l, ExprNode *r, int ln, int c)
       : ExprNode(NodeKind::BinaryOp, ln, c), op(o), left(l), right(r) {
@@ -224,6 +228,7 @@ struct AssignNode : public ExprNode {
   std::string_view op;
   ExprNode *target;
   ExprNode *value;
+  mutable const FunctionDeclNode *overloadedOperator = nullptr;
 
   AssignNode(std::string_view o, ExprNode *t, ExprNode *v, int l, int c,
              int len)

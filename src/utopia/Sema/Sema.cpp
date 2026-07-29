@@ -614,6 +614,66 @@ bool TypeCheckPass::run(const ModuleNode *module, SemaContext &context) {
   return !ctx->hasErrors();
 }
 
+const FunctionDeclNode *TypeCheckPass::resolveOverloadedOperator(
+    const Type *lhsType, std::string_view opName,
+    const std::vector<const Type *> &argTypes) {
+  if (!lhsType)
+    return nullptr;
+
+  const Type *unqual = lhsType->getUnqualifiedType();
+  if (unqual->isPointerType()) {
+    unqual = static_cast<const PointerType *>(unqual)
+                 ->getPointeeType()
+                 ->getUnqualifiedType();
+  } else if (unqual->isReferenceType()) {
+    unqual = static_cast<const ReferenceType *>(unqual)
+                 ->getPointeeType()
+                 ->getUnqualifiedType();
+  }
+
+  if (unqual->getKind() != TypeKind::Struct &&
+      unqual->getKind() != TypeKind::Class) {
+    return nullptr;
+  }
+
+  auto *recTy = static_cast<const RecordType *>(unqual);
+  auto *decl = recTy->getDeclaration();
+  if (!decl)
+    return nullptr;
+
+  llvm::ArrayRef<FunctionDeclNode *> methods;
+  if (decl->kind == NodeKind::ClassDecl) {
+    methods = static_cast<const ClassDeclNode *>(decl)->methods;
+  } else if (decl->kind == NodeKind::StructDecl) {
+    methods = static_cast<const StructDeclNode *>(decl)->methods;
+  }
+
+  std::string opFuncName = "operator" + std::string(opName);
+
+  const FunctionDeclNode *bestMatch = nullptr;
+  for (auto *m : methods) {
+    if (m->name == opFuncName) {
+      size_t paramOffset =
+          (m->isMethod && !m->isExtern && !m->isStatic) ? 1 : 0;
+      if (m->params.size() - paramOffset == argTypes.size()) {
+        bool match = true;
+        for (size_t i = 0; i < argTypes.size(); ++i) {
+          if (!canImplicitlyCast(argTypes[i],
+                                 m->params[paramOffset + i]->type)) {
+            match = false;
+            break;
+          }
+        }
+        if (match) {
+          bestMatch = m;
+          break;
+        }
+      }
+    }
+  }
+  return bestMatch;
+}
+
 bool TypeCheckPass::checkTypeVisibility(const Type *type, const ASTNode *node) {
   if (!type)
     return true;
@@ -1199,6 +1259,15 @@ SemaResult TypeCheckPass::visit(const UnaryOpNode *node) {
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,
                                      "Cascading error in unary op"});
 
+  if (node->op == "++" || node->op == "--" || node->op == "-" ||
+      node->op == "+" || node->op == "~" || node->op == "!") {
+    if (auto *opDecl = resolveOverloadedOperator(*exprType, node->op, {})) {
+      node->overloadedOperator = opDecl;
+      node->exprType = opDecl->returnType;
+      return opDecl->returnType;
+    }
+  }
+
   const Type *resType = nullptr;
   if (node->op == "!") {
     if (!canImplicitlyCast(*exprType, ctx->astCtx.BoolTy)) {
@@ -1289,6 +1358,12 @@ SemaResult TypeCheckPass::visit(const BinaryOpNode *node) {
   if (!lhs || !rhs)
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,
                                      "Invalid operands for binary operation"});
+
+  if (auto *opDecl = resolveOverloadedOperator(*lhs, node->op, {*rhs})) {
+    node->overloadedOperator = opDecl;
+    node->exprType = opDecl->returnType;
+    return opDecl->returnType;
+  }
 
   if (node->op == "&&" || node->op == "||") {
     if (!canImplicitlyCast(*lhs, ctx->astCtx.BoolTy) ||
@@ -1538,6 +1613,13 @@ SemaResult TypeCheckPass::visit(const AssignNode *node) {
   if (!lhsType || !rhsType)
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,
                                      "Cascading error in assignment"});
+
+  if (auto *opDecl =
+          resolveOverloadedOperator(*lhsType, node->op, {*rhsType})) {
+    node->overloadedOperator = opDecl;
+    node->exprType = opDecl->returnType;
+    return opDecl->returnType;
+  }
 
   /* Allow array subscripts as valid l-values for assignment targets */
   if (node->target->kind != NodeKind::Variable &&

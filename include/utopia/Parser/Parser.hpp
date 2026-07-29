@@ -75,6 +75,8 @@ private:
                      name) != currentTemplateParams.end();
   }
 
+  std::string_view parseOperatorName();
+
   const Type *parseType(bool inNewExpr = false);
   const Type *applyArrayDeclarator(const Type *baseType);
   std::string consumeComments();

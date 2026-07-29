@@ -77,6 +77,7 @@ enum class TokenType : uint8_t {
   TYPEDEF_KW, /* typedef */
   ENUM_KW,    /* enum */
   FUNCTION_KW,
+  OPERATOR_KW, /* operator */
   COMMA,
   SEMICOLON,
   RETURN,

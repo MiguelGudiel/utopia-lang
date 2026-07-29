@@ -1073,6 +1073,36 @@ llvm::Value *CodeGen::visit(const WhileNode *node) {
 }
 
 llvm::Value *CodeGen::visit(const UnaryOpNode *node) {
+  if (node->overloadedOperator) {
+    llvm::Value *objPtr = nullptr;
+    if (node->expr->exprType->isPointerType()) {
+      objPtr = dispatch(node->expr);
+    } else {
+      objPtr = getLValue(node->expr);
+    }
+
+    if (!objPtr) {
+      llvm::Value *val = dispatch(node->expr);
+      objPtr = createEntryBlockAlloca(val->getType(), "tmp.op.recv");
+      builder.CreateStore(val, objPtr);
+    }
+
+    llvm::Value *oldVal = nullptr;
+    if (node->isPostfix && (node->op == "++" || node->op == "--")) {
+      llvm::Type *valTy = getLLVMType(node->expr->exprType);
+      oldVal =
+          createTBAALoad(valTy, objPtr, node->expr->exprType, "postfix.old");
+    }
+
+    llvm::Function *func = getOrCreateFunction(node->overloadedOperator);
+    llvm::Value *res = builder.CreateCall(func, {objPtr});
+
+    if (node->isPostfix && oldVal) {
+      return oldVal;
+    }
+    return res;
+  }
+
   if (node->op == "!") {
     llvm::Value *val = dispatch(node->expr);
     if (!val)
@@ -1149,6 +1179,48 @@ llvm::Value *CodeGen::visit(const UnaryOpNode *node) {
 }
 
 llvm::Value *CodeGen::visit(const BinaryOpNode *node) {
+  if (node->overloadedOperator) {
+    llvm::Value *objPtr = nullptr;
+    if (node->left->exprType->isPointerType()) {
+      objPtr = dispatch(node->left);
+    } else {
+      objPtr = getLValue(node->left);
+    }
+
+    if (!objPtr) {
+      llvm::Value *val = dispatch(node->left);
+      objPtr = createEntryBlockAlloca(val->getType(), "tmp.op.recv");
+      builder.CreateStore(val, objPtr);
+    }
+
+    llvm::Function *func = getOrCreateFunction(node->overloadedOperator);
+    std::vector<llvm::Value *> argsArgs;
+    argsArgs.push_back(objPtr);
+
+    llvm::Value *rhsVal = nullptr;
+    bool isRefParam = false;
+    if (node->overloadedOperator->params.size() > 1) {
+      isRefParam = node->overloadedOperator->params[1]->type->isReferenceType();
+    }
+
+    if (isRefParam) {
+      rhsVal = getLValue(node->right);
+      if (!rhsVal) {
+        llvm::Value *val = dispatch(node->right);
+        rhsVal = createEntryBlockAlloca(val->getType(), "tmp.op.arg");
+        builder.CreateStore(val, rhsVal);
+      }
+    } else {
+      rhsVal = dispatch(node->right);
+      llvm::Type *paramTy =
+          getLLVMType(node->overloadedOperator->params[1]->type);
+      rhsVal = createImplicitCast(rhsVal, paramTy);
+    }
+    argsArgs.push_back(rhsVal);
+
+    return builder.CreateCall(func, argsArgs);
+  }
+
   llvm::Value *L = dispatch(node->left);
   llvm::Value *R = dispatch(node->right);
 
@@ -1498,6 +1570,48 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
 }
 
 llvm::Value *CodeGen::visit(const AssignNode *node) {
+  if (node->overloadedOperator) {
+    llvm::Value *objPtr = nullptr;
+    if (node->target->exprType->isPointerType()) {
+      objPtr = dispatch(node->target);
+    } else {
+      objPtr = getLValue(node->target);
+    }
+
+    if (!objPtr) {
+      diags.report({DiagLevel::Error, node->target->line, node->target->column,
+                    node->target->length, "LHS is not an l-value", ""});
+      return nullptr;
+    }
+
+    llvm::Function *func = getOrCreateFunction(node->overloadedOperator);
+    std::vector<llvm::Value *> argsArgs;
+    argsArgs.push_back(objPtr);
+
+    llvm::Value *rhsVal = nullptr;
+    bool isRefParam = false;
+    if (node->overloadedOperator->params.size() > 1) {
+      isRefParam = node->overloadedOperator->params[1]->type->isReferenceType();
+    }
+
+    if (isRefParam) {
+      rhsVal = getLValue(node->value);
+      if (!rhsVal) {
+        llvm::Value *val = dispatch(node->value);
+        rhsVal = createEntryBlockAlloca(val->getType(), "tmp.op.arg");
+        builder.CreateStore(val, rhsVal);
+      }
+    } else {
+      rhsVal = dispatch(node->value);
+      llvm::Type *paramTy =
+          getLLVMType(node->overloadedOperator->params[1]->type);
+      rhsVal = createImplicitCast(rhsVal, paramTy);
+    }
+    argsArgs.push_back(rhsVal);
+
+    return builder.CreateCall(func, argsArgs);
+  }
+
   llvm::Value *lval = getLValue(node->target);
   if (!lval) {
     diags.report({DiagLevel::Error, node->target->line, node->target->column,
