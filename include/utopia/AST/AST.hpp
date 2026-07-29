@@ -1,430 +1,472 @@
 #pragma once
-#include <memory>
-#include <string>
-#include <vector>
+#include "utopia/Common/Types.hpp"
+#include "utopia/Lexer/Token.hpp"
+#include <cstdint>
+#include <llvm/ADT/ArrayRef.h>
+#include <string_view>
 
 namespace utopia {
 
-class ASTVisitor;
+enum class NodeKind : uint8_t {
+  Number,
+  Boolean,
+  Char,
+  Rune,
+  String,
+  Variable,
+  BinaryOp,
+  UnaryOp,
+  Module,
+  Annotation,
+  AnnotationDecl,
+  TypedefDecl,
+  VarDecl,
+  Assign,
+  Block,
+  If,
+  For,
+  While,
+  FunctionDecl,
+  FunctionCall,
+  Return,
+  Cast,
+  ParamDecl,
+  StructDecl,
+  ClassDecl,
+  MemberAccess,
+  ArraySubscript,
+  ArrayLiteral,
+  New,
+  Delete,
+  Null,
+  EnumDecl,
+  EnumMember,
+  ImplicitCast
+};
 
-enum class AccessModifier { Implicit, Public, Private };
+struct ASTNode {
+  NodeKind kind;
+  int line;
+  int column;
+  int length;
+  std::string_view docString;
 
-class ASTNode {
-public:
-  int line = 0;
-  int column = 0;
-  int endLine = 0;
-  int endColumn = 0;
+  explicit ASTNode(NodeKind k, int l = 0, int c = 0, int len = 0)
+      : kind(k), line(l), column(c), length(len) {}
+};
 
-  std::string doc;
+struct StmtNode : public ASTNode {
+  explicit StmtNode(NodeKind k, int l = 0, int c = 0, int len = 0)
+      : ASTNode(k, l, c, len) {}
+};
 
-  virtual ~ASTNode() = default;
+struct ExprNode : public ASTNode {
+  mutable const Type *exprType = nullptr;
+  mutable bool isLValue =
+      false; // Tracks if the expression represents a persistent memory location
+  explicit ExprNode(NodeKind k, int l = 0, int c = 0, int len = 0)
+      : ASTNode(k, l, c, len) {}
+};
 
-  void setRange(int l, int c, int el, int ec) {
-    line = l;
-    column = c;
-    endLine = el;
-    endColumn = ec;
+struct AnnotationNode : public ASTNode {
+  std::string_view name;
+  llvm::ArrayRef<ExprNode *> args;
+  AnnotationNode(std::string_view n, llvm::ArrayRef<ExprNode *> a, int l, int c,
+                 int len)
+      : ASTNode(NodeKind::Annotation, l, c, len), name(n), args(a) {}
+};
+
+struct FunctionDeclNode;
+
+struct DeclNode : public ASTNode {
+  llvm::ArrayRef<AnnotationNode *> annotations;
+  bool hasPublicMod = false;
+  bool hasPrivateMod = false;
+  std::string_view declFilePath;
+
+  bool isTemplate = false;
+  llvm::ArrayRef<std::string_view> templateParams;
+  llvm::ArrayRef<Token> templateBodyTokens;
+
+  explicit DeclNode(NodeKind k, int l = 0, int c = 0, int len = 0)
+      : ASTNode(k, l, c, len) {}
+
+  /**
+   * Resolves visibility state based on modifier override and implicitly
+   * inferred privacy rules (`_` prefix).
+   */
+  bool isPublic(std::string_view declName) const {
+    if (hasPrivateMod)
+      return false;
+    if (hasPublicMod)
+      return true;
+    return !declName.starts_with("_");
   }
-
-  // Double dispatch vectoring
-  virtual void accept(ASTVisitor *visitor) = 0;
 };
 
-// Expressions evaluate to a value
-class ExprNode : public ASTNode {};
+struct EnumMemberNode : public DeclNode {
+  std::string_view name;
+  ExprNode *initializer;
+  mutable int64_t evaluatedValue = 0; // Evaluated statically during Sema
 
-// Statements execute an action but yield no value
-class StmtNode : public ASTNode {};
-
-class ThisNode : public ExprNode {
-public:
-  void accept(ASTVisitor *visitor) override;
+  EnumMemberNode(std::string_view n, ExprNode *init, int l, int c, int len)
+      : DeclNode(NodeKind::EnumMember, l, c, len), name(n), initializer(init) {}
 };
 
-class SuperNode : public ExprNode {
-public:
-  void accept(ASTVisitor *visitor) override;
+struct EnumDeclNode : public DeclNode {
+  std::string_view name;
+  const Type *underlyingType;
+  llvm::ArrayRef<EnumMemberNode *> members;
+  mutable const EnumType *enumType = nullptr;
+
+  EnumDeclNode(std::string_view n, const Type *u, int l, int c, int len)
+      : DeclNode(NodeKind::EnumDecl, l, c, len), name(n), underlyingType(u) {}
 };
 
-class MemberAccessNode : public ExprNode {
-public:
-  std::unique_ptr<ExprNode> object;
-  std::string field;
-
-  MemberAccessNode(std::unique_ptr<ExprNode> obj, std::string f)
-      : object(std::move(obj)), field(std::move(f)) {}
-
-  void accept(ASTVisitor *visitor) override;
+struct NumberNode : public ExprNode {
+  std::string_view raw;
+  bool isFloat;
+  NumberNode(std::string_view r, bool f, int l, int c, int len)
+      : ExprNode(NodeKind::Number, l, c, len), raw(r), isFloat(f) {}
 };
 
-struct StructField {
-  AccessModifier modifier;
-  bool isStatic = false;
-  std::string typeName;
-  std::string name;
-  std::vector<std::string> decorators;
-  std::unique_ptr<ExprNode> initializer = nullptr;
-};
-
-class BlockNode : public StmtNode {
-public:
-  std::vector<std::unique_ptr<ASTNode>> statements;
-  explicit BlockNode(std::vector<std::unique_ptr<ASTNode>> stmts)
-      : statements(std::move(stmts)) {}
-  void accept(ASTVisitor *visitor) override;
-};
-
-class NullLiteralNode : public ExprNode {
-public:
-  void accept(ASTVisitor *visitor) override;
-};
-
-class IfNode : public StmtNode {
-public:
-  std::unique_ptr<ExprNode> condition;
-  std::vector<std::unique_ptr<ASTNode>> thenBody;
-  std::vector<std::unique_ptr<ASTNode>> elseBody;
-
-  IfNode(std::unique_ptr<ExprNode> cond,
-         std::vector<std::unique_ptr<ASTNode>> tBody)
-      : condition(std::move(cond)), thenBody(std::move(tBody)) {}
-
-  void accept(ASTVisitor *visitor) override;
-};
-
-class WhileNode : public StmtNode {
-public:
-  std::unique_ptr<ExprNode> condition;
-  std::vector<std::unique_ptr<ASTNode>> body;
-
-  WhileNode(std::unique_ptr<ExprNode> cond,
-            std::vector<std::unique_ptr<ASTNode>> b)
-      : condition(std::move(cond)), body(std::move(b)) {}
-
-  void accept(ASTVisitor *visitor) override;
-};
-
-class ForNode : public StmtNode {
-public:
-  std::unique_ptr<ASTNode> init;
-  std::unique_ptr<ExprNode> condition;
-  std::unique_ptr<ASTNode> update;
-  std::vector<std::unique_ptr<ASTNode>> body;
-
-  ForNode(std::unique_ptr<ASTNode> i, std::unique_ptr<ExprNode> c,
-          std::unique_ptr<ASTNode> u, std::vector<std::unique_ptr<ASTNode>> b)
-      : init(std::move(i)), condition(std::move(c)), update(std::move(u)),
-        body(std::move(b)) {}
-
-  void accept(ASTVisitor *visitor) override;
-};
-
-class NullAssertNode : public ExprNode {
-public:
-  std::unique_ptr<ExprNode> operand;
-  explicit NullAssertNode(std::unique_ptr<ExprNode> op)
-      : operand(std::move(op)) {}
-
-  void accept(ASTVisitor *visitor) override;
-};
-
-class NumberNode : public ExprNode {
-public:
-  long long value;
-  explicit NumberNode(long long v) : value(v) {}
-  void accept(ASTVisitor *visitor) override;
-};
-
-class FloatNode : public ExprNode {
-public:
-  double value;
-  bool isDouble;
-  explicit FloatNode(double v, bool isDouble = true)
-      : value(v), isDouble(isDouble) {}
-  void accept(ASTVisitor *visitor) override;
-};
-
-class BoolNode : public ExprNode {
-public:
+struct BoolNode : public ExprNode {
   bool value;
-  explicit BoolNode(bool v) : value(v) {}
-  void accept(ASTVisitor *visitor) override;
+  BoolNode(bool v, int l, int c, int len)
+      : ExprNode(NodeKind::Boolean, l, c, len), value(v) {}
 };
 
-class StringNode : public ExprNode {
-public:
-  std::string value;
-  explicit StringNode(std::string v) : value(std::move(v)) {}
-  void accept(ASTVisitor *visitor) override;
+struct CharNode : public ExprNode {
+  uint8_t value;
+  CharNode(uint8_t v, int l, int c, int len)
+      : ExprNode(NodeKind::Char, l, c, len), value(v) {}
 };
 
-class LogicalNotNode : public ExprNode {
-public:
-  std::unique_ptr<ExprNode> operand;
-  explicit LogicalNotNode(std::unique_ptr<ExprNode> op)
-      : operand(std::move(op)) {}
-  void accept(ASTVisitor *visitor) override;
+struct RuneNode : public ExprNode {
+  uint32_t value;
+  RuneNode(uint32_t v, int l, int c, int len)
+      : ExprNode(NodeKind::Rune, l, c, len), value(v) {}
 };
 
-class UnaryMinusNode : public ExprNode {
-public:
-  std::unique_ptr<ExprNode> operand;
-  explicit UnaryMinusNode(std::unique_ptr<ExprNode> op)
-      : operand(std::move(op)) {}
-  void accept(ASTVisitor *visitor) override;
+struct StringNode : public ExprNode {
+  std::string_view value;
+  StringNode(std::string_view v, int l, int c, int len)
+      : ExprNode(NodeKind::String, l, c, len), value(v) {}
 };
 
-class VariableNode : public ExprNode {
-public:
-  std::string name;
-  explicit VariableNode(std::string n) : name(std::move(n)) {}
-  void accept(ASTVisitor *visitor) override;
+struct NullNode : public ExprNode {
+  NullNode(int l, int c, int len) : ExprNode(NodeKind::Null, l, c, len) {}
 };
 
-class AddressOfNode : public ExprNode {
-public:
-  std::unique_ptr<ExprNode> operand;
-  explicit AddressOfNode(std::unique_ptr<ExprNode> op)
-      : operand(std::move(op)) {}
-  void accept(ASTVisitor *visitor) override;
+struct VariableNode : public ExprNode {
+  std::string_view name;
+  bool isField = false;
+  uint32_t fieldIndex = 0;
+  const Type *parentType = nullptr;
+  mutable const DeclNode *resolvedDecl = nullptr;
+
+  llvm::ArrayRef<const Type *> templateArgs;
+
+  VariableNode(std::string_view n, int l, int c, int len)
+      : ExprNode(NodeKind::Variable, l, c, len), name(n) {}
 };
 
-class DerefNode : public ExprNode {
-public:
-  std::unique_ptr<ExprNode> operand;
-  explicit DerefNode(std::unique_ptr<ExprNode> op) : operand(std::move(op)) {}
-  void accept(ASTVisitor *visitor) override;
+struct TypedefDeclNode : public DeclNode {
+  std::string_view aliasName;
+  mutable const Type *targetType;
+  std::string_view targetEntityName;
+  const AliasType *aliasType;
+
+  TypedefDeclNode(std::string_view name, const Type *target, int l, int c,
+                  int len)
+      : DeclNode(NodeKind::TypedefDecl, l, c, len), aliasName(name),
+        targetType(target), aliasType(nullptr) {}
 };
 
-class NewNode : public ExprNode {
-public:
-  std::string typeName;
-  std::vector<std::unique_ptr<ExprNode>> arguments;
-  std::vector<std::unique_ptr<ExprNode>> arraySizes;
+struct UnaryOpNode : public ExprNode {
+  std::string_view op;
+  ExprNode *expr;
+  bool isPostfix;
+  mutable const FunctionDeclNode *overloadedOperator = nullptr;
 
-  std::string resolvedMangledName;
-
-  explicit NewNode(std::string tName,
-                   std::vector<std::unique_ptr<ExprNode>> args = {})
-      : typeName(std::move(tName)), arguments(std::move(args)) {}
-
-  void accept(ASTVisitor *visitor) override;
+  UnaryOpNode(std::string_view o, ExprNode *e, int l, int c,
+              bool postfix = false)
+      : ExprNode(NodeKind::UnaryOp, l, c), op(o), expr(e), isPostfix(postfix) {
+    if (postfix) {
+      this->length = (e->column + e->length) - c + o.length();
+    } else {
+      this->length = (e->column + e->length) - c;
+    }
+  }
 };
 
-class DeleteNode : public StmtNode {
-public:
-  std::unique_ptr<ExprNode> pointerExpr;
+struct BinaryOpNode : public ExprNode {
+  std::string_view op;
+  ExprNode *left;
+  ExprNode *right;
+  mutable const Type *promotedType = nullptr;
+  mutable const FunctionDeclNode *overloadedOperator = nullptr;
+
+  BinaryOpNode(std::string_view o, ExprNode *l, ExprNode *r, int ln, int c)
+      : ExprNode(NodeKind::BinaryOp, ln, c), op(o), left(l), right(r) {
+    this->length = (right->column + right->length) - this->column;
+  }
+};
+
+struct VarDeclNode : public DeclNode {
+  const Type *type;
+  std::string_view varName;
+  std::string mangledName;
+  ExprNode *initializer;
+  bool isGlobal = false;
+  bool isStatic = false;
+
+  /* Reference to the resolved copy constructor for aggregate initialization */
+  mutable const FunctionDeclNode *copyCtor = nullptr;
+
+  VarDeclNode(const Type *t, std::string_view n, ExprNode *init, int l, int c,
+              int len)
+      : DeclNode(NodeKind::VarDecl, l, c, len), type(t), varName(n),
+        initializer(init) {}
+};
+
+struct AssignNode : public ExprNode {
+  std::string_view op;
+  ExprNode *target;
+  ExprNode *value;
+  mutable const FunctionDeclNode *overloadedOperator = nullptr;
+
+  AssignNode(std::string_view o, ExprNode *t, ExprNode *v, int l, int c,
+             int len)
+      : ExprNode(NodeKind::Assign, l, c, len), op(o), target(t), value(v) {}
+};
+
+struct BlockNode : public StmtNode {
+  llvm::ArrayRef<ASTNode *> statements;
+  BlockNode(int l, int c) : StmtNode(NodeKind::Block, l, c, 1) {}
+  void finalize(int endCol) { this->length = endCol - this->column; }
+};
+
+struct ReturnNode : public StmtNode {
+  ExprNode *value;
+  ReturnNode(ExprNode *v, int l, int c, int len)
+      : StmtNode(NodeKind::Return, l, c, len), value(v) {}
+};
+
+struct ParamDeclNode : public DeclNode {
+  const Type *type;
+  std::string_view name;
+  ExprNode *defaultValue;
+  bool isNamed;
+  bool isRequired;
+
+  ParamDeclNode(const Type *t, std::string_view n, ExprNode *defVal, bool isN,
+                bool isReq, int l, int c, int len)
+      : DeclNode(NodeKind::ParamDecl, l, c, len), type(t), name(n),
+        defaultValue(defVal), isNamed(isN), isRequired(isReq) {}
+};
+
+struct FunctionDeclNode : public DeclNode {
+  const Type *returnType;
+  std::string_view name;
+  std::string mangledName;
+  llvm::ArrayRef<ParamDeclNode *> params;
+  BlockNode *body;
+  bool isConst;
+  bool isMethod;
+  bool isExtern;
+  bool isVariadic;
+  bool isImplicit;
+  bool isStatic = false;
+  mutable std::string_view externAlias;
+
+  /* Intrinsic function attributes inferred during semantic analysis */
+  mutable bool isReadNone = false;
+  mutable bool isReadOnly = false;
+  mutable bool isNoFree = false;
+  mutable bool isNoSync = false;
+  mutable bool isWillReturn = false;
+  mutable bool isMustProgress = false;
+
+  FunctionDeclNode(const Type *ret, std::string_view n, int l, int c,
+                   bool isC = false, bool isMeth = false, bool isExt = false,
+                   bool isVar = false, bool isImpl = false)
+      : DeclNode(NodeKind::FunctionDecl, l, c), returnType(ret), name(n),
+        body(nullptr), isConst(isC), isMethod(isMeth), isExtern(isExt),
+        isVariadic(isVar), isImplicit(isImpl) {}
+};
+
+struct FunctionCallNode : public ExprNode {
+  ExprNode *target;
+  llvm::ArrayRef<ExprNode *> args;
+  llvm::ArrayRef<std::string_view> argNames;
+  const FunctionDeclNode *resolvedFunc = nullptr;
+
+  FunctionCallNode(ExprNode *t, llvm::ArrayRef<ExprNode *> a,
+                   llvm::ArrayRef<std::string_view> n, int l, int c, int len)
+      : ExprNode(NodeKind::FunctionCall, l, c, len), target(t), args(a),
+        argNames(n) {}
+};
+
+struct CastNode : public ExprNode {
+  ExprNode *expr;
+  const Type *targetType;
+
+  CastNode(ExprNode *e, const Type *target, int l, int c, int len)
+      : ExprNode(NodeKind::Cast, l, c, len), expr(e), targetType(target) {}
+};
+
+struct ForNode : public StmtNode {
+  ASTNode *initStatement; // It can be a VarDeclNode or an ExprNode (or null).
+  ExprNode *condition;    // Optional
+  ExprNode *increment;    // Optional
+  BlockNode *body;
+
+  ForNode(ASTNode *init, ExprNode *cond, ExprNode *inc, BlockNode *b, int l,
+          int c, int len)
+      : StmtNode(NodeKind::For, l, c, len), initStatement(init),
+        condition(cond), increment(inc), body(b) {}
+};
+
+struct WhileNode : public StmtNode {
+  ExprNode *condition;
+  BlockNode *body;
+
+  WhileNode(ExprNode *cond, BlockNode *b, int l, int c, int len)
+      : StmtNode(NodeKind::While, l, c, len), condition(cond), body(b) {}
+};
+
+struct IfNode : public StmtNode {
+  ExprNode *condition;
+  BlockNode *thenBlock;
+  ASTNode *elseBlock;
+
+  IfNode(ExprNode *cond, BlockNode *tb, ASTNode *eb, int l, int c, int len)
+      : StmtNode(NodeKind::If, l, c, len), condition(cond), thenBlock(tb),
+        elseBlock(eb) {}
+};
+
+struct ModuleNode : public ASTNode {
+  std::string_view filePath;
+  llvm::ArrayRef<std::string_view> rawImports;
+  llvm::ArrayRef<ModuleNode *> importedModules;
+  llvm::ArrayRef<ASTNode *> statements;
+  std::vector<ASTNode *> instantiatedTemplates;
+
+  explicit ModuleNode(std::string_view path)
+      : ASTNode(NodeKind::Module), filePath(path) {}
+};
+
+struct AnnotationDeclNode : public DeclNode {
+  std::string_view name;
+  llvm::ArrayRef<VarDeclNode *> fields;
+  FunctionDeclNode *constructor;
+
+  mutable const RecordType *recordType = nullptr;
+
+  AnnotationDeclNode(std::string_view n, int l, int c, int len)
+      : DeclNode(NodeKind::AnnotationDecl, l, c, len), name(n),
+        constructor(nullptr) {}
+};
+
+struct StructDeclNode : public DeclNode {
+  std::string_view name;
+  llvm::ArrayRef<VarDeclNode *> fields;
+  llvm::ArrayRef<FunctionDeclNode *> methods;
+  llvm::ArrayRef<FunctionDeclNode *> constructors;
+  FunctionDeclNode *destructor;
+
+  mutable const RecordType *recordType = nullptr;
+  bool isOpaque = false;
+
+  StructDeclNode(std::string_view n, int l, int c, int len)
+      : DeclNode(NodeKind::StructDecl, l, c, len), name(n),
+        destructor(nullptr) {}
+};
+
+struct ClassDeclNode : public DeclNode {
+  std::string_view name;
+  llvm::ArrayRef<VarDeclNode *> fields;
+  llvm::ArrayRef<FunctionDeclNode *> methods;
+  llvm::ArrayRef<FunctionDeclNode *> constructors;
+  FunctionDeclNode *destructor;
+
+  mutable const RecordType *recordType = nullptr;
+  bool isOpaque = false;
+
+  ClassDeclNode(std::string_view n, int l, int c, int len)
+      : DeclNode(NodeKind::ClassDecl, l, c, len), name(n), destructor(nullptr) {
+  }
+};
+
+struct MemberAccessNode : public ExprNode {
+  ExprNode *object;
+  std::string_view memberName;
+  bool isMethodRef = false;
+  const FunctionDeclNode *resolvedMethod = nullptr;
+  uint32_t fieldIndex = 0;
+
+  bool isEnumMember = false;
+  const EnumMemberNode *enumMember = nullptr;
+
+  bool isStaticFieldRef = false;
+  const VarDeclNode *resolvedVar = nullptr;
+
+  /* Storage for explicit template arguments applied to method access */
+  llvm::ArrayRef<const Type *> templateArgs;
+
+  MemberAccessNode(ExprNode *obj, std::string_view mem, int l, int c, int len)
+      : ExprNode(NodeKind::MemberAccess, l, c, len), object(obj),
+        memberName(mem) {}
+};
+
+struct ArraySubscriptNode : public ExprNode {
+  ExprNode *base;
+  ExprNode *index;
+  mutable const FunctionDeclNode *overloadedOperator = nullptr;
+
+  ArraySubscriptNode(ExprNode *b, ExprNode *i, int l, int c, int len)
+      : ExprNode(NodeKind::ArraySubscript, l, c, len), base(b), index(i) {}
+};
+
+struct ArrayLiteralNode : public ExprNode {
+  llvm::ArrayRef<ExprNode *> elements;
+  ArrayLiteralNode(llvm::ArrayRef<ExprNode *> elems, int l, int c, int len)
+      : ExprNode(NodeKind::ArrayLiteral, l, c, len), elements(elems) {}
+};
+
+struct NewExprNode : public ExprNode {
+  const Type *allocatedType;
+  ExprNode *arraySize;
+  llvm::ArrayRef<ExprNode *> args;
+  llvm::ArrayRef<std::string_view> argNames;
+  bool hasParens;
+  const FunctionDeclNode *resolvedConstructor = nullptr;
+
+  NewExprNode(const Type *allocTy, ExprNode *arrSize,
+              llvm::ArrayRef<ExprNode *> a, llvm::ArrayRef<std::string_view> n,
+              bool hasParens, int l, int c, int len)
+      : ExprNode(NodeKind::New, l, c, len), allocatedType(allocTy),
+        arraySize(arrSize), args(a), argNames(n), hasParens(hasParens) {}
+};
+
+struct DeleteExprNode : public ExprNode {
+  ExprNode *ptr;
   bool isArray;
 
-  explicit DeleteNode(std::unique_ptr<ExprNode> ptr, bool isArr = false)
-      : pointerExpr(std::move(ptr)), isArray(isArr) {}
-
-  void accept(ASTVisitor *visitor) override;
+  DeleteExprNode(ExprNode *p, bool isArr, int l, int c, int len)
+      : ExprNode(NodeKind::Delete, l, c, len), ptr(p), isArray(isArr) {}
 };
 
-class MoveNode : public ExprNode {
-public:
-  std::unique_ptr<ExprNode> operand;
-  explicit MoveNode(std::unique_ptr<ExprNode> op) : operand(std::move(op)) {}
+struct ImplicitCastNode : public ExprNode {
+  ExprNode *expr;
+  const Type *targetType;
+  const FunctionDeclNode *conversionConstructor = nullptr;
 
-  void accept(ASTVisitor *visitor) override;
-};
-
-class BreakNode : public StmtNode {
-public:
-  void accept(ASTVisitor *visitor) override;
-};
-
-class ContinueNode : public StmtNode {
-public:
-  void accept(ASTVisitor *visitor) override;
-};
-
-enum class InlineState { None, Inline, ForceInline };
-
-class BinaryOpNode : public ExprNode {
-public:
-  std::string op;
-  std::unique_ptr<ExprNode> left;
-  std::unique_ptr<ExprNode> right;
-
-  BinaryOpNode(std::string o, std::unique_ptr<ExprNode> l,
-               std::unique_ptr<ExprNode> r)
-      : op(std::move(o)), left(std::move(l)), right(std::move(r)) {}
-
-  void accept(ASTVisitor *visitor) override;
-};
-
-class CallNode : public ExprNode {
-public:
-  std::string callee;
-  std::vector<std::unique_ptr<ExprNode>> arguments;
-  std::unique_ptr<ExprNode> object;
-
-  std::string resolvedMangledName;
-
-  CallNode(std::string name, std::vector<std::unique_ptr<ExprNode>> args,
-           std::unique_ptr<ExprNode> obj = nullptr)
-      : callee(std::move(name)), arguments(std::move(args)),
-        object(std::move(obj)) {}
-
-  void accept(ASTVisitor *visitor) override;
-};
-
-class CastNode : public ExprNode {
-public:
-  std::unique_ptr<ExprNode> operand;
-  std::string targetType;
-
-  CastNode(std::unique_ptr<ExprNode> op, std::string tType)
-      : operand(std::move(op)), targetType(std::move(tType)) {}
-
-  void accept(ASTVisitor *visitor) override;
-};
-
-class AssignNode : public StmtNode {
-public:
-  std::unique_ptr<ExprNode> target;
-  std::unique_ptr<ExprNode> value;
-  std::string op;
-
-  AssignNode(std::unique_ptr<ExprNode> t, std::unique_ptr<ExprNode> v,
-             std::string o = "=")
-      : target(std::move(t)), value(std::move(v)), op(std::move(o)) {}
-
-  void accept(ASTVisitor *visitor) override;
-};
-
-class SubscriptNode : public ExprNode {
-public:
-  std::unique_ptr<ExprNode> object;
-  std::unique_ptr<ExprNode> index;
-
-  SubscriptNode(std::unique_ptr<ExprNode> obj, std::unique_ptr<ExprNode> idx)
-      : object(std::move(obj)), index(std::move(idx)) {}
-
-  void accept(ASTVisitor *visitor) override;
-};
-
-class VarDeclNode : public StmtNode {
-public:
-  std::string typeName;
-  std::string name;
-  bool isConst;
-  bool isStatic;
-  std::vector<std::string> decorators;
-  std::unique_ptr<ExprNode> initializer;
-  std::vector<std::unique_ptr<ExprNode>> arraySizes;
-
-  VarDeclNode(std::string t, std::string n, bool c, bool st,
-              std::unique_ptr<ExprNode> init)
-      : typeName(std::move(t)), name(std::move(n)), isConst(c), isStatic(st),
-        initializer(std::move(init)) {}
-
-  void accept(ASTVisitor *visitor) override;
-};
-
-class ReturnNode : public StmtNode {
-public:
-  std::unique_ptr<ExprNode> returnValue;
-  explicit ReturnNode(std::unique_ptr<ExprNode> val)
-      : returnValue(std::move(val)) {}
-
-  void accept(ASTVisitor *visitor) override;
-};
-
-struct FunctionParam {
-  std::string type;
-  std::string name;
-  bool isRequired = false;
-  bool isThisAssign = false;
-  bool isConst = false;
-};
-
-class FunctionNode : public ASTNode {
-public:
-  InlineState inlineState;
-  AccessModifier access;
-  std::vector<std::string> decorators;
-  std::string returnType;
-  std::string name;
-  std::string mangledName;
-  std::vector<FunctionParam> args;
-  std::vector<std::unique_ptr<ASTNode>> body;
-
-  bool isConstMethod;
-  bool isMethod;
-  bool isStatic;
-  bool isConstructor;
-  bool isDestructor = false;
-  std::string className;
-
-  FunctionNode(InlineState is, AccessModifier acc,
-               std::vector<std::string> decs, std::string retT, std::string n,
-               std::vector<FunctionParam> a, bool isMeth = false,
-               bool isStat = false, bool isCtor = false, bool isDtor = false,
-               std::string cName = "", bool isConstMeth = false) // <-- AGREGADO
-      : inlineState(is), access(acc), decorators(std::move(decs)),
-        returnType(std::move(retT)), name(std::move(n)), args(std::move(a)),
-        isMethod(isMeth), isStatic(isStat), isConstructor(isCtor),
-        isDestructor(isDtor), className(std::move(cName)),
-        isConstMethod(isConstMeth) {}
-
-  void accept(ASTVisitor *visitor) override;
-};
-
-class StructDeclNode : public ASTNode {
-public:
-  std::string name;
-  bool isClass;
-
-  std::vector<std::string> interfaces;
-  std::string baseClass;
-
-  std::vector<std::string> decorators;
-  std::vector<StructField> fields;
-  std::vector<std::unique_ptr<FunctionNode>> methods;
-
-  StructDeclNode(std::string n, bool c) : name(std::move(n)), isClass(c) {}
-
-  void accept(ASTVisitor *visitor) override;
-};
-
-class ExtensionNode : public ASTNode {
-public:
-  std::string
-      targetTypedef; // The type we are extending (e.g., String, MyClass)
-  std::string name;  // Extension name
-  std::vector<std::unique_ptr<FunctionNode>> methods;
-
-  ExtensionNode(std::string target, std::string n)
-      : targetTypedef(std::move(target)), name(std::move(n)) {}
-
-  void accept(ASTVisitor *visitor) override;
-};
-
-class ProgramNode : public ASTNode {
-public:
-  std::vector<std::unique_ptr<StructDeclNode>> structs;
-  std::vector<std::unique_ptr<FunctionNode>> functions;
-  std::vector<std::unique_ptr<ExtensionNode>> extensions;
-  std::vector<std::unique_ptr<VarDeclNode>> globalVars;
-
-  void accept(ASTVisitor *visitor) override;
-};
-
-class ModuleNode : public ASTNode {
-public:
-  std::string filename;
-  std::vector<std::string> imports;
-  std::vector<std::unique_ptr<StructDeclNode>> structs;
-  std::vector<std::unique_ptr<FunctionNode>> functions;
-  std::vector<std::unique_ptr<ExtensionNode>> extensions;
-  std::vector<std::unique_ptr<VarDeclNode>> globalVars;
-
-  ModuleNode(const std::string &fname) : filename(fname) {}
-  void accept(ASTVisitor *visitor) override;
+  ImplicitCastNode(ExprNode *e, const Type *target,
+                   const FunctionDeclNode *ctor, int l, int c, int len)
+      : ExprNode(NodeKind::ImplicitCast, l, c, len), expr(e),
+        targetType(target), conversionConstructor(ctor) {}
 };
 
 } // namespace utopia

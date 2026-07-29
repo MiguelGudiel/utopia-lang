@@ -1,0 +1,56 @@
+/*
+ * Base route metadata directive.
+ * Requires a constant constructor to instantiate the annotation class 
+ * statically at compile time.
+ */
+annotation class Route {
+    char* path;
+    
+    const Route(char* p) {
+        path = p;
+    }
+}
+
+/*
+ * Dependency injection marker.
+ */
+annotation class Inject {
+    const Inject() {}
+}
+
+class DatabaseService {
+    int size;
+
+    DatabaseService() {
+
+    }
+
+    ~DatabaseService() {
+
+    }
+}
+
+/* * Attach the annotation to the class declaration.
+ * The parser intercepts the '@' token and parses it via parseAnnotations().
+ */
+@Route("/api/v1/users")
+class UserController {
+    
+    @Inject()
+    DatabaseService db;
+
+    @Route("/create")
+    void createUser() {
+        // ...
+    }
+    
+    @Route("/delete")
+    void deleteUser(int32 id) {
+        // ...
+    }
+}
+
+int main() {
+    UserController userController;
+    return 0;
+}

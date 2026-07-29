@@ -1,91 +1,61 @@
-import "IDrawable.utp";
-import "Entity.utp";
+import "utopia:test";
 
-char* msg = "¡Hello World!";
-
-struct Vec3 {
-  float x;
-  float y;
-  float z;
+struct Vector3 {
+    float32 x;
+    float32 y;
+    float32 z;
 }
 
-class Circle extends Entity implements IDrawable {
-  float radius;
-  Circle(this.radius, this.name) {
-  }
+class SpatialNode {
+    Vector3 position;
+    Vector3 rotation;
+    uint32 nodeId;
+    bool isActive;
 
-  void Draw() {
-    print(this.name, ":D");
-  }
+    SpatialNode(uint32 id) {
+        nodeId = id;
+        
+        position.x = 0.0f;
+        position.y = 0.0f;
+        position.z = 0.0f;
+    }
 
-  @override 
-  void Update() {
-    super.Update();
-    print("Circle updated", name);
-  }
+    ~SpatialNode() {
+        isActive = false;
+    }
 
-  inline float GetRadius() const {
-    return this.radius;
-  }
+    void applyVelocity(float32 vx, float32 vy, float32 vz, float32 deltaTime) {
+        /* Euler integration */
+        position.x = position.x + (vx * deltaTime);
+        position.y = position.y + (vy * deltaTime);
+        position.z = position.z + (vz * deltaTime);
+    }
 }
 
-// esto hace una suma chingona
-inline int sum(int a, int b) {
-  return a + b;
-}
-
-force_inline int sleep() {
-  double t = 0.0;
-  // Precise enough to avoid the infinite loop trap
-  while (t < 1000.0) {
-    t += 1.0 / 99999.0;
-  }
-  return t;
+annotation class AnnExample {
+    const AnnExample() {
+        int64 val = 0;
+    }
 }
 
 int main() {
-  char* msg2 = "Mamaguebo, digo glu glu glu";
-  Vec3 vec3;
-  vec3.x = 10;
-  vec3.y = 20.0;
-  vec3.z = 30;
-  print(msg);
-  print(msg2);
-  print("Vec3(", vec3.x, ", ", vec3.y, ", ", vec3.z, ");");
+    char letter = 'A';
+    char newline = '\n';
+    char tab = '\t';
 
-  sum(1, 2);
+    rune emoji = U'🚀';
+    rune kanji = U'字';
 
-  sleep();
+    char* greeting = "Hello from Utopia!";
 
-  Entity* c = new Circle(10.0, "Circle XD");
-  //c.Draw();
-  c.Update();
+    Vector3 gravity;
+    gravity.x = 0.0f;
+    gravity.y = -9.81f;
+    gravity.z = 0.0f;
 
-  sleep();
+    SpatialNode player = SpatialNode(100);
+    player.applyVelocity(15.5f, gravity.y, 0.0f, 0.016f);
 
-  int matrix[3][3];
-
-  for (int i = 0; i < 3; i++) {
-    for (int j = 0; j < 3; j++) {
-      matrix[i][j] = i + j;
-    }
-  }
-
-  int total = matrix[0][0] + matrix[1][1] + matrix[2][2];
-
-  print("La suma de la diagonal es:");
-  sleep();
-  print(total);
-
-  sleep();
-  float radius = 10;//c.GetRadius();
-  print(radius);
-
-  double t = 0;
-  while(t < 9000) {
-    t += 1.0 / 99999.0;
-  }
-
-  print(t);
-  return 0;
+    int status = sum(1, 2);
+    return status;
 }

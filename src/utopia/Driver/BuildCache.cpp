@@ -51,13 +51,9 @@ bool BuildCache::isUpToDate(const std::string &modulePath, uint64_t currentTime,
   std::vector<std::string> visited;
   visited.push_back(modulePath);
 
-  /*
-   * DFS through the dependency graph.
-   * We compare the child's cache timestamp against the parent's DISK timestamp.
-   * If a deep dependency mutates, its cache time will exceed the parent's,
-   * effectively poisoning the bloodline without needing OS filesystem checks.
-   * Rip and tear.
-   */
+  // Recursively check that all transitive imports are up-to-date.
+  // If any cached dependency has a timestamp newer than the parent's
+  // recorded timestamp, the module is considered stale.
   auto checkRecursively = [&](const std::string& node, auto& self) -> bool {
     auto impIt = modules.find(node);
     if (impIt == modules.end())

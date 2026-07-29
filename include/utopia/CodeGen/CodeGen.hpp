@@ -1,138 +1,119 @@
 #pragma once
-#include "utopia/AST/AST.hpp"
 #include "utopia/AST/ASTVisitor.hpp"
-#include <llvm/IR/DIBuilder.h>
+#include "utopia/CodeGen/BackendContext.hpp"
+#include "utopia/CodeGen/CodeGenContext.hpp"
+#include "utopia/Common/Diagnostics.hpp"
 #include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/InstrTypes.h>
 #include <llvm/IR/LLVMContext.h>
+#include <llvm/IR/MDBuilder.h>
 #include <llvm/IR/Module.h>
-#include <llvm/Target/TargetMachine.h>
-#include <map>
-#include <memory>
-#include <utopia/Common/Types.hpp>
-#include <vector>
+#include <llvm/IR/Value.h>
 
 namespace utopia {
-
-class CodeGen : public ASTVisitor {
+class CodeGen : public ASTVisitor<CodeGen, llvm::Value *> {
 public:
-  CodeGen(const std::string &sourceFile, bool isDebug);
-  void generate(ProgramNode *program);
-  void generate(ModuleNode *module, const std::string &outputObjPath,
-                const std::vector<ModuleNode *> &allModules);
-  void registerModules(const std::vector<ModuleNode *> &allModules);
-  void optimize(int level);
-  void saveToFile(const std::string &filename);
-  void emitObjectFile(const std::string &filename);
-  void emitAssemblyFile(const std::string &filename);
+  CodeGen(BackendContext &bCtx, llvm::Module &llvmMod, DiagnosticsEngine &diags)
+      : backend(bCtx), ctx(bCtx.getLLVMContext()), mod(llvmMod), builder(ctx),
+        diags(diags), mdBuilder(ctx) {
+    tbaaRoot = mdBuilder.createTBAARoot("Utopia TBAA");
+
+    llvm::FastMathFlags fmf;
+    fmf.setFast();
+    builder.setFastMathFlags(fmf);
+  }
+
+  llvm::Value *visit(const NumberNode *node);
+  llvm::Value *visit(const BoolNode *node);
+  llvm::Value *visit(const CharNode *node);
+  llvm::Value *visit(const RuneNode *node);
+  llvm::Value *visit(const StringNode *node);
+  llvm::Value *visit(const VariableNode *node);
+  llvm::Value *visit(const UnaryOpNode *node);
+  llvm::Value *visit(const BinaryOpNode *node);
+  llvm::Value *visit(const VarDeclNode *node);
+  llvm::Value *visit(const AssignNode *node);
+  llvm::Value *visit(const BlockNode *node);
+  llvm::Value *visit(const FunctionDeclNode *node);
+  llvm::Value *visit(const FunctionCallNode *node);
+  llvm::Value *visit(const IfNode *node);
+  llvm::Value *visit(const ForNode *node);
+  llvm::Value *visit(const WhileNode *node);
+  llvm::Value *visit(const ReturnNode *node);
+  llvm::Value *visit(const CastNode *node);
+  llvm::Value *visit(const ParamDeclNode *node);
+  llvm::Value *visit(const ModuleNode *node);
+  llvm::Value *visit(const MemberAccessNode *node);
+  llvm::Value *visit(const StructDeclNode *node);
+  llvm::Value *visit(const ClassDeclNode *node);
+  llvm::Value *visit(const AnnotationDeclNode *node);
+  llvm::Value *visit(const TypedefDeclNode *node);
+  llvm::Value *visit(const AnnotationNode *node);
+  llvm::Value *visit(const ArraySubscriptNode *node);
+  llvm::Value *visit(const NewExprNode *node);
+  llvm::Value *visit(const DeleteExprNode *node);
+  llvm::Value *visit(const ArrayLiteralNode *node);
+  llvm::Value *visit(const NullNode *node);
+  llvm::Value *visit(const EnumDeclNode *node);
+  llvm::Value *visit(const EnumMemberNode *node);
+  llvm::Value *visit(const ImplicitCastNode *node);
+
+  llvm::Value *createImplicitCast(llvm::Value *src, llvm::Type *destTy);
 
 private:
-  std::unique_ptr<llvm::LLVMContext> context;
-  std::unique_ptr<llvm::Module> module;
-  std::unique_ptr<llvm::IRBuilder<>> builder;
-  std::unique_ptr<llvm::TargetMachine> targetMachine;
+  BackendContext &backend;
+  llvm::LLVMContext &ctx;
+  llvm::Module &mod;
+  llvm::IRBuilder<> builder;
+  CodeGenContext cgCtx;
+  DiagnosticsEngine &diags;
+  const FunctionDeclNode *currentFunc = nullptr;
+  llvm::AllocaInst *lastTemporaryAlloca =
+      nullptr; // Tracks temporal aggregate allocations for RVO
 
-  // LIFO Stack for Variable Scoping
-  std::vector<std::vector<std::pair<std::string, llvm::Value *>>> valueScopes;
-  std::vector<std::map<std::string, TypeInfo>> typeScopes;
-  std::map<std::string, llvm::Value *> stringPool;
-  std::map<std::string, TypeInfo> globalVarTypes;
+  /* LLVM IR Metadata builders and trackers */
+  llvm::MDBuilder mdBuilder;
+  llvm::MDNode *tbaaRoot = nullptr;
+  std::unordered_map<const Type *, llvm::MDNode *> tbaaTypes;
 
-  // LIFO stacks for loop jumping
-  std::vector<llvm::BasicBlock *> breakTargets;
-  std::vector<llvm::BasicBlock *> continueTargets;
-  std::vector<size_t> loopScopeDepths;
+  llvm::Type *getLLVMType(const Type *type);
+  llvm::Value *getLValue(const ExprNode *node);
+  llvm::Value *evaluateAsReference(const ExprNode *expr);
+  llvm::Constant *evaluateAsConstant(const ExprNode *node);
+  llvm::Function *getOrCreateFunction(const FunctionDeclNode *node);
 
-  std::map<std::string, llvm::GlobalVariable *> vtables;
-  std::map<std::string, llvm::StructType *> vtableTypes;
-  std::map<std::string, std::map<std::string, int>> vtableLayout;
-  std::map<std::string, std::vector<std::string>> vtableMethods;
+  /* TBAA Context Resolution */
+  llvm::MDNode *getTBAATypeNode(const Type *type);
+  llvm::MDNode *getTBAAAccessTag(const Type *type);
+  llvm::MDNode *getTBAAStructAccessTag(const Type *baseType,
+                                       const Type *accessType, uint64_t offset);
+  llvm::MDNode *getTBAATagForExpr(const ExprNode *node);
 
-  std::map<std::string, StructDeclNode *> structASTs;
-  std::map<std::string, llvm::StructType *> structTypes;
-  std::map<std::string, std::map<std::string, int>> structMemberIndices;
-  std::map<std::string, std::map<std::string, TypeInfo>> structMemberTypes;
+  llvm::LoadInst *createTBAALoad(llvm::Type *llTy, llvm::Value *ptr,
+                                 const Type *utopiaTy,
+                                 const llvm::Twine &name = "");
+  llvm::LoadInst *createTBAALoad(llvm::Type *llTy, llvm::Value *ptr,
+                                 llvm::MDNode *tbaaTag,
+                                 const llvm::Twine &name = "");
 
-  std::map<std::string, TypeInfo> functionTypes;
-  std::map<std::string, std::vector<TypeInfo>> functionParamTypes;
+  llvm::StoreInst *createTBAAStore(llvm::Value *val, llvm::Value *ptr,
+                                   const Type *utopiaTy);
+  llvm::StoreInst *createTBAAStore(llvm::Value *val, llvm::Value *ptr,
+                                   llvm::MDNode *tbaaTag);
 
-  llvm::Value *currentVal = nullptr;
-  TypeInfo currentType;
-  std::string currentClass;
-  TypeInfo currentReturnType;
-  llvm::Value *currentLValue = nullptr;
-  bool isLValueContext = false;
-  
-  bool isSuperContext = false;
+  /* Lifetime Intrinsic Emission */
+  void emitLifetimeStart(llvm::AllocaInst *allocaInst, uint64_t size);
+  void emitLifetimeEnd(llvm::AllocaInst *allocaInst, uint64_t size);
 
-  llvm::Value *rvoTarget = nullptr;
-
-  bool isDebug;
-  std::unique_ptr<llvm::DIBuilder> dbgBuilder;
-  llvm::DICompileUnit *dbgCU = nullptr;
-  llvm::DIFile *dbgFile = nullptr;
-  std::vector<llvm::DIScope *> dbgScopes;
-  std::map<std::string, llvm::DIType *> debugTypes;
-
-  void enterScope();
-  void exitScope();
-  llvm::Value *lookupValue(const std::string &name);
-  TypeInfo lookupType(const std::string &name);
-
-  TypeInfo parseTypeString(const std::string &typeName) const;
-  llvm::Type *getLLVMType(const std::string &typeName);
-  llvm::Type *getLLVMType(const TypeInfo &type);
-
-  llvm::Value *castValue(llvm::Value *value, const TypeInfo &from,
-                         const TypeInfo &to);
-  void emitCopyOrStore(llvm::Value *destAddr, llvm::Value *srcVal,
-                       const TypeInfo &targetType, const TypeInfo &srcType);
-  void emitLifecycleLoop(llvm::Value *basePtr, llvm::Value *size,
-                         const std::string &typeName, bool isDestructor);
-  void emitScopeCleanup(size_t targetDepth);
-  llvm::Value *getOrCreateString(const std::string &str);
-
-  llvm::FunctionCallee getMallocPrototype();
-  llvm::FunctionCallee getFreePrototype();
-  llvm::FunctionCallee getPrintfPrototype();
-
-  void emitLocation(ASTNode *node);
-  llvm::DIType *getDebugType(const TypeInfo &type);
-
-  void visit(ThisNode *node) override;
-  void visit(SuperNode *node) override;
-  void visit(StructDeclNode *node) override;
-  void visit(ExtensionNode *node) override;
-  void visit(MemberAccessNode *node) override;
-  void visit(BlockNode *node) override;
-  void visit(NullLiteralNode *node) override;
-  void visit(IfNode *node) override;
-  void visit(WhileNode *node) override;
-  void visit(ForNode *node) override;
-  void visit(BreakNode *node) override;
-  void visit(ContinueNode *node) override;
-  void visit(NullAssertNode *node) override;
-  void visit(LogicalNotNode *node) override;
-  void visit(NumberNode *node) override;
-  void visit(FloatNode *node) override;
-  void visit(BoolNode *node) override;
-  void visit(StringNode *node) override;
-  void visit(UnaryMinusNode *node) override;
-  void visit(SubscriptNode *node) override;
-  void visit(VariableNode *node) override;
-  void visit(AddressOfNode *node) override;
-  void visit(DerefNode *node) override;
-  void visit(NewNode *node) override;
-  void visit(DeleteNode *node) override;
-  void visit(MoveNode *node) override;
-  void visit(BinaryOpNode *node) override;
-  void visit(CallNode *node) override;
-  void visit(CastNode *node) override;
-  void visit(AssignNode *node) override;
-  void visit(VarDeclNode *node) override;
-  void visit(ReturnNode *node) override;
-  void visit(FunctionNode *node) override;
-  void visit(ProgramNode *node) override;
-  void visit(ModuleNode *node) override;
+  void emitConstructorCall(const FunctionCallNode *node,
+                           llvm::Value *targetAddr);
+  void emitArrayLiteralInit(llvm::Value *targetAddr, const Type *targetType,
+                            const ExprNode *initExpr);
+  llvm::AllocaInst *createEntryBlockAlloca(llvm::Type *type,
+                                           const std::string &varName);
+  void emitDefaultInitialization(llvm::Value *ptr, const Type *type);
+  void emitCleanupCall(llvm::Value *ptr, const FunctionDeclNode *dtor);
+  void emitScopeCleanups();
 };
 
 } // namespace utopia

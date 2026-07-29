@@ -1,152 +1,253 @@
 #pragma once
-#include "utopia/AST/AST.hpp"
 #include "utopia/AST/ASTVisitor.hpp"
 #include "utopia/Common/Types.hpp"
-#include <map>
-#include <string>
+#include "utopia/Sema/SemaContext.hpp"
+#include <memory>
+#include <unordered_set>
 #include <vector>
 
 namespace utopia {
 
-std::string typeToString(const TypeInfo &t);
+/*
+ * Strips indirection to evaluate core type compatibility, now safely stripping
+ * both LValue and RValue references.
+ */
+static bool canImplicitlyCast(const Type *from, const Type *to,
+                              bool allowUserDefined = true) {
+  if (!from || !to)
+    return false;
 
-class Sema : public ASTVisitor {
+  if (from == to)
+    return true;
+
+  const Type *baseFrom = from;
+  if (from->isReferenceType()) {
+    baseFrom = static_cast<const ReferenceType *>(from)->getPointeeType();
+  } else if (from->getKind() == TypeKind::RValueReference) {
+    baseFrom = static_cast<const RValueReferenceType *>(from)->getPointeeType();
+  }
+
+  const Type *baseTo = to;
+  if (to->isReferenceType()) {
+    baseTo = static_cast<const ReferenceType *>(to)->getPointeeType();
+  } else if (to->getKind() == TypeKind::RValueReference) {
+    baseTo = static_cast<const RValueReferenceType *>(to)->getPointeeType();
+  }
+
+  if (baseFrom == baseTo)
+    return true;
+
+  /* Resolve underlying entity traits to bypass opaque typedefs and const
+   * qualifiers */
+  const Type *unqualFrom = baseFrom->getUnqualifiedType();
+  const Type *unqualTo = baseTo->getUnqualifiedType();
+
+  /* Process user-defined single-argument conversion constructors */
+  if (allowUserDefined && (unqualTo->getKind() == TypeKind::Class ||
+                           unqualTo->getKind() == TypeKind::Struct)) {
+    auto *recTy = static_cast<const RecordType *>(unqualTo);
+    if (auto *decl = recTy->getDeclaration()) {
+      llvm::ArrayRef<FunctionDeclNode *> ctors;
+      if (decl->kind == NodeKind::ClassDecl)
+        ctors = static_cast<const ClassDeclNode *>(decl)->constructors;
+      else if (decl->kind == NodeKind::StructDecl)
+        ctors = static_cast<const StructDeclNode *>(decl)->constructors;
+
+      for (auto *ctor : ctors) {
+        if (ctor->params.size() == 2) {
+          if (canImplicitlyCast(from, ctor->params[1]->type, false))
+            return true;
+        }
+      }
+    }
+  }
+
+  if (unqualFrom->getKind() == TypeKind::Enum &&
+      unqualTo->getKind() == TypeKind::Enum) {
+    return unqualFrom == unqualTo;
+  }
+
+  if (unqualFrom->getKind() == TypeKind::Array &&
+      unqualTo->getKind() == TypeKind::Array) {
+    auto *arrFrom = static_cast<const ArrayType *>(unqualFrom);
+    auto *arrTo = static_cast<const ArrayType *>(unqualTo);
+
+    /* Allow empty or un-typed array literals to bind to expected target array
+     * type */
+    if (arrFrom->getSize() == 0 || arrFrom->getElementType()->isVoid())
+      return true;
+
+    if (arrFrom->getSize() == arrTo->getSize())
+      return canImplicitlyCast(arrFrom->getElementType(),
+                               arrTo->getElementType(), allowUserDefined);
+  }
+
+  if (unqualFrom == unqualTo) {
+    if (!baseFrom->isConstQualified() || baseTo->isConstQualified())
+      return true;
+  }
+
+  if (unqualFrom->getKind() == TypeKind::Array && unqualTo->isPointerType()) {
+    const Type *elemTy =
+        static_cast<const ArrayType *>(unqualFrom)->getElementType();
+    const Type *toPointee =
+        static_cast<const PointerType *>(unqualTo)->getPointeeType();
+    if (toPointee->isVoid() ||
+        elemTy->getUnqualifiedType() == toPointee->getUnqualifiedType())
+      return true;
+  }
+
+  if (unqualFrom->isPointerType() && unqualTo->isPointerType()) {
+    const Type *fromPointee =
+        static_cast<const PointerType *>(unqualFrom)->getPointeeType();
+    const Type *toPointee =
+        static_cast<const PointerType *>(unqualTo)->getPointeeType();
+
+    /* Universal null pointer interoperability */
+    if (toPointee->isVoid() || fromPointee->isVoid())
+      return true;
+
+    /* Enforce strict parameter structural equality for function pointer
+     * assignments */
+    if (fromPointee->getKind() == TypeKind::Function &&
+        toPointee->getKind() == TypeKind::Function) {
+      auto fF = static_cast<const FunctionType *>(fromPointee);
+      auto fT = static_cast<const FunctionType *>(toPointee);
+      if (fF->getReturnType()->getUnqualifiedType() !=
+          fT->getReturnType()->getUnqualifiedType())
+        return false;
+      if (fF->getParamTypes().size() != fT->getParamTypes().size())
+        return false;
+      for (size_t i = 0; i < fF->getParamTypes().size(); i++) {
+        if (fF->getParamTypes()[i]->getUnqualifiedType() !=
+            fT->getParamTypes()[i]->getUnqualifiedType())
+          return false;
+      }
+      return true;
+    }
+
+    return fromPointee->getUnqualifiedType() == toPointee->getUnqualifiedType();
+  }
+
+  return unqualFrom->isNumeric() && unqualTo->isNumeric();
+}
+
+class SemaPass {
 public:
-  bool analyze(ProgramNode *program);
-  const std::vector<ErrorInfo> &getErrors() const { return errors; }
-  bool analyzeModules(const std::vector<ModuleNode *> &modules);
+  virtual ~SemaPass() = default;
+  virtual bool run(const ModuleNode *module, SemaContext &ctx) = 0;
+  virtual const char *getName() const = 0;
+};
+
+class DeclCollectorPass : public SemaPass,
+                          public ASTVisitor<DeclCollectorPass, void> {
+  std::unordered_set<const ModuleNode *> visitedModules;
+
+public:
+  SemaContext *ctx = nullptr;
+  bool run(const ModuleNode *module, SemaContext &context) override;
+  const char *getName() const override { return "DeclarationCollector"; }
+
+  void visit(const ModuleNode *node);
+  void visit(const FunctionDeclNode *node);
+  void visit(const VarDeclNode *node);
+  void visit(const StructDeclNode *node);
+  void visit(const ClassDeclNode *node);
+  void visit(const TypedefDeclNode *node);
+  void visit(const AnnotationDeclNode *node);
+  void visit(const EnumDeclNode *node);
+  void visit(const EnumMemberNode *node) {}
+
+  void visit(const AnnotationNode *node) {}
+  void visit(const NumberNode *) {}
+  void visit(const BoolNode *) {}
+  void visit(const CharNode *) {}
+  void visit(const RuneNode *) {}
+  void visit(const StringNode *) {}
+  void visit(const VariableNode *) {}
+  void visit(const UnaryOpNode *) {}
+  void visit(const BinaryOpNode *) {}
+  void visit(const AssignNode *) {}
+  void visit(const BlockNode *) {}
+  void visit(const FunctionCallNode *) {}
+  void visit(const IfNode *node);
+  void visit(const ForNode *node);
+  void visit(const WhileNode *node);
+  void visit(const ReturnNode *) {}
+  void visit(const CastNode *) {}
+  void visit(const ParamDeclNode *) {}
+  void visit(const MemberAccessNode *) {}
+  void visit(const ArraySubscriptNode *) {}
+  void visit(const ArrayLiteralNode *) {}
+  void visit(const NewExprNode *) {}
+  void visit(const DeleteExprNode *) {}
+  void visit(const NullNode *) {}
+  void visit(const ImplicitCastNode *node) {}
+};
+
+class TypeCheckPass : public SemaPass,
+                      public ASTVisitor<TypeCheckPass, SemaResult> {
+  SemaContext *ctx = nullptr;
+  std::unordered_set<const ModuleNode *> visitedModules;
 
 private:
-  struct Symbol {
-    TypeInfo type;
-    bool isConst;
-  };
-
-  struct StructDef {
-    bool isClass;
-    bool hasVTable = false;
-    std::string baseClass;
-
-    struct Field {
-      TypeInfo type;
-      AccessModifier mod;
-      int index;
-      bool isStatic;
-    };
-    std::map<std::string, Field> fields;
-
-    // Map method name to its index in the VTable
-    std::map<std::string, int> vtableLayout;
-    std::vector<std::string> vtableMethods; // Exact order of the table
-    std::vector<int> constructorArities;
-  };
-
-  struct OverloadCandidate {
-    std::string mangledName;
-    std::vector<TypeInfo> paramTypes;
-    TypeInfo returnType;
-  };
-  std::map<std::string, std::vector<OverloadCandidate>> overloadTable;
-
-  std::map<std::string, StructDeclNode *> structASTs;
-  std::map<std::string, StructDef> customStructs;
-  std::map<std::string, std::string> copyConstructors;
-
-  std::vector<std::map<std::string, Symbol>> scopeStack;
-  std::vector<ErrorInfo> errors;
-
-  std::map<std::string, TypeInfo> functionTypes;
-  TypeInfo currentExprType;
-  TypeInfo currentReturnType;
-  std::string currentClass;
-
-  std::map<std::string, Symbol> globalSymbols;
-  std::string currentModuleFile;
-  std::map<std::string, std::string> classModuleMap;
-
-  int loopDepth = 0;
-  bool inStaticMethod = false;
-  bool isProcessingExtension = false;
-
-  void enterScope();
-  void exitScope();
-  Symbol *lookup(const std::string &name);
-
-  void reportError(ASTNode *node, const std::string &message);
-  TypeInfo parseType(const std::string &typeName, ASTNode *node = nullptr);
-  bool checkAssignment(const TypeInfo &target, const TypeInfo &source,
-                       ASTNode *node);
-
-  void registerOverload(const std::string &baseName,
-                        const std::string &mangledName,
-                        const std::vector<TypeInfo> &params,
-                        const TypeInfo &ret);
-  int getConversionCost(const TypeInfo &target, const TypeInfo &source);
-  std::string resolveOverload(const std::string &baseName,
-                              const std::vector<TypeInfo> &argTypes,
-                              ASTNode *node, TypeInfo &outReturnType);
-
-  bool methodExistsInClass(const std::string &className,
-                           const std::string &methodName);
-  void validateInterfaceCompliance(StructDeclNode *node,
-                                   const std::string &interfaceName);
-  bool hasClassField(StructDeclNode *node, const std::string &name,
-                     const std::string &type);
-  bool hasClassMethod(StructDeclNode *node, FunctionNode *m);
-  std::string resolveParamType(StructDeclNode *node,
-                               const FunctionParam &param);
-  int getInheritanceDistance(const std::string &derived,
-                             const std::string &base);
+  const FunctionDeclNode *
+  resolveOverloadedOperator(const Type *lhsType, std::string_view opName,
+                            const std::vector<ExprNode *> &args);
 
 public:
-  std::map<ASTNode *, TypeInfo> nodeTypes;
-  const std::map<std::string, StructDef> &getCustomStructs() const {
-    return customStructs;
-  }
-  const std::map<std::string, TypeInfo> &getFunctionTypes() const {
-    return functionTypes;
-  }
-  const std::map<std::string, std::vector<OverloadCandidate>> &
-  getOverloadTable() const {
-    return overloadTable;
-  }
+  bool run(const ModuleNode *module, SemaContext &context) override;
+  const char *getName() const override { return "TypeChecker"; }
 
-private:
-  void visit(ThisNode *node) override;
-  void visit(SuperNode *node) override;
-  void visit(StructDeclNode *node) override;
-  void visit(ExtensionNode *node) override;
-  void visit(MemberAccessNode *node) override;
-  void visit(BlockNode *node) override;
-  void visit(NullLiteralNode *node) override;
-  void visit(IfNode *node) override;
-  void visit(WhileNode *node) override;
-  void visit(ForNode *node) override;
-  void visit(BreakNode *node) override;
-  void visit(ContinueNode *node) override;
-  void visit(NullAssertNode *node) override;
-  void visit(LogicalNotNode *node) override;
-  void visit(NumberNode *node) override;
-  void visit(FloatNode *node) override;
-  void visit(BoolNode *node) override;
-  void visit(StringNode *node) override;
-  void visit(UnaryMinusNode *node) override;
-  void visit(SubscriptNode *node) override;
-  void visit(VariableNode *node) override;
-  void visit(AddressOfNode *node) override;
-  void visit(DerefNode *node) override;
-  void visit(NewNode *node) override;
-  void visit(DeleteNode *node) override;
-  void visit(MoveNode *node) override;
-  void visit(BinaryOpNode *node) override;
-  void visit(CallNode *node) override;
-  void visit(CastNode *node) override;
-  void visit(AssignNode *node) override;
-  void visit(VarDeclNode *node) override;
-  void visit(ReturnNode *node) override;
-  void visit(FunctionNode *node) override;
-  void visit(ProgramNode *node) override;
-  void visit(ModuleNode *node) override;
+  // Check type access visibility to avoid escaping private types across files
+  bool checkTypeVisibility(const Type *type, const ASTNode *node);
+  const Type *resolveIfTemplate(const Type *t);
+  void checkImplicitCastWarning(const Type *from, const Type *to,
+                                const ASTNode *node);
+  ExprNode *performImplicitConversion(ExprNode *expr, const Type *to);
+
+  SemaResult visit(const NumberNode *node);
+  SemaResult visit(const BoolNode *node);
+  SemaResult visit(const CharNode *node);
+  SemaResult visit(const RuneNode *node);
+  SemaResult visit(const StringNode *node);
+  SemaResult visit(const VariableNode *node);
+  SemaResult visit(const UnaryOpNode *node);
+  SemaResult visit(const BinaryOpNode *node);
+  SemaResult visit(const VarDeclNode *node);
+  SemaResult visit(const AssignNode *node);
+  SemaResult visit(const BlockNode *node);
+  SemaResult visit(const FunctionDeclNode *node);
+  SemaResult visit(const FunctionCallNode *node);
+  SemaResult visit(const IfNode *node);
+  SemaResult visit(const ForNode *node);
+  SemaResult visit(const WhileNode *node);
+  SemaResult visit(const ReturnNode *node);
+  SemaResult visit(const CastNode *node);
+  SemaResult visit(const ParamDeclNode *node);
+  SemaResult visit(const ModuleNode *node);
+  SemaResult visit(const StructDeclNode *node);
+  SemaResult visit(const ClassDeclNode *node);
+  SemaResult visit(const MemberAccessNode *node);
+  SemaResult visit(const AnnotationDeclNode *node);
+  SemaResult visit(const TypedefDeclNode *node);
+  SemaResult visit(const AnnotationNode *node);
+  SemaResult visit(const ArraySubscriptNode *node);
+  SemaResult visit(const ArrayLiteralNode *node);
+  SemaResult visit(const NewExprNode *node);
+  SemaResult visit(const DeleteExprNode *node);
+  SemaResult visit(const NullNode *node);
+  SemaResult visit(const EnumDeclNode *node);
+  SemaResult visit(const EnumMemberNode *node);
+  SemaResult visit(const ImplicitCastNode *node);
+};
+
+class SemaPipeline {
+  std::vector<std::unique_ptr<SemaPass>> passes;
+
+public:
+  SemaPipeline();
+  bool run(const ModuleNode *module, SemaContext &ctx);
 };
 
 } // namespace utopia

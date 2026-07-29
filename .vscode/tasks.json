@@ -2,18 +2,35 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "compile-utopia",
+      "label": "build-compiler-cpp",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "--build",
+        "${workspaceFolder}/build",
+        "--parallel"
+      ],
+      "group": {
+        "kind": "build",
+        "default": true
+      },
+      "problemMatcher": [
+        "$gcc"
+      ],
+      "detail": "Compila el código fuente del compilador (C++)"
+    },
+    {
+      "label": "compile-utopia-file",
       "type": "shell",
       "command": "${workspaceFolder}/build/tools/utopia/utopia",
       "args": [
         "${file}",
         "-O0"
       ],
-      "group": {
-        "kind": "build",
-        "default": true
-      },
-      "problemMatcher": []
+      "dependsOn": "build-compiler-cpp",
+      "group": "build",
+      "problemMatcher": [],
+      "detail": "Compila el archivo .utp actual usando el binario utopia"
     }
   ]
 }

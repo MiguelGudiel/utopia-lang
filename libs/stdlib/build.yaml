@@ -1,0 +1,14 @@
+project:
+  name: "utopia"
+  version: "0.1.0"
+
+build:
+  target: library
+  output_dir: "build/lib"
+  include_dirs:
+    - "."
+  sources:
+    - "lib/test.utp"
+    - "lib/ffi.utp"
+  linker_flags:
+    - "-ldl"
