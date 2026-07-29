@@ -1,0 +1,217 @@
+class String {
+  private uint8* data;
+  private uint64 len;
+  private uint64 cap;
+
+  /* Internal utilities for memory and string length evaluation to avoid 
+     heavy external dependencies inside the prelude. */
+  private static uint64 c_strlen(const uint8* str) {
+    if (str == null) 
+    {
+      return 0;
+    }
+    uint64 i = 0;
+    while (str[i] != 0) {
+      i++;
+    }
+    return i;
+  }
+
+  private static void c_strcpy(uint8* dest, const uint8* src, uint64 length) {
+    for (uint64 i = 0; i < length; i++) {
+      dest[i] = src[i];
+    }
+    dest[length] = 0;
+  }
+
+  public String() {
+    this.len = 0;
+    this.cap = 15;
+    this.data = new uint8[16];
+    this.data[0] = 0;
+  }
+
+  public String(const uint8* str) {
+    if (str == null) {
+      this.len = 0;
+      this.cap = 15;
+      this.data = new uint8[16];
+      this.data[0] = 0;
+      return;
+    }
+    this.len = String.c_strlen(str);
+    this.cap = this.len + 15;
+    this.data = new uint8[this.cap + 1];
+    String.c_strcpy(this.data, str, this.len);
+  }
+
+  public String(const String& other) {
+    this.len = other.len;
+    this.cap = other.cap;
+    this.data = new uint8[this.cap + 1];
+    String.c_strcpy(this.data, other.data, this.len);
+  }
+
+  public ~String() {
+    if (this.data != null) {
+      delete[] this.data;
+    }
+  }
+
+  public void operator=(const String& other) {
+    if (this.data != null) {
+      delete[] this.data;
+    }
+    this.len = other.len;
+    this.cap = other.cap;
+    this.data = new uint8[this.cap + 1];
+    String.c_strcpy(this.data, other.data, this.len);
+  }
+
+  public void operator=(const uint8* str) {
+    if (this.data != null) {
+      delete[] this.data;
+    }
+    if (str == null) {
+      this.len = 0;
+      this.cap = 15;
+      this.data = new uint8[16];
+      this.data[0] = 0;
+      return;
+    }
+    this.len = String.c_strlen(str);
+    this.cap = this.len + 15;
+    this.data = new uint8[this.cap + 1];
+    String.c_strcpy(this.data, str, this.len);
+  }
+
+  public bool operator==(const String& other) {
+    if (this.len != other.len) { return false;}
+    for (uint64 i = 0; i < this.len; i++) {
+      if (this.data[i] != other.data[i]) { return false; }
+    }
+    return true;
+  }
+
+  public bool operator==(const uint8* str) {
+    if (str == null) { return this.len == 0; }
+    uint64 str_len = String.c_strlen(str);
+    if (this.len != str_len) { return false; }
+    for (uint64 i = 0; i < this.len; i++) {
+      if (this.data[i] != str[i]) { return false; }
+    }
+    return true;
+  }
+
+  public bool operator!=(const String& other) {
+    /* Dereference this pointer to invoke the overloaded operator== */
+    return !(*this == other);
+  }
+
+  public bool operator!=(const uint8* str) {
+    return !(*this == str);
+  }
+
+  public String operator+(const String& other) {
+      String result;
+      result.len = this.len + other.len;
+      result.cap = result.len + 15;
+        
+      delete[] result.data; 
+      result.data = new uint8[result.cap + 1];
+
+      String.c_strcpy(result.data, this.data, this.len);
+      for (uint64 i = 0; i < other.len; i++) {
+          result.data[this.len + i] = other.data[i];
+      }
+      result.data[result.len] = 0;
+
+      return result;
+  }
+
+  public String operator+(const uint8* str) {
+    String result;
+    if (str == null) {
+      result = *this; 
+      return result;
+    }
+
+    uint64 str_len = String.c_strlen(str);
+    result.len = this.len + str_len;
+    result.cap = result.len + 15;
+        
+    delete[] result.data;
+    result.data = new uint8[result.cap + 1];
+
+    String.c_strcpy(result.data, this.data, this.len);
+    for (uint64 i = 0; i < str_len; i++) {
+      result.data[this.len + i] = str[i];
+    }
+    result.data[result.len] = 0;
+
+    return result;
+  }
+
+  public String operator+(uint8 c) {
+    String result = *this;
+    result.push_back(c);
+    return result;
+  }
+
+  public uint8& operator[](uint64 index) {
+    return this.data[index];
+  }
+
+  public uint64 length() {
+    return this.len;
+  }
+
+  public uint64 capacity() {
+    return this.cap;
+  }
+
+  public const uint8* c_str() {
+    return this.data;
+  }
+
+  public void clear() {
+    this.len = 0;
+    this.data[0] = 0;
+  }
+
+  public void push_back(uint8 c) {
+    if (this.len >= this.cap) {
+      this.cap = this.cap * 2 + 15;
+      uint8* new_data = new uint8[this.cap + 1];
+      String.c_strcpy(new_data, this.data, this.len);
+      delete[] this.data;
+      this.data = new_data;
+    }
+    this.data[this.len] = c;
+    this.len++;
+    this.data[this.len] = 0;
+  }
+}
+
+/* Global operator overloads to support commutativity when primitives 
+   are on the left-hand side of the expression. */
+
+String operator+(const uint8* lhs, const String& rhs) {
+  String res = lhs;
+  return res + rhs;
+}
+
+String operator+(uint8 lhs, const String& rhs) {
+  String res;
+  res.push_back(lhs);
+  return res + rhs;
+}
+
+bool operator==(const uint8* lhs, const String& rhs) {
+  /* Reverse the operands to reuse the internal class logic */
+  return rhs == lhs;
+}
+
+bool operator!=(const uint8* lhs, const String& rhs) {
+  return rhs != lhs;
+}

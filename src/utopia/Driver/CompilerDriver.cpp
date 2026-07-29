@@ -1,191 +1,241 @@
 #include "utopia/Driver/CompilerDriver.hpp"
-#include "Linker.hpp"
-#include "utopia/CodeGen/CodeGen.hpp"
-#include "utopia/Common/Types.hpp"
-#include "utopia/Driver/BuildCache.hpp"
+#include "utopia/CodeGen/BackendContext.hpp"
+#include "utopia/Common/Logger.hpp"
+#include "utopia/Common/Timer.hpp"
+#include "utopia/Driver/Backend.hpp"
+#include "utopia/Driver/Compiler.hpp"
+#include "utopia/Driver/Linker.hpp"
 #include "utopia/Driver/ModuleLoader.hpp"
 #include "utopia/Sema/Sema.hpp"
-#include <chrono>
-#include <fstream>
+
 #include <iostream>
-#include <sstream>
+#include <llvm/ExecutionEngine/Orc/LLJIT.h>
+#include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
+#include <llvm/Support/TargetSelect.h>
+#include <unordered_set>
 
 namespace utopia {
 
 CompilerDriver::CompilerDriver(const CompileOptions &options)
     : options(options) {}
 
-std::string CompilerDriver::readFile(const std::string &path) {
-  std::ifstream file(path);
-  std::stringstream buffer;
-  buffer << file.rdbuf();
-  return buffer.str();
-}
-
-static uint64_t getLocalFileTimestamp(const fs::path &path) {
-  auto ftime = fs::last_write_time(path);
-  auto sysTime = std::chrono::clock_cast<std::chrono::system_clock>(ftime);
-
-  return std::chrono::duration_cast<std::chrono::seconds>(
-             sysTime.time_since_epoch())
-      .count();
-}
-
-fs::path CompilerDriver::getObjPath(const ModuleNode *mod,
+fs::path CompilerDriver::getObjPath(const std::string &filename,
                                     const fs::path &internalPath,
                                     const fs::path &projRoot,
                                     const fs::path &objDir) {
-  fs::path modPath(mod->filename);
-  std::error_code ec;
   fs::path relPath;
+  std::string targetProjectName;
 
-  // Standard library modules are exiled to their own 'std' subtree
-  // to prevent namespace collisions with local project files.
-  if (!internalPath.empty() &&
-      modPath.string().find(internalPath.string()) == 0) {
-    relPath = "std" / fs::relative(modPath, internalPath, ec);
-  } else if (!projRoot.empty()) {
-    relPath = fs::relative(modPath, projRoot, ec);
+  fs::path absInternal = fs::absolute(internalPath);
+  fs::path absProj = fs::absolute(projRoot);
+  fs::path absStdlib = fs::absolute(options.stdlibRoot);
+  fs::path absPrelude = fs::absolute(options.preludeRoot);
 
-    // Modules escaping the project tree via '../' are sequestered
-    // into the 'ext' directory to maintain a clean build structure.
-    if (ec || relPath.string().find("..") != std::string::npos) {
-      relPath = "ext" / modPath.filename();
-    }
+  std::string internalStr = absInternal.string();
+  std::string projStr = absProj.string();
+  std::string stdlibStr = absStdlib.string();
+  std::string preludeStr = absPrelude.string();
+
+  if (internalStr.find(projStr) == 0) {
+    relPath = fs::relative(absInternal, absProj);
+    targetProjectName = options.projectName;
+  } else if (internalStr.find(stdlibStr) == 0) {
+    relPath = fs::relative(absInternal, absStdlib);
+    targetProjectName = "stdlib";
+  } else if (internalStr.find(preludeStr) == 0) {
+    relPath = fs::relative(absInternal, absPrelude);
+    targetProjectName = "prelude";
   } else {
-    relPath = modPath.filename();
+    relPath = absInternal.lexically_relative(fs::current_path());
+    targetProjectName = "external";
+
+    std::string sanitized = relPath.string();
+    size_t pos;
+    while ((pos = sanitized.find("../")) != std::string::npos) {
+      sanitized.replace(pos, 3, "__/");
+    }
+    relPath = fs::path(sanitized);
   }
 
-  relPath.replace_extension(".o");
-  return objDir / relPath;
+  fs::path targetDir =
+      objDir / "obj" / targetProjectName / relPath.parent_path();
+  if (!fs::exists(targetDir)) {
+    fs::create_directories(targetDir);
+  }
+
+  fs::path finalPath = targetDir / filename;
+  Logger::debug("[Driver Debug] Mapped artifact base path: " +
+                finalPath.string());
+  return finalPath;
 }
 
 bool CompilerDriver::run() {
-  ModuleLoader loader;
-  fs::path sourceDir = fs::path(options.sourcePath).parent_path();
-  loader.addSearchPath(sourceDir);
+  fs::path outDir(options.outputDir);
+  if (!fs::exists(outDir)) {
+    fs::create_directories(outDir);
+  }
 
-  for (const auto &dir : options.includeDirs)
-    loader.addSearchPath(dir);
+  Logger::debug("[Driver] Starting compilation for: " + options.sourcePath);
 
-#ifdef UTOPIA_DEBUG_BUILD
-  fs::path internalPath = fs::path(UTOPIA_SOURCE_DIR) / "libs";
-#else
-  fs::path internalPath = UTOPIA_INTERNAL_LIB_PATH;
-#endif
+  fs::path entryPath = fs::absolute(options.sourcePath);
+  std::string entryStr = entryPath.string();
 
-  if (fs::exists(internalPath)) {
-    loader.setSystemPath(internalPath);
-  } else {
-    std::cerr << "error: standard library not found at " << internalPath
-              << "\n";
+  DiagnosticsEngine diagEngine;
+  ASTContext astCtx;
+  ModuleNode *root = nullptr;
+
+  ModuleLoaderConfig modConfig;
+  modConfig.projectRoot = options.projectRoot;
+  modConfig.stdlibRoot = options.stdlibRoot;
+  modConfig.preludeRoot = options.preludeRoot;
+
+  ModuleLoader loader(astCtx, modConfig, diagEngine);
+
+  {
+    ScopedTimer timer("Lexer + Parser + Module Loading");
+    root = loader.loadModule(entryStr);
+  }
+
+  if (!root || diagEngine.hasErrors()) {
+    std::cerr << "[Fatal] Syntax or import errors found." << std::endl;
     return false;
   }
 
-  fs::path preludePath = internalPath / "std" / "prelude.utp";
-  if (!fs::exists(preludePath)) {
-    std::cerr << "Warning: Prelude not found at " << preludePath
-              << ". Global scope will be empty.\n";
-  } else {
-    loader.loadModule("std:prelude", internalPath);
-  }
+  Logger::debug("[Driver] AST generated successfully.");
 
-  ModuleNode *root = loader.loadModule(options.sourcePath, sourceDir);
-  if (!root) {
-    std::cerr << "Failed to load main module: " << options.sourcePath << "\n";
-    return false;
-  }
-  loader.setRootModule(root);
+  {
+    ScopedTimer timer("Semantic Analysis Pipeline");
+    SemaContext semaCtx(astCtx, diagEngine, entryStr);
+    SemaPipeline pipeline;
 
-  Sema sema;
-  if (!sema.analyzeModules(loader.getAllModules())) {
-    for (auto &err : sema.getErrors()) {
-      std::cerr << err.message << "\n";
+    if (!pipeline.run(root, semaCtx) || diagEngine.hasErrors()) {
+      std::cerr << "[Fatal] Semantic errors found." << std::endl;
+      return false;
     }
-    return false;
+    Logger::debug("[Driver] Semantic Analysis passed.");
   }
 
-  fs::path buildDir = fs::path(options.outputPath).parent_path();
-  fs::path objDir = buildDir / "obj";
-  fs::path cacheDir = buildDir / "cache";
+  BackendContext backendCtx;
+  std::vector<std::string> compiledObjects;
+  std::unordered_set<const ModuleNode *> compiledModules;
+  fs::path projRootFs(options.projectRoot);
 
-  fs::create_directories(objDir);
-  fs::create_directories(cacheDir);
+  auto compileTranslationUnit = [&](const ModuleNode *modNode,
+                                    auto &self) -> bool {
+    if (compiledModules.contains(modNode))
+      return true;
+    compiledModules.insert(modNode);
 
-  BuildCache cache(cacheDir / "build_cache.json");
-  cache.load();
-
-  std::vector<std::string> objFiles;
-  std::vector<ModuleNode *> modulesToCompile;
-
-  fs::path projRoot = options.projectRoot.empty()
-                          ? fs::current_path()
-                          : fs::path(options.projectRoot);
-
-  for (ModuleNode *mod : loader.getAllModules()) {
-    fs::path objPath = getObjPath(mod, internalPath, projRoot, objDir);
-    objFiles.push_back(objPath.string());
-
-    // Ensure the nesting exists or LLVM will choke on the missing directory.
-    fs::create_directories(objPath.parent_path());
-
-    uint64_t currentTime = getLocalFileTimestamp(mod->filename);
-    if (cache.isUpToDate(mod->filename, currentTime, mod->imports)) {
-      std::cout << "[Cache] " << mod->filename << " up to date, skipping.\n";
-    } else {
-      modulesToCompile.push_back(mod);
-      cache.update(mod->filename, currentTime, mod->imports);
+    for (const auto *imp : modNode->importedModules) {
+      if (!self(imp, self))
+        return false;
     }
-  }
 
-  for (ModuleNode *mod : modulesToCompile) {
-    fs::path objPath = getObjPath(mod, internalPath, projRoot, objDir);
+    fs::path unitPath = fs::absolute(std::string(modNode->filePath));
+    std::string baseName = unitPath.stem().string();
 
-    fs::path llPath = objPath;
-    llPath.replace_extension(".ll");
-    fs::path asmPath = objPath;
-    asmPath.replace_extension(".s");
+    Logger::debug("[Driver Debug] Starting IR generation for unit: " +
+                  baseName);
 
-    try {
-      CodeGen codegen(mod->filename, options.isDebug);
-      codegen.generate(mod, objPath.string(), loader.getAllModules());
+    llvm::Module *llvmMod =
+        Compiler::compileToIR(const_cast<ModuleNode *>(modNode), backendCtx,
+                              unitPath.string(), diagEngine);
 
-      if (options.optLevel > 0) {
-        codegen.optimize(options.optLevel);
-      }
-      if (options.emitLLVM) {
-        codegen.saveToFile(llPath.string());
-      }
-      if (options.emitAsm) {
-        codegen.emitAssemblyFile(asmPath.string());
-      }
-    } catch (const std::exception &e) {
-      std::cerr << "\n[Build Error] " << mod->filename << "\n"
-                << "Details: " << e.what() << "\n";
+    if (!llvmMod || diagEngine.hasErrors()) {
+      std::cerr << "\033[1;31m[Fatal]\033[0m Compilation aborted for "
+                   "translation unit: "
+                << baseName << "." << std::endl;
+      return false;
+    }
 
-      /* * CLEANUP PHASE:
-       * Nuke any partial artifacts. A corrupted .o is worse than no .o at all.
-       */
-      auto cleanup = [](const fs::path &p) {
-        if (fs::exists(p))
-          fs::remove(p);
-      };
+    fs::path targetBasePath =
+        getObjPath(baseName, unitPath, projRootFs, outDir);
 
-      cleanup(objPath);
-      if (options.emitLLVM)
-        cleanup(llPath);
-      if (options.emitAsm)
-        cleanup(asmPath);
+    Logger::debug("[Driver Debug] Executing backend passes for unit: " +
+                  baseName);
+
+    if (!Backend::process(llvmMod, backendCtx, options,
+                          targetBasePath.string())) {
+      std::cerr << "\033[1;31m[Fatal]\033[0m Backend processing failed for "
+                   "translation unit: "
+                << baseName << "." << std::endl;
+      return false;
+    }
+
+    compiledObjects.push_back(targetBasePath.string() + ".o");
+    return true;
+  };
+
+  {
+    ScopedTimer timer("IR Generation & Code Emission");
+    if (!compileTranslationUnit(root, compileTranslationUnit)) {
       return false;
     }
   }
 
-  if (!Linker::link(objFiles, options.outputPath, options.isDebug,
-                    options.linkerFlags)) {
-    return false;
+  if (options.isJIT) {
+    ScopedTimer timer("JIT Execution Engine");
+    llvm::InitializeNativeTarget();
+    llvm::InitializeNativeTargetAsmPrinter();
+    llvm::InitializeNativeTargetAsmParser();
+
+    auto jitEx = llvm::orc::LLJITBuilder().create();
+    if (!jitEx) {
+      std::cerr
+          << "\033[1;31m[JIT Error]\033[0m Failed to spin up execution engine."
+          << std::endl;
+      return false;
+    }
+    auto jit = std::move(*jitEx);
+
+    /* Transfer global LLVMContext ownership to thread-safe architecture */
+    auto uniqueCtx = backendCtx.takeContext();
+    llvm::orc::ThreadSafeContext tsc(std::move(uniqueCtx));
+
+    for (const auto *modNode : compiledModules) {
+      fs::path unitPath = fs::absolute(std::string(modNode->filePath));
+      auto uniqueMod = backendCtx.takeModule(unitPath.string());
+
+      if (uniqueMod) {
+        auto tsm = llvm::orc::ThreadSafeModule(std::move(uniqueMod), tsc);
+        if (auto err = jit->addIRModule(std::move(tsm))) {
+          std::cerr
+              << "\033[1;31m[JIT Error]\033[0m IR linkage failure for module: "
+              << unitPath.string() << std::endl;
+          return false;
+        }
+      }
+    }
+
+    auto mainSym = jit->lookup("main");
+    if (!mainSym) {
+      std::cerr << "\033[1;31m[JIT Error]\033[0m Entry point symbol 'main' not "
+                   "resolved."
+                << std::endl;
+      return false;
+    }
+
+    int (*mainFn)() = mainSym->toPtr<int (*)()>();
+    int result = mainFn();
+
+    Logger::debug("\033[1;32m[JIT Execution Finished]\033[0m Exit code: " +
+                  std::to_string(result));
+  } else {
+    ScopedTimer timer("Linking");
+    fs::path binOut = outDir / "bin";
+    if (!fs::exists(binOut))
+      fs::create_directories(binOut);
+
+    std::string executablePath = (binOut / options.projectName).string();
+
+    if (!Linker::link(compiledObjects, executablePath, options.isDebug,
+                      options.linkerFlags)) {
+      std::cerr << "\033[1;31m[Fatal]\033[0m Linker step failed.\n";
+      return false;
+    }
+    Logger::info("\033[1;32m[Build Success]\033[0m " + executablePath);
   }
 
-  cache.save();
   return true;
 }
 

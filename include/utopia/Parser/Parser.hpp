@@ -1,66 +1,120 @@
 #pragma once
 #include "utopia/AST/AST.hpp"
-#include "utopia/Lexer/Lexer.hpp"
-#include <memory>
-#include <vector>
+#include "utopia/AST/ASTContext.hpp"
+#include "utopia/Common/Diagnostics.hpp"
+#include "utopia/Common/Types.hpp"
+#include "utopia/Lexer/Token.hpp"
+#include <exception>
+#include <span>
 
 namespace utopia {
 
-struct DeclPreamble {
-  AccessModifier access = AccessModifier::Implicit;
-  InlineState inlineState = InlineState::None;
-  std::vector<std::string> decorators;
-  bool isConst = false;
-  bool isStatic = false;
+class ParseException : public std::exception {
+public:
+  const char *what() const noexcept override {
+    return "Utopia Parse Exception";
+  }
 };
+
+class ModuleLoader;
 
 class Parser {
 public:
-  explicit Parser(const std::vector<Token> &tokens);
-  std::unique_ptr<ModuleNode> parseModule(const std::string &filename);
-  bool isFunctionStart() const;
+  Parser(ASTContext &context, llvm::ArrayRef<Token> tokenStream,
+         DiagnosticsEngine &de, std::string_view path,
+         ModuleLoader *loader = nullptr)
+      : astCtx(context), tokens(tokenStream), diags(de), filePath(path),
+        moduleLoader(loader), isTopLevelInst(true) {}
+
+  ModuleNode *parseModule(std::string_view filePath);
+
+  DeclNode *parseClassDecl();
+  DeclNode *
+  parseDeclarationOrFunction(llvm::ArrayRef<AnnotationNode *> annotations = {});
+
+  std::string_view instantiatingName = "";
+  std::string_view templateBaseName = "";
+  std::unordered_map<std::string_view, const Type *> templateArgs;
+  bool isTopLevelInst = true;
 
 private:
-  const std::vector<Token> &tokens;
+  ASTContext &astCtx;
+  llvm::ArrayRef<Token> tokens;
   size_t cursor = 0;
 
+  DiagnosticsEngine &diags;
+  std::string_view filePath;
+  ModuleLoader *moduleLoader;
+
+  std::vector<std::string_view> currentTemplateParams;
+
   const Token &currentToken() const;
-  const Token &peekNextToken() const;
+  const Token &peekToken(size_t offset = 1) const;
   void advance();
   bool match(TokenType type);
-  void expect(TokenType type, const std::string &errorMessage);
+  void expect(TokenType type, std::string_view errorMessage);
 
-  bool isTypeToken() const;
-  bool isVarDeclaration() const;
-  std::string consumeType();
-  std::string parseTypeName();
+  void report(DiagLevel level, int line, int col, int len,
+              std::string_view msg) {
+    diags.report(
+        {level, line, col, len, std::string(msg), std::string(filePath)});
+  }
+  void reportError(int line, int col, int len, std::string_view message) {
+    report(DiagLevel::Error, line, col, len, message);
+  }
+  void synchronize();
 
-  void parseImportInto(ModuleNode* module);
-  std::unique_ptr<FunctionNode> parseFunction();
-  std::unique_ptr<FunctionNode> parseMethod(const std::string &className);
-  std::unique_ptr<ASTNode> parseStatement();
+  void pushTemplateParam(std::string_view name) {
+    currentTemplateParams.push_back(name);
+  }
+  void popTemplateParams(size_t count) {
+    currentTemplateParams.resize(currentTemplateParams.size() - count);
+  }
+  bool isTemplateParam(std::string_view name) {
+    return std::find(currentTemplateParams.begin(), currentTemplateParams.end(),
+                     name) != currentTemplateParams.end();
+  }
 
-  // Expression Parsing (Ascending Precedence)
-  std::unique_ptr<ExprNode> parseExpression();
-  std::unique_ptr<ExprNode> parseLogicalOr();
-  std::unique_ptr<ExprNode> parseLogicalAnd();
-  std::unique_ptr<ExprNode> parseEquality();
-  std::unique_ptr<ExprNode> parseRelational();
-  std::unique_ptr<ExprNode> parseAdditive();
-  std::unique_ptr<ExprNode> parseTerm();
-  std::unique_ptr<ExprNode> parseCast();
-  std::unique_ptr<ExprNode> parsePrimary();
-  std::unique_ptr<StructDeclNode> parseStructDecl(bool isClass);
-  std::unique_ptr<ExtensionNode> parseExtension();
-  std::unique_ptr<ExprNode> parsePrimaryBase();
-  DeclPreamble parsePreamble();
-  std::unique_ptr<StructDeclNode> parseStructDecl(bool isClass,
-                                                  const DeclPreamble &preamble);
-  std::unique_ptr<FunctionNode> parseFunction(const DeclPreamble &preamble);
-  std::unique_ptr<FunctionNode> parseMethod(const std::string &className,
-                                            const DeclPreamble &preamble);
+  std::string_view parseOperatorName();
 
-  void finalizeNode(ASTNode *node, const Token &startToken);
+  const Type *parseType(bool inNewExpr = false);
+  const Type *applyArrayDeclarator(const Type *baseType);
+  std::string consumeComments();
+  ExprNode *parseArrayLiteral();
+  ASTNode *parseStatement();
+  IfNode *parseIfStatement();
+  llvm::ArrayRef<AnnotationNode *> parseAnnotations();
+  AnnotationNode *parseAnnotation();
+  DeclNode *parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations);
+  DeclNode *parseTypedefDecl();
+  std::vector<ParamDeclNode *> parseParameterList(const Type *classTy,
+                                                  bool &isVariadic);
+
+  DeclNode *parseEnumDecl();
+  DeclNode *parseStructDecl();
+  BlockNode *parseBlock();
+  BlockNode *parseFunctionBody(const Type *returnType);
+  ReturnNode *parseReturn();
+  ExprNode *parseExpressionStatement();
+  ForNode *parseForStatement();
+  WhileNode *parseWhileStatement();
+
+  ExprNode *parseExpression();
+  ExprNode *parseAssignment();
+  ExprNode *parseLogicalOr();
+  ExprNode *parseLogicalAnd();
+  ExprNode *parseBitwiseOr();
+  ExprNode *parseBitwiseXor();
+  ExprNode *parseBitwiseAnd();
+  ExprNode *parseEquality();
+  ExprNode *parseRelational();
+  ExprNode *parseShift();
+  ExprNode *parseAdditive();
+  ExprNode *parseTerm();
+  ExprNode *parseCast();
+  ExprNode *parseUnary();
+  ExprNode *parsePostfix();
+  ExprNode *parsePrimary();
 };
 
 } // namespace utopia

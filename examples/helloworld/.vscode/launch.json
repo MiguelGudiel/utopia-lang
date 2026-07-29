@@ -5,7 +5,7 @@
       "name": "Debug Utopia Binary",
       "type": "lldb",
       "request": "launch",
-      "program": "${workspaceFolder}/build/hello-world",
+      "program": "${workspaceFolder}/build/bin/hello-world",
       "args": [],
       "cwd": "${workspaceFolder}",
       "preLaunchTask": "compile-utopia",
