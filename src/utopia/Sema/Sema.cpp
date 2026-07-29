@@ -142,6 +142,125 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
   return t;
 }
 
+void TypeCheckPass::checkImplicitCastWarning(const Type *from, const Type *to,
+                                             const ASTNode *node) {
+  if (!from || !to || !node)
+    return;
+  const Type *unqualFrom = from->getUnqualifiedType();
+  const Type *unqualTo = to->getUnqualifiedType();
+
+  if (unqualFrom == unqualTo)
+    return;
+
+  if (unqualFrom->isNumeric() && unqualTo->isNumeric()) {
+    auto fKind = static_cast<const BuiltinType *>(unqualFrom)->getBuiltinKind();
+    auto tKind = static_cast<const BuiltinType *>(unqualTo)->getBuiltinKind();
+
+    bool loss = false;
+    if (unqualFrom->isFloat() && unqualTo->isInteger()) {
+      loss = true;
+    } else if (fKind == BuiltinKind::Float64 && tKind == BuiltinKind::Float32) {
+      loss = true;
+    } else if (unqualFrom->isInteger() && unqualTo->isInteger()) {
+      auto getSize = [](BuiltinKind k) {
+        switch (k) {
+        case BuiltinKind::Int8:
+        case BuiltinKind::UInt8:
+          return 1;
+        case BuiltinKind::Int16:
+        case BuiltinKind::UInt16:
+          return 2;
+        case BuiltinKind::Int32:
+        case BuiltinKind::UInt32:
+          return 4;
+        case BuiltinKind::Int64:
+        case BuiltinKind::UInt64:
+          return 8;
+        default:
+          return 0;
+        }
+      };
+      if (getSize(fKind) > getSize(tKind)) {
+        loss = true;
+      }
+    }
+
+    if (loss) {
+      bool isLiteralFit = false;
+      const NumberNode *numNode = nullptr;
+      bool isNegative = false;
+      
+      if (node->kind == NodeKind::Number) {
+        numNode = static_cast<const NumberNode *>(node);
+      } else if (node->kind == NodeKind::UnaryOp) {
+        auto uop = static_cast<const UnaryOpNode *>(node);
+        if (uop->op == "-" && uop->expr->kind == NodeKind::Number) {
+          numNode = static_cast<const NumberNode *>(uop->expr);
+          isNegative = true;
+        } else if (uop->op == "+" && uop->expr->kind == NodeKind::Number) {
+          numNode = static_cast<const NumberNode *>(uop->expr);
+        }
+      }
+
+      if (numNode) {
+        try {
+          if (numNode->isFloat) {
+            if (unqualFrom->isFloat() && unqualTo->isFloat()) {
+              isLiteralFit = true;
+            }
+          } else {
+            uint64_t uval = std::stoull(std::string(numNode->raw));
+            if (unqualTo->isInteger()) {
+              int64_t sval = isNegative ? -static_cast<int64_t>(uval)
+                                        : static_cast<int64_t>(uval);
+              isLiteralFit = true;
+              switch (tKind) {
+              case BuiltinKind::Int8:
+                if (sval < -128 || sval > 127)
+                  isLiteralFit = false;
+                break;
+              case BuiltinKind::UInt8:
+                if (isNegative || uval > 255)
+                  isLiteralFit = false;
+                break;
+              case BuiltinKind::Int16:
+                if (sval < -32768 || sval > 32767)
+                  isLiteralFit = false;
+                break;
+              case BuiltinKind::UInt16:
+                if (isNegative || uval > 65535)
+                  isLiteralFit = false;
+                break;
+              case BuiltinKind::Int32:
+                if (sval < -2147483648LL || sval > 2147483647LL)
+                  isLiteralFit = false;
+                break;
+              case BuiltinKind::UInt32:
+                if (isNegative || uval > 4294967295ULL)
+                  isLiteralFit = false;
+                break;
+              default:
+                break;
+              }
+            }
+          }
+        } catch (...) {
+        }
+      }
+
+      if (!isLiteralFit) {
+        ctx->diags.report(
+            {DiagLevel::Warning, node->line, node->column, node->length,
+             "Implicit conversion from '" + from->toString() + "' to '" +
+                 to->toString() +
+                 "' may lose precision. Use an explicit cast to suppress this "
+                 "warning.",
+             std::string(ctx->currentFile)});
+      }
+    }
+  }
+}
+
 bool DeclCollectorPass::run(const ModuleNode *module, SemaContext &context) {
   ctx = &context;
   dispatch(module);
@@ -1184,6 +1303,44 @@ SemaResult TypeCheckPass::visit(const BinaryOpNode *node) {
       }
     }
 
+    const Type *res = nullptr;
+    if ((*lhs)->isNumeric() && (*rhs)->isNumeric()) {
+      auto getRank = [](const Type *t) {
+        auto k = static_cast<const BuiltinType *>(t->getUnqualifiedType())
+                     ->getBuiltinKind();
+        switch (k) {
+        case BuiltinKind::Float64:
+          return 10;
+        case BuiltinKind::Float32:
+          return 9;
+        case BuiltinKind::UInt64:
+          return 8;
+        case BuiltinKind::Int64:
+          return 7;
+        case BuiltinKind::UInt32:
+          return 6;
+        case BuiltinKind::Int32:
+          return 5;
+        case BuiltinKind::UInt16:
+          return 4;
+        case BuiltinKind::Int16:
+          return 3;
+        case BuiltinKind::UInt8:
+          return 2;
+        case BuiltinKind::Int8:
+          return 1;
+        default:
+          return 0;
+        }
+      };
+      res = getRank(*lhs) >= getRank(*rhs) ? *lhs : *rhs;
+      checkImplicitCastWarning(*lhs, res, node->left);
+      checkImplicitCastWarning(*rhs, res, node->right);
+    } else {
+      res = (*lhs)->isFloat() ? *lhs : *rhs;
+    }
+
+    node->promotedType = res;
     node->exprType = ctx->astCtx.BoolTy;
     return ctx->astCtx.BoolTy;
   }
@@ -1207,7 +1364,44 @@ SemaResult TypeCheckPass::visit(const BinaryOpNode *node) {
                                 (*rhs)->toString());
   }
 
-  const Type *res = (*lhs)->isFloat() ? *lhs : *rhs;
+  const Type *res = nullptr;
+  if ((*lhs)->isNumeric() && (*rhs)->isNumeric()) {
+    auto getRank = [](const Type *t) {
+      auto k = static_cast<const BuiltinType *>(t->getUnqualifiedType())
+                   ->getBuiltinKind();
+      switch (k) {
+      case BuiltinKind::Float64:
+        return 10;
+      case BuiltinKind::Float32:
+        return 9;
+      case BuiltinKind::UInt64:
+        return 8;
+      case BuiltinKind::Int64:
+        return 7;
+      case BuiltinKind::UInt32:
+        return 6;
+      case BuiltinKind::Int32:
+        return 5;
+      case BuiltinKind::UInt16:
+        return 4;
+      case BuiltinKind::Int16:
+        return 3;
+      case BuiltinKind::UInt8:
+        return 2;
+      case BuiltinKind::Int8:
+        return 1;
+      default:
+        return 0;
+      }
+    };
+    res = getRank(*lhs) >= getRank(*rhs) ? *lhs : *rhs;
+    checkImplicitCastWarning(*lhs, res, node->left);
+    checkImplicitCastWarning(*rhs, res, node->right);
+  } else {
+    res = (*lhs)->isFloat() ? *lhs : *rhs;
+  }
+
+  node->promotedType = res;
   node->exprType = res;
   return res;
 }
@@ -1303,6 +1497,8 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
             node->line, node->column, node->length,
             "Cannot initialize variable of type '" + declType->toString() +
                 "' with type '" + initTypeStr + "'");
+      } else {
+        checkImplicitCastWarning(*initRes, declType, node->initializer);
       }
     }
   } else if (declType->isReferenceType()) {
@@ -1380,6 +1576,8 @@ SemaResult TypeCheckPass::visit(const AssignNode *node) {
     return ctx->reportError(node->line, node->column, node->length,
                             "Invalid assignment. Type mismatch.");
   }
+
+  checkImplicitCastWarning(*rhsType, *lhsType, node->value);
 
   const Type *unqualLhs = (*lhsType)->getUnqualifiedType();
   if (unqualLhs->getKind() == TypeKind::Class ||
@@ -1942,6 +2140,12 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
     if (!errors.empty())
       return errors;
 
+    for (size_t p = 0; p < expectedParams; ++p) {
+      checkImplicitCastWarning(resolvedTypes[p],
+                               fDecl->params[paramOffset + p]->type,
+                               resolvedArgs[p]);
+    }
+
     const_cast<FunctionCallNode *>(node)->args =
         ctx->astCtx.copyArray<ExprNode *>(resolvedArgs);
     const_cast<FunctionCallNode *>(node)->argNames = {};
@@ -2269,6 +2473,8 @@ SemaResult TypeCheckPass::visit(const ReturnNode *node) {
                             "Return type mismatch: expected '" +
                                 expectedRet->toString() + "', got '" +
                                 (*valType)->toString() + "'");
+  } else {
+    checkImplicitCastWarning(*valType, expectedRet, node->value);
   }
 
   return *valType;
@@ -2552,6 +2758,12 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
         if (!errors.empty()) {
           overloadErrors.push_back(errors);
           continue;
+        }
+
+        for (size_t p = 0; p < expectedParams; ++p) {
+          checkImplicitCastWarning(resolvedTypes[p],
+                                   ctor->params[paramOffset + p]->type,
+                                   resolvedArgs[p]);
         }
 
         bestMatch = ctor;

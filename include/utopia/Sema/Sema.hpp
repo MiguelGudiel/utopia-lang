@@ -170,6 +170,7 @@ public:
   // Check type access visibility to avoid escaping private types across files
   bool checkTypeVisibility(const Type *type, const ASTNode *node);
   const Type* resolveIfTemplate(const Type* t);
+  void checkImplicitCastWarning(const Type *from, const Type *to, const ASTNode *node);
 
   SemaResult visit(const NumberNode *node);
   SemaResult visit(const BoolNode *node);

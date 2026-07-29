@@ -198,6 +198,7 @@ struct BinaryOpNode : public ExprNode {
   std::string_view op;
   ExprNode *left;
   ExprNode *right;
+  mutable const Type *promotedType = nullptr;
 
   BinaryOpNode(std::string_view o, ExprNode *l, ExprNode *r, int ln, int c)
       : ExprNode(NodeKind::BinaryOp, ln, c), op(o), left(l), right(r) {

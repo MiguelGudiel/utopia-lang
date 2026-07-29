@@ -233,7 +233,7 @@ bool CompilerDriver::run() {
       std::cerr << "\033[1;31m[Fatal]\033[0m Linker step failed.\n";
       return false;
     }
-    Logger::debug("\033[1;32m[Build Success]\033[0m " + executablePath);
+    Logger::info("\033[1;32m[Build Success]\033[0m " + executablePath);
   }
 
   return true;

@@ -1158,18 +1158,39 @@ llvm::Value *CodeGen::visit(const BinaryOpNode *node) {
     return nullptr;
   }
 
-  if (node->op == "&&")
+  if (node->op == "&&") {
+    L = createImplicitCast(L, builder.getInt1Ty());
+    R = createImplicitCast(R, builder.getInt1Ty());
     return builder.CreateLogicalAnd(L, R);
-  if (node->op == "||")
+  }
+  if (node->op == "||") {
+    L = createImplicitCast(L, builder.getInt1Ty());
+    R = createImplicitCast(R, builder.getInt1Ty());
     return builder.CreateLogicalOr(L, R);
+  }
+
+  if (node->promotedType) {
+    llvm::Type *promotedLLVMTy = getLLVMType(node->promotedType);
+    if (L->getType() != promotedLLVMTy)
+      L = createImplicitCast(L, promotedLLVMTy);
+    if (R->getType() != promotedLLVMTy)
+      R = createImplicitCast(R, promotedLLVMTy);
+  } else if (L->getType() != R->getType()) {
+    if (L->getType()->isPointerTy())
+      R = builder.CreateBitCast(R, L->getType());
+    else if (R->getType()->isPointerTy())
+      L = builder.CreateBitCast(L, R->getType());
+  }
 
   bool isFloat = L->getType()->isFloatingPointTy();
   bool isUnsigned = false;
 
-  if (node->left->exprType && node->left->exprType->isInteger()) {
-    auto bKind = static_cast<const BuiltinType *>(
-                     node->left->exprType->getUnqualifiedType())
-                     ->getBuiltinKind();
+  const Type *evalType =
+      node->promotedType ? node->promotedType : node->left->exprType;
+  if (evalType && evalType->isInteger()) {
+    auto bKind =
+        static_cast<const BuiltinType *>(evalType->getUnqualifiedType())
+            ->getBuiltinKind();
     isUnsigned = (bKind == BuiltinKind::UInt8 || bKind == BuiltinKind::UInt16 ||
                   bKind == BuiltinKind::UInt32 || bKind == BuiltinKind::UInt64);
   }
