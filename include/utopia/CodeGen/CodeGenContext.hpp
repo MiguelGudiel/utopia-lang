@@ -52,6 +52,19 @@ public:
     }
   }
 
+  /* Removes a registered cleanup (used for Return Value Optimization to
+   * transfer ownership) */
+  void removeCleanup(llvm::Value *ptr) {
+    for (auto &scope : scopes) {
+      for (auto it = scope.cleanups.begin(); it != scope.cleanups.end(); ++it) {
+        if (it->instancePtr == ptr) {
+          scope.cleanups.erase(it);
+          return;
+        }
+      }
+    }
+  }
+
   /* Registers stack memory spans to enforce precise intrinsic lifetime
    * boundaries */
   void addLifetime(llvm::AllocaInst *allocaInst, uint64_t size) {

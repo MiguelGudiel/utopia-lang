@@ -620,6 +620,10 @@ TypeCheckPass::resolveOverloadedOperator(const Type *lhsType,
   if (!lhsType)
     return nullptr;
 
+  std::string opFuncName = "operator" + std::string(opName);
+  const FunctionDeclNode *bestMatch = nullptr;
+  int bestScore = -1;
+
   const Type *unqual = lhsType->getUnqualifiedType();
   if (unqual->isPointerType()) {
     unqual = static_cast<const PointerType *>(unqual)
@@ -635,46 +639,94 @@ TypeCheckPass::resolveOverloadedOperator(const Type *lhsType,
                  ->getUnqualifiedType();
   }
 
-  if (unqual->getKind() != TypeKind::Struct &&
-      unqual->getKind() != TypeKind::Class) {
-    return nullptr;
+  if (unqual->getKind() == TypeKind::Struct ||
+      unqual->getKind() == TypeKind::Class) {
+    auto *recTy = static_cast<const RecordType *>(unqual);
+    auto *decl = recTy->getDeclaration();
+    if (decl) {
+      llvm::ArrayRef<FunctionDeclNode *> methods;
+      if (decl->kind == NodeKind::ClassDecl) {
+        methods = static_cast<const ClassDeclNode *>(decl)->methods;
+      } else if (decl->kind == NodeKind::StructDecl) {
+        methods = static_cast<const StructDeclNode *>(decl)->methods;
+      }
+
+      for (auto *m : methods) {
+        if (m->name == opFuncName) {
+          size_t paramOffset =
+              (m->isMethod && !m->isExtern && !m->isStatic) ? 1 : 0;
+          if (m->params.size() - paramOffset == args.size()) {
+            bool match = true;
+            int currentScore = 0;
+
+            for (size_t i = 0; i < args.size(); ++i) {
+              const Type *argType = args[i]->exprType;
+              const Type *paramType = m->params[paramOffset + i]->type;
+
+              if (!canImplicitlyCast(argType, paramType)) {
+                match = false;
+                break;
+              }
+
+              bool isLValue = args[i]->isLValue;
+              if (paramType->getKind() == TypeKind::RValueReference) {
+                if (isLValue) {
+                  match = false;
+                  break;
+                }
+                currentScore += 3;
+              } else if (paramType->isReferenceType()) {
+                const Type *pointee =
+                    static_cast<const ReferenceType *>(paramType)
+                        ->getPointeeType();
+                if (!pointee->isConstQualified()) {
+                  if (!isLValue) {
+                    match = false;
+                    break;
+                  }
+                  currentScore += 3;
+                } else {
+                  currentScore += 2;
+                }
+              } else {
+                currentScore += 1;
+              }
+            }
+
+            if (match && currentScore > bestScore) {
+              bestScore = currentScore;
+              bestMatch = m;
+            }
+          }
+        }
+      }
+    }
   }
 
-  auto *recTy = static_cast<const RecordType *>(unqual);
-  auto *decl = recTy->getDeclaration();
-  if (!decl)
-    return nullptr;
-
-  llvm::ArrayRef<FunctionDeclNode *> methods;
-  if (decl->kind == NodeKind::ClassDecl) {
-    methods = static_cast<const ClassDeclNode *>(decl)->methods;
-  } else if (decl->kind == NodeKind::StructDecl) {
-    methods = static_cast<const StructDeclNode *>(decl)->methods;
-  }
-
-  std::string opFuncName = "operator" + std::string(opName);
-
-  const FunctionDeclNode *bestMatch = nullptr;
-  int bestScore = -1;
-
-  for (auto *m : methods) {
-    if (m->name == opFuncName) {
-      size_t paramOffset =
-          (m->isMethod && !m->isExtern && !m->isStatic) ? 1 : 0;
-      if (m->params.size() - paramOffset == args.size()) {
+  auto globalDecls = ctx->lookup(opFuncName);
+  for (const auto *d : globalDecls) {
+    if (d->kind == NodeKind::FunctionDecl) {
+      auto *fDecl = static_cast<const FunctionDeclNode *>(d);
+      if (fDecl->params.size() == 1 + args.size()) {
         bool match = true;
         int currentScore = 0;
 
+        const Type *lhsParamType = fDecl->params[0]->type;
+        if (!canImplicitlyCast(lhsType, lhsParamType)) {
+          match = false;
+          continue;
+        }
+        currentScore += 1;
+
         for (size_t i = 0; i < args.size(); ++i) {
           const Type *argType = args[i]->exprType;
-          const Type *paramType = m->params[paramOffset + i]->type;
+          const Type *paramType = fDecl->params[1 + i]->type;
 
           if (!canImplicitlyCast(argType, paramType)) {
             match = false;
             break;
           }
 
-          /* Move semantics overload resolution scoring */
           bool isLValue = args[i]->isLValue;
           if (paramType->getKind() == TypeKind::RValueReference) {
             if (isLValue) {
@@ -701,11 +753,12 @@ TypeCheckPass::resolveOverloadedOperator(const Type *lhsType,
 
         if (match && currentScore > bestScore) {
           bestScore = currentScore;
-          bestMatch = m;
+          bestMatch = fDecl;
         }
       }
     }
   }
+
   return bestMatch;
 }
 

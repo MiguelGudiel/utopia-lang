@@ -1215,46 +1215,91 @@ llvm::Value *CodeGen::visit(const UnaryOpNode *node) {
 
 llvm::Value *CodeGen::visit(const BinaryOpNode *node) {
   if (node->overloadedOperator) {
-    llvm::Value *objPtr = nullptr;
-    if (node->left->exprType->isPointerType()) {
-      objPtr = dispatch(node->left);
-    } else {
-      objPtr = getLValue(node->left);
-    }
-
-    if (!objPtr) {
-      llvm::Value *val = dispatch(node->left);
-      objPtr = createEntryBlockAlloca(val->getType(), "tmp.op.recv");
-      builder.CreateStore(val, objPtr);
-    }
-
-    llvm::Function *func = getOrCreateFunction(node->overloadedOperator);
+    const FunctionDeclNode *opFunc = node->overloadedOperator;
+    llvm::Function *func = getOrCreateFunction(opFunc);
     std::vector<llvm::Value *> argsArgs;
-    argsArgs.push_back(objPtr);
 
-    llvm::Value *rhsVal = nullptr;
-    bool isRefParam = false;
-    if (node->overloadedOperator->params.size() > 1) {
-      isRefParam =
-          node->overloadedOperator->params[1]->type->isReferenceType() ||
-          node->overloadedOperator->params[1]->type->getKind() ==
-              TypeKind::RValueReference;
-    }
-
-    if (isRefParam) {
-      rhsVal = getLValue(node->right);
-      if (!rhsVal) {
-        llvm::Value *val = dispatch(node->right);
-        rhsVal = createEntryBlockAlloca(val->getType(), "tmp.op.arg");
-        builder.CreateStore(val, rhsVal);
+    if (opFunc->isMethod && !opFunc->isExtern && !opFunc->isStatic) {
+      llvm::Value *objPtr = nullptr;
+      if (node->left->exprType->isPointerType()) {
+        objPtr = dispatch(node->left);
+      } else {
+        objPtr = getLValue(node->left);
       }
+
+      if (!objPtr) {
+        llvm::Value *val = dispatch(node->left);
+        objPtr = createEntryBlockAlloca(val->getType(), "tmp.op.recv");
+        builder.CreateStore(val, objPtr);
+      }
+      argsArgs.push_back(objPtr);
+
+      llvm::Value *rhsVal = nullptr;
+      bool isRefParam = false;
+      if (opFunc->params.size() > 1) {
+        isRefParam =
+            opFunc->params[1]->type->isReferenceType() ||
+            opFunc->params[1]->type->getKind() == TypeKind::RValueReference;
+      }
+
+      if (isRefParam) {
+        rhsVal = getLValue(node->right);
+        if (!rhsVal) {
+          llvm::Value *val = dispatch(node->right);
+          rhsVal = createEntryBlockAlloca(val->getType(), "tmp.op.arg");
+          builder.CreateStore(val, rhsVal);
+        }
+      } else {
+        rhsVal = dispatch(node->right);
+        llvm::Type *paramTy = getLLVMType(opFunc->params[1]->type);
+        rhsVal = createImplicitCast(rhsVal, paramTy);
+      }
+      argsArgs.push_back(rhsVal);
     } else {
-      rhsVal = dispatch(node->right);
-      llvm::Type *paramTy =
-          getLLVMType(node->overloadedOperator->params[1]->type);
-      rhsVal = createImplicitCast(rhsVal, paramTy);
+      llvm::Value *lhsVal = nullptr;
+      bool isRefParamL = false;
+      if (opFunc->params.size() > 0) {
+        isRefParamL =
+            opFunc->params[0]->type->isReferenceType() ||
+            opFunc->params[0]->type->getKind() == TypeKind::RValueReference;
+      }
+
+      if (isRefParamL) {
+        lhsVal = getLValue(node->left);
+        if (!lhsVal) {
+          llvm::Value *val = dispatch(node->left);
+          lhsVal = createEntryBlockAlloca(val->getType(), "tmp.op.arg.l");
+          builder.CreateStore(val, lhsVal);
+        }
+      } else {
+        lhsVal = dispatch(node->left);
+        llvm::Type *paramTyL = getLLVMType(opFunc->params[0]->type);
+        lhsVal = createImplicitCast(lhsVal, paramTyL);
+      }
+      argsArgs.push_back(lhsVal);
+
+      llvm::Value *rhsVal = nullptr;
+      bool isRefParamR = false;
+      if (opFunc->params.size() > 1) {
+        isRefParamR =
+            opFunc->params[1]->type->isReferenceType() ||
+            opFunc->params[1]->type->getKind() == TypeKind::RValueReference;
+      }
+
+      if (isRefParamR) {
+        rhsVal = getLValue(node->right);
+        if (!rhsVal) {
+          llvm::Value *val = dispatch(node->right);
+          rhsVal = createEntryBlockAlloca(val->getType(), "tmp.op.arg.r");
+          builder.CreateStore(val, rhsVal);
+        }
+      } else {
+        rhsVal = dispatch(node->right);
+        llvm::Type *paramTyR = getLLVMType(opFunc->params[1]->type);
+        rhsVal = createImplicitCast(rhsVal, paramTyR);
+      }
+      argsArgs.push_back(rhsVal);
     }
-    argsArgs.push_back(rhsVal);
 
     return builder.CreateCall(func, argsArgs);
   }
@@ -1882,6 +1927,8 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
       llvm::Type *allocTy = getLLVMType(node->exprType);
       llvm::AllocaInst *instance = createEntryBlockAlloca(allocTy, "instance");
 
+      lastTemporaryAlloca = instance;
+
       emitDefaultInitialization(instance, node->exprType);
 
       argsArgs.push_back(instance);
@@ -2035,6 +2082,7 @@ llvm::Value *CodeGen::visit(const ReturnNode *node) {
         return nullptr;
       }
     } else {
+      lastTemporaryAlloca = nullptr; // Reset before dispatch
       retVal = dispatch(node->value);
       if (!retVal) {
         diags.report({DiagLevel::Error, node->line, node->column, node->length,
@@ -2044,6 +2092,17 @@ llvm::Value *CodeGen::visit(const ReturnNode *node) {
       if (currentFunc) {
         llvm::Type *destTy = getLLVMType(currentFunc->returnType);
         retVal = createImplicitCast(retVal, destTy);
+      }
+
+      /* RVO / Return Escape: Prevent local variables and constructed
+       * temporaries from being destroyed if they are being returned by value */
+      if (node->value->kind == NodeKind::Variable) {
+        if (llvm::Value *lval = getLValue(node->value)) {
+          cgCtx.removeCleanup(lval);
+        }
+      } else if (lastTemporaryAlloca) {
+        cgCtx.removeCleanup(lastTemporaryAlloca);
+        lastTemporaryAlloca = nullptr;
       }
     }
   }

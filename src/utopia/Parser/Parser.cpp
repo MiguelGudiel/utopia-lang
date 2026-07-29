@@ -1932,14 +1932,19 @@ DeclNode *Parser::parseDeclarationOrFunction(
 
   const Type *nodeType = parseType();
 
-  std::string_view id = currentToken().value;
-  if (!instantiatingName.empty() && isTopLevelInst) {
-    id = instantiatingName;
-    isTopLevelInst = false;
+  std::string_view id;
+  if (match(TokenType::OPERATOR_KW)) {
+    id = parseOperatorName();
+  } else {
+    id = currentToken().value;
+    if (!instantiatingName.empty() && isTopLevelInst) {
+      id = instantiatingName;
+      isTopLevelInst = false;
+    }
+    expect(TokenType::IDENTIFIER, "Expected identifier after type");
   }
 
   int idLen = (int)id.length();
-  expect(TokenType::IDENTIFIER, "Expected identifier after type");
 
   std::vector<std::string_view> tParams;
   if (match(TokenType::LT)) {

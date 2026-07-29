@@ -75,6 +75,7 @@ private:
   CodeGenContext cgCtx;
   DiagnosticsEngine &diags;
   const FunctionDeclNode *currentFunc = nullptr;
+  llvm::AllocaInst *lastTemporaryAlloca = nullptr; // Tracks temporal aggregate allocations for RVO
 
   /* LLVM IR Metadata builders and trackers */
   llvm::MDBuilder mdBuilder;
