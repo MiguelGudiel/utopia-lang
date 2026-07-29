@@ -32,6 +32,16 @@ llvm::Type *CodeGen::getLLVMType(const Type *type) {
                                    false);
   }
 
+  /* Prevent undefined type structures from silently collapsing into LLVM
+   * runtime faults */
+  if (type->getKind() == TypeKind::TemplateParam) {
+    diags.report({DiagLevel::Error, 0, 0, 0,
+                  "Uninstantiated template parameter '" + type->toString() +
+                      "' reached code generation.",
+                  ""});
+    return builder.getInt8Ty();
+  }
+
   if (type->isBuiltinType()) {
     auto *bTy = static_cast<const BuiltinType *>(type);
     switch (bTy->getBuiltinKind()) {
@@ -100,7 +110,11 @@ llvm::Type *CodeGen::getLLVMType(const Type *type) {
     return structTy;
   }
 
-  return builder.getVoidTy();
+  diags.report({DiagLevel::Error, 0, 0, 0,
+                "Unsupported or unresolved type reached code generation: " +
+                    type->toString(),
+                ""});
+  return builder.getInt8Ty();
 }
 
 llvm::Value *CodeGen::createImplicitCast(llvm::Value *src, llvm::Type *destTy) {
@@ -140,6 +154,9 @@ llvm::Value *CodeGen::createImplicitCast(llvm::Value *src, llvm::Type *destTy) {
 }
 
 llvm::Function *CodeGen::getOrCreateFunction(const FunctionDeclNode *node) {
+  if (node->isTemplate)
+    return nullptr;
+
   std::string irName = node->name == "main" ? "main" : node->mangledName;
   llvm::Function *func = mod.getFunction(irName);
 
@@ -763,6 +780,9 @@ llvm::Value *CodeGen::visit(const StringNode *node) {
 }
 
 llvm::Value *CodeGen::visit(const StructDeclNode *node) {
+  if (node->isTemplate)
+    return nullptr;
+
   if (node->recordType) {
     getLLVMType(node->recordType);
   }
@@ -783,6 +803,9 @@ llvm::Value *CodeGen::visit(const StructDeclNode *node) {
 }
 
 llvm::Value *CodeGen::visit(const ClassDeclNode *node) {
+  if (node->isTemplate)
+    return nullptr;
+
   if (node->recordType) {
     getLLVMType(node->recordType);
   }
@@ -1528,6 +1551,9 @@ llvm::Value *CodeGen::visit(const NullNode *node) {
 llvm::Value *CodeGen::visit(const ParamDeclNode *node) { return nullptr; }
 
 llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
+  if (node->isTemplate)
+    return nullptr;
+
   llvm::Function *func = getOrCreateFunction(node);
 
   if (!node->body || !func->empty()) {
@@ -1789,9 +1815,21 @@ llvm::Value *CodeGen::visit(const ModuleNode *node) {
     }
   }
 
+  for (const auto &stmt : node->instantiatedTemplates) {
+    if (stmt->kind == NodeKind::StructDecl) {
+      getLLVMType(static_cast<const StructDeclNode *>(stmt)->recordType);
+    } else if (stmt->kind == NodeKind::ClassDecl) {
+      getLLVMType(static_cast<const ClassDeclNode *>(stmt)->recordType);
+    }
+  }
+
   /* Pass 2: Traverse and generate instructions for expressions, methods, and
    * functions. */
   for (const auto &stmt : node->statements) {
+    dispatch(stmt);
+  }
+
+  for (const auto &stmt : node->instantiatedTemplates) {
     dispatch(stmt);
   }
 

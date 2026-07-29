@@ -1,5 +1,6 @@
 #pragma once
 #include "utopia/Common/Types.hpp"
+#include "utopia/Lexer/Token.hpp"
 #include <cstdint>
 #include <llvm/ADT/ArrayRef.h>
 #include <string_view>
@@ -76,8 +77,11 @@ struct DeclNode : public ASTNode {
   llvm::ArrayRef<AnnotationNode *> annotations;
   bool hasPublicMod = false;
   bool hasPrivateMod = false;
-  std::string_view
-      declFilePath; // Tracks file origin for visibility enforcement
+  std::string_view declFilePath;
+
+  bool isTemplate = false;
+  llvm::ArrayRef<std::string_view> templateParams;
+  llvm::ArrayRef<Token> templateBodyTokens;
 
   explicit DeclNode(NodeKind k, int l = 0, int c = 0, int len = 0)
       : ASTNode(k, l, c, len) {}
@@ -154,8 +158,9 @@ struct VariableNode : public ExprNode {
   bool isField = false;
   uint32_t fieldIndex = 0;
   const Type *parentType = nullptr;
-  mutable const DeclNode *resolvedDecl =
-      nullptr; // Register target decl statically
+  mutable const DeclNode *resolvedDecl = nullptr;
+
+  llvm::ArrayRef<const Type *> templateArgs;
 
   VariableNode(std::string_view n, int l, int c, int len)
       : ExprNode(NodeKind::Variable, l, c, len), name(n) {}
@@ -331,6 +336,7 @@ struct ModuleNode : public ASTNode {
   llvm::ArrayRef<std::string_view> rawImports;
   llvm::ArrayRef<ModuleNode *> importedModules;
   llvm::ArrayRef<ASTNode *> statements;
+  std::vector<ASTNode *> instantiatedTemplates;
 
   explicit ModuleNode(std::string_view path)
       : ASTNode(NodeKind::Module), filePath(path) {}
@@ -387,6 +393,9 @@ struct MemberAccessNode : public ExprNode {
 
   bool isEnumMember = false;
   const EnumMemberNode *enumMember = nullptr;
+
+  /* Storage for explicit template arguments applied to method access */
+  llvm::ArrayRef<const Type *> templateArgs;
 
   MemberAccessNode(ExprNode *obj, std::string_view mem, int l, int c, int len)
       : ExprNode(NodeKind::MemberAccess, l, c, len), object(obj),

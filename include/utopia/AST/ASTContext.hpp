@@ -119,6 +119,16 @@ public:
     return rec;
   }
 
+  const TemplateParamType *getTemplateParamType(std::string_view name) {
+    return create<TemplateParamType>(name);
+  }
+
+  const TemplateInstType *
+  getTemplateInstType(std::string_view name,
+                      llvm::ArrayRef<const Type *> args) {
+    return create<TemplateInstType>(name, args);
+  }
+
   RecordType *getRecordType(std::string_view name) {
     auto it = recordTypes.find(name);
     return it != recordTypes.end() ? it->second : nullptr;

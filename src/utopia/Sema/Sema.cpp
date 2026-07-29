@@ -1,5 +1,6 @@
 #include "utopia/Sema/Sema.hpp"
 #include "utopia/CodeGen/Mangler.hpp"
+#include "utopia/Parser/Parser.hpp"
 #include "utopia/Sema/EffectAnalyzer.hpp"
 
 #include "utopia/Common/Logger.hpp"
@@ -49,6 +50,98 @@ bool SemaPipeline::run(const ModuleNode *module, SemaContext &ctx) {
   return true;
 }
 
+const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
+  if (!t)
+    return nullptr;
+  if (t->getKind() == TypeKind::TemplateInst) {
+    auto *instTy = static_cast<const TemplateInstType *>(t);
+    if (instTy->getResolvedType())
+      return instTy->getResolvedType();
+
+    auto declIt = ctx->templateRegistry.find(instTy->getBaseName());
+    if (declIt == ctx->templateRegistry.end()) {
+      ctx->reportError(0, 0, 0,
+                       "Template declaration not found: " +
+                           std::string(instTy->getBaseName()));
+      return ctx->astCtx.VoidTy;
+    }
+
+    const DeclNode *tmplDecl = declIt->second;
+    std::string mangledName = std::string(instTy->getBaseName());
+    for (const auto *arg : instTy->getTemplateArgs()) {
+      std::string argStr = arg->toString();
+      for (char &c : argStr) {
+        if (!isalnum(c))
+          c = '_';
+      }
+      mangledName += "_" + argStr;
+    }
+    std::string_view mangledView = ctx->astCtx.copyString(mangledName);
+
+    if (tmplDecl->kind == NodeKind::ClassDecl) {
+      if (auto *existing = ctx->astCtx.getRecordType(mangledView)) {
+        instTy->setResolvedType(existing);
+        return existing;
+      }
+      ctx->astCtx.createRecordType(
+          TypeKind::Class, mangledView); // Cortar bucle recursivo estructural
+    }
+
+    Parser parser(ctx->astCtx, tmplDecl->templateBodyTokens, ctx->diags,
+                  tmplDecl->declFilePath);
+    parser.instantiatingName = mangledView;
+    parser.templateBaseName = instTy->getBaseName();
+    for (size_t i = 0; i < tmplDecl->templateParams.size(); ++i) {
+      parser.templateArgs[tmplDecl->templateParams[i]] =
+          instTy->getTemplateArgs()[i];
+    }
+
+    DeclNode *instDecl = nullptr;
+    if (tmplDecl->kind == NodeKind::ClassDecl) {
+      instDecl = parser.parseClassDecl();
+    } else if (tmplDecl->kind == NodeKind::FunctionDecl) {
+      instDecl = parser.parseDeclarationOrFunction();
+    }
+
+    if (instDecl) {
+      instDecl->hasPublicMod = tmplDecl->hasPublicMod;
+      instDecl->hasPrivateMod = tmplDecl->hasPrivateMod;
+      instDecl->annotations = tmplDecl->annotations;
+      instDecl->declFilePath = tmplDecl->declFilePath; // Origin linkage
+
+      if (ctx->currentModule) {
+        const_cast<ModuleNode *>(ctx->currentModule)
+            ->instantiatedTemplates.push_back(instDecl);
+      }
+      DeclCollectorPass dcp;
+      dcp.ctx = ctx;
+      dcp.dispatch(instDecl);
+      dispatch(instDecl);
+    }
+
+    const Type *res = ctx->astCtx.VoidTy;
+    if (tmplDecl->kind == NodeKind::ClassDecl) {
+      res = ctx->astCtx.getRecordType(mangledView);
+    }
+    instTy->setResolvedType(res);
+    return res;
+  }
+  if (t->isPointerType()) {
+    auto *p = static_cast<const PointerType *>(t);
+    return ctx->astCtx.getPointerType(resolveIfTemplate(p->getPointeeType()));
+  }
+  if (t->isReferenceType()) {
+    auto *p = static_cast<const ReferenceType *>(t);
+    return ctx->astCtx.getReferenceType(resolveIfTemplate(p->getPointeeType()));
+  }
+  if (t->getKind() == TypeKind::Array) {
+    auto *p = static_cast<const ArrayType *>(t);
+    return ctx->astCtx.getArrayType(resolveIfTemplate(p->getElementType()),
+                                    p->getSize());
+  }
+  return t;
+}
+
 bool DeclCollectorPass::run(const ModuleNode *module, SemaContext &context) {
   ctx = &context;
   dispatch(module);
@@ -65,7 +158,9 @@ void DeclCollectorPass::visit(const ModuleNode *node) {
   }
 
   auto prevFile = ctx->currentFile;
+  auto prevMod = ctx->currentModule;
   ctx->setCurrentFile(node->filePath);
+  ctx->currentModule = node;
 
   for (const auto &stmt : node->statements) {
     if (stmt->kind == NodeKind::FunctionDecl ||
@@ -79,6 +174,7 @@ void DeclCollectorPass::visit(const ModuleNode *node) {
   }
 
   ctx->setCurrentFile(prevFile);
+  ctx->currentModule = prevMod;
 }
 
 void DeclCollectorPass::visit(const TypedefDeclNode *node) {
@@ -134,6 +230,14 @@ SemaResult TypeCheckPass::visit(const AnnotationNode *node) {
 }
 
 void DeclCollectorPass::visit(const FunctionDeclNode *node) {
+  if (node->isTemplate) {
+    if (node->declFilePath.empty()) {
+      const_cast<FunctionDeclNode *>(node)->declFilePath = ctx->currentFile;
+    }
+    ctx->templateRegistry[node->name] = node;
+    return;
+  }
+
   bool isExport = false;
 
   for (const auto *ann : node->annotations) {
@@ -198,6 +302,14 @@ void DeclCollectorPass::visit(const VarDeclNode *node) {
 }
 
 void DeclCollectorPass::visit(const StructDeclNode *node) {
+  if (node->isTemplate) {
+    if (node->declFilePath.empty()) {
+      const_cast<StructDeclNode *>(node)->declFilePath = ctx->currentFile;
+    }
+    ctx->templateRegistry[node->name] = node;
+    return;
+  }
+
   ctx->addDecl(node->name, node);
   const_cast<StructDeclNode *>(node)->recordType =
       ctx->astCtx.getRecordType(node->name);
@@ -267,6 +379,14 @@ void DeclCollectorPass::visit(const StructDeclNode *node) {
 }
 
 void DeclCollectorPass::visit(const ClassDeclNode *node) {
+  if (node->isTemplate) {
+    if (node->declFilePath.empty()) {
+      const_cast<ClassDeclNode *>(node)->declFilePath = ctx->currentFile;
+    }
+    ctx->templateRegistry[node->name] = node;
+    return;
+  }
+
   ctx->addDecl(node->name, node);
 
   auto *recTy = ctx->astCtx.getRecordType(node->name);
@@ -451,6 +571,9 @@ SemaResult TypeCheckPass::visit(const StringNode *node) {
 }
 
 SemaResult TypeCheckPass::visit(const StructDeclNode *node) {
+  if (node->isTemplate)
+    return ctx->astCtx.VoidTy;
+
   bool hasErrors = false;
 
   if (node->isOpaque)
@@ -518,6 +641,9 @@ SemaResult TypeCheckPass::visit(const StructDeclNode *node) {
 }
 
 SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
+  if (node->isTemplate)
+    return ctx->astCtx.VoidTy;
+
   bool hasErrors = false;
 
   if (node->isOpaque)
@@ -639,6 +765,69 @@ SemaResult TypeCheckPass::visit(const EnumMemberNode *node) {
 }
 
 SemaResult TypeCheckPass::visit(const VariableNode *node) {
+  if (!node->templateArgs.empty()) {
+    auto decls = ctx->lookup(node->name);
+    DeclNode *tmplDecl = nullptr;
+    for (auto *d : decls) {
+      if (d->kind == NodeKind::FunctionDecl &&
+          static_cast<const FunctionDeclNode *>(d)->isTemplate) {
+        tmplDecl = const_cast<DeclNode *>(d);
+        break;
+      }
+    }
+
+    if (!tmplDecl) {
+      auto it = ctx->templateRegistry.find(node->name);
+      if (it != ctx->templateRegistry.end() &&
+          it->second->kind == NodeKind::FunctionDecl) {
+        tmplDecl = const_cast<DeclNode *>(it->second);
+      }
+    }
+
+    if (tmplDecl) {
+      std::string mangledName = std::string(node->name);
+      for (const auto *arg : node->templateArgs) {
+        const Type *resArg = resolveIfTemplate(arg);
+        std::string argStr = resArg->toString();
+        for (char &c : argStr) {
+          if (!isalnum(c))
+            c = '_';
+        }
+        mangledName += "_" + argStr;
+      }
+      std::string_view mangledView = ctx->astCtx.copyString(mangledName);
+
+      auto instDecls = ctx->lookup(mangledView);
+      if (instDecls.empty()) {
+        Parser parser(ctx->astCtx, tmplDecl->templateBodyTokens, ctx->diags,
+                      tmplDecl->declFilePath);
+        parser.instantiatingName = mangledView;
+        parser.templateBaseName = node->name;
+        for (size_t i = 0; i < tmplDecl->templateParams.size(); ++i) {
+          parser.templateArgs[tmplDecl->templateParams[i]] =
+              resolveIfTemplate(node->templateArgs[i]);
+        }
+        DeclNode *instDecl = parser.parseDeclarationOrFunction();
+        if (instDecl) {
+          instDecl->hasPublicMod = tmplDecl->hasPublicMod;
+          instDecl->hasPrivateMod = tmplDecl->hasPrivateMod;
+          instDecl->annotations = tmplDecl->annotations;
+          instDecl->declFilePath = tmplDecl->declFilePath; // Origin linkage
+
+          if (ctx->currentModule) {
+            const_cast<ModuleNode *>(ctx->currentModule)
+                ->instantiatedTemplates.push_back(instDecl);
+          }
+          DeclCollectorPass dcp;
+          dcp.ctx = ctx;
+          dcp.dispatch(instDecl);
+          dispatch(instDecl);
+        }
+      }
+      const_cast<VariableNode *>(node)->name = mangledView;
+    }
+  }
+
   auto decls = ctx->lookup(node->name);
   if (decls.empty()) {
     auto thisDecls = ctx->lookup("this");
@@ -676,7 +865,6 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
   const Type *ty = nullptr;
   const DeclNode *target = decls.front();
 
-  /* Unwrap typedefs recursively to their underlying entities */
   while (target && target->kind == NodeKind::TypedefDecl) {
     auto td = static_cast<const TypedefDeclNode *>(target);
     if (!td->targetEntityName.empty()) {
@@ -718,8 +906,6 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
     for (auto *p : fDecl->params)
       pTypes.push_back(p->type);
 
-    /* Variables mapping directly to a function identifier decay to a function
-     * pointer */
     const Type *funcTy = ctx->astCtx.getFunctionType(
         fDecl->returnType, ctx->astCtx.copyArray<const Type *>(pTypes));
     ty = ctx->astCtx.getPointerType(funcTy);
@@ -977,6 +1163,7 @@ SemaResult TypeCheckPass::visit(const BinaryOpNode *node) {
 }
 
 SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
+  const_cast<VarDeclNode *>(node)->type = resolveIfTemplate(node->type);
   const Type *declType = node->type;
 
   if (!checkTypeVisibility(declType, node)) {
@@ -1267,6 +1454,100 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
         else
           methods = static_cast<const StructDeclNode *>(recDecl)->methods;
 
+        /* Dynamically instantiate template method bounds if explicitly
+         * requested */
+        if (!node->templateArgs.empty()) {
+          FunctionDeclNode *tmplDecl = nullptr;
+          for (auto *m : methods) {
+            if (m->name == node->memberName && m->isTemplate) {
+              tmplDecl = m;
+              break;
+            }
+          }
+
+          if (tmplDecl) {
+            std::string mangledName = std::string(node->memberName);
+            for (const auto *arg : node->templateArgs) {
+              const Type *resArg = resolveIfTemplate(arg);
+              std::string argStr = resArg->toString();
+              for (char &c : argStr) {
+                if (!isalnum(c))
+                  c = '_';
+              }
+              mangledName += "_" + argStr;
+            }
+            std::string_view mangledView = ctx->astCtx.copyString(mangledName);
+
+            bool alreadyInstantiated = false;
+            for (auto *m : methods) {
+              if (m->name == mangledView) {
+                alreadyInstantiated = true;
+                break;
+              }
+            }
+
+            if (!alreadyInstantiated) {
+              Parser parser(ctx->astCtx, tmplDecl->templateBodyTokens,
+                            ctx->diags, tmplDecl->declFilePath);
+              parser.instantiatingName = mangledView;
+              parser.templateBaseName = node->memberName;
+              for (size_t i = 0; i < tmplDecl->templateParams.size(); ++i) {
+                parser.templateArgs[tmplDecl->templateParams[i]] =
+                    resolveIfTemplate(node->templateArgs[i]);
+              }
+              DeclNode *instDecl = parser.parseDeclarationOrFunction();
+
+              if (instDecl && instDecl->kind == NodeKind::FunctionDecl) {
+                auto *fnDecl = static_cast<FunctionDeclNode *>(instDecl);
+                fnDecl->isMethod = true;
+                fnDecl->hasPublicMod = tmplDecl->hasPublicMod;
+                fnDecl->hasPrivateMod = tmplDecl->hasPrivateMod;
+                fnDecl->annotations = tmplDecl->annotations;
+                fnDecl->declFilePath = tmplDecl->declFilePath; // Origin linkage
+
+                /* Inject implicit 'this' parameter for instantiated methods */
+                std::vector<ParamDeclNode *> newParams;
+                newParams.push_back(ctx->astCtx.create<ParamDeclNode>(
+                    ctx->astCtx.getPointerType(recordTy), "this", nullptr,
+                    false, false, fnDecl->line, fnDecl->column, 4));
+
+                for (auto *p : fnDecl->params) {
+                  newParams.push_back(p);
+                }
+                fnDecl->params =
+                    ctx->astCtx.copyArray<ParamDeclNode *>(newParams);
+
+                std::vector<FunctionDeclNode *> updatedMethods(methods.begin(),
+                                                               methods.end());
+                updatedMethods.push_back(fnDecl);
+
+                if (recDecl->kind == NodeKind::ClassDecl) {
+                  methods =
+                      ctx->astCtx.copyArray<FunctionDeclNode *>(updatedMethods);
+                  const_cast<ClassDeclNode *>(
+                      static_cast<const ClassDeclNode *>(recDecl))
+                      ->methods = methods;
+                } else {
+                  methods =
+                      ctx->astCtx.copyArray<FunctionDeclNode *>(updatedMethods);
+                  const_cast<StructDeclNode *>(
+                      static_cast<const StructDeclNode *>(recDecl))
+                      ->methods = methods;
+                }
+
+                fnDecl->mangledName =
+                    Mangler::mangle(fnDecl, std::string(recordTy->getName()));
+
+                auto prevContext = ctx->getCurrentRecordContext();
+                ctx->setCurrentRecordContext(recordTy);
+                dispatch(fnDecl);
+                ctx->setCurrentRecordContext(prevContext);
+              }
+            }
+            const_cast<MemberAccessNode *>(node)->memberName = mangledView;
+          }
+        }
+
         for (const auto *method : methods) {
           if (method->name == node->memberName) {
             if (!method->isPublic(method->name) &&
@@ -1291,6 +1572,8 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
 }
 
 SemaResult TypeCheckPass::visit(const ParamDeclNode *node) {
+  const_cast<ParamDeclNode *>(node)->type = resolveIfTemplate(node->type);
+
   if (!checkTypeVisibility(node->type, node)) {
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,
                                      "Type visibility error"});
@@ -1320,6 +1603,12 @@ static bool guaranteesReturn(const ASTNode *node) {
 }
 
 SemaResult TypeCheckPass::visit(const FunctionDeclNode *node) {
+  if (node->isTemplate)
+    return ctx->astCtx.VoidTy;
+
+  const_cast<FunctionDeclNode *>(node)->returnType =
+      resolveIfTemplate(node->returnType);
+
   if (!checkTypeVisibility(node->returnType, node)) {
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,
                                      "Type visibility error"});
@@ -1779,6 +2068,9 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
 }
 
 SemaResult TypeCheckPass::visit(const CastNode *node) {
+  const_cast<CastNode *>(node)->targetType =
+      resolveIfTemplate(node->targetType);
+
   auto srcType = dispatch(node->expr);
   const Type *destType = node->targetType;
 
@@ -1903,7 +2195,9 @@ SemaResult TypeCheckPass::visit(const ModuleNode *node) {
   }
 
   auto prevFile = ctx->currentFile;
+  auto prevMod = ctx->currentModule;
   ctx->setCurrentFile(node->filePath);
+  ctx->currentModule = node;
 
   for (const auto &stmt : node->statements) {
     auto res = dispatch(stmt);
@@ -1912,6 +2206,7 @@ SemaResult TypeCheckPass::visit(const ModuleNode *node) {
   }
 
   ctx->setCurrentFile(prevFile);
+  ctx->currentModule = prevMod;
 
   if (hasErrors) {
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,
@@ -1950,6 +2245,9 @@ SemaResult TypeCheckPass::visit(const ArraySubscriptNode *node) {
 }
 
 SemaResult TypeCheckPass::visit(const NewExprNode *node) {
+  const_cast<NewExprNode *>(node)->allocatedType =
+      resolveIfTemplate(node->allocatedType);
+
   if (!checkTypeVisibility(node->allocatedType, node)) {
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,
                                      "Type visibility error"});

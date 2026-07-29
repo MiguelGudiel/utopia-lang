@@ -25,7 +25,9 @@ enum class TypeKind {
   Array,
   Function,
   Alias,
-  Enum
+  Enum,
+  TemplateParam,
+  TemplateInst
 };
 
 enum class BuiltinKind {
@@ -157,6 +159,31 @@ public:
   explicit ClassType(std::string_view n) : RecordType(TypeKind::Class, n) {}
 };
 
+class TemplateParamType : public Type {
+  std::string_view name;
+
+public:
+  explicit TemplateParamType(std::string_view n)
+      : Type(TypeKind::TemplateParam), name(n) {}
+  std::string_view getName() const { return name; }
+};
+
+class TemplateInstType : public Type {
+  std::string_view baseName;
+  llvm::ArrayRef<const Type *> templateArgs;
+  mutable const Type *resolvedType = nullptr;
+
+public:
+  explicit TemplateInstType(std::string_view n,
+                            llvm::ArrayRef<const Type *> args)
+      : Type(TypeKind::TemplateInst), baseName(n), templateArgs(args) {}
+
+  std::string_view getBaseName() const { return baseName; }
+  llvm::ArrayRef<const Type *> getTemplateArgs() const { return templateArgs; }
+  const Type *getResolvedType() const { return resolvedType; }
+  void setResolvedType(const Type *t) const { resolvedType = t; }
+};
+
 class FunctionType : public Type {
   const Type *returnType;
   llvm::ArrayRef<const Type *> paramTypes;
@@ -208,6 +235,12 @@ inline const Type *Type::getUnqualifiedType() const {
     if (tgt)
       return tgt->getUnqualifiedType();
   }
+  if (kind == TypeKind::TemplateInst) {
+    const Type *res =
+        static_cast<const TemplateInstType *>(this)->getResolvedType();
+    if (res)
+      return res->getUnqualifiedType();
+  }
   return this;
 }
 
@@ -238,6 +271,21 @@ inline bool Type::isVoid() const {
 inline std::string Type::toString() const {
   if (kind == TypeKind::Alias) {
     return std::string(static_cast<const AliasType *>(this)->getName());
+  }
+  if (kind == TypeKind::TemplateParam) {
+    return std::string(static_cast<const TemplateParamType *>(this)->getName());
+  }
+  if (kind == TypeKind::TemplateInst) {
+    auto tInst = static_cast<const TemplateInstType *>(this);
+    std::string res = std::string(tInst->getBaseName()) + "<";
+    auto args = tInst->getTemplateArgs();
+    for (size_t i = 0; i < args.size(); ++i) {
+      res += args[i]->toString();
+      if (i < args.size() - 1)
+        res += ", ";
+    }
+    res += ">";
+    return res;
   }
   if (kind == TypeKind::Function) {
     auto fTy = static_cast<const FunctionType *>(this);

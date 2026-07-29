@@ -115,10 +115,10 @@ public:
 
 class DeclCollectorPass : public SemaPass,
                           public ASTVisitor<DeclCollectorPass, void> {
-  SemaContext *ctx = nullptr;
   std::unordered_set<const ModuleNode *> visitedModules;
 
 public:
+  SemaContext *ctx = nullptr;
   bool run(const ModuleNode *module, SemaContext &context) override;
   const char *getName() const override { return "DeclarationCollector"; }
 
@@ -169,6 +169,7 @@ public:
 
   // Check type access visibility to avoid escaping private types across files
   bool checkTypeVisibility(const Type *type, const ASTNode *node);
+  const Type* resolveIfTemplate(const Type* t);
 
   SemaResult visit(const NumberNode *node);
   SemaResult visit(const BoolNode *node);

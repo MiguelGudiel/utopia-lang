@@ -14,10 +14,13 @@ public:
   ASTContext &astCtx;
   SymbolTable symTable;
   std::string_view currentFile;
+  const ModuleNode *currentModule = nullptr;
+  std::unordered_map<std::string_view, const DeclNode *> templateRegistry;
+  DiagnosticsEngine &diags;
 
   explicit SemaContext(ASTContext &ast, DiagnosticsEngine &de,
                        std::string_view path)
-      : astCtx(ast), diags(de), currentFile(path) {
+      : astCtx(ast), currentFile(path), diags(de) {
     currentFunctionReturn = astCtx.VoidTy;
   }
 
@@ -64,7 +67,6 @@ public:
   }
 
 private:
-  DiagnosticsEngine &diags;
   std::vector<ErrorInfo> errors;
   const Type *currentFunctionReturn;
   const RecordType *currentRecordContext = nullptr;

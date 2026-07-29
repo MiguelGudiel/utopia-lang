@@ -20,7 +20,7 @@ class ModuleLoader;
 
 class Parser {
 public:
-  Parser(ASTContext &context, std::span<const Token> tokenStream,
+  Parser(ASTContext &context, llvm::ArrayRef<Token> tokenStream,
          DiagnosticsEngine &de, std::string_view path,
          ModuleLoader *loader = nullptr)
       : astCtx(context), tokens(tokenStream), diags(de), filePath(path),
@@ -28,14 +28,24 @@ public:
 
   ModuleNode *parseModule(std::string_view filePath);
 
+  DeclNode *parseClassDecl();
+  DeclNode *
+  parseDeclarationOrFunction(llvm::ArrayRef<AnnotationNode *> annotations = {});
+
+  std::string_view instantiatingName = "";
+  std::string_view templateBaseName = "";
+  std::unordered_map<std::string_view, const Type *> templateArgs;
+
 private:
   ASTContext &astCtx;
-  std::span<const Token> tokens;
+  llvm::ArrayRef<Token> tokens;
   size_t cursor = 0;
 
   DiagnosticsEngine &diags;
   std::string_view filePath;
   ModuleLoader *moduleLoader;
+
+  std::vector<std::string_view> currentTemplateParams;
 
   const Token &currentToken() const;
   const Token &peekToken(size_t offset = 1) const;
@@ -53,6 +63,17 @@ private:
   }
   void synchronize();
 
+  void pushTemplateParam(std::string_view name) {
+    currentTemplateParams.push_back(name);
+  }
+  void popTemplateParams(size_t count) {
+    currentTemplateParams.resize(currentTemplateParams.size() - count);
+  }
+  bool isTemplateParam(std::string_view name) {
+    return std::find(currentTemplateParams.begin(), currentTemplateParams.end(),
+                     name) != currentTemplateParams.end();
+  }
+
   const Type *parseType(bool inNewExpr = false);
   const Type *applyArrayDeclarator(const Type *baseType);
   std::string consumeComments();
@@ -66,11 +87,8 @@ private:
   std::vector<ParamDeclNode *> parseParameterList(const Type *classTy,
                                                   bool &isVariadic);
 
-  DeclNode *
-  parseDeclarationOrFunction(llvm::ArrayRef<AnnotationNode *> annotations = {});
   DeclNode *parseEnumDecl();
   DeclNode *parseStructDecl();
-  DeclNode *parseClassDecl();
   BlockNode *parseBlock();
   BlockNode *parseFunctionBody(const Type *returnType);
   ReturnNode *parseReturn();

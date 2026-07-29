@@ -130,7 +130,9 @@ ModuleNode *ModuleLoader::loadModule(const std::string &importURI,
   }
 
   Lexer lexer(sourceView);
-  auto tokens = lexer.tokenize();
+  auto tokensVec = lexer.tokenize();
+
+  auto tokens = astCtx.copyArray<Token>(tokensVec);
 
   Parser parser(astCtx, tokens, diags, persistentFilePath, this);
   ModuleNode *module = parser.parseModule(persistentFilePath);
