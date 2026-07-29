@@ -1043,9 +1043,10 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
         if (thisTy->isPointerType()) {
           const Type *pointee =
               static_cast<const PointerType *>(thisTy)->getPointeeType();
-          if (pointee->getKind() == TypeKind::Class ||
-              pointee->getKind() == TypeKind::Struct) {
-            auto clsTy = static_cast<const RecordType *>(pointee);
+          const Type *unqualPointee = pointee->getUnqualifiedType();
+          if (unqualPointee->getKind() == TypeKind::Class ||
+              unqualPointee->getKind() == TypeKind::Struct) {
+            auto clsTy = static_cast<const RecordType *>(unqualPointee);
             if (auto field = clsTy->getField(node->name)) {
               if (!field->isPublic && ctx->getCurrentRecordContext() != clsTy) {
                 return ctx->reportError(node->line, node->column, node->length,
@@ -1285,7 +1286,12 @@ SemaResult TypeCheckPass::visit(const UnaryOpNode *node) {
       return ctx->reportError(node->line, node->column, node->length,
                               "Cannot take address of r-value");
     }
-    resType = ctx->astCtx.getPointerType(*exprType);
+
+    const Type *baseTy = *exprType;
+    if (baseTy->isReferenceType()) {
+      baseTy = static_cast<const ReferenceType *>(baseTy)->getPointeeType();
+    }
+    resType = ctx->astCtx.getPointerType(baseTy);
   } else if (node->op == "*") {
     const Type *unqualExprType = (*exprType)->getUnqualifiedType();
     if (unqualExprType->isPointerType()) {
@@ -1586,6 +1592,55 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
                 "' with type '" + initTypeStr + "'");
       } else {
         checkImplicitCastWarning(*initRes, declType, node->initializer);
+
+        /* Evaluate deep copy construction to prevent shallow copy of aggregates
+         * with destructors */
+        if (baseUnqualTy->getKind() == TypeKind::Class ||
+            baseUnqualTy->getKind() == TypeKind::Struct) {
+          const Type *initUnqual = (*initRes)->getUnqualifiedType();
+
+          if (baseUnqualTy == initUnqual) {
+            auto *recTy = static_cast<const RecordType *>(baseUnqualTy);
+            if (auto *decl = recTy->getDeclaration()) {
+              llvm::ArrayRef<FunctionDeclNode *> ctors;
+              if (decl->kind == NodeKind::ClassDecl)
+                ctors = static_cast<const ClassDeclNode *>(decl)->constructors;
+              else if (decl->kind == NodeKind::StructDecl)
+                ctors = static_cast<const StructDeclNode *>(decl)->constructors;
+
+              const FunctionDeclNode *copyCtor = nullptr;
+              for (auto *ctor : ctors) {
+                if (ctor->params.size() == 2) {
+                  const Type *pType = ctor->params[1]->type;
+                  if (pType->isReferenceType() &&
+                      static_cast<const ReferenceType *>(pType)
+                              ->getPointeeType()
+                              ->getUnqualifiedType() == baseUnqualTy) {
+                    copyCtor = ctor;
+                    break;
+                  }
+                }
+              }
+
+              if (copyCtor) {
+                const_cast<VarDeclNode *>(node)->copyCtor = copyCtor;
+              } else {
+                const FunctionDeclNode *dtor = nullptr;
+                if (decl->kind == NodeKind::ClassDecl)
+                  dtor = static_cast<const ClassDeclNode *>(decl)->destructor;
+                else if (decl->kind == NodeKind::StructDecl)
+                  dtor = static_cast<const StructDeclNode *>(decl)->destructor;
+
+                if (dtor && !dtor->isImplicit) {
+                  return ctx->reportError(
+                      node->line, node->column, node->length,
+                      "Cannot implicitly copy a record with a custom "
+                      "destructor. A copy constructor is required.");
+                }
+              }
+            }
+          }
+        }
       }
     }
   } else if (declType->isReferenceType()) {
@@ -1673,7 +1728,12 @@ SemaResult TypeCheckPass::visit(const AssignNode *node) {
 
   checkImplicitCastWarning(*rhsType, *lhsType, node->value);
 
-  const Type *unqualLhs = (*lhsType)->getUnqualifiedType();
+  const Type *baseLhs = *lhsType;
+  if (baseLhs->isReferenceType()) {
+    baseLhs = static_cast<const ReferenceType *>(baseLhs)->getPointeeType();
+  }
+
+  const Type *unqualLhs = baseLhs->getUnqualifiedType();
   if (unqualLhs->getKind() == TypeKind::Class ||
       unqualLhs->getKind() == TypeKind::Struct) {
     auto *recTy = static_cast<const RecordType *>(unqualLhs);
@@ -1687,7 +1747,8 @@ SemaResult TypeCheckPass::visit(const AssignNode *node) {
       if (dtor && !dtor->isImplicit) {
         return ctx->reportError(
             node->line, node->column, node->length,
-            "Cannot implicitly copy-assign a record with a custom destructor.");
+            "Cannot implicitly copy-assign a record with a custom destructor. "
+            "An overloaded operator= is required.");
       }
     }
   }
@@ -1768,13 +1829,15 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
     else if (unqualObj->isReferenceType())
       baseTy = static_cast<const ReferenceType *>(unqualObj)->getPointeeType();
 
-    if (baseTy->getKind() != TypeKind::Struct &&
-        baseTy->getKind() != TypeKind::Class) {
+    const Type *unqualBaseTy = baseTy->getUnqualifiedType();
+
+    if (unqualBaseTy->getKind() != TypeKind::Struct &&
+        unqualBaseTy->getKind() != TypeKind::Class) {
       return ctx->reportError(node->line, node->column, node->length,
                               "Member access on non-record type");
     }
 
-    recordTy = static_cast<const RecordType *>(baseTy);
+    recordTy = static_cast<const RecordType *>(unqualBaseTy);
 
     if (recordTy->isOpaque()) {
       return ctx->reportError(
@@ -2287,14 +2350,20 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
 
       if (!recordTy) {
         const Type *baseTy = ma->object->exprType;
-        if (baseTy->isPointerType())
-          baseTy = static_cast<const PointerType *>(baseTy)->getPointeeType();
-        else if (baseTy->isReferenceType())
-          baseTy = static_cast<const ReferenceType *>(baseTy)->getPointeeType();
+        const Type *unqualObj = baseTy->getUnqualifiedType();
 
-        if (baseTy->getKind() == TypeKind::Struct ||
-            baseTy->getKind() == TypeKind::Class) {
-          recordTy = static_cast<const RecordType *>(baseTy);
+        if (unqualObj->isPointerType())
+          baseTy =
+              static_cast<const PointerType *>(unqualObj)->getPointeeType();
+        else if (unqualObj->isReferenceType())
+          baseTy =
+              static_cast<const ReferenceType *>(unqualObj)->getPointeeType();
+
+        const Type *unqualBaseTy = baseTy->getUnqualifiedType();
+
+        if (unqualBaseTy->getKind() == TypeKind::Struct ||
+            unqualBaseTy->getKind() == TypeKind::Class) {
+          recordTy = static_cast<const RecordType *>(unqualBaseTy);
           auto recordDecls = ctx->lookup(recordTy->getName());
 
           for (auto *d : recordDecls) {

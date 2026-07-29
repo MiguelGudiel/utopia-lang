@@ -218,6 +218,9 @@ struct VarDeclNode : public DeclNode {
   bool isGlobal = false;
   bool isStatic = false;
 
+  /* Reference to the resolved copy constructor for aggregate initialization */
+  mutable const FunctionDeclNode *copyCtor = nullptr;
+
   VarDeclNode(const Type *t, std::string_view n, ExprNode *init, int l, int c,
               int len)
       : DeclNode(NodeKind::VarDecl, l, c, len), type(t), varName(n),

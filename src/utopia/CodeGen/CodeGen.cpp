@@ -1509,14 +1509,34 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
       }
 
       if (!isRVO) {
-        /* Bypass SSA register inflation for contiguous aggregate types by
-         * mapping direct memory block transfers. */
         bool isAggregate = (unqualTy->getKind() == TypeKind::Struct ||
                             unqualTy->getKind() == TypeKind::Class);
-        if (isAggregate &&
-            (node->initializer->kind == NodeKind::Variable ||
-             node->initializer->kind == NodeKind::MemberAccess ||
-             node->initializer->kind == NodeKind::ArraySubscript)) {
+
+        if (isAggregate && node->copyCtor) {
+          llvm::Value *rvalAddr = getLValue(node->initializer);
+          if (!rvalAddr) {
+            /* Materialize transient r-value to memory if there's no inherent
+             * l-value */
+            llvm::Value *initVal = dispatch(node->initializer);
+            if (initVal) {
+              rvalAddr = createEntryBlockAlloca(ty, "tmp.copy.src");
+              createTBAAStore(initVal, rvalAddr, node->type);
+            }
+          }
+
+          if (rvalAddr) {
+            llvm::Function *ctorFunc = getOrCreateFunction(node->copyCtor);
+            builder.CreateCall(ctorFunc, {alloca, rvalAddr});
+          } else {
+            diags.report(
+                {DiagLevel::Error, node->line, node->column, node->length,
+                 "Failed to resolve source for copy constructor.", ""});
+          }
+        } else if (isAggregate &&
+                   (node->initializer->kind == NodeKind::Variable ||
+                    node->initializer->kind == NodeKind::MemberAccess ||
+                    node->initializer->kind == NodeKind::ArraySubscript)) {
+          /* Fallback generic memcpy for records lacking a custom destructor */
           llvm::Value *rvalAddr = getLValue(node->initializer);
           if (rvalAddr) {
             llvm::Align align = mod.getDataLayout().getABITypeAlign(ty);
