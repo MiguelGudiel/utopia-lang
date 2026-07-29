@@ -266,6 +266,49 @@ void TypeCheckPass::checkImplicitCastWarning(const Type *from, const Type *to,
   }
 }
 
+ExprNode *TypeCheckPass::performImplicitConversion(ExprNode *expr,
+                                                   const Type *to) {
+  if (!expr || !expr->exprType || !to)
+    return expr;
+
+  if (expr->kind == NodeKind::ImplicitCast)
+    return expr;
+
+  const Type *unqualTo = to->getUnqualifiedType();
+
+  /* Prioritize built-in or exact primitive type mappings */
+  if (canImplicitlyCast(expr->exprType, to, false))
+    return expr;
+
+  /* Intercept and rewrite aggregate initialization to invoke conversion
+   * constructors */
+  if (unqualTo->getKind() == TypeKind::Class ||
+      unqualTo->getKind() == TypeKind::Struct) {
+    auto *recTy = static_cast<const RecordType *>(unqualTo);
+    if (auto *decl = recTy->getDeclaration()) {
+      llvm::ArrayRef<FunctionDeclNode *> ctors;
+      if (decl->kind == NodeKind::ClassDecl)
+        ctors = static_cast<const ClassDeclNode *>(decl)->constructors;
+      else if (decl->kind == NodeKind::StructDecl)
+        ctors = static_cast<const StructDeclNode *>(decl)->constructors;
+
+      for (auto *ctor : ctors) {
+        if (ctor->params.size() == 2) {
+          if (canImplicitlyCast(expr->exprType, ctor->params[1]->type, false)) {
+            auto *castNode = ctx->astCtx.create<ImplicitCastNode>(
+                expr, to, ctor, expr->line, expr->column, expr->length);
+            castNode->exprType = to;
+            castNode->isLValue = to->isReferenceType();
+            return castNode;
+          }
+        }
+      }
+    }
+  }
+
+  return expr;
+}
+
 bool DeclCollectorPass::run(const ModuleNode *module, SemaContext &context) {
   ctx = &context;
   dispatch(module);
@@ -620,6 +663,52 @@ TypeCheckPass::resolveOverloadedOperator(const Type *lhsType,
   if (!lhsType)
     return nullptr;
 
+  /*
+   * Restrict operator overloading resolution strictly to expressions where at
+   * least one of the participating operands fundamentally represents a
+   * User-Defined Type (Class, Struct, Enum). This enforces primitive semantic
+   * priority and prevents rogue conversion constructors from arbitrarily
+   * hijacking native numeric operations (e.g. `uint64` + `uint64` bypassing
+   * built-ins).
+   */
+  auto isUserDefined = [](const Type *t) {
+    if (!t)
+      return false;
+    const Type *unqual = t->getUnqualifiedType();
+    if (unqual->isPointerType()) {
+      unqual = static_cast<const PointerType *>(unqual)
+                   ->getPointeeType()
+                   ->getUnqualifiedType();
+    } else if (unqual->isReferenceType()) {
+      unqual = static_cast<const ReferenceType *>(unqual)
+                   ->getPointeeType()
+                   ->getUnqualifiedType();
+    } else if (unqual->getKind() == TypeKind::RValueReference) {
+      unqual = static_cast<const RValueReferenceType *>(unqual)
+                   ->getPointeeType()
+                   ->getUnqualifiedType();
+    }
+    return unqual->getKind() == TypeKind::Struct ||
+           unqual->getKind() == TypeKind::Class ||
+           unqual->getKind() == TypeKind::Enum;
+  };
+
+  bool hasUserDefinedOperand = isUserDefined(lhsType);
+  if (!hasUserDefinedOperand) {
+    for (const auto *arg : args) {
+      if (arg && isUserDefined(arg->exprType)) {
+        hasUserDefinedOperand = true;
+        break;
+      }
+    }
+  }
+
+  // If both operands are primitive structures, fallback definitively to
+  // built-ins
+  if (!hasUserDefinedOperand) {
+    return nullptr;
+  }
+
   std::string opFuncName = "operator" + std::string(opName);
   const FunctionDeclNode *bestMatch = nullptr;
   int bestScore = -1;
@@ -668,6 +757,10 @@ TypeCheckPass::resolveOverloadedOperator(const Type *lhsType,
                 break;
               }
 
+              if (canImplicitlyCast(argType, paramType, false)) {
+                currentScore += 10;
+              }
+
               bool isLValue = args[i]->isLValue;
               if (paramType->getKind() == TypeKind::RValueReference) {
                 if (isLValue) {
@@ -713,10 +806,11 @@ TypeCheckPass::resolveOverloadedOperator(const Type *lhsType,
 
         const Type *lhsParamType = fDecl->params[0]->type;
         if (!canImplicitlyCast(lhsType, lhsParamType)) {
-          match = false;
           continue;
         }
-        currentScore += 1;
+
+        currentScore +=
+            canImplicitlyCast(lhsType, lhsParamType, false) ? 10 : 1;
 
         for (size_t i = 0; i < args.size(); ++i) {
           const Type *argType = args[i]->exprType;
@@ -725,6 +819,10 @@ TypeCheckPass::resolveOverloadedOperator(const Type *lhsType,
           if (!canImplicitlyCast(argType, paramType)) {
             match = false;
             break;
+          }
+
+          if (canImplicitlyCast(argType, paramType, false)) {
+            currentScore += 10;
           }
 
           bool isLValue = args[i]->isLValue;
@@ -1355,6 +1453,8 @@ SemaResult TypeCheckPass::visit(const UnaryOpNode *node) {
   if (node->op == "++" || node->op == "--" || node->op == "-" ||
       node->op == "+" || node->op == "~" || node->op == "!") {
     if (auto *opDecl = resolveOverloadedOperator(*exprType, node->op, {})) {
+      const_cast<UnaryOpNode *>(node)->expr =
+          performImplicitConversion(node->expr, opDecl->params[0]->type);
       node->overloadedOperator = opDecl;
       node->exprType = opDecl->returnType;
       return opDecl->returnType;
@@ -1464,6 +1564,10 @@ SemaResult TypeCheckPass::visit(const BinaryOpNode *node) {
                                      "Invalid operands for binary operation"});
 
   if (auto *opDecl = resolveOverloadedOperator(*lhs, node->op, {node->right})) {
+    const_cast<BinaryOpNode *>(node)->left =
+        performImplicitConversion(node->left, opDecl->params[0]->type);
+    const_cast<BinaryOpNode *>(node)->right =
+        performImplicitConversion(node->right, opDecl->params[1]->type);
     node->overloadedOperator = opDecl;
     node->exprType = opDecl->returnType;
     return opDecl->returnType;
@@ -1697,15 +1801,16 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
                 "' with type '" + initTypeStr + "'");
       } else {
         checkImplicitCastWarning(*initRes, declType, node->initializer);
+        const_cast<VarDeclNode *>(node)->initializer =
+            performImplicitConversion(node->initializer, declType);
 
         /* Evaluate deep copy construction to prevent shallow copy of aggregates
          * with destructors */
         if (baseUnqualTy->getKind() == TypeKind::Class ||
             baseUnqualTy->getKind() == TypeKind::Struct) {
 
-          /* Extract underlying type from reference before evaluating overloads
-           */
-          const Type *initTypeStrp = *initRes;
+          /* Extract the correctly promoted expression type post-conversion */
+          const Type *initTypeStrp = node->initializer->exprType;
           if (initTypeStrp->isReferenceType()) {
             initTypeStrp = static_cast<const ReferenceType *>(initTypeStrp)
                                ->getPointeeType();
@@ -1750,22 +1855,19 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
 
                     if (pType->getKind() == TypeKind::RValueReference) {
                       if (isLValue) {
-                        match =
-                            false; // Cannot bind l-value to r-value reference
+                        match = false;
                       } else {
-                        currentScore = 3; // Perfect match for move constructor
+                        currentScore = 3;
                       }
                     } else if (pType->isReferenceType()) {
                       if (!pointee->isConstQualified()) {
                         if (!isLValue) {
-                          match = false; // Cannot bind r-value to non-const
-                                         // l-value reference
+                          match = false;
                         } else {
-                          currentScore =
-                              3; // Perfect match for mutable l-value reference
+                          currentScore = 3;
                         }
                       } else {
-                        currentScore = 2; // Const reference fallback
+                        currentScore = 2;
                       }
                     } else {
                       currentScore = 1;
@@ -1829,6 +1931,10 @@ SemaResult TypeCheckPass::visit(const AssignNode *node) {
 
   if (auto *opDecl =
           resolveOverloadedOperator(*lhsType, node->op, {node->value})) {
+    const_cast<AssignNode *>(node)->target =
+        performImplicitConversion(node->target, opDecl->params[0]->type);
+    const_cast<AssignNode *>(node)->value =
+        performImplicitConversion(node->value, opDecl->params[1]->type);
     node->overloadedOperator = opDecl;
     node->exprType = opDecl->returnType;
     node->isLValue = true;
@@ -1886,6 +1992,8 @@ SemaResult TypeCheckPass::visit(const AssignNode *node) {
   }
 
   checkImplicitCastWarning(*rhsType, *lhsType, node->value);
+  const_cast<AssignNode *>(node)->value =
+      performImplicitConversion(node->value, *lhsType);
 
   const Type *baseLhs = *lhsType;
   if (baseLhs->isReferenceType()) {
@@ -2473,6 +2581,10 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
                          "': expected '" + paramType->toString() +
                          "', but got '" + resolvedTypes[p]->toString() + "'.");
       } else {
+        if (canImplicitlyCast(resolvedTypes[p], paramType, false)) {
+          outScore += 10;
+        }
+
         bool isLValue = resolvedArgs[p]->isLValue;
         if (paramType->getKind() == TypeKind::RValueReference) {
           if (isLValue) {
@@ -2509,6 +2621,9 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
       checkImplicitCastWarning(resolvedTypes[p],
                                fDecl->params[paramOffset + p]->type,
                                resolvedArgs[p]);
+      /* Enforce implicit conversions internally for the matched parameters */
+      resolvedArgs[p] = performImplicitConversion(
+          resolvedArgs[p], fDecl->params[paramOffset + p]->type);
     }
 
     outResolvedArgs = resolvedArgs;
@@ -2789,8 +2904,14 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
           }
         }
 
+        std::vector<ExprNode *> resolvedArgs;
+        for (size_t i = 0; i < node->args.size(); ++i) {
+          resolvedArgs.push_back(performImplicitConversion(
+              node->args[i], fTy->getParamTypes()[i]));
+        }
+
         const_cast<FunctionCallNode *>(node)->args =
-            ctx->astCtx.copyArray<ExprNode *>(node->args);
+            ctx->astCtx.copyArray<ExprNode *>(resolvedArgs);
         node->exprType = fTy->getReturnType();
         node->isLValue = (node->exprType->isReferenceType());
         return node->exprType;
@@ -2888,6 +3009,8 @@ SemaResult TypeCheckPass::visit(const ReturnNode *node) {
                                 (*valType)->toString() + "'");
   } else {
     checkImplicitCastWarning(*valType, expectedRet, node->value);
+    const_cast<ReturnNode *>(node)->value =
+        performImplicitConversion(node->value, expectedRet);
   }
 
   return *valType;
@@ -2922,6 +3045,14 @@ SemaResult TypeCheckPass::visit(const ArrayLiteralNode *node) {
   if (!elemType) {
     elemType = ctx->astCtx.VoidTy;
   }
+
+  std::vector<ExprNode *> promotedElements;
+  for (const auto *elem : node->elements) {
+    promotedElements.push_back(
+        performImplicitConversion(const_cast<ExprNode *>(elem), elemType));
+  }
+  const_cast<ArrayLiteralNode *>(node)->elements =
+      ctx->astCtx.copyArray<ExprNode *>(promotedElements);
 
   const Type *arrType =
       ctx->astCtx.getArrayType(elemType, node->elements.size());
@@ -2974,6 +3105,10 @@ SemaResult TypeCheckPass::visit(const ArraySubscriptNode *node) {
 
   if (auto *opDecl =
           resolveOverloadedOperator(*baseType, "[]", {node->index})) {
+    const_cast<ArraySubscriptNode *>(node)->base =
+        performImplicitConversion(node->base, opDecl->params[0]->type);
+    const_cast<ArraySubscriptNode *>(node)->index =
+        performImplicitConversion(node->index, opDecl->params[1]->type);
     node->overloadedOperator = opDecl;
     node->exprType = opDecl->returnType;
     node->isLValue = opDecl->returnType->isReferenceType();
@@ -3178,6 +3313,10 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
             break;
           }
 
+          if (canImplicitlyCast(resolvedTypes[p], paramType, false)) {
+            currentScore += 10;
+          }
+
           bool isLValue = resolvedArgs[p]->isLValue;
           if (paramType->getKind() == TypeKind::RValueReference) {
             if (isLValue) {
@@ -3228,10 +3367,20 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
                                 finalErr);
       }
 
-      const_cast<NewExprNode *>(node)->resolvedConstructor = bestMatch;
-      const_cast<NewExprNode *>(node)->args =
-          ctx->astCtx.copyArray<ExprNode *>(bestResolvedArgs);
-      const_cast<NewExprNode *>(node)->argNames = {};
+      if (bestMatch) {
+        const_cast<NewExprNode *>(node)->resolvedConstructor = bestMatch;
+
+        size_t paramOffset = 1;
+        for (size_t p = 0; p < bestResolvedArgs.size(); ++p) {
+          const Type *paramType = bestMatch->params[paramOffset + p]->type;
+          bestResolvedArgs[p] =
+              performImplicitConversion(bestResolvedArgs[p], paramType);
+        }
+
+        const_cast<NewExprNode *>(node)->args =
+            ctx->astCtx.copyArray<ExprNode *>(bestResolvedArgs);
+        const_cast<NewExprNode *>(node)->argNames = {};
+      }
     }
   }
 
@@ -3250,4 +3399,7 @@ SemaResult TypeCheckPass::visit(const DeleteExprNode *node) {
   return ctx->astCtx.VoidTy;
 }
 
+SemaResult TypeCheckPass::visit(const ImplicitCastNode *node) {
+  return node->exprType;
+}
 } // namespace utopia

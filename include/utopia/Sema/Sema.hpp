@@ -12,7 +12,8 @@ namespace utopia {
  * Strips indirection to evaluate core type compatibility, now safely stripping
  * both LValue and RValue references.
  */
-static bool canImplicitlyCast(const Type *from, const Type *to) {
+static bool canImplicitlyCast(const Type *from, const Type *to,
+                              bool allowUserDefined = true) {
   if (!from || !to)
     return false;
 
@@ -41,6 +42,26 @@ static bool canImplicitlyCast(const Type *from, const Type *to) {
   const Type *unqualFrom = baseFrom->getUnqualifiedType();
   const Type *unqualTo = baseTo->getUnqualifiedType();
 
+  /* Process user-defined single-argument conversion constructors */
+  if (allowUserDefined && (unqualTo->getKind() == TypeKind::Class ||
+                           unqualTo->getKind() == TypeKind::Struct)) {
+    auto *recTy = static_cast<const RecordType *>(unqualTo);
+    if (auto *decl = recTy->getDeclaration()) {
+      llvm::ArrayRef<FunctionDeclNode *> ctors;
+      if (decl->kind == NodeKind::ClassDecl)
+        ctors = static_cast<const ClassDeclNode *>(decl)->constructors;
+      else if (decl->kind == NodeKind::StructDecl)
+        ctors = static_cast<const StructDeclNode *>(decl)->constructors;
+
+      for (auto *ctor : ctors) {
+        if (ctor->params.size() == 2) {
+          if (canImplicitlyCast(from, ctor->params[1]->type, false))
+            return true;
+        }
+      }
+    }
+  }
+
   if (unqualFrom->getKind() == TypeKind::Enum &&
       unqualTo->getKind() == TypeKind::Enum) {
     return unqualFrom == unqualTo;
@@ -58,7 +79,7 @@ static bool canImplicitlyCast(const Type *from, const Type *to) {
 
     if (arrFrom->getSize() == arrTo->getSize())
       return canImplicitlyCast(arrFrom->getElementType(),
-                               arrTo->getElementType());
+                               arrTo->getElementType(), allowUserDefined);
   }
 
   if (unqualFrom == unqualTo) {
@@ -161,6 +182,7 @@ public:
   void visit(const NewExprNode *) {}
   void visit(const DeleteExprNode *) {}
   void visit(const NullNode *) {}
+  void visit(const ImplicitCastNode *node) {}
 };
 
 class TypeCheckPass : public SemaPass,
@@ -182,6 +204,7 @@ public:
   const Type *resolveIfTemplate(const Type *t);
   void checkImplicitCastWarning(const Type *from, const Type *to,
                                 const ASTNode *node);
+  ExprNode *performImplicitConversion(ExprNode *expr, const Type *to);
 
   SemaResult visit(const NumberNode *node);
   SemaResult visit(const BoolNode *node);
@@ -216,6 +239,7 @@ public:
   SemaResult visit(const NullNode *node);
   SemaResult visit(const EnumDeclNode *node);
   SemaResult visit(const EnumMemberNode *node);
+  SemaResult visit(const ImplicitCastNode *node);
 };
 
 class SemaPipeline {

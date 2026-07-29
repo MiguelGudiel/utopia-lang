@@ -357,12 +357,21 @@ void CodeGen::emitConstructorCall(const FunctionCallNode *node,
     if (isRefParam) {
       argVal = getLValue(arg);
       if (!argVal) {
+        lastTemporaryAlloca = nullptr;
         llvm::Value *val = dispatch(arg);
-        argVal = createEntryBlockAlloca(val->getType(), "tmp.op.arg");
-        builder.CreateStore(val, argVal);
+        if (lastTemporaryAlloca) {
+          argVal = lastTemporaryAlloca;
+          lastTemporaryAlloca = nullptr;
+        } else {
+          argVal = createEntryBlockAlloca(val->getType(), "tmp.op.arg");
+          builder.CreateStore(val, argVal);
+        }
       }
     } else {
+      lastTemporaryAlloca = nullptr;
       argVal = dispatch(arg);
+      lastTemporaryAlloca = nullptr;
+
       if (func && argVal && argIdx < func->arg_size()) {
         llvm::Type *paramTy = func->getFunctionType()->getParamType(argIdx);
         argVal = createImplicitCast(argVal, paramTy);
@@ -623,6 +632,81 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
   }
 
   return nullptr;
+}
+
+llvm::Value *CodeGen::visit(const ImplicitCastNode *node) {
+  const Type *objectType = node->targetType;
+  if (objectType->isReferenceType()) {
+    objectType =
+        static_cast<const ReferenceType *>(objectType)->getPointeeType();
+  } else if (objectType->getKind() == TypeKind::RValueReference) {
+    objectType =
+        static_cast<const RValueReferenceType *>(objectType)->getPointeeType();
+  }
+
+  llvm::Type *llTy = getLLVMType(objectType);
+
+  llvm::AllocaInst *temp = createEntryBlockAlloca(llTy, "implicit.cast.tmp");
+  emitDefaultInitialization(temp, objectType);
+
+  /* Registrar limpiezas semánticas si se declara un destructor personalizado */
+  const Type *unqual = objectType->getUnqualifiedType();
+  if (unqual->getKind() == TypeKind::Class ||
+      unqual->getKind() == TypeKind::Struct) {
+    auto *recTy = static_cast<const RecordType *>(unqual);
+    if (auto *decl = recTy->getDeclaration()) {
+      const FunctionDeclNode *dtor = nullptr;
+      if (decl->kind == NodeKind::ClassDecl)
+        dtor = static_cast<const ClassDeclNode *>(decl)->destructor;
+      else if (decl->kind == NodeKind::StructDecl)
+        dtor = static_cast<const StructDeclNode *>(decl)->destructor;
+
+      if (dtor) {
+        cgCtx.addCleanup(temp, dtor);
+        lastTemporaryAlloca = temp;
+      }
+    }
+  }
+
+  llvm::Function *ctorFunc = getOrCreateFunction(node->conversionConstructor);
+  std::vector<llvm::Value *> argsArgs;
+  argsArgs.push_back(temp);
+
+  llvm::Value *argVal = nullptr;
+  bool isRefParam = false;
+  if (node->conversionConstructor->params.size() > 1) {
+    const Type *pType = node->conversionConstructor->params[1]->type;
+    isRefParam = pType->isReferenceType() ||
+                 pType->getKind() == TypeKind::RValueReference;
+  }
+
+  if (isRefParam) {
+    argVal = getLValue(node->expr);
+    if (!argVal) {
+      llvm::Value *val = dispatch(node->expr);
+      argVal = createEntryBlockAlloca(val->getType(), "tmp.implicit.arg");
+      builder.CreateStore(val, argVal);
+    }
+  } else {
+    argVal = dispatch(node->expr);
+    if (ctorFunc && argVal && ctorFunc->arg_size() > 1) {
+      llvm::Type *paramTy = ctorFunc->getFunctionType()->getParamType(1);
+      argVal = createImplicitCast(argVal, paramTy);
+    }
+  }
+
+  argsArgs.push_back(argVal);
+  builder.CreateCall(ctorFunc, argsArgs);
+
+  if (!node->exprType->isVoid()) {
+    if (node->exprType->isReferenceType() ||
+        node->exprType->getKind() == TypeKind::RValueReference) {
+      return temp;
+    }
+    return createTBAALoad(getLLVMType(node->exprType), temp, node->exprType);
+  }
+
+  return temp;
 }
 
 llvm::Value *CodeGen::getLValue(const ExprNode *node) {
@@ -1228,9 +1312,15 @@ llvm::Value *CodeGen::visit(const BinaryOpNode *node) {
       }
 
       if (!objPtr) {
+        lastTemporaryAlloca = nullptr;
         llvm::Value *val = dispatch(node->left);
-        objPtr = createEntryBlockAlloca(val->getType(), "tmp.op.recv");
-        builder.CreateStore(val, objPtr);
+        if (lastTemporaryAlloca) {
+          objPtr = lastTemporaryAlloca;
+          lastTemporaryAlloca = nullptr;
+        } else {
+          objPtr = createEntryBlockAlloca(val->getType(), "tmp.op.recv");
+          builder.CreateStore(val, objPtr);
+        }
       }
       argsArgs.push_back(objPtr);
 
@@ -1245,12 +1335,21 @@ llvm::Value *CodeGen::visit(const BinaryOpNode *node) {
       if (isRefParam) {
         rhsVal = getLValue(node->right);
         if (!rhsVal) {
+          lastTemporaryAlloca = nullptr;
           llvm::Value *val = dispatch(node->right);
-          rhsVal = createEntryBlockAlloca(val->getType(), "tmp.op.arg");
-          builder.CreateStore(val, rhsVal);
+          if (lastTemporaryAlloca) {
+            rhsVal = lastTemporaryAlloca;
+            lastTemporaryAlloca = nullptr;
+          } else {
+            rhsVal = createEntryBlockAlloca(val->getType(), "tmp.op.arg");
+            builder.CreateStore(val, rhsVal);
+          }
         }
       } else {
+        lastTemporaryAlloca = nullptr;
         rhsVal = dispatch(node->right);
+        lastTemporaryAlloca = nullptr;
+
         llvm::Type *paramTy = getLLVMType(opFunc->params[1]->type);
         rhsVal = createImplicitCast(rhsVal, paramTy);
       }
@@ -1267,12 +1366,21 @@ llvm::Value *CodeGen::visit(const BinaryOpNode *node) {
       if (isRefParamL) {
         lhsVal = getLValue(node->left);
         if (!lhsVal) {
+          lastTemporaryAlloca = nullptr;
           llvm::Value *val = dispatch(node->left);
-          lhsVal = createEntryBlockAlloca(val->getType(), "tmp.op.arg.l");
-          builder.CreateStore(val, lhsVal);
+          if (lastTemporaryAlloca) {
+            lhsVal = lastTemporaryAlloca;
+            lastTemporaryAlloca = nullptr;
+          } else {
+            lhsVal = createEntryBlockAlloca(val->getType(), "tmp.op.arg.l");
+            builder.CreateStore(val, lhsVal);
+          }
         }
       } else {
+        lastTemporaryAlloca = nullptr;
         lhsVal = dispatch(node->left);
+        lastTemporaryAlloca = nullptr;
+
         llvm::Type *paramTyL = getLLVMType(opFunc->params[0]->type);
         lhsVal = createImplicitCast(lhsVal, paramTyL);
       }
@@ -1289,23 +1397,35 @@ llvm::Value *CodeGen::visit(const BinaryOpNode *node) {
       if (isRefParamR) {
         rhsVal = getLValue(node->right);
         if (!rhsVal) {
+          lastTemporaryAlloca = nullptr;
           llvm::Value *val = dispatch(node->right);
-          rhsVal = createEntryBlockAlloca(val->getType(), "tmp.op.arg.r");
-          builder.CreateStore(val, rhsVal);
+          if (lastTemporaryAlloca) {
+            rhsVal = lastTemporaryAlloca;
+            lastTemporaryAlloca = nullptr;
+          } else {
+            rhsVal = createEntryBlockAlloca(val->getType(), "tmp.op.arg.r");
+            builder.CreateStore(val, rhsVal);
+          }
         }
       } else {
+        lastTemporaryAlloca = nullptr;
         rhsVal = dispatch(node->right);
+        lastTemporaryAlloca = nullptr;
+
         llvm::Type *paramTyR = getLLVMType(opFunc->params[1]->type);
         rhsVal = createImplicitCast(rhsVal, paramTyR);
       }
       argsArgs.push_back(rhsVal);
     }
 
-    return builder.CreateCall(func, argsArgs);
+    auto res = builder.CreateCall(func, argsArgs);
+    lastTemporaryAlloca = nullptr;
+    return res;
   }
 
   llvm::Value *L = dispatch(node->left);
   llvm::Value *R = dispatch(node->right);
+  lastTemporaryAlloca = nullptr;
 
   if (!L || !R) {
     diags.report({DiagLevel::Error, node->line, node->column, node->length,
@@ -1599,10 +1719,13 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
         if (isAggregate && node->copyCtor) {
           llvm::Value *rvalAddr = getLValue(node->initializer);
           if (!rvalAddr) {
-            /* Materialize transient r-value to memory if there's no inherent
-             * l-value */
+            /* Map to the underlying temporary object to enable safe moves */
+            lastTemporaryAlloca = nullptr;
             llvm::Value *initVal = dispatch(node->initializer);
-            if (initVal) {
+            if (lastTemporaryAlloca) {
+              rvalAddr = lastTemporaryAlloca;
+              lastTemporaryAlloca = nullptr;
+            } else if (initVal) {
               rvalAddr = createEntryBlockAlloca(ty, "tmp.copy.src");
               createTBAAStore(initVal, rvalAddr, node->type);
             }
@@ -1623,7 +1746,9 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
             llvm::Align align = mod.getDataLayout().getABITypeAlign(ty);
             builder.CreateMemCpy(alloca, align, rvalAddr, align, allocSize);
           } else {
+            lastTemporaryAlloca = nullptr;
             llvm::Value *initVal = dispatch(node->initializer);
+            lastTemporaryAlloca = nullptr;
             if (initVal) {
               createTBAAStore(initVal, alloca, node->type);
             } else {
@@ -1633,7 +1758,9 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
             }
           }
         } else {
+          lastTemporaryAlloca = nullptr;
           llvm::Value *initVal = dispatch(node->initializer);
+          lastTemporaryAlloca = nullptr;
           if (initVal) {
             initVal = createImplicitCast(initVal, ty);
             createTBAAStore(initVal, alloca, node->type);
@@ -1710,19 +1837,30 @@ llvm::Value *CodeGen::visit(const AssignNode *node) {
     if (isRefParam) {
       rhsVal = getLValue(node->value);
       if (!rhsVal) {
+        lastTemporaryAlloca = nullptr;
         llvm::Value *val = dispatch(node->value);
-        rhsVal = createEntryBlockAlloca(val->getType(), "tmp.op.arg");
-        builder.CreateStore(val, rhsVal);
+        if (lastTemporaryAlloca) {
+          rhsVal = lastTemporaryAlloca;
+          lastTemporaryAlloca = nullptr;
+        } else {
+          rhsVal = createEntryBlockAlloca(val->getType(), "tmp.op.arg");
+          builder.CreateStore(val, rhsVal);
+        }
       }
     } else {
+      lastTemporaryAlloca = nullptr;
       rhsVal = dispatch(node->value);
+      lastTemporaryAlloca = nullptr;
+
       llvm::Type *paramTy =
           getLLVMType(node->overloadedOperator->params[1]->type);
       rhsVal = createImplicitCast(rhsVal, paramTy);
     }
     argsArgs.push_back(rhsVal);
 
-    return builder.CreateCall(func, argsArgs);
+    auto res = builder.CreateCall(func, argsArgs);
+    lastTemporaryAlloca = nullptr;
+    return res;
   }
 
   llvm::Value *lval = getLValue(node->target);
@@ -1765,6 +1903,8 @@ llvm::Value *CodeGen::visit(const AssignNode *node) {
   }
 
   llvm::Value *rval = dispatch(node->value);
+  lastTemporaryAlloca = nullptr;
+
   if (!rval) {
     diags.report({DiagLevel::Error, node->value->line, node->value->column,
                   node->value->length, "Failed to evaluate RHS of assignment.",
@@ -1975,12 +2115,20 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
       if (isRefParam) {
         argVal = getLValue(arg);
         if (!argVal) {
+          lastTemporaryAlloca = nullptr;
           llvm::Value *val = dispatch(arg);
-          argVal = createEntryBlockAlloca(val->getType(), "tmp.op.arg");
-          builder.CreateStore(val, argVal);
+          if (lastTemporaryAlloca) {
+            argVal = lastTemporaryAlloca;
+            lastTemporaryAlloca = nullptr;
+          } else {
+            argVal = createEntryBlockAlloca(val->getType(), "tmp.op.arg");
+            builder.CreateStore(val, argVal);
+          }
         }
       } else {
+        lastTemporaryAlloca = nullptr;
         argVal = dispatch(arg);
+        lastTemporaryAlloca = nullptr;
 
         if (func && argVal) {
           if (argIdx < func->arg_size()) {
@@ -2004,6 +2152,7 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
     }
 
     auto callRes = builder.CreateCall(func, argsArgs);
+    lastTemporaryAlloca = nullptr; // Ensure leak prevention
 
     if (node->resolvedFunc->isMethod &&
         node->resolvedFunc->returnType->isVoid()) {
@@ -2298,12 +2447,21 @@ llvm::Value *CodeGen::visit(const NewExprNode *node) {
           if (isRefParam) {
             argVal = getLValue(arg);
             if (!argVal) {
+              lastTemporaryAlloca = nullptr;
               llvm::Value *val = dispatch(arg);
-              argVal = createEntryBlockAlloca(val->getType(), "tmp.op.arg");
-              builder.CreateStore(val, argVal);
+              if (lastTemporaryAlloca) {
+                argVal = lastTemporaryAlloca;
+                lastTemporaryAlloca = nullptr;
+              } else {
+                argVal = createEntryBlockAlloca(val->getType(), "tmp.op.arg");
+                builder.CreateStore(val, argVal);
+              }
             }
           } else {
+            lastTemporaryAlloca = nullptr;
             argVal = dispatch(arg);
+            lastTemporaryAlloca = nullptr;
+
             if (ctorFunc && argVal && argIdx < ctorFunc->arg_size()) {
               llvm::Type *paramTy =
                   ctorFunc->getFunctionType()->getParamType(argIdx);

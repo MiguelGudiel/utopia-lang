@@ -18,14 +18,6 @@ public:
         diags(diags), mdBuilder(ctx) {
     tbaaRoot = mdBuilder.createTBAARoot("Utopia TBAA");
 
-    /*
-     * Enable Fast-Math globally on the IRBuilder.
-     * This instructs LLVM to assume relaxed floating-point math properties
-     * (nnan, ninf, nsz, arcp, contract, afn, reassoc), allowing the
-     * auto-vectorizer to freely replace costly operations (e.g., division,
-     * square roots) with fast hardware-native intrinsics during optimization
-     * passes.
-     */
     llvm::FastMathFlags fmf;
     fmf.setFast();
     builder.setFastMathFlags(fmf);
@@ -64,6 +56,7 @@ public:
   llvm::Value *visit(const NullNode *node);
   llvm::Value *visit(const EnumDeclNode *node);
   llvm::Value *visit(const EnumMemberNode *node);
+  llvm::Value *visit(const ImplicitCastNode *node);
 
   llvm::Value *createImplicitCast(llvm::Value *src, llvm::Type *destTy);
 
@@ -75,7 +68,8 @@ private:
   CodeGenContext cgCtx;
   DiagnosticsEngine &diags;
   const FunctionDeclNode *currentFunc = nullptr;
-  llvm::AllocaInst *lastTemporaryAlloca = nullptr; // Tracks temporal aggregate allocations for RVO
+  llvm::AllocaInst *lastTemporaryAlloca =
+      nullptr; // Tracks temporal aggregate allocations for RVO
 
   /* LLVM IR Metadata builders and trackers */
   llvm::MDBuilder mdBuilder;
@@ -84,6 +78,7 @@ private:
 
   llvm::Type *getLLVMType(const Type *type);
   llvm::Value *getLValue(const ExprNode *node);
+  llvm::Value *evaluateAsReference(const ExprNode *expr);
   llvm::Constant *evaluateAsConstant(const ExprNode *node);
   llvm::Function *getOrCreateFunction(const FunctionDeclNode *node);
 

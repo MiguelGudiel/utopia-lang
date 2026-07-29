@@ -40,7 +40,8 @@ enum class NodeKind : uint8_t {
   Delete,
   Null,
   EnumDecl,
-  EnumMember
+  EnumMember,
+  ImplicitCast
 };
 
 struct ASTNode {
@@ -455,6 +456,17 @@ struct DeleteExprNode : public ExprNode {
 
   DeleteExprNode(ExprNode *p, bool isArr, int l, int c, int len)
       : ExprNode(NodeKind::Delete, l, c, len), ptr(p), isArray(isArr) {}
+};
+
+struct ImplicitCastNode : public ExprNode {
+  ExprNode *expr;
+  const Type *targetType;
+  const FunctionDeclNode *conversionConstructor = nullptr;
+
+  ImplicitCastNode(ExprNode *e, const Type *target,
+                   const FunctionDeclNode *ctor, int l, int c, int len)
+      : ExprNode(NodeKind::ImplicitCast, l, c, len), expr(e),
+        targetType(target), conversionConstructor(ctor) {}
 };
 
 } // namespace utopia

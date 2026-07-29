@@ -52,6 +52,14 @@ void EffectAnalyzer::visit(const NewExprNode *n) {
     dispatch(a);
 }
 
+void EffectAnalyzer::visit(const ImplicitCastNode *n) {
+  /* Implicit conversions invoke constructors which may have side effects */
+  writesMem = true;
+  readsMem = true;
+  potentiallyInfinite = true;
+  dispatch(n->expr);
+}
+
 void EffectAnalyzer::visit(const WhileNode *n) {
   potentiallyInfinite = true;
   dispatch(n->condition);

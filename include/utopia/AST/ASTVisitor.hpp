@@ -115,6 +115,9 @@ public:
     case NodeKind::Null:
       return static_cast<Derived *>(this)->visit(
           static_cast<const NullNode *>(node));
+    case NodeKind::ImplicitCast:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const ImplicitCastNode *>(node));
     default:
       /* Dispatch failure routing to prevent silent segfaults on unmapped nodes
        */

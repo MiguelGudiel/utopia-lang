@@ -16,6 +16,7 @@ public:
   void visit(const FunctionCallNode *n);
   void visit(const DeleteExprNode *n);
   void visit(const NewExprNode *n);
+  void visit(const ImplicitCastNode *n);
   void visit(const WhileNode *n);
   void visit(const ForNode *n);
   void visit(const UnaryOpNode *n);
