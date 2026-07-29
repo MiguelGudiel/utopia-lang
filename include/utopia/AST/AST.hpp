@@ -208,8 +208,10 @@ struct BinaryOpNode : public ExprNode {
 struct VarDeclNode : public DeclNode {
   const Type *type;
   std::string_view varName;
+  std::string mangledName;
   ExprNode *initializer;
   bool isGlobal = false;
+  bool isStatic = false;
 
   VarDeclNode(const Type *t, std::string_view n, ExprNode *init, int l, int c,
               int len)
@@ -263,6 +265,7 @@ struct FunctionDeclNode : public DeclNode {
   bool isExtern;
   bool isVariadic;
   bool isImplicit;
+  bool isStatic = false;
   mutable std::string_view externAlias;
 
   /* Intrinsic function attributes inferred during semantic analysis */
@@ -393,6 +396,9 @@ struct MemberAccessNode : public ExprNode {
 
   bool isEnumMember = false;
   const EnumMemberNode *enumMember = nullptr;
+
+  bool isStaticFieldRef = false;
+  const VarDeclNode *resolvedVar = nullptr;
 
   /* Storage for explicit template arguments applied to method access */
   llvm::ArrayRef<const Type *> templateArgs;

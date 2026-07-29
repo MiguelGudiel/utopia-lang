@@ -658,6 +658,7 @@ ASTNode *Parser::parseStatement() {
   } else if (currentToken().type == TokenType::TYPE_KW ||
              currentToken().type == TokenType::CONST_KW ||
              currentToken().type == TokenType::EXTERN_KW ||
+             currentToken().type == TokenType::STATIC_KW ||
              (currentToken().type == TokenType::IDENTIFIER &&
               (peekToken().type == TokenType::IDENTIFIER ||
                astCtx.getRecordType(currentToken().value) != nullptr))) {
@@ -1193,7 +1194,17 @@ DeclNode *Parser::parseStructDecl() {
     }
 
     size_t methodStartIdx = cursor;
-    bool isExtern = match(TokenType::EXTERN_KW);
+    bool isStatic = false;
+    bool isExtern = false;
+
+    while (currentToken().type == TokenType::STATIC_KW ||
+           currentToken().type == TokenType::EXTERN_KW) {
+      if (currentToken().type == TokenType::STATIC_KW)
+        isStatic = true;
+      if (currentToken().type == TokenType::EXTERN_KW)
+        isExtern = true;
+      advance();
+    }
 
     if (!isExtern) {
       for (const auto *ann : memberAnnotations) {
@@ -1230,12 +1241,13 @@ DeclNode *Parser::parseStructDecl() {
 
     if (match(TokenType::LPAREN)) {
       bool isVariadic = false;
-      auto params =
-          parseParameterList(isExtern ? nullptr : structTy, isVariadic);
+      auto params = parseParameterList(
+          (isExtern || isStatic) ? nullptr : structTy, isVariadic);
       expect(TokenType::RPAREN, "Expected ')'");
 
       auto method = astCtx.create<FunctionDeclNode>(
           memType, memName, mLine, mCol, false, true, isExtern, isVariadic);
+      method->isStatic = isStatic;
       method->params = astCtx.copyArray<ParamDeclNode *>(params);
       method->annotations = memberAnnotations;
       method->hasPublicMod = isPub;
@@ -1271,10 +1283,16 @@ DeclNode *Parser::parseStructDecl() {
                     "Variables cannot be declared as extern.");
         throw ParseException();
       }
+
+      ExprNode *init = nullptr;
+      if (match(TokenType::ASSIGN)) {
+        init = parseExpression();
+      }
       expect(TokenType::SEMICOLON, "Expected ';'");
 
-      auto field = astCtx.create<VarDeclNode>(memType, memName, nullptr, mLine,
+      auto field = astCtx.create<VarDeclNode>(memType, memName, init, mLine,
                                               mCol, memName.length());
+      field->isStatic = isStatic;
       field->annotations = memberAnnotations;
       field->hasPublicMod = isPub;
       field->hasPrivateMod = isPriv;
@@ -1322,8 +1340,11 @@ DeclNode *Parser::parseStructDecl() {
   expect(TokenType::RBRACE, "Expected '}'");
 
   std::vector<FieldInfo> fInfos;
+  uint32_t instanceFieldIndex = 0;
   for (size_t i = 0; i < fields.size(); ++i) {
-    fInfos.push_back({fields[i]->varName, fields[i]->type, (uint32_t)i,
+    if (fields[i]->isStatic)
+      continue;
+    fInfos.push_back({fields[i]->varName, fields[i]->type, instanceFieldIndex++,
                       fields[i]->isPublic(fields[i]->varName)});
   }
   structTy->setFields(astCtx.copyArray<FieldInfo>(fInfos));
@@ -1498,7 +1519,17 @@ DeclNode *Parser::parseClassDecl() {
     }
 
     size_t methodStartIdx = cursor;
-    bool isExtern = match(TokenType::EXTERN_KW);
+    bool isStatic = false;
+    bool isExtern = false;
+
+    while (currentToken().type == TokenType::STATIC_KW ||
+           currentToken().type == TokenType::EXTERN_KW) {
+      if (currentToken().type == TokenType::STATIC_KW)
+        isStatic = true;
+      if (currentToken().type == TokenType::EXTERN_KW)
+        isExtern = true;
+      advance();
+    }
 
     if (!isExtern) {
       for (const auto *ann : memberAnnotations) {
@@ -1535,12 +1566,13 @@ DeclNode *Parser::parseClassDecl() {
 
     if (match(TokenType::LPAREN)) {
       bool isVariadic = false;
-      auto params =
-          parseParameterList(isExtern ? nullptr : classTy, isVariadic);
+      auto params = parseParameterList(
+          (isExtern || isStatic) ? nullptr : classTy, isVariadic);
       expect(TokenType::RPAREN, "Expected ')'");
 
       auto method = astCtx.create<FunctionDeclNode>(
           memType, memName, mLine, mCol, false, true, isExtern, isVariadic);
+      method->isStatic = isStatic;
       method->params = astCtx.copyArray<ParamDeclNode *>(params);
       method->annotations = memberAnnotations;
       method->hasPublicMod = isPub;
@@ -1577,10 +1609,16 @@ DeclNode *Parser::parseClassDecl() {
                     "Variables cannot be declared as extern.");
         throw ParseException();
       }
+
+      ExprNode *init = nullptr;
+      if (match(TokenType::ASSIGN)) {
+        init = parseExpression();
+      }
       expect(TokenType::SEMICOLON, "Expected ';'");
 
-      auto field = astCtx.create<VarDeclNode>(memType, memName, nullptr, mLine,
+      auto field = astCtx.create<VarDeclNode>(memType, memName, init, mLine,
                                               mCol, memName.length());
+      field->isStatic = isStatic;
       field->annotations = memberAnnotations;
       field->hasPublicMod = isPub;
       field->hasPrivateMod = isPriv;
@@ -1628,8 +1666,11 @@ DeclNode *Parser::parseClassDecl() {
   expect(TokenType::RBRACE, "Expected '}'");
 
   std::vector<FieldInfo> fInfos;
+  uint32_t instanceFieldIndex = 0;
   for (size_t i = 0; i < fields.size(); ++i) {
-    fInfos.push_back({fields[i]->varName, fields[i]->type, (uint32_t)i,
+    if (fields[i]->isStatic)
+      continue;
+    fInfos.push_back({fields[i]->varName, fields[i]->type, instanceFieldIndex++,
                       fields[i]->isPublic(fields[i]->varName)});
   }
   classTy->setFields(astCtx.copyArray<FieldInfo>(fInfos));
@@ -1732,7 +1773,17 @@ DeclNode *Parser::parseDeclarationOrFunction(
   int line = currentToken().line;
   int col = currentToken().column;
 
-  bool isExtern = match(TokenType::EXTERN_KW);
+  bool isExtern = false;
+  bool isStatic = false;
+
+  while (currentToken().type == TokenType::EXTERN_KW ||
+         currentToken().type == TokenType::STATIC_KW) {
+    if (currentToken().type == TokenType::EXTERN_KW)
+      isExtern = true;
+    if (currentToken().type == TokenType::STATIC_KW)
+      isStatic = true;
+    advance();
+  }
 
   /* Fallback to checking the presence of the @extern annotation */
   if (!isExtern) {
@@ -1779,6 +1830,7 @@ DeclNode *Parser::parseDeclarationOrFunction(
 
     auto funcDecl = astCtx.create<FunctionDeclNode>(
         nodeType, id, line, col, isFuncConst, false, isExtern, isVariadic);
+    funcDecl->isStatic = isStatic;
     funcDecl->params = astCtx.copyArray<ParamDeclNode *>(params);
 
     if (isExtern) {
@@ -1805,6 +1857,11 @@ DeclNode *Parser::parseDeclarationOrFunction(
 
   if (isExtern) {
     reportError(line, col, idLen, "Variables cannot be declared as extern.");
+    throw ParseException();
+  }
+
+  if (isStatic) {
+    reportError(line, col, idLen, "Variables cannot be declared as static.");
     throw ParseException();
   }
 

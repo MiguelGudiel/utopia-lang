@@ -317,6 +317,13 @@ void DeclCollectorPass::visit(const StructDeclNode *node) {
   if (node->isOpaque)
     return;
 
+  for (auto *field : node->fields) {
+    if (field->isStatic) {
+      const_cast<VarDeclNode *>(field)->mangledName =
+          Mangler::mangle(field, std::string(node->name));
+    }
+  }
+
   if (node->destructor && node->destructor->isImplicit) {
     const_cast<FunctionDeclNode *>(node->destructor)->hasPublicMod =
         node->hasPublicMod;
@@ -395,6 +402,13 @@ void DeclCollectorPass::visit(const ClassDeclNode *node) {
 
   if (node->isOpaque)
     return;
+
+  for (auto *field : node->fields) {
+    if (field->isStatic) {
+      const_cast<VarDeclNode *>(field)->mangledName =
+          Mangler::mangle(field, std::string(node->name));
+    }
+  }
 
   if (node->destructor && node->destructor->isImplicit) {
     const_cast<FunctionDeclNode *>(node->destructor)->hasPublicMod =
@@ -857,6 +871,42 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
         }
       }
     }
+
+    if (const RecordType *recTy = ctx->getCurrentRecordContext()) {
+      const DeclNode *recDecl = recTy->getDeclaration();
+      if (recDecl) {
+        llvm::ArrayRef<VarDeclNode *> cFields;
+        llvm::ArrayRef<FunctionDeclNode *> cMethods;
+        if (recDecl->kind == NodeKind::ClassDecl) {
+          cFields = static_cast<const ClassDeclNode *>(recDecl)->fields;
+          cMethods = static_cast<const ClassDeclNode *>(recDecl)->methods;
+        } else if (recDecl->kind == NodeKind::StructDecl) {
+          cFields = static_cast<const StructDeclNode *>(recDecl)->fields;
+          cMethods = static_cast<const StructDeclNode *>(recDecl)->methods;
+        }
+
+        for (auto *f : cFields) {
+          if (f->isStatic && f->varName == node->name) {
+            const_cast<VariableNode *>(node)->resolvedDecl = f;
+            node->exprType = f->type;
+            return f->type;
+          }
+        }
+        for (auto *m : cMethods) {
+          if (m->isStatic && m->name == node->name) {
+            const_cast<VariableNode *>(node)->resolvedDecl = m;
+            std::vector<const Type *> pTypes;
+            for (auto *p : m->params)
+              pTypes.push_back(p->type);
+            const Type *funcTy = ctx->astCtx.getFunctionType(
+                m->returnType, ctx->astCtx.copyArray<const Type *>(pTypes));
+            node->exprType = ctx->astCtx.getPointerType(funcTy);
+            return node->exprType;
+          }
+        }
+      }
+    }
+
     return ctx->reportError(node->line, node->column, node->length,
                             "Undefined identifier: '" +
                                 std::string(node->name) + "'");
@@ -918,11 +968,11 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
                                   std::string(node->name) +
                                   "' from outside its file.");
     }
-    return ctx->astCtx.VoidTy;
+    ty = ctx->astCtx.VoidTy;
   } else if (target->kind == NodeKind::StructDecl ||
              target->kind == NodeKind::ClassDecl ||
              target->kind == NodeKind::EnumDecl) {
-    return ctx->astCtx.VoidTy;
+    ty = ctx->astCtx.VoidTy;
   } else {
     return ctx->reportError(node->line, node->column, node->length,
                             "Identifier '" + std::string(node->name) +
@@ -1376,191 +1426,248 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,
                                      "Invalid object in member access"});
 
+  const DeclNode *staticAccessDecl = nullptr;
+  const RecordType *recordTy = nullptr;
+
   if (node->object->kind == NodeKind::Variable) {
     auto varNode = static_cast<const VariableNode *>(node->object);
-    if (varNode->resolvedDecl &&
-        varNode->resolvedDecl->kind == NodeKind::EnumDecl) {
-      auto enumDecl = static_cast<const EnumDeclNode *>(varNode->resolvedDecl);
-      for (auto *mem : enumDecl->members) {
-        if (mem->name == node->memberName) {
-          if (!mem->isPublic(mem->name) &&
-              enumDecl->declFilePath != ctx->currentFile) {
-            return ctx->reportError(node->line, node->column, node->length,
-                                    "Cannot access private enum member '" +
-                                        std::string(mem->name) +
-                                        "' from outside its file.");
+    if (varNode->resolvedDecl) {
+      if (varNode->resolvedDecl->kind == NodeKind::EnumDecl) {
+        auto enumDecl =
+            static_cast<const EnumDeclNode *>(varNode->resolvedDecl);
+        for (auto *mem : enumDecl->members) {
+          if (mem->name == node->memberName) {
+            if (!mem->isPublic(mem->name) &&
+                enumDecl->declFilePath != ctx->currentFile) {
+              return ctx->reportError(node->line, node->column, node->length,
+                                      "Cannot access private enum member '" +
+                                          std::string(mem->name) +
+                                          "' from outside its file.");
+            }
+            const_cast<MemberAccessNode *>(node)->isEnumMember = true;
+            const_cast<MemberAccessNode *>(node)->enumMember = mem;
+            node->exprType = enumDecl->enumType;
+            return node->exprType;
           }
-          const_cast<MemberAccessNode *>(node)->isEnumMember = true;
-          const_cast<MemberAccessNode *>(node)->enumMember = mem;
-          node->exprType = enumDecl->enumType;
-          return node->exprType;
         }
-      }
-      return ctx->reportError(node->line, node->column, node->length,
-                              "Enum '" + std::string(enumDecl->name) +
-                                  "' does not contain member '" +
-                                  std::string(node->memberName) + "'");
-    }
-  }
-
-  const Type *baseTy = *objType;
-  const Type *unqualObj = baseTy->getUnqualifiedType();
-
-  if (unqualObj->isPointerType())
-    baseTy = static_cast<const PointerType *>(unqualObj)->getPointeeType();
-  else if (unqualObj->isReferenceType())
-    baseTy = static_cast<const ReferenceType *>(unqualObj)->getPointeeType();
-
-  if (baseTy->getKind() != TypeKind::Struct &&
-      baseTy->getKind() != TypeKind::Class) {
-    return ctx->reportError(node->line, node->column, node->length,
-                            "Member access on non-record type");
-  }
-
-  auto recordTy = static_cast<const RecordType *>(baseTy);
-
-  if (recordTy->isOpaque()) {
-    return ctx->reportError(node->line, node->column, node->length,
-                            "Cannot access member of incomplete (opaque) type");
-  }
-
-  if (auto field = recordTy->getField(node->memberName)) {
-    if (!field->isPublic && ctx->getCurrentRecordContext() != recordTy) {
-      return ctx->reportError(node->line, node->column, node->length,
-                              "Cannot access private field '" +
-                                  std::string(node->memberName) + "'");
-    }
-    const_cast<MemberAccessNode *>(node)->fieldIndex = field->index;
-    node->exprType = field->type;
-    return field->type;
-  }
-
-  if (baseTy->getKind() == TypeKind::Class ||
-      baseTy->getKind() == TypeKind::Struct) {
-    auto recordDecls = ctx->lookup(recordTy->getName());
-    if (!recordDecls.empty()) {
-      const DeclNode *recDecl = nullptr;
-      for (auto *d : recordDecls) {
-        if (d->kind == NodeKind::ClassDecl || d->kind == NodeKind::StructDecl) {
-          recDecl = d;
-          break;
-        }
-      }
-
-      if (recDecl) {
-        llvm::ArrayRef<FunctionDeclNode *> methods;
-        if (recDecl->kind == NodeKind::ClassDecl)
-          methods = static_cast<const ClassDeclNode *>(recDecl)->methods;
+        return ctx->reportError(node->line, node->column, node->length,
+                                "Enum '" + std::string(enumDecl->name) +
+                                    "' does not contain member '" +
+                                    std::string(node->memberName) + "'");
+      } else if (varNode->resolvedDecl->kind == NodeKind::ClassDecl ||
+                 varNode->resolvedDecl->kind == NodeKind::StructDecl) {
+        staticAccessDecl = varNode->resolvedDecl;
+        if (staticAccessDecl->kind == NodeKind::ClassDecl)
+          recordTy =
+              static_cast<const ClassDeclNode *>(staticAccessDecl)->recordType;
         else
-          methods = static_cast<const StructDeclNode *>(recDecl)->methods;
+          recordTy =
+              static_cast<const StructDeclNode *>(staticAccessDecl)->recordType;
+      }
+    }
+  }
 
-        /* Dynamically instantiate template method bounds if explicitly
-         * requested */
-        if (!node->templateArgs.empty()) {
-          FunctionDeclNode *tmplDecl = nullptr;
+  if (!staticAccessDecl) {
+    const Type *baseTy = *objType;
+    const Type *unqualObj = baseTy->getUnqualifiedType();
+
+    if (unqualObj->isPointerType())
+      baseTy = static_cast<const PointerType *>(unqualObj)->getPointeeType();
+    else if (unqualObj->isReferenceType())
+      baseTy = static_cast<const ReferenceType *>(unqualObj)->getPointeeType();
+
+    if (baseTy->getKind() != TypeKind::Struct &&
+        baseTy->getKind() != TypeKind::Class) {
+      return ctx->reportError(node->line, node->column, node->length,
+                              "Member access on non-record type");
+    }
+
+    recordTy = static_cast<const RecordType *>(baseTy);
+
+    if (recordTy->isOpaque()) {
+      return ctx->reportError(
+          node->line, node->column, node->length,
+          "Cannot access member of incomplete (opaque) type");
+    }
+
+    if (auto field = recordTy->getField(node->memberName)) {
+      if (!field->isPublic && ctx->getCurrentRecordContext() != recordTy) {
+        return ctx->reportError(node->line, node->column, node->length,
+                                "Cannot access private field '" +
+                                    std::string(node->memberName) + "'");
+      }
+      const_cast<MemberAccessNode *>(node)->fieldIndex = field->index;
+      node->exprType = field->type;
+      return field->type;
+    }
+  }
+
+  if (recordTy) {
+    auto recordDecls = ctx->lookup(recordTy->getName());
+    const DeclNode *recDecl = nullptr;
+    for (auto *d : recordDecls) {
+      if (d->kind == NodeKind::ClassDecl || d->kind == NodeKind::StructDecl) {
+        recDecl = d;
+        break;
+      }
+    }
+
+    if (recDecl) {
+      if (staticAccessDecl) {
+        llvm::ArrayRef<VarDeclNode *> staticFields;
+        if (staticAccessDecl->kind == NodeKind::ClassDecl)
+          staticFields =
+              static_cast<const ClassDeclNode *>(staticAccessDecl)->fields;
+        else
+          staticFields =
+              static_cast<const StructDeclNode *>(staticAccessDecl)->fields;
+
+        for (const auto *f : staticFields) {
+          if (f->varName == node->memberName) {
+            if (!f->isStatic) {
+              return ctx->reportError(node->line, node->column, node->length,
+                                      "Cannot access non-static field '" +
+                                          std::string(f->varName) +
+                                          "' without an instance.");
+            }
+            if (!f->isPublic(f->varName) &&
+                ctx->getCurrentRecordContext() != recordTy) {
+              return ctx->reportError(node->line, node->column, node->length,
+                                      "Cannot access private static field '" +
+                                          std::string(f->varName) + "'.");
+            }
+            const_cast<MemberAccessNode *>(node)->isStaticFieldRef = true;
+            const_cast<MemberAccessNode *>(node)->resolvedVar = f;
+            node->exprType = f->type;
+            return f->type;
+          }
+        }
+      }
+
+      llvm::ArrayRef<FunctionDeclNode *> methods;
+      if (recDecl->kind == NodeKind::ClassDecl)
+        methods = static_cast<const ClassDeclNode *>(recDecl)->methods;
+      else
+        methods = static_cast<const StructDeclNode *>(recDecl)->methods;
+
+      if (!node->templateArgs.empty()) {
+        FunctionDeclNode *tmplDecl = nullptr;
+        for (auto *m : methods) {
+          if (m->name == node->memberName && m->isTemplate) {
+            tmplDecl = m;
+            break;
+          }
+        }
+
+        if (tmplDecl) {
+          std::string mangledName = std::string(node->memberName);
+          for (const auto *arg : node->templateArgs) {
+            const Type *resArg = resolveIfTemplate(arg);
+            std::string argStr = resArg->toString();
+            for (char &c : argStr) {
+              if (!isalnum(c))
+                c = '_';
+            }
+            mangledName += "_" + argStr;
+          }
+          std::string_view mangledView = ctx->astCtx.copyString(mangledName);
+
+          bool alreadyInstantiated = false;
           for (auto *m : methods) {
-            if (m->name == node->memberName && m->isTemplate) {
-              tmplDecl = m;
+            if (m->name == mangledView) {
+              alreadyInstantiated = true;
               break;
             }
           }
 
-          if (tmplDecl) {
-            std::string mangledName = std::string(node->memberName);
-            for (const auto *arg : node->templateArgs) {
-              const Type *resArg = resolveIfTemplate(arg);
-              std::string argStr = resArg->toString();
-              for (char &c : argStr) {
-                if (!isalnum(c))
-                  c = '_';
-              }
-              mangledName += "_" + argStr;
+          if (!alreadyInstantiated) {
+            Parser parser(ctx->astCtx, tmplDecl->templateBodyTokens, ctx->diags,
+                          tmplDecl->declFilePath);
+            parser.instantiatingName = mangledView;
+            parser.templateBaseName = node->memberName;
+            for (size_t i = 0; i < tmplDecl->templateParams.size(); ++i) {
+              parser.templateArgs[tmplDecl->templateParams[i]] =
+                  resolveIfTemplate(node->templateArgs[i]);
             }
-            std::string_view mangledView = ctx->astCtx.copyString(mangledName);
+            DeclNode *instDecl = parser.parseDeclarationOrFunction();
 
-            bool alreadyInstantiated = false;
-            for (auto *m : methods) {
-              if (m->name == mangledView) {
-                alreadyInstantiated = true;
-                break;
-              }
-            }
+            if (instDecl && instDecl->kind == NodeKind::FunctionDecl) {
+              auto *fnDecl = static_cast<FunctionDeclNode *>(instDecl);
+              fnDecl->isMethod = true;
+              fnDecl->isStatic = tmplDecl->isStatic;
+              fnDecl->hasPublicMod = tmplDecl->hasPublicMod;
+              fnDecl->hasPrivateMod = tmplDecl->hasPrivateMod;
+              fnDecl->annotations = tmplDecl->annotations;
+              fnDecl->declFilePath = tmplDecl->declFilePath;
 
-            if (!alreadyInstantiated) {
-              Parser parser(ctx->astCtx, tmplDecl->templateBodyTokens,
-                            ctx->diags, tmplDecl->declFilePath);
-              parser.instantiatingName = mangledView;
-              parser.templateBaseName = node->memberName;
-              for (size_t i = 0; i < tmplDecl->templateParams.size(); ++i) {
-                parser.templateArgs[tmplDecl->templateParams[i]] =
-                    resolveIfTemplate(node->templateArgs[i]);
-              }
-              DeclNode *instDecl = parser.parseDeclarationOrFunction();
-
-              if (instDecl && instDecl->kind == NodeKind::FunctionDecl) {
-                auto *fnDecl = static_cast<FunctionDeclNode *>(instDecl);
-                fnDecl->isMethod = true;
-                fnDecl->hasPublicMod = tmplDecl->hasPublicMod;
-                fnDecl->hasPrivateMod = tmplDecl->hasPrivateMod;
-                fnDecl->annotations = tmplDecl->annotations;
-                fnDecl->declFilePath = tmplDecl->declFilePath; // Origin linkage
-
-                /* Inject implicit 'this' parameter for instantiated methods */
-                std::vector<ParamDeclNode *> newParams;
+              std::vector<ParamDeclNode *> newParams;
+              if (!fnDecl->isStatic) {
                 newParams.push_back(ctx->astCtx.create<ParamDeclNode>(
                     ctx->astCtx.getPointerType(recordTy), "this", nullptr,
                     false, false, fnDecl->line, fnDecl->column, 4));
-
-                for (auto *p : fnDecl->params) {
-                  newParams.push_back(p);
-                }
-                fnDecl->params =
-                    ctx->astCtx.copyArray<ParamDeclNode *>(newParams);
-
-                std::vector<FunctionDeclNode *> updatedMethods(methods.begin(),
-                                                               methods.end());
-                updatedMethods.push_back(fnDecl);
-
-                if (recDecl->kind == NodeKind::ClassDecl) {
-                  methods =
-                      ctx->astCtx.copyArray<FunctionDeclNode *>(updatedMethods);
-                  const_cast<ClassDeclNode *>(
-                      static_cast<const ClassDeclNode *>(recDecl))
-                      ->methods = methods;
-                } else {
-                  methods =
-                      ctx->astCtx.copyArray<FunctionDeclNode *>(updatedMethods);
-                  const_cast<StructDeclNode *>(
-                      static_cast<const StructDeclNode *>(recDecl))
-                      ->methods = methods;
-                }
-
-                fnDecl->mangledName =
-                    Mangler::mangle(fnDecl, std::string(recordTy->getName()));
-
-                auto prevContext = ctx->getCurrentRecordContext();
-                ctx->setCurrentRecordContext(recordTy);
-                dispatch(fnDecl);
-                ctx->setCurrentRecordContext(prevContext);
               }
-            }
-            const_cast<MemberAccessNode *>(node)->memberName = mangledView;
-          }
-        }
 
-        for (const auto *method : methods) {
-          if (method->name == node->memberName) {
-            if (!method->isPublic(method->name) &&
-                ctx->getCurrentRecordContext() != recordTy) {
-              return ctx->reportError(node->line, node->column, node->length,
-                                      "Cannot access private method '" +
-                                          std::string(method->name) + "'");
+              for (auto *p : fnDecl->params) {
+                newParams.push_back(p);
+              }
+              fnDecl->params =
+                  ctx->astCtx.copyArray<ParamDeclNode *>(newParams);
+
+              std::vector<FunctionDeclNode *> updatedMethods(methods.begin(),
+                                                             methods.end());
+              updatedMethods.push_back(fnDecl);
+
+              if (recDecl->kind == NodeKind::ClassDecl) {
+                methods =
+                    ctx->astCtx.copyArray<FunctionDeclNode *>(updatedMethods);
+                const_cast<ClassDeclNode *>(
+                    static_cast<const ClassDeclNode *>(recDecl))
+                    ->methods = methods;
+              } else {
+                methods =
+                    ctx->astCtx.copyArray<FunctionDeclNode *>(updatedMethods);
+                const_cast<StructDeclNode *>(
+                    static_cast<const StructDeclNode *>(recDecl))
+                    ->methods = methods;
+              }
+
+              fnDecl->mangledName =
+                  Mangler::mangle(fnDecl, std::string(recordTy->getName()));
+
+              auto prevContext = ctx->getCurrentRecordContext();
+              ctx->setCurrentRecordContext(recordTy);
+              dispatch(fnDecl);
+              ctx->setCurrentRecordContext(prevContext);
             }
-            const_cast<MemberAccessNode *>(node)->isMethodRef = true;
-            const_cast<MemberAccessNode *>(node)->resolvedMethod = method;
-            node->exprType = ctx->astCtx.VoidTy;
-            return ctx->astCtx.VoidTy;
           }
+          const_cast<MemberAccessNode *>(node)->memberName = mangledView;
+        }
+      }
+
+      for (const auto *method : methods) {
+        if (method->name == node->memberName) {
+          if (staticAccessDecl && !method->isStatic) {
+            return ctx->reportError(node->line, node->column, node->length,
+                                    "Cannot access non-static method '" +
+                                        std::string(method->name) +
+                                        "' without an instance.");
+          }
+          if (!staticAccessDecl && method->isStatic) {
+            return ctx->reportError(node->line, node->column, node->length,
+                                    "Cannot access static method '" +
+                                        std::string(method->name) +
+                                        "' via an instance.");
+          }
+          if (!method->isPublic(method->name) &&
+              ctx->getCurrentRecordContext() != recordTy) {
+            return ctx->reportError(node->line, node->column, node->length,
+                                    "Cannot access private method '" +
+                                        std::string(method->name) + "'");
+          }
+          const_cast<MemberAccessNode *>(node)->isMethodRef = true;
+          const_cast<MemberAccessNode *>(node)->resolvedMethod = method;
+          node->exprType = ctx->astCtx.VoidTy;
+          return ctx->astCtx.VoidTy;
         }
       }
     }
@@ -1735,7 +1842,8 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
 
   auto checkMatch =
       [&](const FunctionDeclNode *fDecl) -> std::vector<std::string> {
-    size_t paramOffset = (fDecl->isMethod && !fDecl->isExtern) ? 1 : 0;
+    size_t paramOffset =
+        (fDecl->isMethod && !fDecl->isExtern && !fDecl->isStatic) ? 1 : 0;
     size_t expectedParams = fDecl->params.size() - paramOffset;
 
     std::vector<ExprNode *> resolvedArgs(expectedParams, nullptr);
@@ -1847,20 +1955,41 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
       return maRes;
 
     if (ma->isMethodRef) {
-      const Type *baseTy = ma->object->exprType;
-      if (baseTy->isPointerType())
-        baseTy = static_cast<const PointerType *>(baseTy)->getPointeeType();
-      else if (baseTy->isReferenceType())
-        baseTy = static_cast<const ReferenceType *>(baseTy)->getPointeeType();
-
-      auto recordTy = static_cast<const RecordType *>(baseTy);
-      auto recordDecls = ctx->lookup(recordTy->getName());
-
+      const RecordType *recordTy = nullptr;
       const DeclNode *recDecl = nullptr;
-      for (auto *d : recordDecls) {
-        if (d->kind == NodeKind::ClassDecl || d->kind == NodeKind::StructDecl) {
-          recDecl = d;
-          break;
+
+      if (ma->object->kind == NodeKind::Variable) {
+        auto varNode = static_cast<const VariableNode *>(ma->object);
+        if (varNode->resolvedDecl &&
+            (varNode->resolvedDecl->kind == NodeKind::ClassDecl ||
+             varNode->resolvedDecl->kind == NodeKind::StructDecl)) {
+          recDecl = varNode->resolvedDecl;
+          if (recDecl->kind == NodeKind::ClassDecl)
+            recordTy = static_cast<const ClassDeclNode *>(recDecl)->recordType;
+          else
+            recordTy = static_cast<const StructDeclNode *>(recDecl)->recordType;
+        }
+      }
+
+      if (!recordTy) {
+        const Type *baseTy = ma->object->exprType;
+        if (baseTy->isPointerType())
+          baseTy = static_cast<const PointerType *>(baseTy)->getPointeeType();
+        else if (baseTy->isReferenceType())
+          baseTy = static_cast<const ReferenceType *>(baseTy)->getPointeeType();
+
+        if (baseTy->getKind() == TypeKind::Struct ||
+            baseTy->getKind() == TypeKind::Class) {
+          recordTy = static_cast<const RecordType *>(baseTy);
+          auto recordDecls = ctx->lookup(recordTy->getName());
+
+          for (auto *d : recordDecls) {
+            if (d->kind == NodeKind::ClassDecl ||
+                d->kind == NodeKind::StructDecl) {
+              recDecl = d;
+              break;
+            }
+          }
         }
       }
 

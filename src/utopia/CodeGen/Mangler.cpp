@@ -30,12 +30,8 @@ std::string Mangler::mangle(const FunctionDeclNode *node,
     res += std::to_string(node->name.length()) + std::string(node->name);
   }
 
-  /* * Methods inject 'this' intrinsically. The ABI dictates 'this' is a
-   * pointer. However, standard Itanium doesn't encode 'this' in the method
-   * signature, it's implied by the nested name structure. We skip the first
-   * parameter if it's a method.
-   */
-  size_t startIdx = (node->isMethod && !node->isExtern) ? 1 : 0;
+  size_t startIdx =
+      (node->isMethod && !node->isExtern && !node->isStatic) ? 1 : 0;
 
   if (startIdx >= node->params.size()) {
     res += "v";
@@ -43,6 +39,22 @@ std::string Mangler::mangle(const FunctionDeclNode *node,
     for (size_t i = startIdx; i < node->params.size(); ++i) {
       res += mangleType(node->params[i]->type);
     }
+  }
+
+  return res;
+}
+
+std::string Mangler::mangle(const VarDeclNode *node,
+                            const std::string &parentRecord) {
+  std::string res = "_Z";
+
+  if (!parentRecord.empty()) {
+    res += "N";
+    res += std::to_string(parentRecord.length()) + parentRecord;
+    res += std::to_string(node->varName.length()) + std::string(node->varName);
+    res += "E";
+  } else {
+    res += std::to_string(node->varName.length()) + std::string(node->varName);
   }
 
   return res;

@@ -181,6 +181,8 @@ Token Lexer::nextToken() {
       return {TokenType::ANNOTATION_KW, id, startLine, startCol};
     if (id == "extern")
       return {TokenType::EXTERN_KW, id, startLine, startCol};
+    if (id == "static")
+      return {TokenType::STATIC_KW, id, startLine, startCol};
     if (id == "required")
       return {TokenType::REQUIRED_KW, id, startLine, startCol};
     if (id == "public")

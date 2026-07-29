@@ -655,7 +655,6 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
       SymbolInfo sym = cgCtx.lookupDetailed("this");
 
       llvm::Value *thisAddr = sym.value;
-      // Recuperar el puntero interno del "this" alojado
       llvm::Value *thisPtr =
           builder.CreateLoad(builder.getPtrTy(), thisAddr, "this.val");
       llvm::Type *llvmBaseTy = getLLVMType(varNode->parentType);
@@ -664,11 +663,20 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
                                      varNode->name);
     }
 
-    SymbolInfo sym = cgCtx.lookupDetailed(varNode->name);
+    std::string lookupName = std::string(varNode->name);
+    if (varNode->resolvedDecl &&
+        varNode->resolvedDecl->kind == NodeKind::VarDecl) {
+      auto *varDecl = static_cast<const VarDeclNode *>(varNode->resolvedDecl);
+      if (varDecl->isStatic && !varDecl->mangledName.empty()) {
+        lookupName = varDecl->mangledName;
+      }
+    }
+
+    SymbolInfo sym = cgCtx.lookupDetailed(lookupName);
 
     if (!sym.value) {
       std::cerr << "[CodeGen Error] Unbound symbol in l-value resolution: '"
-                << varNode->name << "'.\n";
+                << lookupName << "'.\n";
       return nullptr;
     }
 
@@ -682,6 +690,19 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
     auto *maNode = static_cast<const MemberAccessNode *>(node);
     if (maNode->isMethodRef)
       return nullptr;
+
+    if (maNode->isStaticFieldRef) {
+      std::string gName = maNode->resolvedVar->mangledName.empty()
+                              ? std::string(maNode->resolvedVar->varName)
+                              : maNode->resolvedVar->mangledName;
+      SymbolInfo sym = cgCtx.lookupDetailed(gName);
+      if (!sym.value) {
+        diags.report({DiagLevel::Error, node->line, node->column, node->length,
+                      "Unbound static field.", ""});
+        return nullptr;
+      }
+      return sym.value;
+    }
 
     llvm::Value *objPtr = nullptr;
     if (maNode->object->exprType->isPointerType()) {
@@ -790,6 +811,11 @@ llvm::Value *CodeGen::visit(const StructDeclNode *node) {
   if (node->isOpaque)
     return nullptr;
 
+  for (const auto *field : node->fields) {
+    if (field->isStatic)
+      dispatch(field);
+  }
+
   for (const auto *ctor : node->constructors)
     dispatch(ctor);
   if (node->destructor)
@@ -812,6 +838,11 @@ llvm::Value *CodeGen::visit(const ClassDeclNode *node) {
 
   if (node->isOpaque)
     return nullptr;
+
+  for (const auto *field : node->fields) {
+    if (field->isStatic)
+      dispatch(field);
+  }
 
   for (const auto *ctor : node->constructors)
     dispatch(ctor);
@@ -880,6 +911,17 @@ llvm::Value *CodeGen::visit(const MemberAccessNode *node) {
 
   if (node->isMethodRef)
     return nullptr;
+
+  if (node->isStaticFieldRef) {
+    std::string gName = node->resolvedVar->mangledName.empty()
+                            ? std::string(node->resolvedVar->varName)
+                            : node->resolvedVar->mangledName;
+    SymbolInfo sym = cgCtx.lookupDetailed(gName);
+    if (!sym.value)
+      return nullptr;
+    return createTBAALoad(getLLVMType(node->exprType), sym.value,
+                          getTBAATagForExpr(node), node->memberName);
+  }
 
   llvm::Value *objPtr = nullptr;
   if (node->object->exprType->isPointerType()) {
@@ -1310,15 +1352,18 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
     }
 
     bool isConstant = node->type->isConstQualified();
+    std::string bindName = node->mangledName.empty()
+                               ? std::string(node->varName)
+                               : node->mangledName;
     auto *gvar = new llvm::GlobalVariable(mod, ty, isConstant,
                                           llvm::GlobalValue::ExternalLinkage,
-                                          initConst, node->varName);
+                                          initConst, bindName);
 
     if (customAlign > 0) {
       gvar->setAlignment(llvm::Align(customAlign));
     }
 
-    cgCtx.bind(node->varName, gvar, true);
+    cgCtx.bind(bindName, gvar, true);
     return gvar;
   }
 
@@ -1614,7 +1659,7 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
 
     if (node->target->kind == NodeKind::MemberAccess) {
       auto ma = static_cast<const MemberAccessNode *>(node->target);
-      if (!node->resolvedFunc->isExtern) {
+      if (!node->resolvedFunc->isExtern && !node->resolvedFunc->isStatic) {
         llvm::Value *objPtr = nullptr;
 
         /*
@@ -1630,7 +1675,8 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
 
         argsArgs.push_back(objPtr);
       }
-    } else if (node->resolvedFunc->isMethod && !node->resolvedFunc->isExtern) {
+    } else if (node->resolvedFunc->isMethod && !node->resolvedFunc->isExtern &&
+               !node->resolvedFunc->isStatic) {
       llvm::Type *allocTy = getLLVMType(node->exprType);
       llvm::AllocaInst *instance = createEntryBlockAlloca(allocTy, "instance");
 
@@ -1663,8 +1709,10 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
 
       bool isRefParam = false;
       size_t paramOffset =
-          (node->resolvedFunc->isMethod && !node->resolvedFunc->isExtern) ? 1
-                                                                          : 0;
+          (node->resolvedFunc->isMethod && !node->resolvedFunc->isExtern &&
+           !node->resolvedFunc->isStatic)
+              ? 1
+              : 0;
 
       if (argIdx >= paramOffset &&
           (argIdx - paramOffset) < node->resolvedFunc->params.size()) {
@@ -2160,6 +2208,8 @@ llvm::MDNode *CodeGen::getTBAATagForExpr(const ExprNode *node) {
     auto *ma = static_cast<const MemberAccessNode *>(node);
     if (ma->isMethodRef)
       return nullptr;
+    if (ma->isStaticFieldRef)
+      return getTBAAAccessTag(node->exprType);
 
     const Type *baseTy = ma->object->exprType;
     if (baseTy->isPointerType()) {
