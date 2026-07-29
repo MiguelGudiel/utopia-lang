@@ -9,3 +9,4 @@ build:
     - "."
   sources:
     - "lib/prelude.utp"
+    - "lib/String.utp"

@@ -777,13 +777,15 @@ ASTNode *Parser::parseStatement() {
     node = parseForStatement();
   } else if (currentToken().type == TokenType::WHILE_KW) {
     node = parseWhileStatement();
-  } else if (currentToken().type == TokenType::TYPE_KW ||
-             currentToken().type == TokenType::CONST_KW ||
+  } else if (currentToken().type == TokenType::CONST_KW ||
              currentToken().type == TokenType::EXTERN_KW ||
              currentToken().type == TokenType::STATIC_KW ||
+             ((currentToken().type == TokenType::TYPE_KW ||
+               (currentToken().type == TokenType::IDENTIFIER &&
+                astCtx.getRecordType(currentToken().value) != nullptr)) &&
+              peekToken().type != TokenType::DOT) ||
              (currentToken().type == TokenType::IDENTIFIER &&
-              (peekToken().type == TokenType::IDENTIFIER ||
-               astCtx.getRecordType(currentToken().value) != nullptr))) {
+              peekToken().type == TokenType::IDENTIFIER)) {
     node = parseDeclarationOrFunction(annotations);
   } else if (currentToken().type == TokenType::RETURN) {
     node = parseReturn();

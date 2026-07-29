@@ -120,9 +120,12 @@ ModuleNode *ModuleLoader::loadModule(const std::string &importURI,
   /*
    * Initialize prelude strictly prior to parsing the target AST block.
    * Pre-populates primitive core abstractions to satisfy early semantic
-   * lookups.
+   * lookups. We skip injection if the module being compiled is part of
+   * the prelude itself to avoid circular dependency.
    */
-  if (importURI != "prelude" && key.find("prelude.utp") == std::string::npos) {
+  std::string preludeDir =
+      std::filesystem::absolute(config.preludeRoot).string();
+  if (importURI != "prelude" && key.find(preludeDir) == std::string::npos) {
     ModuleNode *preludeMod = loadModule("prelude", currentFileDir);
     if (preludeMod) {
       resolvedImports.push_back(preludeMod);

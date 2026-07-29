@@ -1,3 +1,5 @@
+import "String.utp";
+
 // Utopia Numeric Limits Prelude
 // Provides named constants for the minimum and maximum values
 // of all built‑in integer types.
