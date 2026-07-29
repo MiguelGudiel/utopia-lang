@@ -80,7 +80,29 @@ void EffectAnalyzer::visit(const UnaryOpNode *n) {
 }
 
 void EffectAnalyzer::visit(const ArraySubscriptNode *n) {
-  readsMem = true;
+  if (n->overloadedOperator) {
+    if (n->overloadedOperator->isExtern) {
+      writesMem = true;
+      readsMem = true;
+      freesMem = true;
+      hasSync = true;
+      potentiallyInfinite = true;
+    } else {
+      if (!n->overloadedOperator->isReadNone)
+        readsMem = true;
+      if (!n->overloadedOperator->isReadOnly &&
+          !n->overloadedOperator->isReadNone)
+        writesMem = true;
+      if (!n->overloadedOperator->isNoFree)
+        freesMem = true;
+      if (!n->overloadedOperator->isNoSync)
+        hasSync = true;
+      if (!n->overloadedOperator->isWillReturn)
+        potentiallyInfinite = true;
+    }
+  } else {
+    readsMem = true;
+  }
   dispatch(n->base);
   dispatch(n->index);
 }

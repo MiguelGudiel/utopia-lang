@@ -2919,6 +2919,14 @@ SemaResult TypeCheckPass::visit(const ArraySubscriptNode *node) {
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,
                                      "Cascading error in array subscript"});
 
+  if (auto *opDecl =
+          resolveOverloadedOperator(*baseType, "[]", {node->index})) {
+    node->overloadedOperator = opDecl;
+    node->exprType = opDecl->returnType;
+    node->isLValue = opDecl->returnType->isReferenceType();
+    return opDecl->returnType;
+  }
+
   const Type *unqualBase = (*baseType)->getUnqualifiedType();
   if (unqualBase->isPointerType()) {
     node->exprType =
@@ -2927,8 +2935,9 @@ SemaResult TypeCheckPass::visit(const ArraySubscriptNode *node) {
     node->exprType =
         static_cast<const ArrayType *>(unqualBase)->getElementType();
   } else {
-    return ctx->reportError(node->line, node->column, node->length,
-                            "Subscripted value is not an array or pointer");
+    return ctx->reportError(
+        node->line, node->column, node->length,
+        "Subscripted value is not an array, pointer, or class with operator[]");
   }
 
   if (!(*indexType)->isInteger()) {

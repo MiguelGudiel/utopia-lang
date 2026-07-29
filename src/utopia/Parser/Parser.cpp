@@ -58,6 +58,17 @@ void Parser::expect(TokenType type, std::string_view errorMessage) {
 std::string_view Parser::parseOperatorName() {
   std::string_view opStr;
   switch (currentToken().type) {
+  case TokenType::LBRACKET:
+    advance();
+    if (currentToken().type == TokenType::RBRACKET) {
+      opStr = "[]";
+    } else {
+      reportError(currentToken().line, currentToken().column,
+                  currentToken().value.length(),
+                  "Expected ']' after '[' for operator[]");
+      throw ParseException();
+    }
+    break;
   case TokenType::PLUS:
     opStr = "+";
     break;

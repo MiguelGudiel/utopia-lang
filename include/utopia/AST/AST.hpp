@@ -422,6 +422,7 @@ struct MemberAccessNode : public ExprNode {
 struct ArraySubscriptNode : public ExprNode {
   ExprNode *base;
   ExprNode *index;
+  mutable const FunctionDeclNode *overloadedOperator = nullptr;
 
   ArraySubscriptNode(ExprNode *b, ExprNode *i, int l, int c, int len)
       : ExprNode(NodeKind::ArraySubscript, l, c, len), base(b), index(i) {}

@@ -631,6 +631,34 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
 
   if (node->kind == NodeKind::ArraySubscript) {
     auto *subNode = static_cast<const ArraySubscriptNode *>(node);
+
+    if (subNode->overloadedOperator) {
+      llvm::Value *objPtr = nullptr;
+      if (subNode->base->exprType->isPointerType()) {
+        objPtr = dispatch(subNode->base);
+      } else {
+        objPtr = getLValue(subNode->base);
+      }
+
+      if (!objPtr) {
+        llvm::Value *val = dispatch(subNode->base);
+        objPtr = createEntryBlockAlloca(val->getType(), "tmp.op.recv");
+        builder.CreateStore(val, objPtr);
+      }
+
+      llvm::Function *func = getOrCreateFunction(subNode->overloadedOperator);
+      std::vector<llvm::Value *> argsArgs;
+      argsArgs.push_back(objPtr);
+
+      llvm::Value *idxVal = dispatch(subNode->index);
+      llvm::Type *paramTy =
+          getLLVMType(subNode->overloadedOperator->params[1]->type);
+      idxVal = createImplicitCast(idxVal, paramTy);
+      argsArgs.push_back(idxVal);
+
+      return builder.CreateCall(func, argsArgs);
+    }
+
     llvm::Value *baseVal = getLValue(subNode->base);
     llvm::Value *idxVal = dispatch(subNode->index);
     if (!baseVal || !idxVal)
@@ -2085,6 +2113,41 @@ llvm::Value *CodeGen::visit(const ModuleNode *node) {
 }
 
 llvm::Value *CodeGen::visit(const ArraySubscriptNode *node) {
+  if (node->overloadedOperator) {
+    llvm::Value *objPtr = nullptr;
+    if (node->base->exprType->isPointerType()) {
+      objPtr = dispatch(node->base);
+    } else {
+      objPtr = getLValue(node->base);
+    }
+
+    if (!objPtr) {
+      llvm::Value *val = dispatch(node->base);
+      objPtr = createEntryBlockAlloca(val->getType(), "tmp.op.recv");
+      builder.CreateStore(val, objPtr);
+    }
+
+    llvm::Function *func = getOrCreateFunction(node->overloadedOperator);
+    std::vector<llvm::Value *> argsArgs;
+    argsArgs.push_back(objPtr);
+
+    llvm::Value *idxVal = dispatch(node->index);
+    llvm::Type *paramTy =
+        getLLVMType(node->overloadedOperator->params[1]->type);
+    idxVal = createImplicitCast(idxVal, paramTy);
+    argsArgs.push_back(idxVal);
+
+    llvm::Value *res = builder.CreateCall(func, argsArgs);
+
+    if (node->exprType->isReferenceType() ||
+        node->exprType->getKind() == TypeKind::RValueReference) {
+      const Type *loadTy =
+          static_cast<const ReferenceType *>(node->exprType)->getPointeeType();
+      return createTBAALoad(getLLVMType(loadTy), res, loadTy);
+    }
+    return res;
+  }
+
   llvm::Value *lval = getLValue(node);
   if (!lval)
     return nullptr;
@@ -2095,7 +2158,13 @@ llvm::Value *CodeGen::visit(const ArraySubscriptNode *node) {
         arrTy, lval, {builder.getInt32(0), builder.getInt32(0)});
   }
 
-  return createTBAALoad(getLLVMType(node->exprType), lval, node->exprType);
+  const Type *loadTy = node->exprType;
+  if (loadTy->isReferenceType() ||
+      loadTy->getKind() == TypeKind::RValueReference) {
+    loadTy = static_cast<const ReferenceType *>(loadTy)->getPointeeType();
+  }
+
+  return createTBAALoad(getLLVMType(loadTy), lval, loadTy);
 }
 
 llvm::Value *CodeGen::visit(const NewExprNode *node) {
