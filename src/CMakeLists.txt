@@ -1,5 +1,6 @@
 set(CORE_SOURCES
     utopia/AST/AST.cpp
+    utopia/AST/ASTCloner.cpp
     utopia/CodeGen/CodeGen.cpp
     utopia/CodeGen/BackendContext.cpp
     utopia/CodeGen/Mangler.cpp

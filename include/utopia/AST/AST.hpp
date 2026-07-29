@@ -86,7 +86,6 @@ struct DeclNode : public ASTNode {
 
   bool isTemplate = false;
   llvm::ArrayRef<std::string_view> templateParams;
-  llvm::ArrayRef<Token> templateBodyTokens;
 
   explicit DeclNode(NodeKind k, int l = 0, int c = 0, int len = 0)
       : ASTNode(k, l, c, len) {}

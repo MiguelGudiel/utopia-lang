@@ -184,16 +184,9 @@ const Type *Parser::parseType(bool inNewExpr) {
   }
 
   std::string_view base = currentToken().value;
-
-  if (!instantiatingName.empty() && base == templateBaseName) {
-    base = instantiatingName;
-  }
-
   const Type *ty = nullptr;
 
-  if (auto it = templateArgs.find(base); it != templateArgs.end()) {
-    ty = it->second;
-  } else if (isTemplateParam(base)) {
+  if (isTemplateParam(base)) {
     ty = astCtx.getTemplateParamType(base);
   } else {
     ty = astCtx.getBuiltinTypeByName(base);
@@ -1317,7 +1310,6 @@ DeclNode *Parser::parseStructDecl() {
       continue;
     }
 
-    size_t methodStartIdx = cursor;
     bool isStatic = false;
     bool isExtern = false;
 
@@ -1395,8 +1387,6 @@ DeclNode *Parser::parseStructDecl() {
         method->isTemplate = true;
         method->templateParams =
             astCtx.copyArray<std::string_view>(methodTParams);
-        method->templateBodyTokens =
-            tokens.slice(methodStartIdx, cursor - methodStartIdx);
         popTemplateParams(methodTParams.size());
       }
 
@@ -1488,16 +1478,11 @@ DeclNode *Parser::parseStructDecl() {
 }
 
 DeclNode *Parser::parseClassDecl() {
-  size_t startIdx = cursor;
   int line = currentToken().line;
   int col = currentToken().column;
   advance();
 
   std::string_view name = currentToken().value;
-  if (!instantiatingName.empty() && isTopLevelInst) {
-    name = instantiatingName;
-    isTopLevelInst = false;
-  }
   expect(TokenType::IDENTIFIER, "Expected class name");
 
   std::vector<std::string_view> tParams;
@@ -1505,9 +1490,7 @@ DeclNode *Parser::parseClassDecl() {
     if (currentToken().type != TokenType::GT) {
       do {
         tParams.push_back(currentToken().value);
-        if (instantiatingName.empty()) {
-          pushTemplateParam(tParams.back());
-        }
+        pushTemplateParam(tParams.back());
         expect(TokenType::IDENTIFIER, "Expected template parameter name");
       } while (match(TokenType::COMMA));
     }
@@ -1526,8 +1509,7 @@ DeclNode *Parser::parseClassDecl() {
                                              currentToken().column - col);
     node->isOpaque = true;
     node->recordType = classTy;
-    if (instantiatingName.empty())
-      popTemplateParams(tParams.size());
+    popTemplateParams(tParams.size());
     return node;
   }
 
@@ -1578,7 +1560,7 @@ DeclNode *Parser::parseClassDecl() {
       std::string_view dtorName = currentToken().value;
       expect(TokenType::IDENTIFIER, "Expected class name after '~'");
 
-      if (dtorName != (instantiatingName.empty() ? name : templateBaseName)) {
+      if (dtorName != name) {
         reportError(dLine, dCol, dtorName.length(),
                     "Destructor name must match the class name.");
         throw ParseException();
@@ -1612,17 +1594,13 @@ DeclNode *Parser::parseClassDecl() {
     bool isConstCtor = false;
     if (currentToken().type == TokenType::CONST_KW &&
         peekToken().type == TokenType::IDENTIFIER &&
-        peekToken().value ==
-            (instantiatingName.empty() ? name : templateBaseName) &&
-        peekToken(2).type == TokenType::LPAREN) {
+        peekToken().value == name && peekToken(2).type == TokenType::LPAREN) {
       isConstCtor = true;
     }
 
-    if (isConstCtor ||
-        (currentToken().type == TokenType::IDENTIFIER &&
-         currentToken().value ==
-             (instantiatingName.empty() ? name : templateBaseName) &&
-         peekToken().type == TokenType::LPAREN)) {
+    if (isConstCtor || (currentToken().type == TokenType::IDENTIFIER &&
+                        currentToken().value == name &&
+                        peekToken().type == TokenType::LPAREN)) {
       int cLine = currentToken().line;
       int cCol = currentToken().column;
 
@@ -1650,7 +1628,6 @@ DeclNode *Parser::parseClassDecl() {
       continue;
     }
 
-    size_t methodStartIdx = cursor;
     bool isStatic = false;
     bool isExtern = false;
 
@@ -1729,8 +1706,6 @@ DeclNode *Parser::parseClassDecl() {
         method->isTemplate = true;
         method->templateParams =
             astCtx.copyArray<std::string_view>(methodTParams);
-        method->templateBodyTokens =
-            tokens.slice(methodStartIdx, cursor - methodStartIdx);
         popTemplateParams(methodTParams.size());
       }
 
@@ -1818,14 +1793,11 @@ DeclNode *Parser::parseClassDecl() {
   node->constructors = astCtx.copyArray<FunctionDeclNode *>(constructors);
   node->destructor = destructor;
 
-  if (instantiatingName.empty()) {
-    popTemplateParams(tParams.size());
-  }
+  popTemplateParams(tParams.size());
 
-  if (!tParams.empty() && instantiatingName.empty()) {
+  if (!tParams.empty()) {
     node->isTemplate = true;
     node->templateParams = astCtx.copyArray<std::string_view>(tParams);
-    node->templateBodyTokens = tokens.slice(startIdx, cursor - startIdx);
   }
 
   return node;
@@ -1906,7 +1878,6 @@ DeclNode *Parser::parseEnumDecl() {
 
 DeclNode *Parser::parseDeclarationOrFunction(
     llvm::ArrayRef<AnnotationNode *> annotations) {
-  size_t startIdx = cursor;
   int line = currentToken().line;
   int col = currentToken().column;
 
@@ -1939,10 +1910,6 @@ DeclNode *Parser::parseDeclarationOrFunction(
     id = parseOperatorName();
   } else {
     id = currentToken().value;
-    if (!instantiatingName.empty() && isTopLevelInst) {
-      id = instantiatingName;
-      isTopLevelInst = false;
-    }
     expect(TokenType::IDENTIFIER, "Expected identifier after type");
   }
 
@@ -1953,9 +1920,7 @@ DeclNode *Parser::parseDeclarationOrFunction(
     if (currentToken().type != TokenType::GT) {
       do {
         tParams.push_back(currentToken().value);
-        if (instantiatingName.empty()) {
-          pushTemplateParam(tParams.back());
-        }
+        pushTemplateParam(tParams.back());
         expect(TokenType::IDENTIFIER, "Expected template parameter name");
       } while (match(TokenType::COMMA));
     }
@@ -1989,14 +1954,11 @@ DeclNode *Parser::parseDeclarationOrFunction(
       funcDecl->length = funcDecl->body->column + funcDecl->body->length - col;
     }
 
-    if (instantiatingName.empty()) {
-      popTemplateParams(tParams.size());
-    }
+    popTemplateParams(tParams.size());
 
-    if (!tParams.empty() && instantiatingName.empty()) {
+    if (!tParams.empty()) {
       funcDecl->isTemplate = true;
       funcDecl->templateParams = astCtx.copyArray<std::string_view>(tParams);
-      funcDecl->templateBodyTokens = tokens.slice(startIdx, cursor - startIdx);
     }
     return funcDecl;
   }

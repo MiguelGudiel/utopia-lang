@@ -1,4 +1,5 @@
 #include "utopia/Sema/Sema.hpp"
+#include "utopia/AST/ASTCloner.hpp"
 #include "utopia/CodeGen/Mangler.hpp"
 #include "utopia/Parser/Parser.hpp"
 #include "utopia/Sema/EffectAnalyzer.hpp"
@@ -78,35 +79,99 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
     }
     std::string_view mangledView = ctx->astCtx.copyString(mangledName);
 
-    if (tmplDecl->kind == NodeKind::ClassDecl) {
+    if (tmplDecl->kind == NodeKind::ClassDecl ||
+        tmplDecl->kind == NodeKind::StructDecl) {
       if (auto *existing = ctx->astCtx.getRecordType(mangledView)) {
         instTy->setResolvedType(existing);
         return existing;
       }
-      ctx->astCtx.createRecordType(TypeKind::Class, mangledView);
+      ctx->astCtx.createRecordType(tmplDecl->kind == NodeKind::ClassDecl
+                                       ? TypeKind::Class
+                                       : TypeKind::Struct,
+                                   mangledView);
     }
 
-    Parser parser(ctx->astCtx, tmplDecl->templateBodyTokens, ctx->diags,
-                  tmplDecl->declFilePath);
-    parser.instantiatingName = mangledView;
-    parser.templateBaseName = instTy->getBaseName();
+    std::unordered_map<std::string_view, const Type *> templateArgMap;
     for (size_t i = 0; i < tmplDecl->templateParams.size(); ++i) {
-      parser.templateArgs[tmplDecl->templateParams[i]] =
+      templateArgMap[tmplDecl->templateParams[i]] =
           instTy->getTemplateArgs()[i];
     }
 
-    DeclNode *instDecl = nullptr;
-    if (tmplDecl->kind == NodeKind::ClassDecl) {
-      instDecl = parser.parseClassDecl();
-    } else if (tmplDecl->kind == NodeKind::FunctionDecl) {
-      instDecl = parser.parseDeclarationOrFunction();
-    }
+    ASTCloner cloner(ctx->astCtx, templateArgMap);
+    DeclNode *instDecl = static_cast<DeclNode *>(cloner.dispatch(tmplDecl));
 
     if (instDecl) {
       instDecl->hasPublicMod = tmplDecl->hasPublicMod;
       instDecl->hasPrivateMod = tmplDecl->hasPrivateMod;
       instDecl->annotations = tmplDecl->annotations;
       instDecl->declFilePath = tmplDecl->declFilePath;
+
+      if (instDecl->kind == NodeKind::ClassDecl) {
+        static_cast<ClassDeclNode *>(instDecl)->name = mangledView;
+      } else if (instDecl->kind == NodeKind::StructDecl) {
+        static_cast<StructDeclNode *>(instDecl)->name = mangledView;
+      } else if (instDecl->kind == NodeKind::FunctionDecl) {
+        static_cast<FunctionDeclNode *>(instDecl)->name = mangledView;
+      }
+
+      /* Dynamically repopulate FieldInfo array for RecordType bindings
+       * post-clone */
+      if (instDecl->kind == NodeKind::ClassDecl ||
+          instDecl->kind == NodeKind::StructDecl) {
+        RecordType *recTy = ctx->astCtx.getRecordType(mangledView);
+        std::vector<FieldInfo> fInfos;
+        uint32_t instanceFieldIndex = 0;
+        auto fields = (instDecl->kind == NodeKind::ClassDecl)
+                          ? static_cast<ClassDeclNode *>(instDecl)->fields
+                          : static_cast<StructDeclNode *>(instDecl)->fields;
+
+        for (size_t i = 0; i < fields.size(); ++i) {
+          if (fields[i]->isStatic)
+            continue;
+          fInfos.push_back({fields[i]->varName, fields[i]->type,
+                            instanceFieldIndex++,
+                            fields[i]->isPublic(fields[i]->varName)});
+        }
+        recTy->setFields(ctx->astCtx.copyArray<FieldInfo>(fInfos));
+
+        /* Update 'this' pointers in methods and constructors to reflect the
+         * instantiated record type */
+        auto updateThisPtr = [&](llvm::ArrayRef<FunctionDeclNode *> funcs) {
+          for (auto *f : funcs) {
+            if (!f->isStatic && !f->params.empty() &&
+                f->params.front()->name == "this") {
+              const_cast<ParamDeclNode *>(f->params.front())->type =
+                  ctx->astCtx.getPointerType(recTy);
+            }
+          }
+        };
+
+        if (instDecl->kind == NodeKind::ClassDecl) {
+          auto *cls = static_cast<ClassDeclNode *>(instDecl);
+          cls->recordType = recTy;
+          recTy->setOpaque(
+              cls->isOpaque); // Ensure the RecordType maps to definition state
+          updateThisPtr(cls->methods);
+          updateThisPtr(cls->constructors);
+          if (cls->destructor && !cls->destructor->params.empty() &&
+              cls->destructor->params.front()->name == "this") {
+            const_cast<ParamDeclNode *>(cls->destructor->params.front())->type =
+                ctx->astCtx.getPointerType(recTy);
+          }
+        } else {
+          auto *str = static_cast<StructDeclNode *>(instDecl);
+          str->recordType = recTy;
+          recTy->setOpaque(
+              str->isOpaque); // Ensure the RecordType maps to definition state
+          updateThisPtr(str->methods);
+          updateThisPtr(str->constructors);
+          if (str->destructor && !str->destructor->params.empty() &&
+              str->destructor->params.front()->name == "this") {
+            const_cast<ParamDeclNode *>(str->destructor->params.front())->type =
+                ctx->astCtx.getPointerType(recTy);
+          }
+        }
+      }
 
       if (ctx->currentModule) {
         const_cast<ModuleNode *>(ctx->currentModule)
@@ -125,7 +190,8 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
     }
 
     const Type *res = ctx->astCtx.VoidTy;
-    if (tmplDecl->kind == NodeKind::ClassDecl) {
+    if (tmplDecl->kind == NodeKind::ClassDecl ||
+        tmplDecl->kind == NodeKind::StructDecl) {
       res = ctx->astCtx.getRecordType(mangledView);
     }
     instTy->setResolvedType(res);
@@ -1184,16 +1250,17 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
 
       auto instDecls = ctx->lookup(mangledView);
       if (instDecls.empty()) {
-        Parser parser(ctx->astCtx, tmplDecl->templateBodyTokens, ctx->diags,
-                      tmplDecl->declFilePath);
-        parser.instantiatingName = mangledView;
-        parser.templateBaseName = node->name;
+        std::unordered_map<std::string_view, const Type *> templateArgMap;
         for (size_t i = 0; i < tmplDecl->templateParams.size(); ++i) {
-          parser.templateArgs[tmplDecl->templateParams[i]] =
+          templateArgMap[tmplDecl->templateParams[i]] =
               resolveIfTemplate(node->templateArgs[i]);
         }
-        DeclNode *instDecl = parser.parseDeclarationOrFunction();
+
+        ASTCloner cloner(ctx->astCtx, templateArgMap);
+        DeclNode *instDecl = static_cast<DeclNode *>(cloner.dispatch(tmplDecl));
+
         if (instDecl) {
+          static_cast<FunctionDeclNode *>(instDecl)->name = mangledView;
           instDecl->hasPublicMod = tmplDecl->hasPublicMod;
           instDecl->hasPrivateMod = tmplDecl->hasPrivateMod;
           instDecl->annotations = tmplDecl->annotations;
@@ -2208,18 +2275,19 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
           }
 
           if (!alreadyInstantiated) {
-            Parser parser(ctx->astCtx, tmplDecl->templateBodyTokens, ctx->diags,
-                          tmplDecl->declFilePath);
-            parser.instantiatingName = mangledView;
-            parser.templateBaseName = node->memberName;
+            std::unordered_map<std::string_view, const Type *> templateArgMap;
             for (size_t i = 0; i < tmplDecl->templateParams.size(); ++i) {
-              parser.templateArgs[tmplDecl->templateParams[i]] =
+              templateArgMap[tmplDecl->templateParams[i]] =
                   resolveIfTemplate(node->templateArgs[i]);
             }
-            DeclNode *instDecl = parser.parseDeclarationOrFunction();
+
+            ASTCloner cloner(ctx->astCtx, templateArgMap);
+            DeclNode *instDecl =
+                static_cast<DeclNode *>(cloner.dispatch(tmplDecl));
 
             if (instDecl && instDecl->kind == NodeKind::FunctionDecl) {
               auto *fnDecl = static_cast<FunctionDeclNode *>(instDecl);
+              fnDecl->name = mangledView;
               fnDecl->isMethod = true;
               fnDecl->isStatic = tmplDecl->isStatic;
               fnDecl->hasPublicMod = tmplDecl->hasPublicMod;
@@ -2227,18 +2295,13 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
               fnDecl->annotations = tmplDecl->annotations;
               fnDecl->declFilePath = tmplDecl->declFilePath;
 
-              std::vector<ParamDeclNode *> newParams;
-              if (!fnDecl->isStatic) {
-                newParams.push_back(ctx->astCtx.create<ParamDeclNode>(
-                    ctx->astCtx.getPointerType(recordTy), "this", nullptr,
-                    false, false, fnDecl->line, fnDecl->column, 4));
+              /* Prevent duplicate 'this' pointers from being injected.
+               * Instead, safely reinterpret the existing cloned pointer. */
+              if (!fnDecl->isStatic && !fnDecl->params.empty() &&
+                  fnDecl->params.front()->name == "this") {
+                const_cast<ParamDeclNode *>(fnDecl->params.front())->type =
+                    ctx->astCtx.getPointerType(recordTy);
               }
-
-              for (auto *p : fnDecl->params) {
-                newParams.push_back(p);
-              }
-              fnDecl->params =
-                  ctx->astCtx.copyArray<ParamDeclNode *>(newParams);
 
               std::vector<FunctionDeclNode *> updatedMethods(methods.begin(),
                                                              methods.end());

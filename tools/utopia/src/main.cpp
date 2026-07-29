@@ -1,7 +1,7 @@
 #include "BuildScriptRunner.hpp"
 #include "ProjectManager.hpp"
-#include "utopia/Driver/CompilerDriver.hpp"
 #include "utopia/Common/Logger.hpp"
+#include "utopia/Driver/CompilerDriver.hpp"
 #include <iostream>
 #include <llvm/ExecutionEngine/Orc/ExecutionUtils.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
@@ -71,14 +71,14 @@ int main(int argc, char **argv) {
     fs::path preludePath =
         fs::path(UTOPIA_SOURCE_DIR) / "libs" / "prelude" / "lib";
     fs::path buildLibPath =
-        fs::path(UTOPIA_SOURCE_DIR) / "libs" / "build" / "lib";
+        fs::path(UTOPIA_SOURCE_DIR) / "libs" / "builder" / "lib";
 #else
     fs::path stdlibPath =
         projRoot.parent_path().parent_path() / "libs" / "stdlib" / "lib";
     fs::path preludePath =
         projRoot.parent_path().parent_path() / "libs" / "prelude" / "lib";
     fs::path buildLibPath =
-        projRoot.parent_path().parent_path() / "libs" / "build" / "lib";
+        projRoot.parent_path().parent_path() / "libs" / "builder" / "lib";
 #endif
 
     options.stdlibRoot = stdlibPath.string();

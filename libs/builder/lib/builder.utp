@@ -1,0 +1,11 @@
+// Utopia Build Configuration API
+// Exposes the JIT-callable interface for build.utp scripts
+
+@extern("UtopiaBuild_addLinkerFlag")
+extern void addLinkerFlag(const uint8* flag);
+
+@extern("UtopiaBuild_addIncludeDir")
+extern void addIncludeDir(const uint8* dir);
+
+@extern("UtopiaBuild_setOptLevel")
+extern void setOptLevel(int32 level);
