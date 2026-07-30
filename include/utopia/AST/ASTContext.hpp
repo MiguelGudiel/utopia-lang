@@ -9,6 +9,7 @@
 #include <memory>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace utopia {
@@ -54,6 +55,14 @@ public:
   template <typename T, typename... Args> T *create(Args &&...args) {
     void *mem = allocator.Allocate<T>();
     return new (mem) T(std::forward<Args>(args)...);
+  }
+
+  void registerTemplateName(std::string_view name) {
+    registeredTemplates.insert(name);
+  }
+
+  bool isTemplateName(std::string_view name) const {
+    return registeredTemplates.contains(name);
   }
 
   template <typename T> llvm::ArrayRef<T> copyArray(llvm::ArrayRef<T> src) {
@@ -227,6 +236,8 @@ private:
   std::unordered_map<std::string_view, RecordType *> recordTypes;
   std::unordered_map<std::string_view, const Type *> typeAliases;
   std::unordered_map<std::string_view, const EnumType *> enumTypes;
+
+  std::unordered_set<std::string_view> registeredTemplates;
 };
 
 } // namespace utopia

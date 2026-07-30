@@ -1772,6 +1772,12 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
   const_cast<VarDeclNode *>(node)->type = resolveIfTemplate(node->type);
   const Type *declType = node->type;
 
+  /* Check for strictly unresolved types delegated safely from the parser */
+  if (declType->getKind() == TypeKind::TemplateParam) {
+    return ctx->reportError(node->line, node->column, node->length,
+                            "Unknown type: '" + declType->toString() + "'");
+  }
+
   if (!checkTypeVisibility(declType, node)) {
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,
                                      "Type visibility error"});
@@ -2377,6 +2383,11 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
 SemaResult TypeCheckPass::visit(const ParamDeclNode *node) {
   const_cast<ParamDeclNode *>(node)->type = resolveIfTemplate(node->type);
 
+  if (node->type->getKind() == TypeKind::TemplateParam) {
+    return ctx->reportError(node->line, node->column, node->length,
+                            "Unknown type: '" + node->type->toString() + "'");
+  }
+
   if (!checkTypeVisibility(node->type, node)) {
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,
                                      "Type visibility error"});
@@ -2411,6 +2422,12 @@ SemaResult TypeCheckPass::visit(const FunctionDeclNode *node) {
 
   const_cast<FunctionDeclNode *>(node)->returnType =
       resolveIfTemplate(node->returnType);
+
+  if (node->returnType->getKind() == TypeKind::TemplateParam) {
+    return ctx->reportError(node->line, node->column, node->length,
+                            "Unknown return type: '" +
+                                node->returnType->toString() + "'");
+  }
 
   if (!checkTypeVisibility(node->returnType, node)) {
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,

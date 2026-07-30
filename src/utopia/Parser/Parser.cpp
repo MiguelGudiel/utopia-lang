@@ -199,44 +199,7 @@ const Type *Parser::parseType(bool inNewExpr) {
   }
 
   if (!ty) {
-    bool foundAsTemplateParam = false;
-    size_t la = 0;
-
-    /* Lookahead to resolve generic return types in template functions/methods.
-     * Scans forward to verify if the unknown identifier is explicitly declared
-     * as a template parameter before the function arguments begin. */
-    while (peekToken(la).type != TokenType::EOF_TOK &&
-           peekToken(la).type != TokenType::LPAREN &&
-           peekToken(la).type != TokenType::SEMICOLON &&
-           peekToken(la).type != TokenType::LBRACE) {
-
-      if (peekToken(la).type == TokenType::LT) {
-        size_t inner = la + 1;
-        while (peekToken(inner).type != TokenType::EOF_TOK &&
-               peekToken(inner).type != TokenType::GT &&
-               peekToken(inner).type != TokenType::LPAREN) {
-
-          if (peekToken(inner).type == TokenType::IDENTIFIER &&
-              peekToken(inner).value == base) {
-            foundAsTemplateParam = true;
-            break;
-          }
-          inner++;
-        }
-      }
-
-      if (foundAsTemplateParam)
-        break;
-      la++;
-    }
-
-    if (foundAsTemplateParam) {
-      ty = astCtx.getTemplateParamType(base);
-    } else {
-      reportError(currentToken().line, currentToken().column,
-                  (int)base.length(), "Unknown type: " + std::string(base));
-      throw ParseException();
-    }
+    ty = astCtx.getTemplateParamType(base);
   }
 
   advance();
@@ -1345,6 +1308,7 @@ DeclNode *Parser::parseStructDecl() {
 
     std::vector<std::string_view> methodTParams;
     if (match(TokenType::LT)) {
+      astCtx.registerTemplateName(memName); // Register method template
       if (currentToken().type != TokenType::GT) {
         do {
           methodTParams.push_back(currentToken().value);
@@ -1487,6 +1451,7 @@ DeclNode *Parser::parseClassDecl() {
 
   std::vector<std::string_view> tParams;
   if (match(TokenType::LT)) {
+    astCtx.registerTemplateName(name); // Register class template
     if (currentToken().type != TokenType::GT) {
       do {
         tParams.push_back(currentToken().value);
@@ -1514,7 +1479,6 @@ DeclNode *Parser::parseClassDecl() {
   }
 
   classTy->setOpaque(false);
-
   expect(TokenType::LBRACE, "Expected '{'");
 
   std::vector<VarDeclNode *> fields;
@@ -1663,6 +1627,7 @@ DeclNode *Parser::parseClassDecl() {
 
     std::vector<std::string_view> methodTParams;
     if (match(TokenType::LT)) {
+      astCtx.registerTemplateName(memName); // Register method template
       if (currentToken().type != TokenType::GT) {
         do {
           methodTParams.push_back(currentToken().value);
@@ -1917,6 +1882,7 @@ DeclNode *Parser::parseDeclarationOrFunction(
 
   std::vector<std::string_view> tParams;
   if (match(TokenType::LT)) {
+    astCtx.registerTemplateName(id); // Register function template
     if (currentToken().type != TokenType::GT) {
       do {
         tParams.push_back(currentToken().value);
@@ -2122,21 +2088,12 @@ ExprNode *Parser::parsePostfix() {
       int memLen = memberName.length();
       expect(TokenType::IDENTIFIER, "Expected member name after '.'");
 
-      /* Check for template invocation on method access */
+      /* Check for template invocation using semantic awareness rather than
+       * lookahead */
       bool isTemplateCall = false;
-      if (currentToken().type == TokenType::LT) {
-        size_t lookahead = 1;
-        while (peekToken(lookahead).type != TokenType::EOF_TOK &&
-               peekToken(lookahead).type != TokenType::SEMICOLON) {
-          if (peekToken(lookahead).type == TokenType::GT ||
-              peekToken(lookahead).type == TokenType::RSHIFT) {
-            if (peekToken(lookahead + 1).type == TokenType::LPAREN) {
-              isTemplateCall = true;
-            }
-            break;
-          }
-          lookahead++;
-        }
+      if (currentToken().type == TokenType::LT &&
+          astCtx.isTemplateName(memberName)) {
+        isTemplateCall = true;
       }
 
       auto maNode = astCtx.create<MemberAccessNode>(
@@ -2225,7 +2182,6 @@ ExprNode *Parser::parsePostfix() {
       int col = expr->column;
       std::string_view op = currentToken().value;
       advance();
-      /* Evaluate postfix increments properly by passing isPostfix=true */
       expr = astCtx.create<UnaryOpNode>(op, expr, line, col, true);
     } else {
       break;
@@ -2393,19 +2349,8 @@ ExprNode *Parser::parsePrimary() {
     advance();
 
     bool isTemplateCall = false;
-    if (currentToken().type == TokenType::LT) {
-      size_t lookahead = 1;
-      while (peekToken(lookahead).type != TokenType::EOF_TOK &&
-             peekToken(lookahead).type != TokenType::SEMICOLON) {
-        if (peekToken(lookahead).type == TokenType::GT ||
-            peekToken(lookahead).type == TokenType::RSHIFT) {
-          if (peekToken(lookahead + 1).type == TokenType::LPAREN) {
-            isTemplateCall = true;
-          }
-          break;
-        }
-        lookahead++;
-      }
+    if (currentToken().type == TokenType::LT && astCtx.isTemplateName(name)) {
+      isTemplateCall = true;
     }
 
     auto varNode = astCtx.create<VariableNode>(name, line, col, len);
