@@ -831,6 +831,29 @@ DeclNode *Parser::parseTypedefDecl() {
   return decl;
 }
 
+BlockNode *Parser::parseStatementAsBlock() {
+  if (currentToken().type == TokenType::LBRACE) {
+    return parseBlock();
+  }
+
+  int startLine = currentToken().line;
+  int startCol = currentToken().column;
+
+  auto stmt = parseStatement();
+
+  auto block = astCtx.create<BlockNode>(startLine, startCol);
+  if (stmt) {
+    std::vector<ASTNode *> statements = {stmt};
+    block->statements = astCtx.copyArray<ASTNode *>(statements);
+    block->length = (stmt->column + stmt->length) - startCol;
+  } else {
+    block->statements = {};
+    block->length = 0;
+  }
+
+  return block;
+}
+
 IfNode *Parser::parseIfStatement() {
   int line = currentToken().line;
   int col = currentToken().column;
@@ -840,14 +863,14 @@ IfNode *Parser::parseIfStatement() {
   auto cond = parseExpression();
   expect(TokenType::RPAREN, "Expected ')' after if condition");
 
-  auto thenBlock = parseBlock();
+  auto thenBlock = parseStatementAsBlock();
   ASTNode *elseBlock = nullptr;
 
   if (match(TokenType::ELSE_KW)) {
     if (currentToken().type == TokenType::IF_KW) {
       elseBlock = parseIfStatement();
     } else {
-      elseBlock = parseBlock();
+      elseBlock = parseStatementAsBlock();
     }
   }
 
@@ -891,7 +914,7 @@ ForNode *Parser::parseForStatement() {
   }
   expect(TokenType::RPAREN, "Expected ')' after for clauses");
 
-  auto body = parseBlock();
+  auto body = parseStatementAsBlock();
 
   int len = (body->column + body->length) - col;
   return astCtx.create<ForNode>(initStmt, cond, inc, body, line, col, len);
@@ -906,7 +929,7 @@ WhileNode *Parser::parseWhileStatement() {
   auto cond = parseExpression();
   expect(TokenType::RPAREN, "Expected ')' after while condition");
 
-  auto body = parseBlock();
+  auto body = parseStatementAsBlock();
 
   int len = (body->column + body->length) - col;
   return astCtx.create<WhileNode>(cond, body, line, col, len);

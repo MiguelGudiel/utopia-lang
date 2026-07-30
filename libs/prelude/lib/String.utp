@@ -6,10 +6,8 @@ class String {
   /* Internal utilities for memory and string length evaluation to avoid 
      heavy external dependencies inside the prelude. */
   private static uint64 c_strlen(const uint8* str) {
-    if (str == null) 
-    {
+    if (str == null)
       return 0;
-    }
     uint64 i = 0;
     while (str[i] != 0) {
       i++;
@@ -53,15 +51,13 @@ class String {
   }
 
   public ~String() {
-    if (this.data != null) {
+    if (this.data != null)
       delete[] this.data;
-    }
   }
 
   public void operator=(const String& other) {
-    if (this.data != null) {
+    if (this.data != null)
       delete[] this.data;
-    }
     this.len = other.len;
     this.cap = other.cap;
     this.data = new uint8[this.cap + 1];
@@ -69,9 +65,8 @@ class String {
   }
 
   public void operator=(const uint8* str) {
-    if (this.data != null) {
+    if (this.data != null)
       delete[] this.data;
-    }
     if (str == null) {
       this.len = 0;
       this.cap = 15;
@@ -86,19 +81,19 @@ class String {
   }
 
   public bool operator==(const String& other) {
-    if (this.len != other.len) { return false;}
+    if (this.len != other.len) return false;
     for (uint64 i = 0; i < this.len; i++) {
-      if (this.data[i] != other.data[i]) { return false; }
+      if (this.data[i] != other.data[i]) return false;
     }
     return true;
   }
 
   public bool operator==(const uint8* str) {
-    if (str == null) { return this.len == 0; }
+    if (str == null) return this.len == 0;
     uint64 str_len = String.c_strlen(str);
-    if (this.len != str_len) { return false; }
+    if (this.len != str_len) return false;
     for (uint64 i = 0; i < this.len; i++) {
-      if (this.data[i] != str[i]) { return false; }
+      if (this.data[i] != str[i]) return false;
     }
     return true;
   }

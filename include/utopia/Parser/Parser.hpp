@@ -87,6 +87,7 @@ private:
   DeclNode *parseEnumDecl();
   DeclNode *parseStructDecl();
   BlockNode *parseBlock();
+  BlockNode *parseStatementAsBlock();
   BlockNode *parseFunctionBody(const Type *returnType);
   ReturnNode *parseReturn();
   ExprNode *parseExpressionStatement();
