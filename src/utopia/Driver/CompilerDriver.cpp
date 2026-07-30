@@ -139,7 +139,7 @@ bool CompilerDriver::run() {
 
     llvm::Module *llvmMod =
         Compiler::compileToIR(const_cast<ModuleNode *>(modNode), backendCtx,
-                              unitPath.string(), diagEngine);
+                              unitPath.string(), diagEngine, options.isDebug);
 
     if (!llvmMod || diagEngine.hasErrors()) {
       std::cerr << "\033[1;31m[Fatal]\033[0m Compilation aborted for "

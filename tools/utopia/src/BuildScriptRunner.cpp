@@ -60,8 +60,8 @@ bool BuildScriptRunner::run(const std::filesystem::path &scriptPath,
   }
 
   BackendContext backendCtx;
-  llvm::Module *llvmMod =
-      Compiler::compileToIR(root, backendCtx, "build_script", diagEngine);
+  llvm::Module *llvmMod = Compiler::compileToIR(
+      root, backendCtx, "build_script", diagEngine, options.isDebug);
   if (!llvmMod || diagEngine.hasErrors()) {
     g_CurrentBuildOptions = nullptr;
     return false;

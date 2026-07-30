@@ -37,6 +37,8 @@ int main(int argc, char **argv) {
         options.emitAsm = true;
       } else if (arg == "--jit") {
         options.isJIT = true;
+      } else if (arg == "-g" || arg == "--debug") {
+        options.isDebug = true;
       } else if (arg.starts_with("-O")) {
         if (arg.length() > 2 && std::isdigit(arg[2])) {
           cliOptLevel = std::stoi(std::string(arg.substr(2)));

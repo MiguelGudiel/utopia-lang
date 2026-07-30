@@ -11,7 +11,8 @@ class Compiler {
 public:
   static llvm::Module *compileToIR(ModuleNode *root, BackendContext &backendCtx,
                                    const std::string &moduleName,
-                                   DiagnosticsEngine &diags);
+                                   DiagnosticsEngine &diags,
+                                   bool emitDebugInfo);
 };
 
 } // namespace utopia

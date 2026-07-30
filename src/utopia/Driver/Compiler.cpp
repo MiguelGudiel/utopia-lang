@@ -9,9 +9,10 @@ namespace utopia {
 llvm::Module *Compiler::compileToIR(ModuleNode *root,
                                     BackendContext &backendCtx,
                                     const std::string &moduleName,
-                                    DiagnosticsEngine &diags) {
+                                    DiagnosticsEngine &diags,
+                                    bool emitDebugInfo) {
   llvm::Module *llvmMod = backendCtx.createModule(moduleName);
-  CodeGen codegen(backendCtx, *llvmMod, diags);
+  CodeGen codegen(backendCtx, *llvmMod, diags, emitDebugInfo);
   codegen.dispatch(root);
 
   if (diags.hasErrors()) {

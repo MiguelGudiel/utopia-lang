@@ -3,6 +3,9 @@
 #include "utopia/CodeGen/BackendContext.hpp"
 #include "utopia/CodeGen/CodeGenContext.hpp"
 #include "utopia/Common/Diagnostics.hpp"
+#include <llvm/IR/DIBuilder.h>
+#include <llvm/IR/DebugInfo.h>
+#include <llvm/IR/DebugLoc.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/InstrTypes.h>
 #include <llvm/IR/LLVMContext.h>
@@ -13,15 +16,11 @@
 namespace utopia {
 class CodeGen : public ASTVisitor<CodeGen, llvm::Value *> {
 public:
-  CodeGen(BackendContext &bCtx, llvm::Module &llvmMod, DiagnosticsEngine &diags)
-      : backend(bCtx), ctx(bCtx.getLLVMContext()), mod(llvmMod), builder(ctx),
-        diags(diags), mdBuilder(ctx) {
-    tbaaRoot = mdBuilder.createTBAARoot("Utopia TBAA");
+  CodeGen(BackendContext &bCtx, llvm::Module &llvmMod, DiagnosticsEngine &diags,
+          bool emitDebugInfo);
 
-    llvm::FastMathFlags fmf;
-    fmf.setFast();
-    builder.setFastMathFlags(fmf);
-  }
+  /* Intercepts and sets the debug location securely prior to evaluation */
+  llvm::Value *dispatch(const ASTNode *node);
 
   llvm::Value *visit(const NumberNode *node);
   llvm::Value *visit(const BoolNode *node);
@@ -73,8 +72,18 @@ private:
   CodeGenContext cgCtx;
   DiagnosticsEngine &diags;
   const FunctionDeclNode *currentFunc = nullptr;
-  llvm::AllocaInst *lastTemporaryAlloca =
-      nullptr; // Tracks temporal aggregate allocations for RVO
+  llvm::AllocaInst *lastTemporaryAlloca = nullptr;
+
+  /* Debug Metadata Emitters */
+  bool emitDebugInfo;
+  std::unique_ptr<llvm::DIBuilder> dBuilder;
+  llvm::DICompileUnit *diCU = nullptr;
+  llvm::DIFile *diFile = nullptr;
+  std::vector<llvm::DIScope *> lexicalBlocks;
+  std::unordered_map<const Type *, llvm::DIType *> debugTypes;
+
+  llvm::DIType *getDIType(const Type *type);
+  void emitLocation(const ASTNode *node);
 
   /* LLVM IR Metadata builders and trackers */
   llvm::MDBuilder mdBuilder;
