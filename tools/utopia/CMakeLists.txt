@@ -16,3 +16,5 @@ endif()
 target_include_directories(utopia PRIVATE 
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
+
+install(TARGETS utopia DESTINATION bin)

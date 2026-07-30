@@ -29,6 +29,12 @@ target_compile_definitions(utopia_core PUBLIC
     UTOPIA_INTERNAL_LIB_PATH="${CMAKE_INSTALL_PREFIX}/lib/utopia"
 )
 
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    target_compile_definitions(utopia_core PUBLIC UTOPIA_DEBUG_BUILD)
+elseif(CMAKE_BUILD_TYPE STREQUAL "Release")
+    target_compile_definitions(utopia_core PUBLIC UTOPIA_RELEASE_BUILD)
+endif()
+
 target_include_directories(utopia_core PUBLIC 
     $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
 )

@@ -7,6 +7,7 @@
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
 #include <llvm/Support/ErrorHandling.h>
+#include <llvm/Support/FileSystem.h>
 #include <llvm/Support/TargetSelect.h>
 #include <optional>
 #include <string>
@@ -67,8 +68,18 @@ int main(int argc, char **argv) {
     options.projectRoot = projRoot.string();
     options.outputDir = (projRoot / config.outputDir).string();
 
-    /* Resolution of stdlib and prelude paths */
-#ifdef UTOPIA_SOURCE_DIR
+#if defined(UTOPIA_RELEASE_BUILD)
+    std::string exePathStr =
+        llvm::sys::fs::getMainExecutable(argv[0], (void *)(intptr_t)&main);
+    fs::path exePath(exePathStr);
+
+    fs::path installRoot = exePath.parent_path().parent_path();
+
+    fs::path stdlibPath = installRoot / "lib" / "utopia" / "stdlib" / "lib";
+    fs::path preludePath = installRoot / "lib" / "utopia" / "prelude" / "lib";
+    fs::path buildLibPath = installRoot / "lib" / "utopia" / "builder" / "lib";
+#elif defined(UTOPIA_SOURCE_DIR)
+    /* Resolve from the source tree during active development */
     fs::path stdlibPath =
         fs::path(UTOPIA_SOURCE_DIR) / "libs" / "stdlib" / "lib";
     fs::path preludePath =
@@ -76,6 +87,7 @@ int main(int argc, char **argv) {
     fs::path buildLibPath =
         fs::path(UTOPIA_SOURCE_DIR) / "libs" / "builder" / "lib";
 #else
+    /* Fallback relative resolution */
     fs::path stdlibPath =
         projRoot.parent_path().parent_path() / "libs" / "stdlib" / "lib";
     fs::path preludePath =
