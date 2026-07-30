@@ -1,5 +1,21 @@
 {
   "version": "2.0.0",
+  "inputs": [
+    {
+      "id": "winArch",
+      "type": "pickString",
+      "description": "Arquitectura objetivo para Windows",
+      "options": ["x64", "ARM64", "Win32"],
+      "default": "x64"
+    },
+    {
+      "id": "macArch",
+      "type": "pickString",
+      "description": "Arquitectura objetivo para macOS (arm64 = M1/M2/M3, x86_64 = Intel)",
+      "options": ["arm64", "x86_64", "x86_64;arm64"],
+      "default": "arm64"
+    }
+  ],
   "tasks": [
     {
       "label": "build-compiler-cpp",
@@ -31,6 +47,51 @@
       "group": "build",
       "problemMatcher": [],
       "detail": "Compila el archivo .utp actual usando el binario utopia"
+    },
+    {
+      "label": "Package Installer: Windows (NSIS)",
+      "type": "shell",
+      "windows": {
+        "command": "cmake -S . -B build_release -A ${input:winArch} -DCMAKE_BUILD_TYPE=Release && cmake --build build_release --config Release && cpack --config build_release/CPackConfig.cmake -C Release -G NSIS",
+        "options": {
+          "shell": {
+            "executable": "cmd.exe",
+            "args": ["/d", "/c"]
+          }
+        }
+      },
+      "problemMatcher": [],
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "new"
+      }
+    },
+    {
+      "label": "Package Installer: macOS (DMG)",
+      "type": "shell",
+      "osx": {
+        "command": "cmake -S . -B build_release -DCMAKE_OSX_ARCHITECTURES=\"${input:macArch}\" -DCMAKE_BUILD_TYPE=Release && cmake --build build_release && cpack --config build_release/CPackConfig.cmake -G DragNDrop"
+      },
+      "problemMatcher": [],
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "new"
+      }
+    },
+    {
+      "label": "Package Installer: Fedora/Linux (RPM)",
+      "type": "shell",
+      "linux": {
+        "command": "cmake -S . -B build_release -DCMAKE_BUILD_TYPE=Release && cmake --build build_release && cpack --config build_release/CPackConfig.cmake -G RPM"
+      },
+      "problemMatcher": [],
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "new"
+      }
     }
   ]
 }

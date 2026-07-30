@@ -1,0 +1,5 @@
+@extern
+uint32 sleep(uint32 seconds);
+
+@extern
+int32 system(const uint8* command);

@@ -1,0 +1,35 @@
+/*
+ * Defines possible application states.
+ * Demonstrates enumerations and switch-case control flow.
+ */
+enum AppState {
+  Idle,
+  Loading,
+  Running,
+  Error
+}
+
+int main() {
+  AppState currentState = AppState.Loading;
+
+  /* Branch execution based on the active enumerated state */
+  switch (currentState) {
+    case AppState.Idle:
+      print("System is currently idle.\n");
+      break;
+    case AppState.Loading:
+      print("System is loading resources...\n");
+      break;
+    case AppState.Running:
+      print("System is running normally.\n");
+      break;
+    case AppState.Error:
+      print("A critical error occurred!\n");
+      break;
+    default:
+      print("Unknown system state.\n");
+      break;
+  }
+
+  return 0;
+}

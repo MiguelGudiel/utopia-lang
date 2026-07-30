@@ -24,18 +24,14 @@ public:
          DiagnosticsEngine &de, std::string_view path,
          ModuleLoader *loader = nullptr)
       : astCtx(context), tokens(tokenStream), diags(de), filePath(path),
-        moduleLoader(loader), isTopLevelInst(true) {}
+        moduleLoader(loader) {}
 
   ModuleNode *parseModule(std::string_view filePath);
 
   DeclNode *parseClassDecl();
   DeclNode *
   parseDeclarationOrFunction(llvm::ArrayRef<AnnotationNode *> annotations = {});
-
-  std::string_view instantiatingName = "";
-  std::string_view templateBaseName = "";
-  std::unordered_map<std::string_view, const Type *> templateArgs;
-  bool isTopLevelInst = true;
+  std::vector<ParamDeclNode *> parseParameterList(bool &isVariadic);
 
 private:
   ASTContext &astCtx;
@@ -87,17 +83,19 @@ private:
   AnnotationNode *parseAnnotation();
   DeclNode *parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations);
   DeclNode *parseTypedefDecl();
-  std::vector<ParamDeclNode *> parseParameterList(const Type *classTy,
-                                                  bool &isVariadic);
 
   DeclNode *parseEnumDecl();
   DeclNode *parseStructDecl();
   BlockNode *parseBlock();
+  BlockNode *parseStatementAsBlock();
   BlockNode *parseFunctionBody(const Type *returnType);
   ReturnNode *parseReturn();
   ExprNode *parseExpressionStatement();
   ForNode *parseForStatement();
   WhileNode *parseWhileStatement();
+  SwitchNode *parseSwitchStatement();
+  BreakNode *parseBreakStatement();
+  ContinueNode *parseContinueStatement();
 
   ExprNode *parseExpression();
   ExprNode *parseAssignment();

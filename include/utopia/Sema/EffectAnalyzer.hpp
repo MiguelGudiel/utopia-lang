@@ -17,8 +17,12 @@ public:
   void visit(const DeleteExprNode *n);
   void visit(const NewExprNode *n);
   void visit(const ImplicitCastNode *n);
-  void visit(const WhileNode *n);
   void visit(const ForNode *n);
+  void visit(const WhileNode *n);
+  void visit(const SwitchNode *n);
+  void visit(const CaseNode *n) {}
+  void visit(const BreakNode *n) {}
+  void visit(const ContinueNode *n) {}
   void visit(const UnaryOpNode *n);
   void visit(const ArraySubscriptNode *n);
   void visit(const MemberAccessNode *n);

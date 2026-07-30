@@ -1,5 +1,6 @@
 set(CORE_SOURCES
     utopia/AST/AST.cpp
+    utopia/AST/ASTCloner.cpp
     utopia/CodeGen/CodeGen.cpp
     utopia/CodeGen/BackendContext.cpp
     utopia/CodeGen/Mangler.cpp
@@ -27,6 +28,12 @@ target_compile_definitions(utopia_core PUBLIC
     UTOPIA_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
     UTOPIA_INTERNAL_LIB_PATH="${CMAKE_INSTALL_PREFIX}/lib/utopia"
 )
+
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    target_compile_definitions(utopia_core PUBLIC UTOPIA_DEBUG_BUILD)
+elseif(CMAKE_BUILD_TYPE STREQUAL "Release")
+    target_compile_definitions(utopia_core PUBLIC UTOPIA_RELEASE_BUILD)
+endif()
 
 target_include_directories(utopia_core PUBLIC 
     $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>

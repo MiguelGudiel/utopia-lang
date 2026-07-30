@@ -26,6 +26,10 @@ enum class NodeKind : uint8_t {
   If,
   For,
   While,
+  Switch,
+  Case,
+  Break,
+  Continue,
   FunctionDecl,
   FunctionCall,
   Return,
@@ -86,7 +90,6 @@ struct DeclNode : public ASTNode {
 
   bool isTemplate = false;
   llvm::ArrayRef<std::string_view> templateParams;
-  llvm::ArrayRef<Token> templateBodyTokens;
 
   explicit DeclNode(NodeKind k, int l = 0, int c = 0, int len = 0)
       : ASTNode(k, l, c, len) {}
@@ -279,6 +282,7 @@ struct FunctionDeclNode : public DeclNode {
   bool isImplicit;
   bool isStatic = false;
   mutable std::string_view externAlias;
+  const RecordType *parentRecord = nullptr;
 
   /* Intrinsic function attributes inferred during semantic analysis */
   mutable bool isReadNone = false;
@@ -334,6 +338,34 @@ struct WhileNode : public StmtNode {
 
   WhileNode(ExprNode *cond, BlockNode *b, int l, int c, int len)
       : StmtNode(NodeKind::While, l, c, len), condition(cond), body(b) {}
+};
+
+struct CaseNode : public ASTNode {
+  ExprNode *value; /* nullptr represents 'default' */
+  llvm::ArrayRef<ASTNode *> statements;
+
+  CaseNode(ExprNode *v, llvm::ArrayRef<ASTNode *> stmts, int l, int c, int len)
+      : ASTNode(NodeKind::Case, l, c, len), value(v), statements(stmts) {}
+};
+
+struct SwitchNode : public StmtNode {
+  ExprNode *condition;
+  llvm::ArrayRef<CaseNode *> cases;
+  bool hasDefault;
+
+  SwitchNode(ExprNode *cond, llvm::ArrayRef<CaseNode *> c, bool hd, int l,
+             int col, int len)
+      : StmtNode(NodeKind::Switch, l, col, len), condition(cond), cases(c),
+        hasDefault(hd) {}
+};
+
+struct BreakNode : public StmtNode {
+  BreakNode(int l, int c, int len) : StmtNode(NodeKind::Break, l, c, len) {}
+};
+
+struct ContinueNode : public StmtNode {
+  ContinueNode(int l, int c, int len)
+      : StmtNode(NodeKind::Continue, l, c, len) {}
 };
 
 struct IfNode : public StmtNode {

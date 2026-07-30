@@ -9,6 +9,7 @@ namespace utopia {
 
 struct CompileOptions {
   std::string projectName;
+  std::string target;
   std::string sourcePath;
   std::string outputPath;
   std::string projectRoot;

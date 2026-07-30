@@ -9,6 +9,7 @@
 #include <memory>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace utopia {
@@ -54,6 +55,14 @@ public:
   template <typename T, typename... Args> T *create(Args &&...args) {
     void *mem = allocator.Allocate<T>();
     return new (mem) T(std::forward<Args>(args)...);
+  }
+
+  void registerTemplateName(std::string_view name) {
+    registeredTemplates.insert(name);
+  }
+
+  bool isTemplateName(std::string_view name) const {
+    return registeredTemplates.contains(name);
   }
 
   template <typename T> llvm::ArrayRef<T> copyArray(llvm::ArrayRef<T> src) {
@@ -175,6 +184,102 @@ public:
     return nullptr;
   }
 
+  const Type *getPromotedNumericType(const Type *lhs, const Type *rhs) const {
+    if (!lhs->isNumeric() || !rhs->isNumeric()) {
+      return nullptr;
+    }
+
+    auto k1 = static_cast<const BuiltinType *>(lhs->getUnqualifiedType())
+                  ->getBuiltinKind();
+    auto k2 = static_cast<const BuiltinType *>(rhs->getUnqualifiedType())
+                  ->getBuiltinKind();
+
+    if (k1 == k2) {
+      return lhs->getUnqualifiedType();
+    }
+
+    /* Floating-point type promotion takes absolute precedence */
+    if (k1 == BuiltinKind::Float64 || k2 == BuiltinKind::Float64) {
+      return Float64Ty;
+    }
+    if (k1 == BuiltinKind::Float32 || k2 == BuiltinKind::Float32) {
+      return Float32Ty;
+    }
+
+    /*
+     * 2D Type Promotion Matrix for Integer Arithmetic.
+     * Prevents lossy conversions by safely expanding to the next compatible
+     * precision tier when signed and unsigned boundaries collide.
+     *
+     * Indices correspond directly to BuiltinKind integral definitions:
+     * 0: Int8, 1: Int16, 2: Int32, 3: Int64
+     * 4: UInt8, 5: UInt16, 6: UInt32, 7: UInt64
+     */
+    static constexpr BuiltinKind promotionMatrix[8][8] = {
+        /*             Int8                 Int16                Int32 Int64
+               UInt8                UInt16               UInt32 UInt64 */
+        /* Int8   */ {BuiltinKind::Int8, BuiltinKind::Int16, BuiltinKind::Int32,
+                      BuiltinKind::Int64, BuiltinKind::Int16,
+                      BuiltinKind::Int32, BuiltinKind::Int64,
+                      BuiltinKind::UInt64},
+        /* Int16  */
+        {BuiltinKind::Int16, BuiltinKind::Int16, BuiltinKind::Int32,
+         BuiltinKind::Int64, BuiltinKind::Int16, BuiltinKind::Int32,
+         BuiltinKind::Int64, BuiltinKind::UInt64},
+        /* Int32  */
+        {BuiltinKind::Int32, BuiltinKind::Int32, BuiltinKind::Int32,
+         BuiltinKind::Int64, BuiltinKind::Int32, BuiltinKind::Int32,
+         BuiltinKind::Int64, BuiltinKind::UInt64},
+        /* Int64  */
+        {BuiltinKind::Int64, BuiltinKind::Int64, BuiltinKind::Int64,
+         BuiltinKind::Int64, BuiltinKind::Int64, BuiltinKind::Int64,
+         BuiltinKind::Int64, BuiltinKind::UInt64},
+        /* UInt8  */
+        {BuiltinKind::Int16, BuiltinKind::Int16, BuiltinKind::Int32,
+         BuiltinKind::Int64, BuiltinKind::UInt8, BuiltinKind::UInt16,
+         BuiltinKind::UInt32, BuiltinKind::UInt64},
+        /* UInt16 */
+        {BuiltinKind::Int32, BuiltinKind::Int32, BuiltinKind::Int32,
+         BuiltinKind::Int64, BuiltinKind::UInt16, BuiltinKind::UInt16,
+         BuiltinKind::UInt32, BuiltinKind::UInt64},
+        /* UInt32 */
+        {BuiltinKind::Int64, BuiltinKind::Int64, BuiltinKind::Int64,
+         BuiltinKind::Int64, BuiltinKind::UInt32, BuiltinKind::UInt32,
+         BuiltinKind::UInt32, BuiltinKind::UInt64},
+        /* UInt64 */
+        {BuiltinKind::UInt64, BuiltinKind::UInt64, BuiltinKind::UInt64,
+         BuiltinKind::UInt64, BuiltinKind::UInt64, BuiltinKind::UInt64,
+         BuiltinKind::UInt64, BuiltinKind::UInt64}};
+
+    int idx1 = static_cast<int>(k1);
+    int idx2 = static_cast<int>(k2);
+
+    if (idx1 >= 0 && idx1 <= 7 && idx2 >= 0 && idx2 <= 7) {
+      switch (promotionMatrix[idx1][idx2]) {
+      case BuiltinKind::Int8:
+        return Int8Ty;
+      case BuiltinKind::Int16:
+        return Int16Ty;
+      case BuiltinKind::Int32:
+        return Int32Ty;
+      case BuiltinKind::Int64:
+        return Int64Ty;
+      case BuiltinKind::UInt8:
+        return UInt8Ty;
+      case BuiltinKind::UInt16:
+        return UInt16Ty;
+      case BuiltinKind::UInt32:
+        return UInt32Ty;
+      case BuiltinKind::UInt64:
+        return UInt64Ty;
+      default:
+        return nullptr;
+      }
+    }
+
+    return nullptr;
+  }
+
   /* Returns the canonical array type for the given element type and size. */
   const ArrayType *getArrayType(const Type *elementType, uint64_t size) {
     for (const auto *arrTy : arrayTypes) {
@@ -227,6 +332,8 @@ private:
   std::unordered_map<std::string_view, RecordType *> recordTypes;
   std::unordered_map<std::string_view, const Type *> typeAliases;
   std::unordered_map<std::string_view, const EnumType *> enumTypes;
+
+  std::unordered_set<std::string_view> registeredTemplates;
 };
 
 } // namespace utopia

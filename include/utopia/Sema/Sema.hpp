@@ -54,8 +54,8 @@ static bool canImplicitlyCast(const Type *from, const Type *to,
         ctors = static_cast<const StructDeclNode *>(decl)->constructors;
 
       for (auto *ctor : ctors) {
-        if (ctor->params.size() == 2) {
-          if (canImplicitlyCast(from, ctor->params[1]->type, false))
+        if (ctor->params.size() == 1) {
+          if (canImplicitlyCast(from, ctor->params[0]->type, false))
             return true;
         }
       }
@@ -173,6 +173,10 @@ public:
   void visit(const IfNode *node);
   void visit(const ForNode *node);
   void visit(const WhileNode *node);
+  void visit(const SwitchNode *node);
+  void visit(const CaseNode *node) {}
+  void visit(const BreakNode *node) {}
+  void visit(const ContinueNode *node) {}
   void visit(const ReturnNode *) {}
   void visit(const CastNode *) {}
   void visit(const ParamDeclNode *) {}
@@ -222,6 +226,10 @@ public:
   SemaResult visit(const IfNode *node);
   SemaResult visit(const ForNode *node);
   SemaResult visit(const WhileNode *node);
+  SemaResult visit(const SwitchNode *node);
+  SemaResult visit(const CaseNode *node) { return ctx->astCtx.VoidTy; }
+  SemaResult visit(const BreakNode *node);
+  SemaResult visit(const ContinueNode *node);
   SemaResult visit(const ReturnNode *node);
   SemaResult visit(const CastNode *node);
   SemaResult visit(const ParamDeclNode *node);

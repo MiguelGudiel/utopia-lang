@@ -10,3 +10,7 @@ build:
   sources:
     - "lib/prelude.utp"
     - "lib/String.utp"
+    - "lib/Math/Limits.utp"
+    - "lib/Memory/Core.utp"
+    - "lib/System/OS.utp"
+    - "lib/IO/Console.utp"

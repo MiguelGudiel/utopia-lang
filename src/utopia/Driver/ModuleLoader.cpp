@@ -14,16 +14,16 @@ ModuleLoader::resolveImportURI(std::string_view uri,
                                const fs::path &currentDir) {
   std::string uriStr(uri);
 
-  if (uriStr == "utopia:build") {
+  if (uriStr == "utopia:builder") {
     if (!config.isBuildScript) {
-      return std::unexpected("The 'utopia:build' module can only be imported "
+      return std::unexpected("The 'utopia:builder' module can only be imported "
                              "from build.utp scripts.");
     }
-    fs::path target = config.buildLibRoot / "build.utp";
+    fs::path target = config.buildLibRoot / "builder.utp";
     if (fs::exists(target)) {
       return fs::weakly_canonical(target);
     }
-    return std::unexpected("Build library module not found at: " +
+    return std::unexpected("Builder library module not found at: " +
                            target.string());
   }
 

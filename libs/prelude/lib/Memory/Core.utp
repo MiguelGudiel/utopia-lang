@@ -1,0 +1,5 @@
+@extern
+void* malloc(uint64 size);
+
+@extern
+void free(void* ptr);

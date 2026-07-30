@@ -1,0 +1,17 @@
+/*
+ * Demonstrates interaction with the standard Prelude library.
+ * Shows object instantiation, operator overloading (concatenation), and methods.
+ */
+int main() {
+  String greeting = "Welcome to ";
+  String language = "Utopia Language!";
+  
+  /* Concatenate strings using the overloaded '+' operator */
+  String message = greeting + language;
+  
+  /* Access the raw C-string for the standard print function */
+  print("%s\n", message.c_str());
+  print("Total string length: %d\n", message.length());
+  
+  return 0;
+}

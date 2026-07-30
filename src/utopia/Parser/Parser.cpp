@@ -184,16 +184,9 @@ const Type *Parser::parseType(bool inNewExpr) {
   }
 
   std::string_view base = currentToken().value;
-
-  if (!instantiatingName.empty() && base == templateBaseName) {
-    base = instantiatingName;
-  }
-
   const Type *ty = nullptr;
 
-  if (auto it = templateArgs.find(base); it != templateArgs.end()) {
-    ty = it->second;
-  } else if (isTemplateParam(base)) {
+  if (isTemplateParam(base)) {
     ty = astCtx.getTemplateParamType(base);
   } else {
     ty = astCtx.getBuiltinTypeByName(base);
@@ -206,44 +199,7 @@ const Type *Parser::parseType(bool inNewExpr) {
   }
 
   if (!ty) {
-    bool foundAsTemplateParam = false;
-    size_t la = 0;
-
-    /* Lookahead to resolve generic return types in template functions/methods.
-     * Scans forward to verify if the unknown identifier is explicitly declared
-     * as a template parameter before the function arguments begin. */
-    while (peekToken(la).type != TokenType::EOF_TOK &&
-           peekToken(la).type != TokenType::LPAREN &&
-           peekToken(la).type != TokenType::SEMICOLON &&
-           peekToken(la).type != TokenType::LBRACE) {
-
-      if (peekToken(la).type == TokenType::LT) {
-        size_t inner = la + 1;
-        while (peekToken(inner).type != TokenType::EOF_TOK &&
-               peekToken(inner).type != TokenType::GT &&
-               peekToken(inner).type != TokenType::LPAREN) {
-
-          if (peekToken(inner).type == TokenType::IDENTIFIER &&
-              peekToken(inner).value == base) {
-            foundAsTemplateParam = true;
-            break;
-          }
-          inner++;
-        }
-      }
-
-      if (foundAsTemplateParam)
-        break;
-      la++;
-    }
-
-    if (foundAsTemplateParam) {
-      ty = astCtx.getTemplateParamType(base);
-    } else {
-      reportError(currentToken().line, currentToken().column,
-                  (int)base.length(), "Unknown type: " + std::string(base));
-      throw ParseException();
-    }
+    ty = astCtx.getTemplateParamType(base);
   }
 
   advance();
@@ -451,18 +407,11 @@ const Type *Parser::applyArrayDeclarator(const Type *baseType) {
   return result;
 }
 
-std::vector<ParamDeclNode *> Parser::parseParameterList(const Type *classTy,
-                                                        bool &isVariadic) {
+std::vector<ParamDeclNode *> Parser::parseParameterList(bool &isVariadic) {
   std::vector<ParamDeclNode *> params;
   isVariadic = false;
   bool inNamedBlock = false;
   bool optionalPositionalStarted = false;
-
-  if (classTy) {
-    params.push_back(astCtx.create<ParamDeclNode>(
-        astCtx.getPointerType(classTy), "this", nullptr, false, false,
-        currentToken().line, currentToken().column, 4));
-  }
 
   while (currentToken().type == TokenType::COMMENT)
     advance();
@@ -509,12 +458,6 @@ std::vector<ParamDeclNode *> Parser::parseParameterList(const Type *classTy,
     std::string_view pName = currentToken().value;
     int pLen = (int)pName.length();
     expect(TokenType::IDENTIFIER, "Expected parameter name.");
-
-    /* Apply array-to-pointer decay for parameter declarations just like C++ */
-    if (pType->getKind() == TypeKind::Array) {
-      pType = astCtx.getPointerType(
-          static_cast<const ArrayType *>(pType)->getElementType());
-    }
 
     ExprNode *defVal = nullptr;
     if (match(TokenType::ASSIGN)) {
@@ -663,7 +606,7 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
       expect(TokenType::LPAREN, "Expected '('");
 
       bool isVariadic = false;
-      auto params = parseParameterList(classTy, isVariadic);
+      auto params = parseParameterList(isVariadic);
       if (isVariadic) {
         reportError(cLine, cCol, name.length(),
                     "Annotation constructors cannot be variadic.");
@@ -673,6 +616,7 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
 
       constructor = astCtx.create<FunctionDeclNode>(astCtx.VoidTy, name, cLine,
                                                     cCol, true, true);
+      constructor->parentRecord = classTy;
       constructor->params = astCtx.copyArray<ParamDeclNode *>(params);
       constructor->annotations = memberAnnotations;
       constructor->hasPublicMod = isPub;
@@ -777,6 +721,12 @@ ASTNode *Parser::parseStatement() {
     node = parseForStatement();
   } else if (currentToken().type == TokenType::WHILE_KW) {
     node = parseWhileStatement();
+  } else if (currentToken().type == TokenType::SWITCH_KW) {
+    node = parseSwitchStatement();
+  } else if (currentToken().type == TokenType::BREAK_KW) {
+    node = parseBreakStatement();
+  } else if (currentToken().type == TokenType::CONTINUE_KW) {
+    node = parseContinueStatement();
   } else if (currentToken().type == TokenType::CONST_KW ||
              currentToken().type == TokenType::EXTERN_KW ||
              currentToken().type == TokenType::STATIC_KW ||
@@ -887,6 +837,29 @@ DeclNode *Parser::parseTypedefDecl() {
   return decl;
 }
 
+BlockNode *Parser::parseStatementAsBlock() {
+  if (currentToken().type == TokenType::LBRACE) {
+    return parseBlock();
+  }
+
+  int startLine = currentToken().line;
+  int startCol = currentToken().column;
+
+  auto stmt = parseStatement();
+
+  auto block = astCtx.create<BlockNode>(startLine, startCol);
+  if (stmt) {
+    std::vector<ASTNode *> statements = {stmt};
+    block->statements = astCtx.copyArray<ASTNode *>(statements);
+    block->length = (stmt->column + stmt->length) - startCol;
+  } else {
+    block->statements = {};
+    block->length = 0;
+  }
+
+  return block;
+}
+
 IfNode *Parser::parseIfStatement() {
   int line = currentToken().line;
   int col = currentToken().column;
@@ -896,14 +869,14 @@ IfNode *Parser::parseIfStatement() {
   auto cond = parseExpression();
   expect(TokenType::RPAREN, "Expected ')' after if condition");
 
-  auto thenBlock = parseBlock();
+  auto thenBlock = parseStatementAsBlock();
   ASTNode *elseBlock = nullptr;
 
   if (match(TokenType::ELSE_KW)) {
     if (currentToken().type == TokenType::IF_KW) {
       elseBlock = parseIfStatement();
     } else {
-      elseBlock = parseBlock();
+      elseBlock = parseStatementAsBlock();
     }
   }
 
@@ -947,7 +920,7 @@ ForNode *Parser::parseForStatement() {
   }
   expect(TokenType::RPAREN, "Expected ')' after for clauses");
 
-  auto body = parseBlock();
+  auto body = parseStatementAsBlock();
 
   int len = (body->column + body->length) - col;
   return astCtx.create<ForNode>(initStmt, cond, inc, body, line, col, len);
@@ -962,10 +935,108 @@ WhileNode *Parser::parseWhileStatement() {
   auto cond = parseExpression();
   expect(TokenType::RPAREN, "Expected ')' after while condition");
 
-  auto body = parseBlock();
+  auto body = parseStatementAsBlock();
 
   int len = (body->column + body->length) - col;
   return astCtx.create<WhileNode>(cond, body, line, col, len);
+}
+
+SwitchNode *Parser::parseSwitchStatement() {
+  int line = currentToken().line;
+  int col = currentToken().column;
+  advance(); /* consume 'switch' */
+
+  expect(TokenType::LPAREN, "Expected '(' after 'switch'");
+  auto cond = parseExpression();
+  expect(TokenType::RPAREN, "Expected ')' after switch condition");
+
+  expect(TokenType::LBRACE, "Expected '{' after switch expression");
+
+  std::vector<CaseNode *> cases;
+  bool hasDefault = false;
+
+  while (currentToken().type != TokenType::RBRACE &&
+         currentToken().type != TokenType::EOF_TOK) {
+
+    /* Consume any floating comments before case/default directives */
+    while (currentToken().type == TokenType::COMMENT) {
+      advance();
+    }
+
+    if (currentToken().type == TokenType::RBRACE ||
+        currentToken().type == TokenType::EOF_TOK) {
+      break;
+    }
+
+    int cLine = currentToken().line;
+    int cCol = currentToken().column;
+    ExprNode *caseVal = nullptr;
+
+    if (match(TokenType::CASE_KW)) {
+      caseVal = parseExpression();
+      expect(TokenType::COLON, "Expected ':' after case value");
+    } else if (match(TokenType::DEFAULT_KW)) {
+      expect(TokenType::COLON, "Expected ':' after 'default'");
+      if (hasDefault) {
+        reportError(cLine, cCol, 7,
+                    "Multiple 'default' labels in switch statement");
+      }
+      hasDefault = true;
+    } else {
+      reportError(currentToken().line, currentToken().column,
+                  currentToken().value.length(),
+                  "Expected 'case' or 'default' in switch body");
+      synchronize();
+      break;
+    }
+
+    std::vector<ASTNode *> stmts;
+    while (true) {
+      /* Peek past comments to check if a case/default closure is approaching */
+      size_t offset = 0;
+      while (peekToken(offset).type == TokenType::COMMENT) {
+        offset++;
+      }
+
+      TokenType nextTy = peekToken(offset).type;
+      if (nextTy == TokenType::CASE_KW || nextTy == TokenType::DEFAULT_KW ||
+          nextTy == TokenType::RBRACE || nextTy == TokenType::EOF_TOK) {
+        break;
+      }
+
+      if (auto stmt = parseStatement()) {
+        stmts.push_back(stmt);
+      }
+    }
+
+    int cLen = currentToken().column - cCol;
+    cases.push_back(astCtx.create<CaseNode>(
+        caseVal, astCtx.copyArray<ASTNode *>(stmts), cLine, cCol, cLen));
+  }
+
+  int endCol = currentToken().column + 1;
+  expect(TokenType::RBRACE, "Expected '}' at end of switch block");
+
+  return astCtx.create<SwitchNode>(cond, astCtx.copyArray<CaseNode *>(cases),
+                                   hasDefault, line, col, endCol - col);
+}
+
+BreakNode *Parser::parseBreakStatement() {
+  int line = currentToken().line;
+  int col = currentToken().column;
+  advance();
+  int endCol = currentToken().column + currentToken().value.length();
+  expect(TokenType::SEMICOLON, "Expected ';' after 'break'");
+  return astCtx.create<BreakNode>(line, col, endCol - col);
+}
+
+ContinueNode *Parser::parseContinueStatement() {
+  int line = currentToken().line;
+  int col = currentToken().column;
+  advance();
+  int endCol = currentToken().column + currentToken().value.length();
+  expect(TokenType::SEMICOLON, "Expected ';' after 'continue'");
+  return astCtx.create<ContinueNode>(line, col, endCol - col);
 }
 
 ExprNode *Parser::parseLogicalOr() {
@@ -1263,13 +1334,7 @@ DeclNode *Parser::parseStructDecl() {
 
       destructor = astCtx.create<FunctionDeclNode>(astCtx.VoidTy, "~", dLine,
                                                    dCol, false, true);
-
-      std::vector<ParamDeclNode *> params;
-      params.push_back(
-          astCtx.create<ParamDeclNode>(astCtx.getPointerType(structTy), "this",
-                                       nullptr, false, false, dLine, dCol, 4));
-
-      destructor->params = astCtx.copyArray<ParamDeclNode *>(params);
+      destructor->parentRecord = structTy;
       destructor->annotations = memberAnnotations;
       destructor->hasPublicMod = isPub;
       destructor->hasPrivateMod = isPriv;
@@ -1299,12 +1364,13 @@ DeclNode *Parser::parseStructDecl() {
       advance();
 
       bool isVariadic = false;
-      auto params = parseParameterList(structTy, isVariadic);
+      auto params = parseParameterList(isVariadic);
       expect(TokenType::RPAREN, "Expected ')'");
 
       auto constructor =
           astCtx.create<FunctionDeclNode>(astCtx.VoidTy, name, cLine, cCol,
                                           isConstCtor, true, false, isVariadic);
+      constructor->parentRecord = structTy;
       constructor->params = astCtx.copyArray<ParamDeclNode *>(params);
       constructor->annotations = memberAnnotations;
       constructor->hasPublicMod = isPub;
@@ -1317,7 +1383,6 @@ DeclNode *Parser::parseStructDecl() {
       continue;
     }
 
-    size_t methodStartIdx = cursor;
     bool isStatic = false;
     bool isExtern = false;
 
@@ -1353,6 +1418,7 @@ DeclNode *Parser::parseStructDecl() {
 
     std::vector<std::string_view> methodTParams;
     if (match(TokenType::LT)) {
+      astCtx.registerTemplateName(memName);
       if (currentToken().type != TokenType::GT) {
         do {
           methodTParams.push_back(currentToken().value);
@@ -1370,12 +1436,12 @@ DeclNode *Parser::parseStructDecl() {
 
     if (match(TokenType::LPAREN)) {
       bool isVariadic = false;
-      auto params = parseParameterList(
-          (isExtern || isStatic) ? nullptr : structTy, isVariadic);
+      auto params = parseParameterList(isVariadic);
       expect(TokenType::RPAREN, "Expected ')'");
 
       auto method = astCtx.create<FunctionDeclNode>(
           memType, memName, mLine, mCol, false, true, isExtern, isVariadic);
+      method->parentRecord = structTy;
       method->isStatic = isStatic;
       method->params = astCtx.copyArray<ParamDeclNode *>(params);
       method->annotations = memberAnnotations;
@@ -1395,8 +1461,6 @@ DeclNode *Parser::parseStructDecl() {
         method->isTemplate = true;
         method->templateParams =
             astCtx.copyArray<std::string_view>(methodTParams);
-        method->templateBodyTokens =
-            tokens.slice(methodStartIdx, cursor - methodStartIdx);
         popTemplateParams(methodTParams.size());
       }
 
@@ -1435,12 +1499,7 @@ DeclNode *Parser::parseStructDecl() {
   if (constructors.empty()) {
     auto defaultCtor = astCtx.create<FunctionDeclNode>(
         astCtx.VoidTy, name, line, col, false, true, false, false, true);
-
-    std::vector<ParamDeclNode *> params;
-    params.push_back(
-        astCtx.create<ParamDeclNode>(astCtx.getPointerType(structTy), "this",
-                                     nullptr, false, false, line, col, 4));
-    defaultCtor->params = astCtx.copyArray<ParamDeclNode *>(params);
+    defaultCtor->parentRecord = structTy;
 
     auto emptyBody = astCtx.create<BlockNode>(line, col);
     emptyBody->statements = {};
@@ -1453,11 +1512,7 @@ DeclNode *Parser::parseStructDecl() {
   if (!destructor) {
     destructor = astCtx.create<FunctionDeclNode>(
         astCtx.VoidTy, "~", line, col, false, true, false, false, true);
-    std::vector<ParamDeclNode *> params;
-    params.push_back(
-        astCtx.create<ParamDeclNode>(astCtx.getPointerType(structTy), "this",
-                                     nullptr, false, false, line, col, 4));
-    destructor->params = astCtx.copyArray<ParamDeclNode *>(params);
+    destructor->parentRecord = structTy;
 
     auto emptyBody = astCtx.create<BlockNode>(line, col);
     emptyBody->statements = {};
@@ -1488,26 +1543,20 @@ DeclNode *Parser::parseStructDecl() {
 }
 
 DeclNode *Parser::parseClassDecl() {
-  size_t startIdx = cursor;
   int line = currentToken().line;
   int col = currentToken().column;
   advance();
 
   std::string_view name = currentToken().value;
-  if (!instantiatingName.empty() && isTopLevelInst) {
-    name = instantiatingName;
-    isTopLevelInst = false;
-  }
   expect(TokenType::IDENTIFIER, "Expected class name");
 
   std::vector<std::string_view> tParams;
   if (match(TokenType::LT)) {
+    astCtx.registerTemplateName(name); // Register class template
     if (currentToken().type != TokenType::GT) {
       do {
         tParams.push_back(currentToken().value);
-        if (instantiatingName.empty()) {
-          pushTemplateParam(tParams.back());
-        }
+        pushTemplateParam(tParams.back());
         expect(TokenType::IDENTIFIER, "Expected template parameter name");
       } while (match(TokenType::COMMA));
     }
@@ -1526,13 +1575,11 @@ DeclNode *Parser::parseClassDecl() {
                                              currentToken().column - col);
     node->isOpaque = true;
     node->recordType = classTy;
-    if (instantiatingName.empty())
-      popTemplateParams(tParams.size());
+    popTemplateParams(tParams.size());
     return node;
   }
 
   classTy->setOpaque(false);
-
   expect(TokenType::LBRACE, "Expected '{'");
 
   std::vector<VarDeclNode *> fields;
@@ -1578,7 +1625,7 @@ DeclNode *Parser::parseClassDecl() {
       std::string_view dtorName = currentToken().value;
       expect(TokenType::IDENTIFIER, "Expected class name after '~'");
 
-      if (dtorName != (instantiatingName.empty() ? name : templateBaseName)) {
+      if (dtorName != name) {
         reportError(dLine, dCol, dtorName.length(),
                     "Destructor name must match the class name.");
         throw ParseException();
@@ -1589,15 +1636,7 @@ DeclNode *Parser::parseClassDecl() {
 
       destructor = astCtx.create<FunctionDeclNode>(astCtx.VoidTy, "~", dLine,
                                                    dCol, false, true);
-
-      /* Inject implicit contextual 'this' binding to maintain static soundness
-       */
-      std::vector<ParamDeclNode *> params;
-      params.push_back(
-          astCtx.create<ParamDeclNode>(astCtx.getPointerType(classTy), "this",
-                                       nullptr, false, false, dLine, dCol, 4));
-
-      destructor->params = astCtx.copyArray<ParamDeclNode *>(params);
+      destructor->parentRecord = classTy;
       destructor->annotations = memberAnnotations;
       destructor->hasPublicMod = isPub;
       destructor->hasPrivateMod = isPriv;
@@ -1612,17 +1651,13 @@ DeclNode *Parser::parseClassDecl() {
     bool isConstCtor = false;
     if (currentToken().type == TokenType::CONST_KW &&
         peekToken().type == TokenType::IDENTIFIER &&
-        peekToken().value ==
-            (instantiatingName.empty() ? name : templateBaseName) &&
-        peekToken(2).type == TokenType::LPAREN) {
+        peekToken().value == name && peekToken(2).type == TokenType::LPAREN) {
       isConstCtor = true;
     }
 
-    if (isConstCtor ||
-        (currentToken().type == TokenType::IDENTIFIER &&
-         currentToken().value ==
-             (instantiatingName.empty() ? name : templateBaseName) &&
-         peekToken().type == TokenType::LPAREN)) {
+    if (isConstCtor || (currentToken().type == TokenType::IDENTIFIER &&
+                        currentToken().value == name &&
+                        peekToken().type == TokenType::LPAREN)) {
       int cLine = currentToken().line;
       int cCol = currentToken().column;
 
@@ -1632,12 +1667,13 @@ DeclNode *Parser::parseClassDecl() {
       advance();
 
       bool isVariadic = false;
-      auto params = parseParameterList(classTy, isVariadic);
+      auto params = parseParameterList(isVariadic);
       expect(TokenType::RPAREN, "Expected ')'");
 
       auto constructor =
           astCtx.create<FunctionDeclNode>(astCtx.VoidTy, name, cLine, cCol,
                                           isConstCtor, true, false, isVariadic);
+      constructor->parentRecord = classTy;
       constructor->params = astCtx.copyArray<ParamDeclNode *>(params);
       constructor->annotations = memberAnnotations;
       constructor->hasPublicMod = isPub;
@@ -1650,7 +1686,6 @@ DeclNode *Parser::parseClassDecl() {
       continue;
     }
 
-    size_t methodStartIdx = cursor;
     bool isStatic = false;
     bool isExtern = false;
 
@@ -1686,6 +1721,7 @@ DeclNode *Parser::parseClassDecl() {
 
     std::vector<std::string_view> methodTParams;
     if (match(TokenType::LT)) {
+      astCtx.registerTemplateName(memName); // Register method template
       if (currentToken().type != TokenType::GT) {
         do {
           methodTParams.push_back(currentToken().value);
@@ -1703,12 +1739,12 @@ DeclNode *Parser::parseClassDecl() {
 
     if (match(TokenType::LPAREN)) {
       bool isVariadic = false;
-      auto params = parseParameterList(
-          (isExtern || isStatic) ? nullptr : classTy, isVariadic);
+      auto params = parseParameterList(isVariadic);
       expect(TokenType::RPAREN, "Expected ')'");
 
       auto method = astCtx.create<FunctionDeclNode>(
           memType, memName, mLine, mCol, false, true, isExtern, isVariadic);
+      method->parentRecord = classTy;
       method->isStatic = isStatic;
       method->params = astCtx.copyArray<ParamDeclNode *>(params);
       method->annotations = memberAnnotations;
@@ -1729,8 +1765,6 @@ DeclNode *Parser::parseClassDecl() {
         method->isTemplate = true;
         method->templateParams =
             astCtx.copyArray<std::string_view>(methodTParams);
-        method->templateBodyTokens =
-            tokens.slice(methodStartIdx, cursor - methodStartIdx);
         popTemplateParams(methodTParams.size());
       }
 
@@ -1769,12 +1803,7 @@ DeclNode *Parser::parseClassDecl() {
   if (constructors.empty()) {
     auto defaultCtor = astCtx.create<FunctionDeclNode>(
         astCtx.VoidTy, name, line, col, false, true, false, false, true);
-
-    std::vector<ParamDeclNode *> params;
-    params.push_back(
-        astCtx.create<ParamDeclNode>(astCtx.getPointerType(classTy), "this",
-                                     nullptr, false, false, line, col, 4));
-    defaultCtor->params = astCtx.copyArray<ParamDeclNode *>(params);
+    defaultCtor->parentRecord = classTy;
 
     auto emptyBody = astCtx.create<BlockNode>(line, col);
     emptyBody->statements = {};
@@ -1787,11 +1816,7 @@ DeclNode *Parser::parseClassDecl() {
   if (!destructor) {
     destructor = astCtx.create<FunctionDeclNode>(
         astCtx.VoidTy, "~", line, col, false, true, false, false, true);
-    std::vector<ParamDeclNode *> params;
-    params.push_back(
-        astCtx.create<ParamDeclNode>(astCtx.getPointerType(classTy), "this",
-                                     nullptr, false, false, line, col, 4));
-    destructor->params = astCtx.copyArray<ParamDeclNode *>(params);
+    destructor->parentRecord = classTy;
 
     auto emptyBody = astCtx.create<BlockNode>(line, col);
     emptyBody->statements = {};
@@ -1818,14 +1843,11 @@ DeclNode *Parser::parseClassDecl() {
   node->constructors = astCtx.copyArray<FunctionDeclNode *>(constructors);
   node->destructor = destructor;
 
-  if (instantiatingName.empty()) {
-    popTemplateParams(tParams.size());
-  }
+  popTemplateParams(tParams.size());
 
-  if (!tParams.empty() && instantiatingName.empty()) {
+  if (!tParams.empty()) {
     node->isTemplate = true;
     node->templateParams = astCtx.copyArray<std::string_view>(tParams);
-    node->templateBodyTokens = tokens.slice(startIdx, cursor - startIdx);
   }
 
   return node;
@@ -1906,7 +1928,6 @@ DeclNode *Parser::parseEnumDecl() {
 
 DeclNode *Parser::parseDeclarationOrFunction(
     llvm::ArrayRef<AnnotationNode *> annotations) {
-  size_t startIdx = cursor;
   int line = currentToken().line;
   int col = currentToken().column;
 
@@ -1939,10 +1960,6 @@ DeclNode *Parser::parseDeclarationOrFunction(
     id = parseOperatorName();
   } else {
     id = currentToken().value;
-    if (!instantiatingName.empty() && isTopLevelInst) {
-      id = instantiatingName;
-      isTopLevelInst = false;
-    }
     expect(TokenType::IDENTIFIER, "Expected identifier after type");
   }
 
@@ -1950,12 +1967,11 @@ DeclNode *Parser::parseDeclarationOrFunction(
 
   std::vector<std::string_view> tParams;
   if (match(TokenType::LT)) {
+    astCtx.registerTemplateName(id); // Register function template
     if (currentToken().type != TokenType::GT) {
       do {
         tParams.push_back(currentToken().value);
-        if (instantiatingName.empty()) {
-          pushTemplateParam(tParams.back());
-        }
+        pushTemplateParam(tParams.back());
         expect(TokenType::IDENTIFIER, "Expected template parameter name");
       } while (match(TokenType::COMMA));
     }
@@ -1969,7 +1985,7 @@ DeclNode *Parser::parseDeclarationOrFunction(
 
   if (match(TokenType::LPAREN)) {
     bool isVariadic = false;
-    auto params = parseParameterList(nullptr, isVariadic);
+    auto params = parseParameterList(isVariadic);
     expect(TokenType::RPAREN, "Expected ')' after parameters");
 
     bool isFuncConst = match(TokenType::CONST_KW);
@@ -1989,14 +2005,11 @@ DeclNode *Parser::parseDeclarationOrFunction(
       funcDecl->length = funcDecl->body->column + funcDecl->body->length - col;
     }
 
-    if (instantiatingName.empty()) {
-      popTemplateParams(tParams.size());
-    }
+    popTemplateParams(tParams.size());
 
-    if (!tParams.empty() && instantiatingName.empty()) {
+    if (!tParams.empty()) {
       funcDecl->isTemplate = true;
       funcDecl->templateParams = astCtx.copyArray<std::string_view>(tParams);
-      funcDecl->templateBodyTokens = tokens.slice(startIdx, cursor - startIdx);
     }
     return funcDecl;
   }
@@ -2160,21 +2173,12 @@ ExprNode *Parser::parsePostfix() {
       int memLen = memberName.length();
       expect(TokenType::IDENTIFIER, "Expected member name after '.'");
 
-      /* Check for template invocation on method access */
+      /* Check for template invocation using semantic awareness rather than
+       * lookahead */
       bool isTemplateCall = false;
-      if (currentToken().type == TokenType::LT) {
-        size_t lookahead = 1;
-        while (peekToken(lookahead).type != TokenType::EOF_TOK &&
-               peekToken(lookahead).type != TokenType::SEMICOLON) {
-          if (peekToken(lookahead).type == TokenType::GT ||
-              peekToken(lookahead).type == TokenType::RSHIFT) {
-            if (peekToken(lookahead + 1).type == TokenType::LPAREN) {
-              isTemplateCall = true;
-            }
-            break;
-          }
-          lookahead++;
-        }
+      if (currentToken().type == TokenType::LT &&
+          astCtx.isTemplateName(memberName)) {
+        isTemplateCall = true;
       }
 
       auto maNode = astCtx.create<MemberAccessNode>(
@@ -2263,7 +2267,6 @@ ExprNode *Parser::parsePostfix() {
       int col = expr->column;
       std::string_view op = currentToken().value;
       advance();
-      /* Evaluate postfix increments properly by passing isPostfix=true */
       expr = astCtx.create<UnaryOpNode>(op, expr, line, col, true);
     } else {
       break;
@@ -2431,19 +2434,8 @@ ExprNode *Parser::parsePrimary() {
     advance();
 
     bool isTemplateCall = false;
-    if (currentToken().type == TokenType::LT) {
-      size_t lookahead = 1;
-      while (peekToken(lookahead).type != TokenType::EOF_TOK &&
-             peekToken(lookahead).type != TokenType::SEMICOLON) {
-        if (peekToken(lookahead).type == TokenType::GT ||
-            peekToken(lookahead).type == TokenType::RSHIFT) {
-          if (peekToken(lookahead + 1).type == TokenType::LPAREN) {
-            isTemplateCall = true;
-          }
-          break;
-        }
-        lookahead++;
-      }
+    if (currentToken().type == TokenType::LT && astCtx.isTemplateName(name)) {
+      isTemplateCall = true;
     }
 
     auto varNode = astCtx.create<VariableNode>(name, line, col, len);

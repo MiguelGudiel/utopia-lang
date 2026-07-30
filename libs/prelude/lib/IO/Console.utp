@@ -1,0 +1,50 @@
+import "../String.utp";
+
+class Console {
+  @extern("printf")
+  private static int32 c_printf(const uint8* format, ...);
+
+  @extern("getchar")
+  private static int32 c_getchar();
+
+  @extern("system")
+  private static int32 c_system(const uint8* command);
+
+  public static void print(const String& text) {
+    Console.c_printf("%s", text.c_str());
+  }
+
+  public static void printLine(const String& text) {
+    Console.c_printf("%s\n", text.c_str());
+  }
+
+  public static String readLine() {
+    String result;
+    while (true) {
+      int32 c = Console.c_getchar();
+      
+      /* Break on EOF (-1) or newline */
+      if (c == -1 || c == 10) {
+        break;
+      }
+      
+      /* Ignore carriage return */
+      if (c != 13) {
+        result.push_back(c as uint8);
+      }
+    }
+    return result;
+  }
+
+  public static void clear() {
+    #if _WIN32
+    Console.c_system("cls");
+    #else
+    Console.c_system("clear");
+    #endif
+  }
+}
+
+/* Retained for backward compatibility */
+@extern("printf")
+int32 print(const uint8* format, ...);

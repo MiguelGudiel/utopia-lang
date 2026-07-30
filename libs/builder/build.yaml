@@ -1,0 +1,11 @@
+project:
+  name: "build"
+  version: "0.1.0"
+
+build:
+  target: library
+  output_dir: "build/lib"
+  include_dirs:
+    - "."
+  sources:
+    - "lib/builder.utp"

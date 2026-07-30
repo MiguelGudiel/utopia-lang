@@ -230,6 +230,16 @@ Token Lexer::parseToken() {
       return {TokenType::FOR_KW, id, startLine, startCol};
     if (id == "while")
       return {TokenType::WHILE_KW, id, startLine, startCol};
+    if (id == "switch")
+      return {TokenType::SWITCH_KW, id, startLine, startCol};
+    if (id == "case")
+      return {TokenType::CASE_KW, id, startLine, startCol};
+    if (id == "default")
+      return {TokenType::DEFAULT_KW, id, startLine, startCol};
+    if (id == "break")
+      return {TokenType::BREAK_KW, id, startLine, startCol};
+    if (id == "continue")
+      return {TokenType::CONTINUE_KW, id, startLine, startCol};
     if (id == "if")
       return {TokenType::IF_KW, id, startLine, startCol};
     if (id == "else")
