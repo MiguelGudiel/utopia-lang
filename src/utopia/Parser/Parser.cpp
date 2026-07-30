@@ -721,6 +721,8 @@ ASTNode *Parser::parseStatement() {
     node = parseForStatement();
   } else if (currentToken().type == TokenType::WHILE_KW) {
     node = parseWhileStatement();
+  } else if (currentToken().type == TokenType::SWITCH_KW) {
+    node = parseSwitchStatement();
   } else if (currentToken().type == TokenType::BREAK_KW) {
     node = parseBreakStatement();
   } else if (currentToken().type == TokenType::CONTINUE_KW) {
@@ -937,6 +939,86 @@ WhileNode *Parser::parseWhileStatement() {
 
   int len = (body->column + body->length) - col;
   return astCtx.create<WhileNode>(cond, body, line, col, len);
+}
+
+SwitchNode *Parser::parseSwitchStatement() {
+  int line = currentToken().line;
+  int col = currentToken().column;
+  advance(); /* consume 'switch' */
+
+  expect(TokenType::LPAREN, "Expected '(' after 'switch'");
+  auto cond = parseExpression();
+  expect(TokenType::RPAREN, "Expected ')' after switch condition");
+
+  expect(TokenType::LBRACE, "Expected '{' after switch expression");
+
+  std::vector<CaseNode *> cases;
+  bool hasDefault = false;
+
+  while (currentToken().type != TokenType::RBRACE &&
+         currentToken().type != TokenType::EOF_TOK) {
+
+    /* Consume any floating comments before case/default directives */
+    while (currentToken().type == TokenType::COMMENT) {
+      advance();
+    }
+
+    if (currentToken().type == TokenType::RBRACE ||
+        currentToken().type == TokenType::EOF_TOK) {
+      break;
+    }
+
+    int cLine = currentToken().line;
+    int cCol = currentToken().column;
+    ExprNode *caseVal = nullptr;
+
+    if (match(TokenType::CASE_KW)) {
+      caseVal = parseExpression();
+      expect(TokenType::COLON, "Expected ':' after case value");
+    } else if (match(TokenType::DEFAULT_KW)) {
+      expect(TokenType::COLON, "Expected ':' after 'default'");
+      if (hasDefault) {
+        reportError(cLine, cCol, 7,
+                    "Multiple 'default' labels in switch statement");
+      }
+      hasDefault = true;
+    } else {
+      reportError(currentToken().line, currentToken().column,
+                  currentToken().value.length(),
+                  "Expected 'case' or 'default' in switch body");
+      synchronize();
+      break;
+    }
+
+    std::vector<ASTNode *> stmts;
+    while (true) {
+      /* Peek past comments to check if a case/default closure is approaching */
+      size_t offset = 0;
+      while (peekToken(offset).type == TokenType::COMMENT) {
+        offset++;
+      }
+
+      TokenType nextTy = peekToken(offset).type;
+      if (nextTy == TokenType::CASE_KW || nextTy == TokenType::DEFAULT_KW ||
+          nextTy == TokenType::RBRACE || nextTy == TokenType::EOF_TOK) {
+        break;
+      }
+
+      if (auto stmt = parseStatement()) {
+        stmts.push_back(stmt);
+      }
+    }
+
+    int cLen = currentToken().column - cCol;
+    cases.push_back(astCtx.create<CaseNode>(
+        caseVal, astCtx.copyArray<ASTNode *>(stmts), cLine, cCol, cLen));
+  }
+
+  int endCol = currentToken().column + 1;
+  expect(TokenType::RBRACE, "Expected '}' at end of switch block");
+
+  return astCtx.create<SwitchNode>(cond, astCtx.copyArray<CaseNode *>(cases),
+                                   hasDefault, line, col, endCol - col);
 }
 
 BreakNode *Parser::parseBreakStatement() {

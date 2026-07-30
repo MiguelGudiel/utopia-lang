@@ -60,12 +60,6 @@ void EffectAnalyzer::visit(const ImplicitCastNode *n) {
   dispatch(n->expr);
 }
 
-void EffectAnalyzer::visit(const WhileNode *n) {
-  potentiallyInfinite = true;
-  dispatch(n->condition);
-  dispatch(n->body);
-}
-
 void EffectAnalyzer::visit(const ForNode *n) {
   potentiallyInfinite = true;
   if (n->initStatement)
@@ -75,6 +69,24 @@ void EffectAnalyzer::visit(const ForNode *n) {
   if (n->increment)
     dispatch(n->increment);
   dispatch(n->body);
+}
+
+void EffectAnalyzer::visit(const WhileNode *n) {
+  potentiallyInfinite = true;
+  dispatch(n->condition);
+  dispatch(n->body);
+}
+
+void EffectAnalyzer::visit(const SwitchNode *n) {
+  dispatch(n->condition);
+  for (auto *c : n->cases) {
+    if (c->value) {
+      dispatch(c->value);
+    }
+    for (auto *s : c->statements) {
+      dispatch(s);
+    }
+  }
 }
 
 void EffectAnalyzer::visit(const UnaryOpNode *n) {

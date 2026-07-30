@@ -534,6 +534,18 @@ void DeclCollectorPass::visit(const WhileNode *node) {
   dispatch(node->body);
 }
 
+void DeclCollectorPass::visit(const SwitchNode *node) {
+  dispatch(node->condition);
+  for (const auto *c : node->cases) {
+    if (c->value) {
+      dispatch(c->value);
+    }
+    for (const auto *stmt : c->statements) {
+      dispatch(stmt);
+    }
+  }
+}
+
 void DeclCollectorPass::visit(const VarDeclNode *node) {
   ctx->addDecl(node->varName, node);
 }
@@ -1565,10 +1577,59 @@ SemaResult TypeCheckPass::visit(const WhileNode *node) {
   return ctx->astCtx.VoidTy;
 }
 
+SemaResult TypeCheckPass::visit(const SwitchNode *node) {
+  auto condRes = dispatch(node->condition);
+  if (!condRes)
+    return std::unexpected(condRes.error());
+
+  const Type *condTy = *condRes;
+  if (!condTy->isInteger() && condTy->getKind() != TypeKind::Enum) {
+    return ctx->reportError(
+        node->condition->line, node->condition->column, node->condition->length,
+        "Switch condition must be an integer or enum type.");
+  }
+
+  SwitchGuard switchGuard(*ctx);
+  ScopeGuard scopeGuard(
+      *ctx); /* Implicitly groups entire switch body as C/C++ */
+
+  bool hasErrors = false;
+  for (auto *c : node->cases) {
+    if (c->value) {
+      auto valRes = dispatch(c->value);
+      if (!valRes) {
+        hasErrors = true;
+      } else {
+        if (!canImplicitlyCast(*valRes, condTy)) {
+          ctx->reportError(
+              c->value->line, c->value->column, c->value->length,
+              "Case value type does not match switch condition type.");
+          hasErrors = true;
+        } else {
+          c->value = performImplicitConversion(c->value, condTy);
+        }
+      }
+    }
+
+    for (auto *s : c->statements) {
+      if (!dispatch(s))
+        hasErrors = true;
+    }
+  }
+
+  if (hasErrors) {
+    return std::unexpected(ErrorInfo{node->line, node->column, node->length,
+                                     "Errors inside switch statement"});
+  }
+
+  return ctx->astCtx.VoidTy;
+}
+
 SemaResult TypeCheckPass::visit(const BreakNode *node) {
-  if (!ctx->isInLoop()) {
-    return ctx->reportError(node->line, node->column, node->length,
-                            "Break statement outside of loop control flow.");
+  if (!ctx->isInBreakable()) {
+    return ctx->reportError(
+        node->line, node->column, node->length,
+        "Break statement outside of loop or switch control flow.");
   }
   return ctx->astCtx.VoidTy;
 }

@@ -76,6 +76,12 @@ public:
     case NodeKind::While:
       return static_cast<Derived *>(this)->visit(
           static_cast<const WhileNode *>(node));
+    case NodeKind::Switch:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const SwitchNode *>(node));
+    case NodeKind::Case:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const CaseNode *>(node));
     case NodeKind::Break:
       return static_cast<Derived *>(this)->visit(
           static_cast<const BreakNode *>(node));

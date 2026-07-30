@@ -1233,6 +1233,91 @@ llvm::Value *CodeGen::visit(const WhileNode *node) {
   return nullptr;
 }
 
+llvm::Value *CodeGen::visit(const SwitchNode *node) {
+  llvm::Value *condV = dispatch(node->condition);
+  if (!condV)
+    return nullptr;
+
+  llvm::Type *condTy = getLLVMType(node->condition->exprType);
+  condV = createImplicitCast(condV, condTy);
+
+  llvm::Function *theFunction = builder.GetInsertBlock()->getParent();
+  llvm::BasicBlock *endBB =
+      llvm::BasicBlock::Create(ctx, "switch.end", theFunction);
+  llvm::BasicBlock *defaultBB = endBB;
+
+  /* Phase 1: Pre-allocate basic blocks to map the switch table targets */
+  std::vector<llvm::BasicBlock *> caseBlocks;
+  for (size_t i = 0; i < node->cases.size(); ++i) {
+    llvm::BasicBlock *bb =
+        llvm::BasicBlock::Create(ctx, "switch.case", theFunction);
+    caseBlocks.push_back(bb);
+    if (!node->cases[i]->value) {
+      defaultBB = bb;
+    }
+  }
+
+  llvm::SwitchInst *switchInst =
+      builder.CreateSwitch(condV, defaultBB, node->cases.size());
+
+  CGScopeGuard guard(cgCtx);
+  /* Push break-target context. Nullptr distinguishes it from loops for
+   * 'continue' commands */
+  cgCtx.pushLoop(nullptr, endBB);
+
+  /* Phase 2: Emit block internals and configure explicit fallthrough links */
+  for (size_t i = 0; i < node->cases.size(); ++i) {
+    const auto *c = node->cases[i];
+
+    if (c->value) {
+      llvm::Constant *caseConst = evaluateAsConstant(c->value);
+      if (!caseConst) {
+        diags.report({DiagLevel::Error, c->value->line, c->value->column,
+                      c->value->length,
+                      "Case value must evaluate to a compile-time constant",
+                      ""});
+        return nullptr;
+      }
+
+      if (auto *ci = llvm::dyn_cast<llvm::ConstantInt>(caseConst)) {
+        switchInst->addCase(ci, caseBlocks[i]);
+      } else {
+        diags.report({DiagLevel::Error, c->value->line, c->value->column,
+                      c->value->length,
+                      "Switch cases only support integer and enum constants",
+                      ""});
+        return nullptr;
+      }
+    }
+
+    /* Emulate C-ABI Implicit Fallthrough constraint */
+    if (i > 0 && !builder.GetInsertBlock()->getTerminator()) {
+      builder.CreateBr(caseBlocks[i]);
+    }
+
+    builder.SetInsertPoint(caseBlocks[i]);
+
+    for (const auto *stmt : c->statements) {
+      dispatch(stmt);
+      if (builder.GetInsertBlock()->getTerminator()) {
+        break;
+      }
+    }
+  }
+
+  /* Secure block termination if the final case lacks a break/return */
+  if (!builder.GetInsertBlock()->getTerminator()) {
+    builder.CreateBr(endBB);
+  }
+
+  cgCtx.popLoop();
+
+  endBB->moveAfter(builder.GetInsertBlock());
+  builder.SetInsertPoint(endBB);
+
+  return nullptr;
+}
+
 llvm::Value *CodeGen::visit(const BreakNode *node) {
   const auto &loop = cgCtx.getCurrentLoop();
   emitLoopCleanups(loop.scopeDepth);
@@ -1241,7 +1326,7 @@ llvm::Value *CodeGen::visit(const BreakNode *node) {
 }
 
 llvm::Value *CodeGen::visit(const ContinueNode *node) {
-  const auto &loop = cgCtx.getCurrentLoop();
+  const auto &loop = cgCtx.getCurrentLoopForContinue();
   emitLoopCleanups(loop.scopeDepth);
   builder.CreateBr(loop.continueBlock);
   return nullptr;

@@ -173,6 +173,8 @@ public:
   void visit(const IfNode *node);
   void visit(const ForNode *node);
   void visit(const WhileNode *node);
+  void visit(const SwitchNode *node);
+  void visit(const CaseNode *node) {}
   void visit(const BreakNode *node) {}
   void visit(const ContinueNode *node) {}
   void visit(const ReturnNode *) {}
@@ -224,6 +226,8 @@ public:
   SemaResult visit(const IfNode *node);
   SemaResult visit(const ForNode *node);
   SemaResult visit(const WhileNode *node);
+  SemaResult visit(const SwitchNode *node);
+  SemaResult visit(const CaseNode *node) { return ctx->astCtx.VoidTy; }
   SemaResult visit(const BreakNode *node);
   SemaResult visit(const ContinueNode *node);
   SemaResult visit(const ReturnNode *node);

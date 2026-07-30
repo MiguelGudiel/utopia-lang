@@ -70,11 +70,16 @@ public:
   void exitLoop() { loopDepth--; }
   bool isInLoop() const { return loopDepth > 0; }
 
+  void enterSwitch() { switchDepth++; }
+  void exitSwitch() { switchDepth--; }
+  bool isInBreakable() const { return loopDepth > 0 || switchDepth > 0; }
+
 private:
   std::vector<ErrorInfo> errors;
   const Type *currentFunctionReturn;
   const RecordType *currentRecordContext = nullptr;
   int loopDepth = 0;
+  int switchDepth = 0;
 };
 
 class ScopeGuard {
@@ -91,6 +96,14 @@ class LoopGuard {
 public:
   explicit LoopGuard(SemaContext &c) : ctx(c) { ctx.enterLoop(); }
   ~LoopGuard() { ctx.exitLoop(); }
+};
+
+class SwitchGuard {
+  SemaContext &ctx;
+
+public:
+  explicit SwitchGuard(SemaContext &c) : ctx(c) { ctx.enterSwitch(); }
+  ~SwitchGuard() { ctx.exitSwitch(); }
 };
 
 } // namespace utopia

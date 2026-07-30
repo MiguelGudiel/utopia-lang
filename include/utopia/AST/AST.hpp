@@ -26,6 +26,8 @@ enum class NodeKind : uint8_t {
   If,
   For,
   While,
+  Switch,
+  Case,
   Break,
   Continue,
   FunctionDecl,
@@ -336,6 +338,25 @@ struct WhileNode : public StmtNode {
 
   WhileNode(ExprNode *cond, BlockNode *b, int l, int c, int len)
       : StmtNode(NodeKind::While, l, c, len), condition(cond), body(b) {}
+};
+
+struct CaseNode : public ASTNode {
+  ExprNode *value; /* nullptr represents 'default' */
+  llvm::ArrayRef<ASTNode *> statements;
+
+  CaseNode(ExprNode *v, llvm::ArrayRef<ASTNode *> stmts, int l, int c, int len)
+      : ASTNode(NodeKind::Case, l, c, len), value(v), statements(stmts) {}
+};
+
+struct SwitchNode : public StmtNode {
+  ExprNode *condition;
+  llvm::ArrayRef<CaseNode *> cases;
+  bool hasDefault;
+
+  SwitchNode(ExprNode *cond, llvm::ArrayRef<CaseNode *> c, bool hd, int l,
+             int col, int len)
+      : StmtNode(NodeKind::Switch, l, col, len), condition(cond), cases(c),
+        hasDefault(hd) {}
 };
 
 struct BreakNode : public StmtNode {

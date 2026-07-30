@@ -102,6 +102,16 @@ public:
   void popLoop() { loops.pop_back(); }
   const LoopInfo &getCurrentLoop() const { return loops.back(); }
 
+  /* Fetches the closest valid loop block explicitly ignoring switch jumps */
+  const LoopInfo &getCurrentLoopForContinue() const {
+    for (auto it = loops.rbegin(); it != loops.rend(); ++it) {
+      if (it->continueBlock != nullptr) {
+        return *it;
+      }
+    }
+    return loops.front();
+  }
+
 private:
   std::vector<CGLocalScope> scopes;
   std::vector<LoopInfo> loops;

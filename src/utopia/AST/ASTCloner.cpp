@@ -187,6 +187,19 @@ ASTNode *ASTCloner::visit(const WhileNode *n) {
                                n->line, n->column, n->length);
 }
 
+ASTNode *ASTCloner::visit(const SwitchNode *n) {
+  auto *s = ctx.create<SwitchNode>(
+      static_cast<ExprNode *>(dispatch(n->condition)), cloneArray(n->cases),
+      n->hasDefault, n->line, n->column, n->length);
+  return s;
+}
+
+ASTNode *ASTCloner::visit(const CaseNode *n) {
+  return ctx.create<CaseNode>(
+      n->value ? static_cast<ExprNode *>(dispatch(n->value)) : nullptr,
+      cloneArray(n->statements), n->line, n->column, n->length);
+}
+
 ASTNode *ASTCloner::visit(const BreakNode *n) {
   return ctx.create<BreakNode>(n->line, n->column, n->length);
 }

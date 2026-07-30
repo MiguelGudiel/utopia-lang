@@ -93,6 +93,7 @@ private:
   ExprNode *parseExpressionStatement();
   ForNode *parseForStatement();
   WhileNode *parseWhileStatement();
+  SwitchNode *parseSwitchStatement();
   BreakNode *parseBreakStatement();
   ContinueNode *parseContinueStatement();
 
