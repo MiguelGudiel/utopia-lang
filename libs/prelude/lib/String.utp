@@ -22,6 +22,12 @@ class String {
     dest[length] = 0;
   }
 
+  @extern("atoi")
+  private static int32 c_atoi(const uint8* str);
+
+  @extern("atof")
+  private static float64 c_atof(const uint8* str);
+
   public String() {
     this.len = 0;
     this.cap = 15;
@@ -167,6 +173,16 @@ class String {
 
   public const uint8* c_str() {
     return this.data;
+  }
+
+  public int32 toInt() {
+    if (this.data == null) return 0;
+    return String.c_atoi(this.data);
+  }
+
+  public float64 toFloat() {
+    if (this.data == null) return 0.0;
+    return String.c_atof(this.data);
   }
 
   public void clear() {
