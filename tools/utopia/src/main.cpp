@@ -61,6 +61,7 @@ int main(int argc, char **argv) {
     }
 
     options.projectName = config.name;
+    options.target = config.target;
     options.projectRoot = projRoot.string();
     options.outputDir = (projRoot / config.outputDir).string();
 

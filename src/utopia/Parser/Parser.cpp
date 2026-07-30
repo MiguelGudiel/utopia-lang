@@ -407,18 +407,11 @@ const Type *Parser::applyArrayDeclarator(const Type *baseType) {
   return result;
 }
 
-std::vector<ParamDeclNode *> Parser::parseParameterList(const Type *classTy,
-                                                        bool &isVariadic) {
+std::vector<ParamDeclNode *> Parser::parseParameterList(bool &isVariadic) {
   std::vector<ParamDeclNode *> params;
   isVariadic = false;
   bool inNamedBlock = false;
   bool optionalPositionalStarted = false;
-
-  if (classTy) {
-    params.push_back(astCtx.create<ParamDeclNode>(
-        astCtx.getPointerType(classTy), "this", nullptr, false, false,
-        currentToken().line, currentToken().column, 4));
-  }
 
   while (currentToken().type == TokenType::COMMENT)
     advance();
@@ -465,12 +458,6 @@ std::vector<ParamDeclNode *> Parser::parseParameterList(const Type *classTy,
     std::string_view pName = currentToken().value;
     int pLen = (int)pName.length();
     expect(TokenType::IDENTIFIER, "Expected parameter name.");
-
-    /* Apply array-to-pointer decay for parameter declarations just like C++ */
-    if (pType->getKind() == TypeKind::Array) {
-      pType = astCtx.getPointerType(
-          static_cast<const ArrayType *>(pType)->getElementType());
-    }
 
     ExprNode *defVal = nullptr;
     if (match(TokenType::ASSIGN)) {
@@ -619,7 +606,7 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
       expect(TokenType::LPAREN, "Expected '('");
 
       bool isVariadic = false;
-      auto params = parseParameterList(classTy, isVariadic);
+      auto params = parseParameterList(isVariadic);
       if (isVariadic) {
         reportError(cLine, cCol, name.length(),
                     "Annotation constructors cannot be variadic.");
@@ -629,6 +616,7 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
 
       constructor = astCtx.create<FunctionDeclNode>(astCtx.VoidTy, name, cLine,
                                                     cCol, true, true);
+      constructor->parentRecord = classTy;
       constructor->params = astCtx.copyArray<ParamDeclNode *>(params);
       constructor->annotations = memberAnnotations;
       constructor->hasPublicMod = isPub;
@@ -1219,13 +1207,7 @@ DeclNode *Parser::parseStructDecl() {
 
       destructor = astCtx.create<FunctionDeclNode>(astCtx.VoidTy, "~", dLine,
                                                    dCol, false, true);
-
-      std::vector<ParamDeclNode *> params;
-      params.push_back(
-          astCtx.create<ParamDeclNode>(astCtx.getPointerType(structTy), "this",
-                                       nullptr, false, false, dLine, dCol, 4));
-
-      destructor->params = astCtx.copyArray<ParamDeclNode *>(params);
+      destructor->parentRecord = structTy;
       destructor->annotations = memberAnnotations;
       destructor->hasPublicMod = isPub;
       destructor->hasPrivateMod = isPriv;
@@ -1255,12 +1237,13 @@ DeclNode *Parser::parseStructDecl() {
       advance();
 
       bool isVariadic = false;
-      auto params = parseParameterList(structTy, isVariadic);
+      auto params = parseParameterList(isVariadic);
       expect(TokenType::RPAREN, "Expected ')'");
 
       auto constructor =
           astCtx.create<FunctionDeclNode>(astCtx.VoidTy, name, cLine, cCol,
                                           isConstCtor, true, false, isVariadic);
+      constructor->parentRecord = structTy;
       constructor->params = astCtx.copyArray<ParamDeclNode *>(params);
       constructor->annotations = memberAnnotations;
       constructor->hasPublicMod = isPub;
@@ -1308,7 +1291,7 @@ DeclNode *Parser::parseStructDecl() {
 
     std::vector<std::string_view> methodTParams;
     if (match(TokenType::LT)) {
-      astCtx.registerTemplateName(memName); // Register method template
+      astCtx.registerTemplateName(memName);
       if (currentToken().type != TokenType::GT) {
         do {
           methodTParams.push_back(currentToken().value);
@@ -1326,12 +1309,12 @@ DeclNode *Parser::parseStructDecl() {
 
     if (match(TokenType::LPAREN)) {
       bool isVariadic = false;
-      auto params = parseParameterList(
-          (isExtern || isStatic) ? nullptr : structTy, isVariadic);
+      auto params = parseParameterList(isVariadic);
       expect(TokenType::RPAREN, "Expected ')'");
 
       auto method = astCtx.create<FunctionDeclNode>(
           memType, memName, mLine, mCol, false, true, isExtern, isVariadic);
+      method->parentRecord = structTy;
       method->isStatic = isStatic;
       method->params = astCtx.copyArray<ParamDeclNode *>(params);
       method->annotations = memberAnnotations;
@@ -1389,12 +1372,7 @@ DeclNode *Parser::parseStructDecl() {
   if (constructors.empty()) {
     auto defaultCtor = astCtx.create<FunctionDeclNode>(
         astCtx.VoidTy, name, line, col, false, true, false, false, true);
-
-    std::vector<ParamDeclNode *> params;
-    params.push_back(
-        astCtx.create<ParamDeclNode>(astCtx.getPointerType(structTy), "this",
-                                     nullptr, false, false, line, col, 4));
-    defaultCtor->params = astCtx.copyArray<ParamDeclNode *>(params);
+    defaultCtor->parentRecord = structTy;
 
     auto emptyBody = astCtx.create<BlockNode>(line, col);
     emptyBody->statements = {};
@@ -1407,11 +1385,7 @@ DeclNode *Parser::parseStructDecl() {
   if (!destructor) {
     destructor = astCtx.create<FunctionDeclNode>(
         astCtx.VoidTy, "~", line, col, false, true, false, false, true);
-    std::vector<ParamDeclNode *> params;
-    params.push_back(
-        astCtx.create<ParamDeclNode>(astCtx.getPointerType(structTy), "this",
-                                     nullptr, false, false, line, col, 4));
-    destructor->params = astCtx.copyArray<ParamDeclNode *>(params);
+    destructor->parentRecord = structTy;
 
     auto emptyBody = astCtx.create<BlockNode>(line, col);
     emptyBody->statements = {};
@@ -1535,15 +1509,7 @@ DeclNode *Parser::parseClassDecl() {
 
       destructor = astCtx.create<FunctionDeclNode>(astCtx.VoidTy, "~", dLine,
                                                    dCol, false, true);
-
-      /* Inject implicit contextual 'this' binding to maintain static soundness
-       */
-      std::vector<ParamDeclNode *> params;
-      params.push_back(
-          astCtx.create<ParamDeclNode>(astCtx.getPointerType(classTy), "this",
-                                       nullptr, false, false, dLine, dCol, 4));
-
-      destructor->params = astCtx.copyArray<ParamDeclNode *>(params);
+      destructor->parentRecord = classTy;
       destructor->annotations = memberAnnotations;
       destructor->hasPublicMod = isPub;
       destructor->hasPrivateMod = isPriv;
@@ -1574,12 +1540,13 @@ DeclNode *Parser::parseClassDecl() {
       advance();
 
       bool isVariadic = false;
-      auto params = parseParameterList(classTy, isVariadic);
+      auto params = parseParameterList(isVariadic);
       expect(TokenType::RPAREN, "Expected ')'");
 
       auto constructor =
           astCtx.create<FunctionDeclNode>(astCtx.VoidTy, name, cLine, cCol,
                                           isConstCtor, true, false, isVariadic);
+      constructor->parentRecord = classTy;
       constructor->params = astCtx.copyArray<ParamDeclNode *>(params);
       constructor->annotations = memberAnnotations;
       constructor->hasPublicMod = isPub;
@@ -1645,12 +1612,12 @@ DeclNode *Parser::parseClassDecl() {
 
     if (match(TokenType::LPAREN)) {
       bool isVariadic = false;
-      auto params = parseParameterList(
-          (isExtern || isStatic) ? nullptr : classTy, isVariadic);
+      auto params = parseParameterList(isVariadic);
       expect(TokenType::RPAREN, "Expected ')'");
 
       auto method = astCtx.create<FunctionDeclNode>(
           memType, memName, mLine, mCol, false, true, isExtern, isVariadic);
+      method->parentRecord = classTy;
       method->isStatic = isStatic;
       method->params = astCtx.copyArray<ParamDeclNode *>(params);
       method->annotations = memberAnnotations;
@@ -1709,12 +1676,7 @@ DeclNode *Parser::parseClassDecl() {
   if (constructors.empty()) {
     auto defaultCtor = astCtx.create<FunctionDeclNode>(
         astCtx.VoidTy, name, line, col, false, true, false, false, true);
-
-    std::vector<ParamDeclNode *> params;
-    params.push_back(
-        astCtx.create<ParamDeclNode>(astCtx.getPointerType(classTy), "this",
-                                     nullptr, false, false, line, col, 4));
-    defaultCtor->params = astCtx.copyArray<ParamDeclNode *>(params);
+    defaultCtor->parentRecord = classTy;
 
     auto emptyBody = astCtx.create<BlockNode>(line, col);
     emptyBody->statements = {};
@@ -1727,11 +1689,7 @@ DeclNode *Parser::parseClassDecl() {
   if (!destructor) {
     destructor = astCtx.create<FunctionDeclNode>(
         astCtx.VoidTy, "~", line, col, false, true, false, false, true);
-    std::vector<ParamDeclNode *> params;
-    params.push_back(
-        astCtx.create<ParamDeclNode>(astCtx.getPointerType(classTy), "this",
-                                     nullptr, false, false, line, col, 4));
-    destructor->params = astCtx.copyArray<ParamDeclNode *>(params);
+    destructor->parentRecord = classTy;
 
     auto emptyBody = astCtx.create<BlockNode>(line, col);
     emptyBody->statements = {};
@@ -1900,7 +1858,7 @@ DeclNode *Parser::parseDeclarationOrFunction(
 
   if (match(TokenType::LPAREN)) {
     bool isVariadic = false;
-    auto params = parseParameterList(nullptr, isVariadic);
+    auto params = parseParameterList(isVariadic);
     expect(TokenType::RPAREN, "Expected ')' after parameters");
 
     bool isFuncConst = match(TokenType::CONST_KW);

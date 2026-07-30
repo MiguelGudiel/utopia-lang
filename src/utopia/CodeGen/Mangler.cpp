@@ -30,14 +30,11 @@ std::string Mangler::mangle(const FunctionDeclNode *node,
     res += std::to_string(node->name.length()) + std::string(node->name);
   }
 
-  size_t startIdx =
-      (node->isMethod && !node->isExtern && !node->isStatic) ? 1 : 0;
-
-  if (startIdx >= node->params.size()) {
+  if (node->params.empty()) {
     res += "v";
   } else {
-    for (size_t i = startIdx; i < node->params.size(); ++i) {
-      res += mangleType(node->params[i]->type);
+    for (const auto *param : node->params) {
+      res += mangleType(param->type);
     }
   }
 

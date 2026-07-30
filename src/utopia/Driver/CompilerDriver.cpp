@@ -222,18 +222,44 @@ bool CompilerDriver::run() {
                   std::to_string(result));
   } else {
     ScopedTimer timer("Linking");
-    fs::path binOut = outDir / "bin";
-    if (!fs::exists(binOut))
-      fs::create_directories(binOut);
 
-    std::string executablePath = (binOut / options.projectName).string();
+    if (options.target == "library") {
+      if (!fs::exists(outDir))
+        fs::create_directories(outDir);
 
-    if (!Linker::link(compiledObjects, executablePath, options.isDebug,
-                      options.linkerFlags)) {
-      std::cerr << "\033[1;31m[Fatal]\033[0m Linker step failed.\n";
-      return false;
+#if defined(_WIN32)
+      std::string ext = ".dll";
+#elif defined(__APPLE__)
+      std::string ext = ".dylib";
+#else
+      std::string ext = ".so";
+#endif
+
+      std::string libPath =
+          (outDir / ("lib" + options.projectName + ext)).string();
+      std::vector<std::string> libFlags = options.linkerFlags;
+      libFlags.push_back("-shared");
+
+      if (!Linker::link(compiledObjects, libPath, options.isDebug, libFlags)) {
+        std::cerr
+            << "\033[1;31m[Fatal]\033[0m Linker step failed for library.\n";
+        return false;
+      }
+      Logger::info("\033[1;32m[Build Success]\033[0m " + libPath);
+    } else {
+      fs::path binOut = outDir / "bin";
+      if (!fs::exists(binOut))
+        fs::create_directories(binOut);
+
+      std::string executablePath = (binOut / options.projectName).string();
+
+      if (!Linker::link(compiledObjects, executablePath, options.isDebug,
+                        options.linkerFlags)) {
+        std::cerr << "\033[1;31m[Fatal]\033[0m Linker step failed.\n";
+        return false;
+      }
+      Logger::info("\033[1;32m[Build Success]\033[0m " + executablePath);
     }
-    Logger::info("\033[1;32m[Build Success]\033[0m " + executablePath);
   }
 
   return true;

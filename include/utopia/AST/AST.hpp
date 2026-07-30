@@ -278,6 +278,7 @@ struct FunctionDeclNode : public DeclNode {
   bool isImplicit;
   bool isStatic = false;
   mutable std::string_view externAlias;
+  const RecordType *parentRecord = nullptr;
 
   /* Intrinsic function attributes inferred during semantic analysis */
   mutable bool isReadNone = false;

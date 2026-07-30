@@ -134,14 +134,11 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
         }
         recTy->setFields(ctx->astCtx.copyArray<FieldInfo>(fInfos));
 
-        /* Update 'this' pointers in methods and constructors to reflect the
-         * instantiated record type */
-        auto updateThisPtr = [&](llvm::ArrayRef<FunctionDeclNode *> funcs) {
+        /* Ensure method ownership is retained post-clone */
+        auto updateParentRec = [&](llvm::ArrayRef<FunctionDeclNode *> funcs) {
           for (auto *f : funcs) {
-            if (!f->isStatic && !f->params.empty() &&
-                f->params.front()->name == "this") {
-              const_cast<ParamDeclNode *>(f->params.front())->type =
-                  ctx->astCtx.getPointerType(recTy);
+            if (!f->isStatic) {
+              const_cast<FunctionDeclNode *>(f)->parentRecord = recTy;
             }
           }
         };
@@ -149,26 +146,20 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
         if (instDecl->kind == NodeKind::ClassDecl) {
           auto *cls = static_cast<ClassDeclNode *>(instDecl);
           cls->recordType = recTy;
-          recTy->setOpaque(
-              cls->isOpaque); // Ensure the RecordType maps to definition state
-          updateThisPtr(cls->methods);
-          updateThisPtr(cls->constructors);
-          if (cls->destructor && !cls->destructor->params.empty() &&
-              cls->destructor->params.front()->name == "this") {
-            const_cast<ParamDeclNode *>(cls->destructor->params.front())->type =
-                ctx->astCtx.getPointerType(recTy);
+          recTy->setOpaque(cls->isOpaque);
+          updateParentRec(cls->methods);
+          updateParentRec(cls->constructors);
+          if (cls->destructor) {
+            cls->destructor->parentRecord = recTy;
           }
         } else {
           auto *str = static_cast<StructDeclNode *>(instDecl);
           str->recordType = recTy;
-          recTy->setOpaque(
-              str->isOpaque); // Ensure the RecordType maps to definition state
-          updateThisPtr(str->methods);
-          updateThisPtr(str->constructors);
-          if (str->destructor && !str->destructor->params.empty() &&
-              str->destructor->params.front()->name == "this") {
-            const_cast<ParamDeclNode *>(str->destructor->params.front())->type =
-                ctx->astCtx.getPointerType(recTy);
+          recTy->setOpaque(str->isOpaque);
+          updateParentRec(str->methods);
+          updateParentRec(str->constructors);
+          if (str->destructor) {
+            str->destructor->parentRecord = recTy;
           }
         }
       }
@@ -359,8 +350,8 @@ ExprNode *TypeCheckPass::performImplicitConversion(ExprNode *expr,
         ctors = static_cast<const StructDeclNode *>(decl)->constructors;
 
       for (auto *ctor : ctors) {
-        if (ctor->params.size() == 2) {
-          if (canImplicitlyCast(expr->exprType, ctor->params[1]->type, false)) {
+        if (ctor->params.size() == 1) {
+          if (canImplicitlyCast(expr->exprType, ctor->params[0]->type, false)) {
             auto *castNode = ctx->astCtx.create<ImplicitCastNode>(
                 expr, to, ctor, expr->line, expr->column, expr->length);
             castNode->exprType = to;
@@ -415,12 +406,25 @@ void DeclCollectorPass::visit(const TypedefDeclNode *node) {
 }
 
 void DeclCollectorPass::visit(const AnnotationDeclNode *node) {
+  if (node->declFilePath.empty()) {
+    const_cast<AnnotationDeclNode *>(node)->declFilePath = ctx->currentFile;
+  }
   ctx->addDecl(node->name, node);
   auto *recTy = ctx->astCtx.getRecordType(node->name);
   const_cast<AnnotationDeclNode *>(node)->recordType = recTy;
   recTy->setDeclaration(node);
 
+  for (auto *field : node->fields) {
+    if (field->declFilePath.empty()) {
+      const_cast<VarDeclNode *>(field)->declFilePath = ctx->currentFile;
+    }
+  }
+
   if (node->constructor) {
+    if (node->constructor->declFilePath.empty()) {
+      const_cast<FunctionDeclNode *>(node->constructor)->declFilePath =
+          ctx->currentFile;
+    }
     const_cast<FunctionDeclNode *>(node->constructor)->mangledName =
         Mangler::mangle(node->constructor, std::string(node->name));
     ctx->addDecl(node->name, node->constructor);
@@ -543,6 +547,10 @@ void DeclCollectorPass::visit(const StructDeclNode *node) {
     return;
   }
 
+  if (node->declFilePath.empty()) {
+    const_cast<StructDeclNode *>(node)->declFilePath = ctx->currentFile;
+  }
+
   ctx->addDecl(node->name, node);
   const_cast<StructDeclNode *>(node)->recordType =
       ctx->astCtx.getRecordType(node->name);
@@ -551,6 +559,9 @@ void DeclCollectorPass::visit(const StructDeclNode *node) {
     return;
 
   for (auto *field : node->fields) {
+    if (field->declFilePath.empty()) {
+      const_cast<VarDeclNode *>(field)->declFilePath = ctx->currentFile;
+    }
     if (field->isStatic) {
       const_cast<VarDeclNode *>(field)->mangledName =
           Mangler::mangle(field, std::string(node->name));
@@ -565,6 +576,9 @@ void DeclCollectorPass::visit(const StructDeclNode *node) {
   }
 
   for (auto *ctor : node->constructors) {
+    if (ctor->declFilePath.empty()) {
+      const_cast<FunctionDeclNode *>(ctor)->declFilePath = ctx->currentFile;
+    }
     if (ctor->isImplicit) {
       const_cast<FunctionDeclNode *>(ctor)->hasPublicMod = node->hasPublicMod;
       const_cast<FunctionDeclNode *>(ctor)->hasPrivateMod = node->hasPrivateMod;
@@ -575,11 +589,18 @@ void DeclCollectorPass::visit(const StructDeclNode *node) {
   }
 
   if (node->destructor) {
+    if (node->destructor->declFilePath.empty()) {
+      const_cast<FunctionDeclNode *>(node->destructor)->declFilePath =
+          ctx->currentFile;
+    }
     const_cast<FunctionDeclNode *>(node->destructor)->mangledName =
         Mangler::mangle(node->destructor, std::string(node->name));
   }
 
   for (auto *method : node->methods) {
+    if (method->declFilePath.empty()) {
+      const_cast<FunctionDeclNode *>(method)->declFilePath = ctx->currentFile;
+    }
     bool isExport = false;
 
     for (const auto *ann : method->annotations) {
@@ -627,6 +648,10 @@ void DeclCollectorPass::visit(const ClassDeclNode *node) {
     return;
   }
 
+  if (node->declFilePath.empty()) {
+    const_cast<ClassDeclNode *>(node)->declFilePath = ctx->currentFile;
+  }
+
   ctx->addDecl(node->name, node);
 
   auto *recTy = ctx->astCtx.getRecordType(node->name);
@@ -637,6 +662,9 @@ void DeclCollectorPass::visit(const ClassDeclNode *node) {
     return;
 
   for (auto *field : node->fields) {
+    if (field->declFilePath.empty()) {
+      const_cast<VarDeclNode *>(field)->declFilePath = ctx->currentFile;
+    }
     if (field->isStatic) {
       const_cast<VarDeclNode *>(field)->mangledName =
           Mangler::mangle(field, std::string(node->name));
@@ -651,6 +679,9 @@ void DeclCollectorPass::visit(const ClassDeclNode *node) {
   }
 
   for (auto *ctor : node->constructors) {
+    if (ctor->declFilePath.empty()) {
+      const_cast<FunctionDeclNode *>(ctor)->declFilePath = ctx->currentFile;
+    }
     if (ctor->isImplicit) {
       const_cast<FunctionDeclNode *>(ctor)->hasPublicMod = node->hasPublicMod;
       const_cast<FunctionDeclNode *>(ctor)->hasPrivateMod = node->hasPrivateMod;
@@ -660,10 +691,17 @@ void DeclCollectorPass::visit(const ClassDeclNode *node) {
     ctx->addDecl(node->name, ctor);
   }
   if (node->destructor) {
+    if (node->destructor->declFilePath.empty()) {
+      const_cast<FunctionDeclNode *>(node->destructor)->declFilePath =
+          ctx->currentFile;
+    }
     const_cast<FunctionDeclNode *>(node->destructor)->mangledName =
         Mangler::mangle(node->destructor, std::string(node->name));
   }
   for (auto *method : node->methods) {
+    if (method->declFilePath.empty()) {
+      const_cast<FunctionDeclNode *>(method)->declFilePath = ctx->currentFile;
+    }
     bool isExport = false;
 
     for (const auto *ann : method->annotations) {
@@ -703,10 +741,19 @@ void DeclCollectorPass::visit(const ClassDeclNode *node) {
 }
 
 void DeclCollectorPass::visit(const EnumDeclNode *node) {
+  if (node->declFilePath.empty()) {
+    const_cast<EnumDeclNode *>(node)->declFilePath = ctx->currentFile;
+  }
   ctx->addDecl(node->name, node);
   const_cast<EnumDeclNode *>(node)->enumType =
       ctx->astCtx.getEnumType(node->name, node->underlyingType);
   const_cast<EnumType *>(node->enumType)->setDeclaration(node);
+
+  for (auto *mem : node->members) {
+    if (mem->declFilePath.empty()) {
+      const_cast<EnumMemberNode *>(mem)->declFilePath = ctx->currentFile;
+    }
+  }
 }
 
 bool TypeCheckPass::run(const ModuleNode *module, SemaContext &context) {
@@ -729,14 +776,6 @@ TypeCheckPass::resolveOverloadedOperator(const Type *lhsType,
   if (!lhsType)
     return nullptr;
 
-  /*
-   * Restrict operator overloading resolution strictly to expressions where at
-   * least one of the participating operands fundamentally represents a
-   * User-Defined Type (Class, Struct, Enum). This enforces primitive semantic
-   * priority and prevents rogue conversion constructors from arbitrarily
-   * hijacking native numeric operations (e.g. `uint64` + `uint64` bypassing
-   * built-ins).
-   */
   auto isUserDefined = [](const Type *t) {
     if (!t)
       return false;
@@ -769,8 +808,6 @@ TypeCheckPass::resolveOverloadedOperator(const Type *lhsType,
     }
   }
 
-  // If both operands are primitive structures, fallback definitively to
-  // built-ins
   if (!hasUserDefinedOperand) {
     return nullptr;
   }
@@ -808,15 +845,19 @@ TypeCheckPass::resolveOverloadedOperator(const Type *lhsType,
 
       for (auto *m : methods) {
         if (m->name == opFuncName) {
-          size_t paramOffset =
-              (m->isMethod && !m->isExtern && !m->isStatic) ? 1 : 0;
-          if (m->params.size() - paramOffset == args.size()) {
+          if (m->params.size() == args.size()) {
             bool match = true;
             int currentScore = 0;
 
             for (size_t i = 0; i < args.size(); ++i) {
               const Type *argType = args[i]->exprType;
-              const Type *paramType = m->params[paramOffset + i]->type;
+              const Type *paramType = m->params[i]->type;
+
+              if (paramType->getKind() == TypeKind::Array) {
+                paramType = ctx->astCtx.getPointerType(
+                    static_cast<const ArrayType *>(paramType)
+                        ->getElementType());
+              }
 
               if (!canImplicitlyCast(argType, paramType)) {
                 match = false;
@@ -881,6 +922,11 @@ TypeCheckPass::resolveOverloadedOperator(const Type *lhsType,
         for (size_t i = 0; i < args.size(); ++i) {
           const Type *argType = args[i]->exprType;
           const Type *paramType = fDecl->params[1 + i]->type;
+
+          if (paramType->getKind() == TypeKind::Array) {
+            paramType = ctx->astCtx.getPointerType(
+                static_cast<const ArrayType *>(paramType)->getElementType());
+          }
 
           if (!canImplicitlyCast(argType, paramType)) {
             match = false;
@@ -1390,6 +1436,12 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
     ty = static_cast<const VarDeclNode *>(target)->type;
   } else if (target->kind == NodeKind::ParamDecl) {
     ty = static_cast<const ParamDeclNode *>(target)->type;
+    /* Apply dynamic decay of Array Types specifically to Parameters so
+       assignments and evaluation safely map to pointer representations. */
+    if (ty->getKind() == TypeKind::Array) {
+      ty = ctx->astCtx.getPointerType(
+          static_cast<const ArrayType *>(ty)->getElementType());
+    }
   } else if (target->kind == NodeKind::FunctionDecl) {
     if (!target->isPublic(
             static_cast<const FunctionDeclNode *>(target)->name) &&
@@ -1520,8 +1572,10 @@ SemaResult TypeCheckPass::visit(const UnaryOpNode *node) {
   if (node->op == "++" || node->op == "--" || node->op == "-" ||
       node->op == "+" || node->op == "~" || node->op == "!") {
     if (auto *opDecl = resolveOverloadedOperator(*exprType, node->op, {})) {
-      const_cast<UnaryOpNode *>(node)->expr =
-          performImplicitConversion(node->expr, opDecl->params[0]->type);
+      if (!(opDecl->isMethod && !opDecl->isStatic)) {
+        const_cast<UnaryOpNode *>(node)->expr =
+            performImplicitConversion(node->expr, opDecl->params[0]->type);
+      }
       node->overloadedOperator = opDecl;
       node->exprType = opDecl->returnType;
       return opDecl->returnType;
@@ -1631,10 +1685,15 @@ SemaResult TypeCheckPass::visit(const BinaryOpNode *node) {
                                      "Invalid operands for binary operation"});
 
   if (auto *opDecl = resolveOverloadedOperator(*lhs, node->op, {node->right})) {
-    const_cast<BinaryOpNode *>(node)->left =
-        performImplicitConversion(node->left, opDecl->params[0]->type);
-    const_cast<BinaryOpNode *>(node)->right =
-        performImplicitConversion(node->right, opDecl->params[1]->type);
+    if (opDecl->isMethod && !opDecl->isStatic) {
+      const_cast<BinaryOpNode *>(node)->right =
+          performImplicitConversion(node->right, opDecl->params[0]->type);
+    } else {
+      const_cast<BinaryOpNode *>(node)->left =
+          performImplicitConversion(node->left, opDecl->params[0]->type);
+      const_cast<BinaryOpNode *>(node)->right =
+          performImplicitConversion(node->right, opDecl->params[1]->type);
+    }
     node->overloadedOperator = opDecl;
     node->exprType = opDecl->returnType;
     return opDecl->returnType;
@@ -1852,8 +1911,8 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
               int bestScore = -1;
 
               for (auto *ctor : ctors) {
-                if (ctor->params.size() == 2) {
-                  const Type *pType = ctor->params[1]->type;
+                if (ctor->params.size() == 1) {
+                  const Type *pType = ctor->params[0]->type;
                   const Type *pointee = nullptr;
 
                   if (pType->isReferenceType()) {
@@ -1948,17 +2007,21 @@ SemaResult TypeCheckPass::visit(const AssignNode *node) {
 
   if (auto *opDecl =
           resolveOverloadedOperator(*lhsType, node->op, {node->value})) {
-    const_cast<AssignNode *>(node)->target =
-        performImplicitConversion(node->target, opDecl->params[0]->type);
-    const_cast<AssignNode *>(node)->value =
-        performImplicitConversion(node->value, opDecl->params[1]->type);
+    if (opDecl->isMethod && !opDecl->isStatic) {
+      const_cast<AssignNode *>(node)->value =
+          performImplicitConversion(node->value, opDecl->params[0]->type);
+    } else {
+      const_cast<AssignNode *>(node)->target =
+          performImplicitConversion(node->target, opDecl->params[0]->type);
+      const_cast<AssignNode *>(node)->value =
+          performImplicitConversion(node->value, opDecl->params[1]->type);
+    }
     node->overloadedOperator = opDecl;
     node->exprType = opDecl->returnType;
     node->isLValue = true;
     return opDecl->returnType;
   }
 
-  /* Allow array subscripts as valid l-values for assignment targets */
   if (node->target->kind != NodeKind::Variable &&
       node->target->kind != NodeKind::UnaryOp &&
       node->target->kind != NodeKind::MemberAccess &&
@@ -2378,17 +2441,19 @@ SemaResult TypeCheckPass::visit(const FunctionDeclNode *node) {
                                      "Type visibility error"});
   }
 
-  /*
-   * Save the current expected return type before processing this function.
-   * This is crucial to support on-the-fly template instantiations that occur
-   * within the body of other functions without polluting their semantic
-   * context.
-   */
   const Type *prevRet = ctx->getFunctionReturnType();
   ctx->setFunctionReturnType(node->returnType);
 
   ScopeGuard guard(*ctx);
   bool hasErrors = false;
+
+  if (node->isMethod && !node->isExtern && !node->isStatic &&
+      node->parentRecord) {
+    auto *thisParam = ctx->astCtx.create<ParamDeclNode>(
+        ctx->astCtx.getPointerType(node->parentRecord), "this", nullptr, false,
+        false, node->line, node->column, 4);
+    ctx->addDecl("this", thisParam);
+  }
 
   for (const auto *param : node->params) {
     if (param->defaultValue) {
@@ -2431,7 +2496,6 @@ SemaResult TypeCheckPass::visit(const FunctionDeclNode *node) {
     node->isMustProgress = true;
   }
 
-  /* Restore the previous return type from the outer context */
   ctx->setFunctionReturnType(prevRet);
 
   if (hasErrors) {
@@ -2511,9 +2575,7 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
                         std::vector<ExprNode *> &outResolvedArgs)
       -> std::vector<std::string> {
     outScore = 0;
-    size_t paramOffset =
-        (fDecl->isMethod && !fDecl->isExtern && !fDecl->isStatic) ? 1 : 0;
-    size_t expectedParams = fDecl->params.size() - paramOffset;
+    size_t expectedParams = fDecl->params.size();
 
     std::vector<ExprNode *> resolvedArgs(expectedParams, nullptr);
     std::vector<const Type *> resolvedTypes(expectedParams, nullptr);
@@ -2534,11 +2596,10 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
           errors.push_back("Too many arguments provided.");
           return errors;
         }
-        if (fDecl->params[paramOffset + posArgCount]->isNamed) {
+        if (fDecl->params[posArgCount]->isNamed) {
           errors.push_back(
               "Positional argument provided for named parameter '" +
-              std::string(fDecl->params[paramOffset + posArgCount]->name) +
-              "'.");
+              std::string(fDecl->params[posArgCount]->name) + "'.");
           return errors;
         }
         resolvedArgs[posArgCount] = node->args[i];
@@ -2555,8 +2616,8 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
 
         bool found = false;
         for (size_t p = 0; p < expectedParams; ++p) {
-          if (fDecl->params[paramOffset + p]->name == name) {
-            if (!fDecl->params[paramOffset + p]->isNamed) {
+          if (fDecl->params[p]->name == name) {
+            if (!fDecl->params[p]->isNamed) {
               errors.push_back("Parameter '" + std::string(name) +
                                "' cannot be passed as a named argument.");
             }
@@ -2575,16 +2636,15 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
 
     for (size_t p = 0; p < expectedParams; ++p) {
       if (!resolvedArgs[p]) {
-        if (fDecl->params[paramOffset + p]->defaultValue) {
-          resolvedArgs[p] = fDecl->params[paramOffset + p]->defaultValue;
-          resolvedTypes[p] =
-              fDecl->params[paramOffset + p]->defaultValue->exprType;
+        if (fDecl->params[p]->defaultValue) {
+          resolvedArgs[p] = fDecl->params[p]->defaultValue;
+          resolvedTypes[p] = fDecl->params[p]->defaultValue->exprType;
         } else {
-          auto pName = std::string(fDecl->params[paramOffset + p]->name);
-          if (fDecl->params[paramOffset + p]->isRequired) {
+          auto pName = std::string(fDecl->params[p]->name);
+          if (fDecl->params[p]->isRequired) {
             errors.push_back("Missing required named parameter '" + pName +
                              "'.");
-          } else if (!fDecl->params[paramOffset + p]->isNamed) {
+          } else if (!fDecl->params[p]->isNamed) {
             errors.push_back("Missing mandatory positional parameter '" +
                              pName + "'.");
           } else {
@@ -2598,12 +2658,19 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
       return errors;
 
     for (size_t p = 0; p < expectedParams; ++p) {
-      const Type *paramType = fDecl->params[paramOffset + p]->type;
+      const Type *paramType = fDecl->params[p]->type;
+
+      /* Array decay dynamically applied to matching criteria */
+      if (paramType->getKind() == TypeKind::Array) {
+        paramType = ctx->astCtx.getPointerType(
+            static_cast<const ArrayType *>(paramType)->getElementType());
+      }
+
       if (!canImplicitlyCast(resolvedTypes[p], paramType)) {
         errors.push_back("Type mismatch for parameter '" +
-                         std::string(fDecl->params[paramOffset + p]->name) +
-                         "': expected '" + paramType->toString() +
-                         "', but got '" + resolvedTypes[p]->toString() + "'.");
+                         std::string(fDecl->params[p]->name) + "': expected '" +
+                         paramType->toString() + "', but got '" +
+                         resolvedTypes[p]->toString() + "'.");
       } else {
         if (canImplicitlyCast(resolvedTypes[p], paramType, false)) {
           outScore += 10;
@@ -2614,7 +2681,7 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
           if (isLValue) {
             errors.push_back(
                 "Cannot bind an l-value to r-value reference parameter '" +
-                std::string(fDecl->params[paramOffset + p]->name) + "'.");
+                std::string(fDecl->params[p]->name) + "'.");
           } else {
             outScore += 3;
           }
@@ -2625,7 +2692,7 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
             if (!isLValue) {
               errors.push_back(
                   "Cannot bind an r-value to non-const reference parameter '" +
-                  std::string(fDecl->params[paramOffset + p]->name) + "'.");
+                  std::string(fDecl->params[p]->name) + "'.");
             } else {
               outScore += 3;
             }
@@ -2642,12 +2709,13 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
       return errors;
 
     for (size_t p = 0; p < expectedParams; ++p) {
-      checkImplicitCastWarning(resolvedTypes[p],
-                               fDecl->params[paramOffset + p]->type,
-                               resolvedArgs[p]);
-      /* Enforce implicit conversions internally for the matched parameters */
-      resolvedArgs[p] = performImplicitConversion(
-          resolvedArgs[p], fDecl->params[paramOffset + p]->type);
+      const Type *paramType = fDecl->params[p]->type;
+      if (paramType->getKind() == TypeKind::Array) {
+        paramType = ctx->astCtx.getPointerType(
+            static_cast<const ArrayType *>(paramType)->getElementType());
+      }
+      checkImplicitCastWarning(resolvedTypes[p], paramType, resolvedArgs[p]);
+      resolvedArgs[p] = performImplicitConversion(resolvedArgs[p], paramType);
     }
 
     outResolvedArgs = resolvedArgs;
@@ -3129,10 +3197,15 @@ SemaResult TypeCheckPass::visit(const ArraySubscriptNode *node) {
 
   if (auto *opDecl =
           resolveOverloadedOperator(*baseType, "[]", {node->index})) {
-    const_cast<ArraySubscriptNode *>(node)->base =
-        performImplicitConversion(node->base, opDecl->params[0]->type);
-    const_cast<ArraySubscriptNode *>(node)->index =
-        performImplicitConversion(node->index, opDecl->params[1]->type);
+    if (opDecl->isMethod && !opDecl->isStatic) {
+      const_cast<ArraySubscriptNode *>(node)->index =
+          performImplicitConversion(node->index, opDecl->params[0]->type);
+    } else {
+      const_cast<ArraySubscriptNode *>(node)->base =
+          performImplicitConversion(node->base, opDecl->params[0]->type);
+      const_cast<ArraySubscriptNode *>(node)->index =
+          performImplicitConversion(node->index, opDecl->params[1]->type);
+    }
     node->overloadedOperator = opDecl;
     node->exprType = opDecl->returnType;
     node->isLValue = opDecl->returnType->isReferenceType();
@@ -3235,8 +3308,7 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
           continue;
         }
 
-        size_t paramOffset = 1;
-        size_t expectedParams = ctor->params.size() - paramOffset;
+        size_t expectedParams = ctor->params.size();
 
         std::vector<ExprNode *> resolvedArgs(expectedParams, nullptr);
         std::vector<const Type *> resolvedTypes(expectedParams, nullptr);
@@ -3257,11 +3329,10 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
               errors.push_back("Too many arguments provided.");
               break;
             }
-            if (ctor->params[paramOffset + posArgCount]->isNamed) {
+            if (ctor->params[posArgCount]->isNamed) {
               errors.push_back(
                   "Positional argument provided for named parameter '" +
-                  std::string(ctor->params[paramOffset + posArgCount]->name) +
-                  "'.");
+                  std::string(ctor->params[posArgCount]->name) + "'.");
               break;
             }
             resolvedArgs[posArgCount] = node->args[i];
@@ -3278,8 +3349,8 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
 
             bool found = false;
             for (size_t p = 0; p < expectedParams; ++p) {
-              if (ctor->params[paramOffset + p]->name == name) {
-                if (!ctor->params[paramOffset + p]->isNamed) {
+              if (ctor->params[p]->name == name) {
+                if (!ctor->params[p]->isNamed) {
                   errors.push_back("Parameter '" + std::string(name) +
                                    "' cannot be passed as a named argument.");
                 }
@@ -3303,16 +3374,15 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
 
         for (size_t p = 0; p < expectedParams; ++p) {
           if (!resolvedArgs[p]) {
-            if (ctor->params[paramOffset + p]->defaultValue) {
-              resolvedArgs[p] = ctor->params[paramOffset + p]->defaultValue;
-              resolvedTypes[p] =
-                  ctor->params[paramOffset + p]->defaultValue->exprType;
+            if (ctor->params[p]->defaultValue) {
+              resolvedArgs[p] = ctor->params[p]->defaultValue;
+              resolvedTypes[p] = ctor->params[p]->defaultValue->exprType;
             } else {
-              auto pName = std::string(ctor->params[paramOffset + p]->name);
-              if (ctor->params[paramOffset + p]->isRequired) {
+              auto pName = std::string(ctor->params[p]->name);
+              if (ctor->params[p]->isRequired) {
                 errors.push_back("Missing required named parameter '" + pName +
                                  "'.");
-              } else if (!ctor->params[paramOffset + p]->isNamed) {
+              } else if (!ctor->params[p]->isNamed) {
                 errors.push_back("Missing mandatory positional parameter '" +
                                  pName + "'.");
               } else {
@@ -3331,7 +3401,13 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
         bool match = true;
 
         for (size_t p = 0; p < expectedParams; ++p) {
-          const Type *paramType = ctor->params[paramOffset + p]->type;
+          const Type *paramType = ctor->params[p]->type;
+
+          if (paramType->getKind() == TypeKind::Array) {
+            paramType = ctx->astCtx.getPointerType(
+                static_cast<const ArrayType *>(paramType)->getElementType());
+          }
+
           if (!canImplicitlyCast(resolvedTypes[p], paramType)) {
             match = false;
             break;
@@ -3394,9 +3470,12 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
       if (bestMatch) {
         const_cast<NewExprNode *>(node)->resolvedConstructor = bestMatch;
 
-        size_t paramOffset = 1;
         for (size_t p = 0; p < bestResolvedArgs.size(); ++p) {
-          const Type *paramType = bestMatch->params[paramOffset + p]->type;
+          const Type *paramType = bestMatch->params[p]->type;
+          if (paramType->getKind() == TypeKind::Array) {
+            paramType = ctx->astCtx.getPointerType(
+                static_cast<const ArrayType *>(paramType)->getElementType());
+          }
           bestResolvedArgs[p] =
               performImplicitConversion(bestResolvedArgs[p], paramType);
         }

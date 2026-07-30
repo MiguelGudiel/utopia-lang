@@ -54,8 +54,8 @@ static bool canImplicitlyCast(const Type *from, const Type *to,
         ctors = static_cast<const StructDeclNode *>(decl)->constructors;
 
       for (auto *ctor : ctors) {
-        if (ctor->params.size() == 2) {
-          if (canImplicitlyCast(from, ctor->params[1]->type, false))
+        if (ctor->params.size() == 1) {
+          if (canImplicitlyCast(from, ctor->params[0]->type, false))
             return true;
         }
       }

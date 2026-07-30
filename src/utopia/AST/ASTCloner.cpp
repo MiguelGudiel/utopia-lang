@@ -235,6 +235,7 @@ ASTNode *ASTCloner::visit(const FunctionDeclNode *n) {
   node->declFilePath = n->declFilePath;
   node->length = n->length;
   node->isTemplate = false;
+  node->parentRecord = n->parentRecord;
   return node;
 }
 
