@@ -1667,35 +1667,7 @@ SemaResult TypeCheckPass::visit(const BinaryOpNode *node) {
 
     const Type *res = nullptr;
     if ((*lhs)->isNumeric() && (*rhs)->isNumeric()) {
-      auto getRank = [](const Type *t) {
-        auto k = static_cast<const BuiltinType *>(t->getUnqualifiedType())
-                     ->getBuiltinKind();
-        switch (k) {
-        case BuiltinKind::Float64:
-          return 10;
-        case BuiltinKind::Float32:
-          return 9;
-        case BuiltinKind::UInt64:
-          return 8;
-        case BuiltinKind::Int64:
-          return 7;
-        case BuiltinKind::UInt32:
-          return 6;
-        case BuiltinKind::Int32:
-          return 5;
-        case BuiltinKind::UInt16:
-          return 4;
-        case BuiltinKind::Int16:
-          return 3;
-        case BuiltinKind::UInt8:
-          return 2;
-        case BuiltinKind::Int8:
-          return 1;
-        default:
-          return 0;
-        }
-      };
-      res = getRank(*lhs) >= getRank(*rhs) ? *lhs : *rhs;
+      res = ctx->astCtx.getPromotedNumericType(*lhs, *rhs);
       checkImplicitCastWarning(*lhs, res, node->left);
       checkImplicitCastWarning(*rhs, res, node->right);
     } else {
@@ -1728,35 +1700,7 @@ SemaResult TypeCheckPass::visit(const BinaryOpNode *node) {
 
   const Type *res = nullptr;
   if ((*lhs)->isNumeric() && (*rhs)->isNumeric()) {
-    auto getRank = [](const Type *t) {
-      auto k = static_cast<const BuiltinType *>(t->getUnqualifiedType())
-                   ->getBuiltinKind();
-      switch (k) {
-      case BuiltinKind::Float64:
-        return 10;
-      case BuiltinKind::Float32:
-        return 9;
-      case BuiltinKind::UInt64:
-        return 8;
-      case BuiltinKind::Int64:
-        return 7;
-      case BuiltinKind::UInt32:
-        return 6;
-      case BuiltinKind::Int32:
-        return 5;
-      case BuiltinKind::UInt16:
-        return 4;
-      case BuiltinKind::Int16:
-        return 3;
-      case BuiltinKind::UInt8:
-        return 2;
-      case BuiltinKind::Int8:
-        return 1;
-      default:
-        return 0;
-      }
-    };
-    res = getRank(*lhs) >= getRank(*rhs) ? *lhs : *rhs;
+    res = ctx->astCtx.getPromotedNumericType(*lhs, *rhs);
     checkImplicitCastWarning(*lhs, res, node->left);
     checkImplicitCastWarning(*rhs, res, node->right);
   } else {
