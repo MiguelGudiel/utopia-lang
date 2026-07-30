@@ -25,11 +25,16 @@ struct LifetimeInfo {
   uint64_t size = 0;
 };
 
-/* Extended lexical scope with RAII support */
 struct CGLocalScope {
   std::unordered_map<std::string, SymbolInfo> symbols;
   std::vector<CleanupInfo> cleanups;
   std::vector<LifetimeInfo> lifetimes;
+};
+
+struct LoopInfo {
+  llvm::BasicBlock *continueBlock;
+  llvm::BasicBlock *breakBlock;
+  size_t scopeDepth;
 };
 
 class CodeGenContext {
@@ -90,8 +95,16 @@ public:
     return {};
   }
 
+  void pushLoop(llvm::BasicBlock *cont, llvm::BasicBlock *brk) {
+    loops.push_back({cont, brk, scopes.size()});
+  }
+
+  void popLoop() { loops.pop_back(); }
+  const LoopInfo &getCurrentLoop() const { return loops.back(); }
+
 private:
   std::vector<CGLocalScope> scopes;
+  std::vector<LoopInfo> loops;
 };
 
 class CGScopeGuard {

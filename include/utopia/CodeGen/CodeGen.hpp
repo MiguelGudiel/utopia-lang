@@ -39,6 +39,8 @@ public:
   llvm::Value *visit(const IfNode *node);
   llvm::Value *visit(const ForNode *node);
   llvm::Value *visit(const WhileNode *node);
+  llvm::Value *visit(const BreakNode *node);
+  llvm::Value *visit(const ContinueNode *node);
   llvm::Value *visit(const ReturnNode *node);
   llvm::Value *visit(const CastNode *node);
   llvm::Value *visit(const ParamDeclNode *node);
@@ -59,6 +61,7 @@ public:
   llvm::Value *visit(const ImplicitCastNode *node);
 
   llvm::Value *createImplicitCast(llvm::Value *src, llvm::Type *destTy);
+  void emitLoopCleanups(size_t targetDepth);
 
 private:
   BackendContext &backend;

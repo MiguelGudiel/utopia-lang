@@ -1538,6 +1538,7 @@ SemaResult TypeCheckPass::visit(const ForNode *node) {
       return std::unexpected(incRes.error());
   }
 
+  LoopGuard loopGuard(*ctx);
   auto bodyRes = dispatch(node->body);
   if (!bodyRes)
     return bodyRes;
@@ -1556,10 +1557,27 @@ SemaResult TypeCheckPass::visit(const WhileNode *node) {
         "While loop condition must evaluate to a boolean type.");
   }
 
+  LoopGuard loopGuard(*ctx);
   auto bodyRes = dispatch(node->body);
   if (!bodyRes)
     return bodyRes;
 
+  return ctx->astCtx.VoidTy;
+}
+
+SemaResult TypeCheckPass::visit(const BreakNode *node) {
+  if (!ctx->isInLoop()) {
+    return ctx->reportError(node->line, node->column, node->length,
+                            "Break statement outside of loop control flow.");
+  }
+  return ctx->astCtx.VoidTy;
+}
+
+SemaResult TypeCheckPass::visit(const ContinueNode *node) {
+  if (!ctx->isInLoop()) {
+    return ctx->reportError(node->line, node->column, node->length,
+                            "Continue statement outside of loop control flow.");
+  }
   return ctx->astCtx.VoidTy;
 }
 

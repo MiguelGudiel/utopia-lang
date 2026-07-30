@@ -328,6 +328,23 @@ llvm::Function *CodeGen::getOrCreateFunction(const FunctionDeclNode *node) {
   return func;
 }
 
+void CodeGen::emitLoopCleanups(size_t targetDepth) {
+  auto allScopes = cgCtx.getAllScopes();
+  size_t currentDepth = allScopes.size();
+  for (auto scopeIt = allScopes.rbegin();
+       scopeIt != allScopes.rend() && currentDepth > targetDepth;
+       ++scopeIt, --currentDepth) {
+    for (auto cleanupIt = scopeIt->cleanups.rbegin();
+         cleanupIt != scopeIt->cleanups.rend(); ++cleanupIt) {
+      emitCleanupCall(cleanupIt->instancePtr, cleanupIt->destructor);
+    }
+    for (auto lifeIt = scopeIt->lifetimes.rbegin();
+         lifeIt != scopeIt->lifetimes.rend(); ++lifeIt) {
+      emitLifetimeEnd(lifeIt->allocaInst, lifeIt->size);
+    }
+  }
+}
+
 llvm::Value *CodeGen::visit(const AnnotationDeclNode *node) {
   if (node->recordType) {
     getLLVMType(node->recordType);
@@ -1158,7 +1175,11 @@ llvm::Value *CodeGen::visit(const ForNode *node) {
 
   theFunction->insert(theFunction->end(), bodyBB);
   builder.SetInsertPoint(bodyBB);
+
+  cgCtx.pushLoop(incBB, endBB);
   dispatch(node->body);
+  cgCtx.popLoop();
+
   if (!builder.GetInsertBlock()->getTerminator()) {
     builder.CreateBr(incBB);
   }
@@ -1172,6 +1193,9 @@ llvm::Value *CodeGen::visit(const ForNode *node) {
 
   theFunction->insert(theFunction->end(), endBB);
   builder.SetInsertPoint(endBB);
+
+  /* Ensures cleanups are executed for the loop initializer scope */
+  emitScopeCleanups();
 
   return nullptr;
 }
@@ -1194,7 +1218,11 @@ llvm::Value *CodeGen::visit(const WhileNode *node) {
 
   theFunction->insert(theFunction->end(), bodyBB);
   builder.SetInsertPoint(bodyBB);
+
+  cgCtx.pushLoop(condBB, endBB);
   dispatch(node->body);
+  cgCtx.popLoop();
+
   if (!builder.GetInsertBlock()->getTerminator()) {
     builder.CreateBr(condBB);
   }
@@ -1202,6 +1230,20 @@ llvm::Value *CodeGen::visit(const WhileNode *node) {
   theFunction->insert(theFunction->end(), endBB);
   builder.SetInsertPoint(endBB);
 
+  return nullptr;
+}
+
+llvm::Value *CodeGen::visit(const BreakNode *node) {
+  const auto &loop = cgCtx.getCurrentLoop();
+  emitLoopCleanups(loop.scopeDepth);
+  builder.CreateBr(loop.breakBlock);
+  return nullptr;
+}
+
+llvm::Value *CodeGen::visit(const ContinueNode *node) {
+  const auto &loop = cgCtx.getCurrentLoop();
+  emitLoopCleanups(loop.scopeDepth);
+  builder.CreateBr(loop.continueBlock);
   return nullptr;
 }
 

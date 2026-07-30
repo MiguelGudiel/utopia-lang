@@ -173,6 +173,8 @@ public:
   void visit(const IfNode *node);
   void visit(const ForNode *node);
   void visit(const WhileNode *node);
+  void visit(const BreakNode *node) {}
+  void visit(const ContinueNode *node) {}
   void visit(const ReturnNode *) {}
   void visit(const CastNode *) {}
   void visit(const ParamDeclNode *) {}
@@ -222,6 +224,8 @@ public:
   SemaResult visit(const IfNode *node);
   SemaResult visit(const ForNode *node);
   SemaResult visit(const WhileNode *node);
+  SemaResult visit(const BreakNode *node);
+  SemaResult visit(const ContinueNode *node);
   SemaResult visit(const ReturnNode *node);
   SemaResult visit(const CastNode *node);
   SemaResult visit(const ParamDeclNode *node);

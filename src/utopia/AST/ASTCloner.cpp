@@ -187,6 +187,14 @@ ASTNode *ASTCloner::visit(const WhileNode *n) {
                                n->line, n->column, n->length);
 }
 
+ASTNode *ASTCloner::visit(const BreakNode *n) {
+  return ctx.create<BreakNode>(n->line, n->column, n->length);
+}
+
+ASTNode *ASTCloner::visit(const ContinueNode *n) {
+  return ctx.create<ContinueNode>(n->line, n->column, n->length);
+}
+
 ASTNode *ASTCloner::visit(const ReturnNode *n) {
   return ctx.create<ReturnNode>(
       n->value ? static_cast<ExprNode *>(dispatch(n->value)) : nullptr, n->line,

@@ -721,6 +721,10 @@ ASTNode *Parser::parseStatement() {
     node = parseForStatement();
   } else if (currentToken().type == TokenType::WHILE_KW) {
     node = parseWhileStatement();
+  } else if (currentToken().type == TokenType::BREAK_KW) {
+    node = parseBreakStatement();
+  } else if (currentToken().type == TokenType::CONTINUE_KW) {
+    node = parseContinueStatement();
   } else if (currentToken().type == TokenType::CONST_KW ||
              currentToken().type == TokenType::EXTERN_KW ||
              currentToken().type == TokenType::STATIC_KW ||
@@ -933,6 +937,24 @@ WhileNode *Parser::parseWhileStatement() {
 
   int len = (body->column + body->length) - col;
   return astCtx.create<WhileNode>(cond, body, line, col, len);
+}
+
+BreakNode *Parser::parseBreakStatement() {
+  int line = currentToken().line;
+  int col = currentToken().column;
+  advance();
+  int endCol = currentToken().column + currentToken().value.length();
+  expect(TokenType::SEMICOLON, "Expected ';' after 'break'");
+  return astCtx.create<BreakNode>(line, col, endCol - col);
+}
+
+ContinueNode *Parser::parseContinueStatement() {
+  int line = currentToken().line;
+  int col = currentToken().column;
+  advance();
+  int endCol = currentToken().column + currentToken().value.length();
+  expect(TokenType::SEMICOLON, "Expected ';' after 'continue'");
+  return astCtx.create<ContinueNode>(line, col, endCol - col);
 }
 
 ExprNode *Parser::parseLogicalOr() {

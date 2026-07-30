@@ -26,6 +26,8 @@ enum class NodeKind : uint8_t {
   If,
   For,
   While,
+  Break,
+  Continue,
   FunctionDecl,
   FunctionCall,
   Return,
@@ -334,6 +336,15 @@ struct WhileNode : public StmtNode {
 
   WhileNode(ExprNode *cond, BlockNode *b, int l, int c, int len)
       : StmtNode(NodeKind::While, l, c, len), condition(cond), body(b) {}
+};
+
+struct BreakNode : public StmtNode {
+  BreakNode(int l, int c, int len) : StmtNode(NodeKind::Break, l, c, len) {}
+};
+
+struct ContinueNode : public StmtNode {
+  ContinueNode(int l, int c, int len)
+      : StmtNode(NodeKind::Continue, l, c, len) {}
 };
 
 struct IfNode : public StmtNode {

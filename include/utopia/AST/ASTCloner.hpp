@@ -51,6 +51,8 @@ public:
   ASTNode *visit(const IfNode *n);
   ASTNode *visit(const ForNode *n);
   ASTNode *visit(const WhileNode *n);
+  ASTNode *visit(const BreakNode *n);
+  ASTNode *visit(const ContinueNode *n);
   ASTNode *visit(const ReturnNode *n);
   ASTNode *visit(const VarDeclNode *n);
   ASTNode *visit(const ParamDeclNode *n);
