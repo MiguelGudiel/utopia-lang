@@ -1,0 +1,43 @@
+/*
+ * Computes a mathematical operation using an expression-bodied function.
+ */
+int multiply(int a, int b) => a * b;
+
+/*
+ * Demonstrates named parameters, default arguments, and the required modifier.
+ * Named parameters must be enclosed in braces.
+ */
+void configureServer(String host, {int port = 8080, required bool useSSL}) {
+  Console.print("Connecting to ");
+  Console.print(host);
+  
+  if (useSSL) {
+    Console.printLine(" over secure connection...");
+  } else {
+    Console.printLine(" over unencrypted connection...");
+  }
+}
+
+/*
+ * Demonstrates const correctness for reference safety.
+ * The buffer contents cannot be mutated within this scope.
+ */
+void processBuffer(const uint8* buffer, int size) {
+  if (buffer == null || size <= 0) {
+    return;
+  }
+  Console.printLine("Buffer processing complete.");
+}
+
+int main() {
+  int result = multiply(10, 5);
+  
+  /* Call function specifying positional and named parameters */
+  configureServer("api.utopialang.org", useSSL: true);
+  configureServer("localhost", port: 3000, useSSL: false);
+  
+  String payload = "System Payload";
+  processBuffer(payload.c_str(), payload.length() as int);
+  
+  return 0;
+}

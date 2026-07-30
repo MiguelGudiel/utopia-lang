@@ -1,0 +1,40 @@
+/**
+ * Recursively computes the nth Fibonacci term.
+ */
+int fibonacci(int n) {
+  if (n <= 1) {
+    return n;
+  }
+  return fibonacci(n - 1) + fibonacci(n - 2);
+}
+
+/**
+ * Computes and outputs the Fibonacci sequence using recursion.
+ *
+ * @param terms The total number of terms to generate.
+ */
+void printFibonacci(int terms) {
+  if (terms <= 0) {
+    Console.printLine("Error: The number of terms must be a positive integer.");
+    return;
+  }
+
+  print("Fibonacci sequence (%d terms):\n", terms);
+
+  for (int i = 0; i < terms; i++) {
+    print("%d ", fibonacci(i));
+  }
+  
+  print("\n");
+}
+
+int main() {
+  Console.print("Enter the number of terms to generate: ");
+  
+  String input = Console.readLine();
+  int terms = input.toInt();
+  
+  printFibonacci(terms);
+  
+  return 0;
+}

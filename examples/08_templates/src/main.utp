@@ -1,0 +1,49 @@
+/*
+ * Generic container class capable of storing arbitrary types.
+ */
+class Box<T> {
+  private T item;
+  private bool isEmpty;
+
+  public Box() {
+    this.isEmpty = true;
+  }
+
+  public Box(T initialItem) {
+    this.item = initialItem;
+    this.isEmpty = false;
+  }
+
+  public void setItem(T newItem) {
+    this.item = newItem;
+    this.isEmpty = false;
+  }
+
+  public const T getItem() {
+    return this.item;
+  }
+    
+  public const bool hasItem() => !this.isEmpty;
+}
+
+/*
+ * Generic utility method to determine the maximum of two values.
+ */
+T findMax<T>(T a, T b) {
+  if (a > b) {
+    return a;
+  }
+  return b;
+}
+
+int main() {
+  Box<int>* intBox = new Box<int>(42);
+  Box<float64>* floatBox = new Box<float64>(3.14159);
+  
+  int highest = findMax<int>(100, 250);
+  
+  delete intBox;
+  delete floatBox;
+  
+  return 0;
+}

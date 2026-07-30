@@ -1,0 +1,9 @@
+project:
+  name: "hello-world"
+
+build:
+  target: executable
+  source_dirs:
+    - src/
+  sources:
+    - "main.utp"

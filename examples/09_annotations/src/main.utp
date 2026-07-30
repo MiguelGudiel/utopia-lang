@@ -1,0 +1,37 @@
+/*
+ * Defines a custom annotation class for HTTP routing.
+ * Annotations strictly require a const constructor.
+ */
+annotation class Route {
+  String path;
+  String method;
+
+  const Route(String path, String method) {
+    this.path = path;
+    this.method = method;
+  }
+}
+
+/*
+ * Defines metadata indicating a serialization requirement.
+ */
+annotation class Serializable {
+  const Serializable() {}
+}
+
+@Serializable
+class ApiController {
+  /* Attaches the routing metadata to the specific endpoint handler */
+  @Route("/api/v1/users", "GET")
+  public void fetchUsers() {
+    Console.printLine("Executing user fetch logic...");
+  }
+}
+
+int main() {
+  ApiController* controller = new ApiController();
+  controller.fetchUsers();
+  
+  delete controller;
+  return 0;
+}
