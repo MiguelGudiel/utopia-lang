@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -20,6 +21,9 @@ struct CompileOptions {
   std::string buildLibRoot;
   std::vector<std::string> includeDirs;
   std::vector<std::string> linkerFlags;
+
+  std::unordered_set<std::string> publicMacros;
+  std::unordered_set<std::string> privateMacros;
 
   std::unordered_map<std::string, std::string> packages;
 

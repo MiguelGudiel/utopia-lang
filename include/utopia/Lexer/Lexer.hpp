@@ -15,7 +15,8 @@ struct CondState {
 
 class Lexer {
 public:
-  explicit Lexer(std::string_view sourceCode);
+  explicit Lexer(std::string_view sourceCode,
+                 const std::unordered_set<std::string> &macros = {});
   std::vector<Token> tokenize();
 
 private:

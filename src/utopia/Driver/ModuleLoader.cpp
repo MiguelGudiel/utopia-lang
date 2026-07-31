@@ -152,7 +152,7 @@ ModuleNode *ModuleLoader::loadModule(const std::string &importURI,
     }
   }
 
-  Lexer lexer(sourceView);
+  Lexer lexer(sourceView, config.definedMacros);
   auto tokensVec = lexer.tokenize();
 
   auto tokens = astCtx.copyArray<Token>(tokensVec);

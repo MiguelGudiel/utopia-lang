@@ -18,6 +18,7 @@ struct ModuleLoaderConfig {
   std::filesystem::path buildLibRoot;
   std::vector<std::string> includeDirs;
   std::unordered_map<std::string, std::string> packages;
+  std::unordered_set<std::string> definedMacros;
   bool isBuildScript = false;
 };
 

@@ -90,6 +90,9 @@ bool CompilerDriver::run() {
   modConfig.preludeRoot = options.preludeRoot;
   modConfig.includeDirs = options.includeDirs;
   modConfig.packages = options.packages;
+  modConfig.definedMacros = options.publicMacros;
+  modConfig.definedMacros.insert(options.privateMacros.begin(),
+                                 options.privateMacros.end());
 
   ModuleLoader loader(astCtx, modConfig, diagEngine);
 

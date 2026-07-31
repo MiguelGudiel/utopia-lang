@@ -24,6 +24,7 @@ struct GlobalOptions {
   std::string stdlibRoot;
   std::string preludeRoot;
   std::string buildLibRoot;
+  std::vector<std::string> cliMacros;
 };
 
 void utopiaFatalErrorHandler(void *user_data, const char *reason,
@@ -55,9 +56,14 @@ bool buildProject(const fs::path &projRoot, CompileOptions &parentOptions,
     options.optLevel = parentOptions.optLevel;
     options.includeDirs = parentOptions.includeDirs;
     options.linkerFlags = parentOptions.linkerFlags;
+    options.publicMacros = parentOptions.publicMacros;
   } else {
     options.target = config.target;
     options.outputDir = (projRoot / config.outputDir).string();
+
+    for (const auto &m : globalOpts.cliMacros) {
+      options.publicMacros.insert(m);
+    }
   }
 
   options.projectRoot = projRoot.string();
@@ -96,18 +102,20 @@ bool buildProject(const fs::path &projRoot, CompileOptions &parentOptions,
                                 : config.includeDirs.front();
   options.packages[config.name] = selfPkgRoot;
 
-  for (const auto &dep : config.dependencies) {
-    fs::path depPath = projRoot / dep.path;
-    if (!buildProject(depPath, options, true, dep.linkType, globalOpts)) {
-      return false;
-    }
-  }
-
+  /* Execute project build script BEFORE dependencies to allow macro inheritance
+   */
   fs::path buildUtpPath = projRoot / "build.utp";
   if (fs::exists(buildUtpPath)) {
     Logger::debug("[Utopia] Executing project build script (build.utp)...");
     if (!BuildScriptRunner::run(buildUtpPath, options, projRoot)) {
       std::cerr << "Fatal: Failed to execute build.utp successfully.\n";
+      return false;
+    }
+  }
+
+  for (const auto &dep : config.dependencies) {
+    fs::path depPath = projRoot / dep.path;
+    if (!buildProject(depPath, options, true, dep.linkType, globalOpts)) {
       return false;
     }
   }
@@ -154,7 +162,8 @@ bool buildProject(const fs::path &projRoot, CompileOptions &parentOptions,
 #endif
     }
 
-    /* Propagate unique includes and linker flags back to the parent */
+    /* Propagate unique includes, linker flags, and public macros back to the
+     * parent */
     for (const auto &inc : options.includeDirs) {
       if (std::find(parentOptions.includeDirs.begin(),
                     parentOptions.includeDirs.end(),
@@ -169,6 +178,10 @@ bool buildProject(const fs::path &projRoot, CompileOptions &parentOptions,
                     flag) == parentOptions.linkerFlags.end()) {
         parentOptions.linkerFlags.push_back(flag);
       }
+    }
+
+    for (const auto &m : options.publicMacros) {
+      parentOptions.publicMacros.insert(m);
     }
 
     for (const auto &pkg : options.packages) {
@@ -201,6 +214,8 @@ int main(int argc, char **argv) {
         if (arg.length() > 2 && std::isdigit(arg[2])) {
           globalOpts.cliOptLevel = std::stoi(std::string(arg.substr(2)));
         }
+      } else if (arg.starts_with("-D")) {
+        globalOpts.cliMacros.push_back(std::string(arg.substr(2)));
       } else if (!arg.empty() && arg[0] != '-') {
         startPath = fs::absolute(std::string(arg));
       }
