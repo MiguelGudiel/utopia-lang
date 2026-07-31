@@ -36,7 +36,8 @@ public:
   ModuleNode *loadModule(const std::string &importURI,
                          const std::filesystem::path &currentFileDir = "",
                          int line = 0, int col = 0, int len = 0,
-                         std::string_view sourceFile = "");
+                         std::string_view sourceFile = "",
+                         std::string_view virtualSource = "");
 
 private:
   ASTContext &astCtx;
@@ -45,6 +46,9 @@ private:
 
   std::unordered_map<std::string, std::string> sourceCache;
   std::unordered_map<std::string, ModuleNode *> moduleCache;
+  std::unordered_set<std::string> activeImports;
+
+  std::unordered_map<std::string, std::string_view> persistentSourceCache;
 
   std::expected<std::filesystem::path, std::string>
   resolveImportURI(std::string_view uri,

@@ -42,7 +42,7 @@ set(YAML_CPP_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
 add_subdirectory(thirdparty/yaml-cpp)
 add_subdirectory(src)
 add_subdirectory(tools/utopia)
-#add_subdirectory(tools/lsp)
+add_subdirectory(tools/lsp)
 
 if(BUILD_TESTS)
     enable_testing()

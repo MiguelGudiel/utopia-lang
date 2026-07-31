@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <iostream>
 #include <nlohmann/json.hpp>
 #include <string>
@@ -19,9 +20,16 @@ struct Diagnostic {
 
 class DiagnosticsEngine {
 public:
+  bool printToConsole = true;
+
   void report(const Diagnostic &diag) {
+    if (diag.level == DiagLevel::Error) {
+      errorCount++;
+    }
     diagnostics.push_back(diag);
-    renderToConsole(diag);
+    if (printToConsole) {
+      renderToConsole(diag);
+    }
   }
 
   bool hasErrors() const { return errorCount > 0; }
@@ -34,10 +42,14 @@ public:
       int lspLine = d.line > 0 ? d.line - 1 : 0;
       int lspCol = d.column > 0 ? d.column - 1 : 0;
 
+      // Prevent negative lengths from multi-line spanning nodes to avoid VS
+      // Code rejecting the payload
+      int safeLen = std::max(1, d.length);
+
       j.push_back(
           {{"range",
             {{"start", {{"line", lspLine}, {"character", lspCol}}},
-             {"end", {{"line", lspLine}, {"character", lspCol + d.length}}}}},
+             {"end", {{"line", lspLine}, {"character", lspCol + safeLen}}}}},
            {"severity", d.level == DiagLevel::Error ? 1 : 2},
            {"message", d.message},
            {"source", "utopia"}});
@@ -55,9 +67,6 @@ private:
   int errorCount = 0;
 
   void renderToConsole(const Diagnostic &diag) {
-    if (diag.level == DiagLevel::Error)
-      errorCount++;
-
     const char *color = "";
     const char *label = "";
 

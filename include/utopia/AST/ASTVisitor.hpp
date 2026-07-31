@@ -12,7 +12,7 @@ public:
      * propagation of unhandled expected types across the pipeline */
     if (!node) [[unlikely]] {
       std::cerr << "[Fatal] ASTVisitor dispatch encountered a null AST node.\n";
-      std::abort();
+      throw std::runtime_error("ASTVisitor: ASTVisitor dispatch encountered a null AST node.");
     }
 
     switch (node->kind) {
@@ -138,7 +138,8 @@ public:
        */
       std::cerr << "[Fatal] ASTVisitor dispatch failure. Unhandled NodeKind: "
                 << static_cast<int>(node->kind) << '\n';
-      std::abort();
+      throw std::runtime_error("ASTVisitor: Unhandled NodeKind: " +
+                                  std::to_string(static_cast<int>(node->kind)));
     }
   }
 };

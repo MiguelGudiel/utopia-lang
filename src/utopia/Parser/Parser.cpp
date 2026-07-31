@@ -359,6 +359,12 @@ ModuleNode *Parser::parseModule(std::string_view filePath) {
         }
 
       } else if (currentToken().type != TokenType::EOF_TOK) {
+        if (currentToken().type == TokenType::RBRACE) {
+          reportError(currentToken().line, currentToken().column, 1,
+                      "Stray '}' in module scope");
+          advance();
+          continue;
+        }
         auto stmt = parseStatement();
         if (stmt)
           statements.push_back(stmt);

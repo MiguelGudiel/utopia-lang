@@ -98,42 +98,55 @@ ModuleLoader::resolveImportURI(std::string_view uri,
 ModuleNode *ModuleLoader::loadModule(const std::string &importURI,
                                      const fs::path &currentFileDir, int line,
                                      int col, int len,
-                                     std::string_view sourceFile) {
-  auto resolvedPathResult = resolveImportURI(importURI, currentFileDir);
-
+                                     std::string_view sourceFile,
+                                     std::string_view virtualSource) {
+  fs::path absPath;
   std::string diagFile = sourceFile.empty() ? "" : std::string(sourceFile);
 
-  if (!resolvedPathResult) {
-    diags.report({DiagLevel::Error, line, col, len, resolvedPathResult.error(),
-                  diagFile});
-    return nullptr;
+  if (!virtualSource.empty()) {
+    absPath = fs::weakly_canonical(fs::path(importURI));
+  } else {
+    auto resolvedPathResult = resolveImportURI(importURI, currentFileDir);
+    if (!resolvedPathResult) {
+      diags.report({DiagLevel::Error, line, col, len,
+                    resolvedPathResult.error(), diagFile});
+      return nullptr;
+    }
+    absPath = *resolvedPathResult;
   }
 
-  fs::path absPath = *resolvedPathResult;
   std::string key = absPath.string();
 
   if (auto it = moduleCache.find(key); it != moduleCache.end()) {
     return it->second;
   }
 
-  /* Prevent infinite recursion resulting from circular dependencies */
-  if (sourceCache.contains(key)) {
+  if (activeImports.contains(key)) {
     diags.report({DiagLevel::Error, line, col, len,
                   "Circular import dependency detected: " + key, diagFile});
     return nullptr;
   }
+  activeImports.insert(key);
 
-  std::ifstream file(absPath);
-  if (!file) {
-    diags.report({DiagLevel::Error, line, col, len,
-                  "Could not open file: " + key, diagFile});
-    return nullptr;
+  std::string fileContent;
+  if (!virtualSource.empty()) {
+    fileContent = std::string(virtualSource);
+  } else {
+    std::ifstream file(absPath);
+    if (!file) {
+      diags.report({DiagLevel::Error, line, col, len,
+                    "Could not open file: " + key, diagFile});
+      activeImports.erase(key);
+      return nullptr;
+    }
+    std::stringstream buffer;
+    buffer << file.rdbuf();
+    fileContent = buffer.str();
   }
 
-  std::stringstream buffer;
-  buffer << file.rdbuf();
-
-  auto [sourceIt, inserted] = sourceCache.insert({key, buffer.str()});
+  std::string_view persistentSource = astCtx.copyString(fileContent);
+  auto [sourceIt, inserted] =
+      persistentSourceCache.insert({key, persistentSource});
   std::string_view sourceView = sourceIt->second;
 
   std::string_view persistentFilePath = astCtx.copyString(key);
@@ -166,10 +179,6 @@ ModuleNode *ModuleLoader::loadModule(const std::string &importURI,
   Parser parser(astCtx, tokens, diags, persistentFilePath, this);
   ModuleNode *module = parser.parseModule(persistentFilePath);
 
-  if (diags.hasErrors()) {
-    return nullptr;
-  }
-
   moduleCache[key] = module;
 
   for (std::string_view imp : module->rawImports) {
@@ -197,6 +206,7 @@ ModuleNode *ModuleLoader::loadModule(const std::string &importURI,
   }
   module->exportedModules = astCtx.copyArray<ModuleNode *>(resolvedExports);
 
+  activeImports.erase(key);
   return module;
 }
 
