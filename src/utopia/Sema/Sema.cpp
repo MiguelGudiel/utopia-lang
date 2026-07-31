@@ -1157,7 +1157,11 @@ SemaResult TypeCheckPass::visit(const NumberNode *node) {
   std::string_view raw = node->raw;
   const Type *ty = ctx->astCtx.Int32Ty;
 
-  if (raw.ends_with('f') || raw.ends_with('F')) {
+  /* Shield hex values from being incorrectly typed as Float32 due to 'F'/'f' */
+  bool isHex =
+      raw.length() > 2 && raw[0] == '0' && (raw[1] == 'x' || raw[1] == 'X');
+
+  if (!isHex && (raw.ends_with('f') || raw.ends_with('F'))) {
     ty = ctx->astCtx.Float32Ty;
   } else if (raw.ends_with("ul") || raw.ends_with("UL") ||
              raw.ends_with("lu") || raw.ends_with("LU")) {

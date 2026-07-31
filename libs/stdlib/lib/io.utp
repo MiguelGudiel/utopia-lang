@@ -1,0 +1,222 @@
+#if _WIN32
+
+@extern("_access")
+static int32 _access(const uint8* path, int32 mode);
+
+@extern("_mkdir")
+static int32 _mkdir(const uint8* path);
+
+@extern("_rmdir")
+static int32 _rmdir(const uint8* path);
+
+#else
+
+@extern("access")
+static int32 _access(const uint8* path, int32 mode);
+
+@extern("mkdir")
+static int32 _mkdir(const uint8* path, int32 mode);
+
+@extern("rmdir")
+static int32 _rmdir(const uint8* path);
+
+#endif
+
+@extern("fopen")
+static void* _fopen(const uint8* filename, const uint8* mode);
+
+@extern("fclose")
+static int32 _fclose(void* stream);
+
+@extern("fread")
+static uint64 _fread(void* ptr, uint64 size, uint64 count, void* stream);
+
+@extern("fwrite")
+static uint64 _fwrite(const void* ptr, uint64 size, uint64 count, void* stream);
+
+@extern("fseek")
+static int32 _fseek(void* stream, int64 offset, int32 origin);
+
+@extern("ftell")
+static int64 _ftell(void* stream);
+
+@extern("remove")
+static int32 _remove(const uint8* filename);
+
+@extern("rename")
+static int32 _rename(const uint8* oldname, const uint8* newname);
+
+/*
+ * Low-level API for granular file stream operations.
+ * Wraps C-style file manipulation with automated resource management.
+ */
+class FileHandle {
+  void* _handle;
+
+  static const int32 SEEK_SET = 0;
+  static const int32 SEEK_CUR = 1;
+  static const int32 SEEK_END = 2;
+
+  FileHandle() {
+    this._handle = null;
+  }
+
+  ~FileHandle() {
+    this.close();
+  }
+
+  bool open(String path, String mode) {
+    this.close();
+    this._handle = _fopen(path.c_str(), mode.c_str());
+    return this._handle != null;
+  }
+
+  void close() {
+    if (this._handle != null) {
+      _fclose(this._handle);
+      this._handle = null;
+    }
+  }
+
+  bool isOpen() => this._handle != null;
+
+  uint64 read(uint8* buffer, uint64 size, uint64 count) {
+    if (this._handle == null) return 0;
+    return _fread(buffer, size, count, this._handle);
+  }
+
+  uint64 write(const uint8* buffer, uint64 size, uint64 count) {
+    if (this._handle == null) return 0;
+    return _fwrite(buffer, size, count, this._handle);
+  }
+
+  bool seek(int64 offset, int32 origin) {
+    if (this._handle == null) return false;
+    return _fseek(this._handle, offset, origin) == 0;
+  }
+
+  int64 tell() {
+    if (this._handle == null) return -1;
+    return _ftell(this._handle);
+  }
+}
+
+/*
+ * High-level API for File manipulations.
+ */
+class File {
+  String _path;
+
+  File(String path) {
+    this._path = path;
+  }
+
+  String getPath() => this._path;
+
+  bool exists() {
+    return _access(this._path.c_str(), 0) == 0;
+  }
+
+  bool remove() {
+    return _remove(this._path.c_str()) == 0;
+  }
+
+  bool rename(String newPath) {
+    bool success = _rename(this._path.c_str(), newPath.c_str()) == 0;
+    if (success) {
+      this._path = newPath;
+    }
+    return success;
+  }
+
+  uint64 length() {
+    void* file = _fopen(this._path.c_str(), "rb");
+    if (file == null) return 0;
+    _fseek(file, 0, 2);
+    int64 size = _ftell(file);
+    _fclose(file);
+    
+    if (size < 0) return 0;
+    return size as uint64;
+  }
+
+  String readAsString() {
+    void* file = _fopen(this._path.c_str(), "rb");
+    if (file == null) return "";
+
+    _fseek(file, 0, 2);
+    int64 size = _ftell(file);
+    _fseek(file, 0, 0);
+
+    if (size <= 0) {
+      _fclose(file);
+      return "";
+    }
+
+    uint8* buffer = new uint8[size as uint64 + 1];
+    uint64 readSize = _fread(buffer, 1, size as uint64, file);
+    buffer[readSize] = 0;
+
+    _fclose(file);
+
+    String result = buffer;
+    delete[] buffer;
+    return result;
+  }
+
+  bool writeAsString(String content) {
+    void* file = _fopen(this._path.c_str(), "wb");
+    if (file == null) return false;
+
+    uint64 written = _fwrite(content.c_str(), 1, content.length(), file);
+    _fclose(file);
+    return written == content.length();
+  }
+
+  bool appendAsString(String content) {
+    void* file = _fopen(this._path.c_str(), "ab");
+    if (file == null) return false;
+
+    uint64 written = _fwrite(content.c_str(), 1, content.length(), file);
+    _fclose(file);
+    return written == content.length();
+  }
+
+  bool create() {
+    if (this.exists()) return true;
+    void* file = _fopen(this._path.c_str(), "wb");
+    if (file == null) return false;
+    _fclose(file);
+    return true;
+  }
+}
+
+/*
+ * High-level API for Directory manipulations.
+ */
+class Directory {
+  String _path;
+
+  Directory(String path) {
+    this._path = path;
+  }
+
+  String getPath() => this._path;
+
+  bool exists() {
+    return _access(this._path.c_str(), 0) == 0;
+  }
+
+  bool create() {
+    #if _WIN32
+    return _mkdir(this._path.c_str()) == 0;
+    #else
+    /* 0x1FF (hex) = 511 (dec) = 0777 (octal for POSIX) */
+    return _mkdir(this._path.c_str(), 0x1FF) == 0;
+    #endif
+  }
+
+  bool remove() {
+    return _rmdir(this._path.c_str()) == 0;
+  }
+}

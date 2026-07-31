@@ -10,5 +10,6 @@ build:
   sources:
     - "lib/test.utp"
     - "lib/ffi.utp"
+    - "lib/io.utp"
   linker_flags:
     - "-ldl"

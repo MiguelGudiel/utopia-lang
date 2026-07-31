@@ -2598,11 +2598,19 @@ ExprNode *Parser::parsePrimary() {
     int len = (int)raw.length();
     advance();
 
-    bool isFloat = raw.find('.') != std::string_view::npos ||
-                   raw.find('e') != std::string_view::npos ||
-                   raw.find('E') != std::string_view::npos ||
-                   raw.find('f') != std::string_view::npos ||
-                   raw.find('F') != std::string_view::npos;
+    /* Identify explicitly defined hexadecimal literals to avoid conflicting
+     * with floating-point scientific notation or suffixes (e.g., 'e', 'f'). */
+    bool isHex =
+        raw.length() > 2 && raw[0] == '0' && (raw[1] == 'x' || raw[1] == 'X');
+
+    bool isFloat = false;
+    if (!isHex) {
+      isFloat = raw.find('.') != std::string_view::npos ||
+                raw.find('e') != std::string_view::npos ||
+                raw.find('E') != std::string_view::npos ||
+                raw.find('f') != std::string_view::npos ||
+                raw.find('F') != std::string_view::npos;
+    }
 
     return astCtx.create<NumberNode>(raw, isFloat, line, col, len);
   }
@@ -2724,7 +2732,7 @@ ExprNode *Parser::parsePrimary() {
     auto varNode = astCtx.create<VariableNode>(name, line, col, len);
 
     if (isTemplateCall) {
-      advance(); // '<'
+      advance();
       std::vector<const Type *> tArgs;
       if (currentToken().type != TokenType::GT) {
         do {
