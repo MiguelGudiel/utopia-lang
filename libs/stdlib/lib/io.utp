@@ -9,6 +9,12 @@ static int32 _mkdir(const uint8* path);
 @extern("_rmdir")
 static int32 _rmdir(const uint8* path);
 
+@extern("GetModuleFileNameA")
+static uint32 _GetModuleFileNameA(void* module, uint8* buf, uint32 size);
+
+@extern("_getcwd")
+static uint8* _getcwd(uint8* buf, int32 size);
+
 #else
 
 @extern("access")
@@ -19,6 +25,17 @@ static int32 _mkdir(const uint8* path, int32 mode);
 
 @extern("rmdir")
 static int32 _rmdir(const uint8* path);
+
+#if __APPLE__
+@extern("_NSGetExecutablePath")
+static int32 _NSGetExecutablePath(uint8* buf, uint32* bufsize);
+#else
+@extern("readlink")
+static int64 _os_readlink(const uint8* path, uint8* buf, uint64 bufsize);
+#endif
+
+@extern("getcwd")
+static uint8* _getcwd(uint8* buf, uint64 size);
 
 #endif
 
@@ -45,6 +62,88 @@ static int32 _remove(const uint8* filename);
 
 @extern("rename")
 static int32 _rename(const uint8* oldname, const uint8* newname);
+
+class Path {
+  static String getExecutablePath() {
+    uint8[4096] exePath;
+    #if _WIN32
+    uint32 len = _GetModuleFileNameA(null, &exePath[0], 4096);
+    if (len <= 0) return "";
+    exePath[len] = 0;
+    return &exePath[0];
+    #else
+    #if __APPLE__
+    uint32 bufsize = 4096;
+    if (_NSGetExecutablePath(&exePath[0], &bufsize) != 0) return "";
+    return &exePath[0];
+    #else
+    int64 len = _os_readlink("/proc/self/exe", &exePath[0], 4096);
+    if (len <= 0) return "";
+    exePath[len] = 0;
+    return &exePath[0];
+    #endif
+    #endif
+  }
+
+  static String getCurrentDirectory() {
+    uint8[4096] buf;
+    #if _WIN32
+    uint8* res = _getcwd(&buf[0], 4096);
+    #else
+    uint8* res = _getcwd(&buf[0], 4096);
+    #endif
+    if (res == null) return "";
+    return res;
+  }
+
+  static String getDirectoryName(String path) {
+    int64 lastSlash = -1;
+    uint64 len = path.length();
+    for (uint64 i = 0; i < len; i++) {
+      if (path[i] == 47 || path[i] == 92) {
+        lastSlash = i as int64;
+      }
+    }
+    if (lastSlash == -1) return "";
+    
+    String dir;
+    for (int64 i = 0; i <= lastSlash; i++) {
+      dir.push_back(path[i as uint64]);
+    }
+    return dir;
+  }
+
+  static String getFileName(String path) {
+    int64 lastSlash = -1;
+    uint64 len = path.length();
+    for (uint64 i = 0; i < len; i++) {
+      if (path[i] == 47 || path[i] == 92) {
+        lastSlash = i as int64;
+      }
+    }
+    
+    String file;
+    for (uint64 i = (lastSlash + 1) as uint64; i < len; i++) {
+      file.push_back(path[i]);
+    }
+    return file;
+  }
+
+  static String combine(String path1, String path2) {
+    if (path1.length() == 0) return path2;
+    if (path2.length() == 0) return path1;
+    
+    uint8 lastChar = path1[path1.length() - 1];
+    if (lastChar == 47 || lastChar == 92) {
+      return path1 + path2;
+    }
+    #if _WIN32
+    return path1 + "\\" + path2;
+    #else
+    return path1 + "/" + path2;
+    #endif
+  }
+}
 
 /*
  * Low-level API for granular file stream operations.
