@@ -701,9 +701,25 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
 
   if (node->kind == NodeKind::Variable) {
     auto *varNode = static_cast<const VariableNode *>(node);
-    SymbolInfo sym = cgCtx.lookupDetailed(varNode->name);
+    std::string lookupName = std::string(varNode->name);
+
+    if (varNode->resolvedDecl &&
+        varNode->resolvedDecl->kind == NodeKind::VarDecl) {
+      auto *varDecl = static_cast<const VarDeclNode *>(varNode->resolvedDecl);
+      if (varDecl->isStatic && !varDecl->mangledName.empty()) {
+        lookupName = varDecl->mangledName;
+      }
+    }
+
+    SymbolInfo sym = cgCtx.lookupDetailed(lookupName);
 
     if (sym.value) {
+      /* Resolve scalar values directly from global variable initializers */
+      if (auto *gv = llvm::dyn_cast<llvm::GlobalVariable>(sym.value)) {
+        if (gv->isConstant() && gv->hasInitializer()) {
+          return gv->getInitializer();
+        }
+      }
       return llvm::dyn_cast<llvm::Constant>(sym.value);
     }
 
@@ -725,7 +741,17 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
 
     if (unNode->op == "&" && unNode->expr->kind == NodeKind::Variable) {
       auto *varNode = static_cast<const VariableNode *>(unNode->expr);
-      SymbolInfo sym = cgCtx.lookupDetailed(varNode->name);
+      std::string lookupName = std::string(varNode->name);
+
+      if (varNode->resolvedDecl &&
+          varNode->resolvedDecl->kind == NodeKind::VarDecl) {
+        auto *varDecl = static_cast<const VarDeclNode *>(varNode->resolvedDecl);
+        if (varDecl->isStatic && !varDecl->mangledName.empty()) {
+          lookupName = varDecl->mangledName;
+        }
+      }
+
+      SymbolInfo sym = cgCtx.lookupDetailed(lookupName);
       if (sym.value && llvm::isa<llvm::Constant>(sym.value)) {
         return llvm::cast<llvm::Constant>(sym.value);
       }
