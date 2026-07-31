@@ -10,6 +10,9 @@
 #include <unordered_set>
 #include <yaml-cpp/yaml.h>
 
+#include <fstream>
+#include <sstream>
+
 using json = nlohmann::json;
 
 namespace utopia::lsp {
@@ -125,6 +128,186 @@ public:
   void visit(const ModuleNode *) {}
 };
 
+std::string pathToUri(std::string_view path) {
+  if (path.empty()) {
+    return "";
+  }
+  std::string uri(path);
+  std::replace(uri.begin(), uri.end(), '\\', '/');
+#if defined(_WIN32)
+  if (!uri.empty() && uri[0] != '/') {
+    uri = "/" + uri;
+  }
+#endif
+  if (!uri.starts_with("file://")) {
+    uri = "file://" + uri;
+  }
+  return uri;
+}
+
+std::string getFileText(const std::string &path) {
+  std::string uri = pathToUri(path);
+  if (documents.contains(uri)) {
+    return documents[uri].text;
+  }
+  std::ifstream file(path);
+  if (file) {
+    std::stringstream buffer;
+    buffer << file.rdbuf();
+    return buffer.str();
+  }
+  return "";
+}
+
+struct SourceLocation {
+  int line;
+  int col;
+  int length;
+};
+
+SourceLocation getExactNameLocation(const std::string &text,
+                                    const DeclNode *decl) {
+  SourceLocation loc{decl->line > 0 ? decl->line - 1 : 0,
+                     decl->column > 0 ? decl->column - 1 : 0,
+                     decl->length > 0 ? decl->length : 1};
+  if (text.empty() || decl->line <= 0)
+    return loc;
+
+  std::string_view name;
+  if (decl->kind == NodeKind::VarDecl)
+    name = static_cast<const VarDeclNode *>(decl)->varName;
+  else if (decl->kind == NodeKind::FunctionDecl)
+    name = static_cast<const FunctionDeclNode *>(decl)->name;
+  else if (decl->kind == NodeKind::ParamDecl)
+    name = static_cast<const ParamDeclNode *>(decl)->name;
+  else if (decl->kind == NodeKind::StructDecl)
+    name = static_cast<const StructDeclNode *>(decl)->name;
+  else if (decl->kind == NodeKind::ClassDecl)
+    name = static_cast<const ClassDeclNode *>(decl)->name;
+  else if (decl->kind == NodeKind::UnionDecl)
+    name = static_cast<const UnionDeclNode *>(decl)->name;
+  else if (decl->kind == NodeKind::EnumDecl)
+    name = static_cast<const EnumDeclNode *>(decl)->name;
+  else if (decl->kind == NodeKind::TypedefDecl)
+    name = static_cast<const TypedefDeclNode *>(decl)->aliasName;
+
+  if (name.empty())
+    return loc;
+
+  int currentLine = 0;
+  size_t startIdx = 0;
+  for (size_t i = 0; i < text.length(); ++i) {
+    if (currentLine == loc.line) {
+      startIdx = i + loc.col;
+      break;
+    }
+    if (text[i] == '\n')
+      currentLine++;
+  }
+
+  if (startIdx >= text.length())
+    return loc;
+
+  size_t pos = text.find(name, startIdx);
+  if (pos != std::string::npos && pos - startIdx < 150) {
+    bool leftOk =
+        pos == 0 || (!std::isalnum(text[pos - 1]) && text[pos - 1] != '_');
+    bool rightOk = pos + name.length() >= text.length() ||
+                   (!std::isalnum(text[pos + name.length()]) &&
+                    text[pos + name.length()] != '_');
+
+    if (leftOk && rightOk) {
+      int newCol = 0;
+      int newLine = 0;
+      for (size_t i = 0; i < pos; ++i) {
+        if (text[i] == '\n') {
+          newLine++;
+          newCol = 0;
+        } else {
+          newCol++;
+        }
+      }
+      return {newLine, newCol, (int)name.length()};
+    }
+  }
+  return loc;
+}
+
+const DeclNode *getTypeDeclaration(const Type *ty) {
+  if (!ty)
+    return nullptr;
+  const Type *unqual = ty->getUnqualifiedType();
+
+  while (unqual->isPointerType())
+    unqual = static_cast<const PointerType *>(unqual)
+                 ->getPointeeType()
+                 ->getUnqualifiedType();
+
+  while (unqual->isReferenceType() ||
+         unqual->getKind() == TypeKind::RValueReference) {
+    if (unqual->isReferenceType())
+      unqual = static_cast<const ReferenceType *>(unqual)
+                   ->getPointeeType()
+                   ->getUnqualifiedType();
+    else
+      unqual = static_cast<const RValueReferenceType *>(unqual)
+                   ->getPointeeType()
+                   ->getUnqualifiedType();
+  }
+
+  while (unqual->getKind() == TypeKind::Array)
+    unqual = static_cast<const ArrayType *>(unqual)
+                 ->getElementType()
+                 ->getUnqualifiedType();
+
+  if (unqual->getKind() == TypeKind::Class ||
+      unqual->getKind() == TypeKind::Struct ||
+      unqual->getKind() == TypeKind::Union) {
+    return static_cast<const RecordType *>(unqual)->getDeclaration();
+  } else if (unqual->getKind() == TypeKind::Enum) {
+    return static_cast<const EnumType *>(unqual)->getDeclaration();
+  } else if (unqual->getKind() == TypeKind::Alias) {
+    return static_cast<const AliasType *>(unqual)->getDeclaration();
+  }
+  return nullptr;
+}
+
+std::string getHoverTextForDecl(const DeclNode *decl) {
+  if (!decl)
+    return "";
+  std::string text;
+
+  if (decl->kind == NodeKind::ClassDecl) {
+    text = "```utopia\nclass " +
+           std::string(static_cast<const ClassDeclNode *>(decl)->name) +
+           "\n```";
+  } else if (decl->kind == NodeKind::StructDecl) {
+    text = "```utopia\nstruct " +
+           std::string(static_cast<const StructDeclNode *>(decl)->name) +
+           "\n```";
+  } else if (decl->kind == NodeKind::UnionDecl) {
+    text = "```utopia\nunion " +
+           std::string(static_cast<const UnionDeclNode *>(decl)->name) +
+           "\n```";
+  } else if (decl->kind == NodeKind::EnumDecl) {
+    text = "```utopia\nenum " +
+           std::string(static_cast<const EnumDeclNode *>(decl)->name) + "\n```";
+  } else if (decl->kind == NodeKind::TypedefDecl) {
+    text = "```utopia\ntypedef " +
+           std::string(static_cast<const TypedefDeclNode *>(decl)->aliasName) +
+           "\n```";
+  } else if (decl->kind == NodeKind::AnnotationDecl) {
+    text = "```utopia\nannotation " +
+           std::string(static_cast<const AnnotationDeclNode *>(decl)->name) +
+           "\n```";
+  }
+
+  if (!decl->docString.empty())
+    text += "\n---\n" + std::string(decl->docString);
+
+  return text;
+}
+
 void handleHover(const json &req) {
   std::string uri = req["params"]["textDocument"]["uri"];
   int line = req["params"]["position"]["line"].get<int>() + 1;
@@ -138,10 +321,12 @@ void handleHover(const json &req) {
 
     if (node) {
       std::string hoverText;
+      const DeclNode *declTarget = nullptr;
 
       if (node->kind == NodeKind::Variable) {
         auto varNode = static_cast<const VariableNode *>(node);
         if (varNode->resolvedDecl) {
+          declTarget = varNode->resolvedDecl;
           if (varNode->resolvedDecl->kind == NodeKind::VarDecl) {
             auto decl = static_cast<const VarDeclNode *>(varNode->resolvedDecl);
             hoverText = "```utopia\n" + decl->type->toString() + " " +
@@ -160,12 +345,15 @@ void handleHover(const json &req) {
                 static_cast<const ParamDeclNode *>(varNode->resolvedDecl);
             hoverText = "```utopia\n" + decl->type->toString() + " " +
                         std::string(decl->name) + "\n```";
+          } else {
+            hoverText = getHoverTextForDecl(varNode->resolvedDecl);
           }
         }
       } else if (node->kind == NodeKind::FunctionCall) {
         auto callNode = static_cast<const FunctionCallNode *>(node);
         if (callNode->resolvedFunc) {
           auto funcRes = callNode->resolvedFunc;
+          declTarget = funcRes;
           hoverText = "```utopia\n" + funcRes->returnType->toString() + " " +
                       std::string(funcRes->name) + "(";
           for (size_t i = 0; i < funcRes->params.size(); ++i) {
@@ -177,28 +365,113 @@ void handleHover(const json &req) {
           if (!funcRes->docString.empty())
             hoverText += "\n---\n" + std::string(funcRes->docString);
         }
-      } else if (node->kind == NodeKind::FunctionDecl) {
-        auto declNode = static_cast<const FunctionDeclNode *>(node);
-        hoverText = "```utopia\n" + declNode->returnType->toString() + " " +
-                    std::string(declNode->name) + "(...)\n```";
-        if (!declNode->docString.empty())
-          hoverText += "\n---\n" + std::string(declNode->docString);
-      } else if (node->kind == NodeKind::VarDecl) {
-        auto declNode = static_cast<const VarDeclNode *>(node);
-        hoverText = "```utopia\n" + declNode->type->toString() + " " +
-                    std::string(declNode->varName) + "\n```";
-        if (!declNode->docString.empty())
-          hoverText += "\n---\n" + std::string(declNode->docString);
+      } else if (node->kind == NodeKind::MemberAccess) {
+        auto ma = static_cast<const MemberAccessNode *>(node);
+        if (ma->isMethodRef && ma->resolvedMethod) {
+          declTarget = ma->resolvedMethod;
+          hoverText = "```utopia\n" +
+                      ma->resolvedMethod->returnType->toString() + " " +
+                      std::string(ma->resolvedMethod->name) + "(...)\n```";
+          if (!ma->resolvedMethod->docString.empty())
+            hoverText += "\n---\n" + std::string(ma->resolvedMethod->docString);
+        } else if (ma->isStaticFieldRef && ma->resolvedVar) {
+          declTarget = ma->resolvedVar;
+          hoverText = "```utopia\n" + ma->resolvedVar->type->toString() + " " +
+                      std::string(ma->resolvedVar->varName) + "\n```";
+          if (!ma->resolvedVar->docString.empty())
+            hoverText += "\n---\n" + std::string(ma->resolvedVar->docString);
+        } else if (ma->isEnumMember && ma->enumMember) {
+          declTarget = ma->enumMember;
+          hoverText =
+              "```utopia\n" + std::string(ma->enumMember->name) + "\n```";
+          if (!ma->enumMember->docString.empty())
+            hoverText += "\n---\n" + std::string(ma->enumMember->docString);
+        }
+      } else if (node->kind == NodeKind::FunctionDecl ||
+                 node->kind == NodeKind::VarDecl ||
+                 node->kind == NodeKind::ParamDecl ||
+                 node->kind == NodeKind::ClassDecl ||
+                 node->kind == NodeKind::StructDecl ||
+                 node->kind == NodeKind::UnionDecl ||
+                 node->kind == NodeKind::EnumDecl ||
+                 node->kind == NodeKind::EnumMember ||
+                 node->kind == NodeKind::TypedefDecl ||
+                 node->kind == NodeKind::AnnotationDecl) {
+
+        declTarget = static_cast<const DeclNode *>(node);
+        auto loc = getExactNameLocation(doc.text, declTarget);
+
+        if (col - 1 < loc.col) {
+          const Type *t = nullptr;
+          if (declTarget->kind == NodeKind::VarDecl)
+            t = static_cast<const VarDeclNode *>(declTarget)->type;
+          else if (declTarget->kind == NodeKind::FunctionDecl)
+            t = static_cast<const FunctionDeclNode *>(declTarget)->returnType;
+          else if (declTarget->kind == NodeKind::ParamDecl)
+            t = static_cast<const ParamDeclNode *>(declTarget)->type;
+
+          if (t) {
+            if (auto typeDecl = getTypeDeclaration(t)) {
+              declTarget = typeDecl;
+              hoverText = getHoverTextForDecl(typeDecl);
+            } else {
+              hoverText = "```utopia\n" + t->toString() + "\n```";
+            }
+          }
+        }
+
+        if (hoverText.empty()) {
+          if (declTarget->kind == NodeKind::FunctionDecl) {
+            auto declNode = static_cast<const FunctionDeclNode *>(declTarget);
+            hoverText = "```utopia\n" + declNode->returnType->toString() + " " +
+                        std::string(declNode->name) + "(...)\n```";
+            if (!declNode->docString.empty())
+              hoverText += "\n---\n" + std::string(declNode->docString);
+          } else if (declTarget->kind == NodeKind::VarDecl) {
+            auto declNode = static_cast<const VarDeclNode *>(declTarget);
+            hoverText = "```utopia\n" + declNode->type->toString() + " " +
+                        std::string(declNode->varName) + "\n```";
+            if (!declNode->docString.empty())
+              hoverText += "\n---\n" + std::string(declNode->docString);
+          } else if (declTarget->kind == NodeKind::ParamDecl) {
+            auto declNode = static_cast<const ParamDeclNode *>(declTarget);
+            hoverText = "```utopia\n" + declNode->type->toString() + " " +
+                        std::string(declNode->name) + "\n```";
+          } else {
+            hoverText = getHoverTextForDecl(declTarget);
+          }
+        }
       }
 
       if (!hoverText.empty()) {
+        int hoverLine = node->line > 0 ? node->line - 1 : 0;
+        int hoverCol = node->column > 0 ? node->column - 1 : 0;
+        int hoverLen = node->length > 0 ? node->length : 1;
+
+        if (node->kind == NodeKind::FunctionDecl ||
+            node->kind == NodeKind::VarDecl ||
+            node->kind == NodeKind::ParamDecl ||
+            node->kind == NodeKind::ClassDecl ||
+            node->kind == NodeKind::StructDecl ||
+            node->kind == NodeKind::UnionDecl ||
+            node->kind == NodeKind::EnumDecl ||
+            node->kind == NodeKind::TypedefDecl ||
+            node->kind == NodeKind::AnnotationDecl) {
+
+          if (declTarget == node) {
+            auto loc = getExactNameLocation(
+                doc.text, static_cast<const DeclNode *>(node));
+            hoverLine = loc.line;
+            hoverCol = loc.col;
+            hoverLen = loc.length;
+          }
+        }
+
         res = {{"contents", {{"kind", "markdown"}, {"value", hoverText}}},
                {"range",
-                {{"start",
-                  {{"line", node->line - 1}, {"character", node->column - 1}}},
+                {{"start", {{"line", hoverLine}, {"character", hoverCol}}},
                  {"end",
-                  {{"line", node->line - 1},
-                   {"character", node->column - 1 + node->length}}}}}};
+                  {{"line", hoverLine}, {"character", hoverCol + hoverLen}}}}}};
       }
     }
   }
@@ -210,58 +483,143 @@ void handleDefinition(const json &req) {
   int line = req["params"]["position"]["line"].get<int>() + 1;
   int col = req["params"]["position"]["character"].get<int>() + 1;
 
-  json res = nullptr;
+  json res = json::array();
   if (documents.contains(uri)) {
     auto &doc = documents[uri];
     SearchVisitor searcher(line, col);
     const ASTNode *node = searcher.find(doc.ast);
 
     if (node) {
+      const DeclNode *targetDecl = nullptr;
+
       if (node->kind == NodeKind::Variable) {
         auto varNode = static_cast<const VariableNode *>(node);
         if (varNode->resolvedDecl) {
-          int defLine = varNode->resolvedDecl->line - 1;
-          int defCol = varNode->resolvedDecl->column - 1;
-          res = {{"uri", uri},
-                 {"range",
-                  {{"start", {{"line", defLine}, {"character", defCol}}},
-                   {"end",
-                    {{"line", defLine},
-                     {"character", defCol + varNode->resolvedDecl->length}}}}}};
+          targetDecl = varNode->resolvedDecl;
+        } else if (varNode->isField && varNode->parentType) {
+          auto recTy = static_cast<const RecordType *>(varNode->parentType);
+          auto decl = recTy->getDeclaration();
+          if (decl) {
+            llvm::ArrayRef<VarDeclNode *> fields;
+            if (decl->kind == NodeKind::ClassDecl) {
+              fields = static_cast<const ClassDeclNode *>(decl)->fields;
+            } else if (decl->kind == NodeKind::StructDecl) {
+              fields = static_cast<const StructDeclNode *>(decl)->fields;
+            } else if (decl->kind == NodeKind::UnionDecl) {
+              fields = static_cast<const UnionDeclNode *>(decl)->fields;
+            }
+            for (auto *f : fields) {
+              if (f->varName == varNode->name) {
+                targetDecl = f;
+                break;
+              }
+            }
+          }
         }
       } else if (node->kind == NodeKind::FunctionCall) {
-        auto callNode = static_cast<const FunctionCallNode *>(node);
-        if (callNode->resolvedFunc) {
-          int defLine = callNode->resolvedFunc->line - 1;
-          int defCol = callNode->resolvedFunc->column - 1;
-          res = {
-              {"uri", uri},
-              {"range",
-               {{"start", {{"line", defLine}, {"character", defCol}}},
-                {"end",
-                 {{"line", defLine},
-                  {"character", defCol + callNode->resolvedFunc->length}}}}}};
+        targetDecl = static_cast<const FunctionCallNode *>(node)->resolvedFunc;
+      } else if (node->kind == NodeKind::MemberAccess) {
+        auto ma = static_cast<const MemberAccessNode *>(node);
+        if (ma->isMethodRef) {
+          targetDecl = ma->resolvedMethod;
+        } else if (ma->isStaticFieldRef) {
+          targetDecl = ma->resolvedVar;
+        } else if (ma->isEnumMember) {
+          targetDecl = ma->enumMember;
+        } else {
+          const Type *baseTy = ma->object->exprType;
+          if (baseTy) {
+            if (baseTy->isPointerType()) {
+              baseTy =
+                  static_cast<const PointerType *>(baseTy)->getPointeeType();
+            } else if (baseTy->isReferenceType() ||
+                       baseTy->getKind() == TypeKind::RValueReference) {
+              baseTy =
+                  static_cast<const ReferenceType *>(baseTy)->getPointeeType();
+            }
+
+            const Type *unqual = baseTy->getUnqualifiedType();
+            if (unqual->getKind() == TypeKind::Class ||
+                unqual->getKind() == TypeKind::Struct ||
+                unqual->getKind() == TypeKind::Union) {
+              auto recTy = static_cast<const RecordType *>(unqual);
+              auto decl = recTy->getDeclaration();
+              if (decl) {
+                llvm::ArrayRef<VarDeclNode *> fields;
+                if (decl->kind == NodeKind::ClassDecl) {
+                  fields = static_cast<const ClassDeclNode *>(decl)->fields;
+                } else if (decl->kind == NodeKind::StructDecl) {
+                  fields = static_cast<const StructDeclNode *>(decl)->fields;
+                } else if (decl->kind == NodeKind::UnionDecl) {
+                  fields = static_cast<const UnionDeclNode *>(decl)->fields;
+                }
+                for (auto *f : fields) {
+                  if (f->varName == ma->memberName) {
+                    targetDecl = f;
+                    break;
+                  }
+                }
+              }
+            }
+          }
         }
-      } else if (node->kind == NodeKind::FunctionDecl) {
-        auto declNode = static_cast<const FunctionDeclNode *>(node);
-        res = {{"uri", uri},
-               {"range",
-                {{"start",
-                  {{"line", declNode->line - 1},
-                   {"character", declNode->column - 1}}},
-                 {"end",
-                  {{"line", declNode->line - 1},
-                   {"character", declNode->column - 1 + declNode->length}}}}}};
-      } else if (node->kind == NodeKind::VarDecl) {
-        auto declNode = static_cast<const VarDeclNode *>(node);
-        res = {{"uri", uri},
-               {"range",
-                {{"start",
-                  {{"line", declNode->line - 1},
-                   {"character", declNode->column - 1}}},
-                 {"end",
-                  {{"line", declNode->line - 1},
-                   {"character", declNode->column - 1 + declNode->length}}}}}};
+      } else if (node->kind == NodeKind::New) {
+        targetDecl =
+            static_cast<const NewExprNode *>(node)->resolvedConstructor;
+      } else if (node->kind == NodeKind::FunctionDecl ||
+                 node->kind == NodeKind::VarDecl ||
+                 node->kind == NodeKind::ParamDecl ||
+                 node->kind == NodeKind::ClassDecl ||
+                 node->kind == NodeKind::StructDecl ||
+                 node->kind == NodeKind::UnionDecl ||
+                 node->kind == NodeKind::EnumDecl ||
+                 node->kind == NodeKind::EnumMember ||
+                 node->kind == NodeKind::TypedefDecl ||
+                 node->kind == NodeKind::AnnotationDecl) {
+
+        targetDecl = static_cast<const DeclNode *>(node);
+        auto loc = getExactNameLocation(doc.text, targetDecl);
+
+        if (col - 1 < loc.col) {
+          const Type *t = nullptr;
+          if (targetDecl->kind == NodeKind::VarDecl)
+            t = static_cast<const VarDeclNode *>(targetDecl)->type;
+          else if (targetDecl->kind == NodeKind::FunctionDecl)
+            t = static_cast<const FunctionDeclNode *>(targetDecl)->returnType;
+          else if (targetDecl->kind == NodeKind::ParamDecl)
+            t = static_cast<const ParamDeclNode *>(targetDecl)->type;
+
+          if (t) {
+            if (auto typeDecl = getTypeDeclaration(t)) {
+              targetDecl = typeDecl;
+            } else {
+              targetDecl = nullptr;
+            }
+          }
+        }
+      }
+
+      if (targetDecl) {
+        std::string targetUri = uri;
+        std::string targetText = doc.text;
+
+        if (!targetDecl->declFilePath.empty()) {
+          targetUri = pathToUri(targetDecl->declFilePath);
+          if (targetUri != uri) {
+            targetText = getFileText(std::string(targetDecl->declFilePath));
+          }
+        }
+
+        auto loc = getExactNameLocation(targetText, targetDecl);
+        int defLine = loc.line;
+        int defCol = loc.col;
+        int defLen = loc.length;
+
+        res = {
+            {"uri", targetUri},
+            {"range",
+             {{"start", {{"line", defLine}, {"character", defCol}}},
+              {"end", {{"line", defLine}, {"character", defCol + defLen}}}}}};
       }
     }
   }

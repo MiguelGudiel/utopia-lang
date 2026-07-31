@@ -606,8 +606,10 @@ void DeclCollectorPass::visit(const UnionDeclNode *node) {
   }
 
   ctx->addDecl(node->name, node);
-  const_cast<UnionDeclNode *>(node)->recordType =
-      ctx->astCtx.getRecordType(node->name);
+
+  auto *recTy = ctx->astCtx.getRecordType(node->name);
+  const_cast<UnionDeclNode *>(node)->recordType = recTy;
+  recTy->setDeclaration(node);
 
   if (node->isOpaque)
     return;
@@ -707,8 +709,10 @@ void DeclCollectorPass::visit(const StructDeclNode *node) {
   }
 
   ctx->addDecl(node->name, node);
-  const_cast<StructDeclNode *>(node)->recordType =
-      ctx->astCtx.getRecordType(node->name);
+
+  auto *recTy = ctx->astCtx.getRecordType(node->name);
+  const_cast<StructDeclNode *>(node)->recordType = recTy;
+  recTy->setDeclaration(node);
 
   if (node->isOpaque)
     return;
@@ -3297,6 +3301,13 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
           node->exprType = bestMatch->returnType;
           node->isLValue = (node->exprType->isReferenceType());
         }
+
+        if (node->target->kind == NodeKind::Variable) {
+          const_cast<VariableNode *>(
+              static_cast<const VariableNode *>(node->target))
+              ->resolvedDecl = bestMatch;
+        }
+
         return node->exprType;
       }
 
