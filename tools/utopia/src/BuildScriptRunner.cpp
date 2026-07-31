@@ -40,6 +40,8 @@ bool BuildScriptRunner::run(const std::filesystem::path &scriptPath,
   modConfig.stdlibRoot = options.stdlibRoot;
   modConfig.preludeRoot = options.preludeRoot;
   modConfig.buildLibRoot = options.buildLibRoot;
+  modConfig.includeDirs = options.includeDirs;
+  modConfig.packages = options.packages;
   modConfig.isBuildScript = true;
 
   DiagnosticsEngine diagEngine;

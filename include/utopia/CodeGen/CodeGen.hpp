@@ -17,7 +17,7 @@ namespace utopia {
 class CodeGen : public ASTVisitor<CodeGen, llvm::Value *> {
 public:
   CodeGen(BackendContext &bCtx, llvm::Module &llvmMod, DiagnosticsEngine &diags,
-          bool emitDebugInfo);
+          bool emitDebugInfo, std::string filePath);
 
   /* Intercepts and sets the debug location securely prior to evaluation */
   llvm::Value *dispatch(const ASTNode *node);
@@ -74,6 +74,7 @@ private:
   DiagnosticsEngine &diags;
   const FunctionDeclNode *currentFunc = nullptr;
   llvm::AllocaInst *lastTemporaryAlloca = nullptr;
+  std::string currentFilePath;
 
   /* Debug Metadata Emitters */
   bool emitDebugInfo;

@@ -88,6 +88,8 @@ bool CompilerDriver::run() {
   modConfig.projectRoot = options.projectRoot;
   modConfig.stdlibRoot = options.stdlibRoot;
   modConfig.preludeRoot = options.preludeRoot;
+  modConfig.includeDirs = options.includeDirs;
+  modConfig.packages = options.packages;
 
   ModuleLoader loader(astCtx, modConfig, diagEngine);
 
@@ -133,6 +135,27 @@ bool CompilerDriver::run() {
 
     fs::path unitPath = fs::absolute(std::string(modNode->filePath));
     std::string baseName = unitPath.stem().string();
+    std::string unitStr = unitPath.string();
+
+    /* Filter out external package dependencies to prevent redundant IR
+     * generation. Dependencies are independently compiled and linked by the
+     * build system.
+     */
+    bool isPackageDependency = false;
+    for (const auto &[pkgName, pkgRoot] : options.packages) {
+      if (pkgName == options.projectName)
+        continue;
+
+      std::string pkgStr = fs::absolute(pkgRoot).string();
+      if (unitStr.find(pkgStr) == 0) {
+        isPackageDependency = true;
+        break;
+      }
+    }
+
+    if (isPackageDependency) {
+      return true;
+    }
 
     Logger::debug("[Driver Debug] Starting IR generation for unit: " +
                   baseName);
@@ -223,9 +246,10 @@ bool CompilerDriver::run() {
   } else {
     ScopedTimer timer("Linking");
 
-    if (options.target == "library") {
-      if (!fs::exists(outDir))
-        fs::create_directories(outDir);
+    if (options.target == "shared_library" || options.target == "shared") {
+      fs::path binOut = outDir / "bin";
+      if (!fs::exists(binOut))
+        fs::create_directories(binOut);
 
 #if defined(_WIN32)
       std::string ext = ".dll";
@@ -236,13 +260,34 @@ bool CompilerDriver::run() {
 #endif
 
       std::string libPath =
-          (outDir / ("lib" + options.projectName + ext)).string();
-      std::vector<std::string> libFlags = options.linkerFlags;
-      libFlags.push_back("-shared");
+          (binOut / ("lib" + options.projectName + ext)).string();
 
-      if (!Linker::link(compiledObjects, libPath, options.isDebug, libFlags)) {
-        std::cerr
-            << "\033[1;31m[Fatal]\033[0m Linker step failed for library.\n";
+      if (!Linker::link(compiledObjects, libPath, options.isDebug,
+                        options.linkerFlags, "shared_library")) {
+        std::cerr << "\033[1;31m[Fatal]\033[0m Linker step failed for shared "
+                     "library.\n";
+        return false;
+      }
+      Logger::info("\033[1;32m[Build Success]\033[0m " + libPath);
+    } else if (options.target == "library" ||
+               options.target == "static_library" ||
+               options.target == "static") {
+      fs::path libOut = outDir / "lib";
+      if (!fs::exists(libOut))
+        fs::create_directories(libOut);
+
+      std::string ext = ".a";
+#if defined(_WIN32)
+      ext = ".lib";
+#endif
+
+      std::string libPath =
+          (libOut / ("lib" + options.projectName + ext)).string();
+
+      if (!Linker::link(compiledObjects, libPath, options.isDebug,
+                        options.linkerFlags, "static_library")) {
+        std::cerr << "\033[1;31m[Fatal]\033[0m Linker step failed for static "
+                     "library.\n";
         return false;
       }
       Logger::info("\033[1;32m[Build Success]\033[0m " + libPath);
@@ -254,7 +299,7 @@ bool CompilerDriver::run() {
       std::string executablePath = (binOut / options.projectName).string();
 
       if (!Linker::link(compiledObjects, executablePath, options.isDebug,
-                        options.linkerFlags)) {
+                        options.linkerFlags, "executable")) {
         std::cerr << "\033[1;31m[Fatal]\033[0m Linker step failed.\n";
         return false;
       }

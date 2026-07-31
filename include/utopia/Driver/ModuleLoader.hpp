@@ -7,6 +7,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 namespace utopia {
 
@@ -15,6 +16,8 @@ struct ModuleLoaderConfig {
   std::filesystem::path stdlibRoot;
   std::filesystem::path preludeRoot;
   std::filesystem::path buildLibRoot;
+  std::vector<std::string> includeDirs;
+  std::unordered_map<std::string, std::string> packages;
   bool isBuildScript = false;
 };
 
