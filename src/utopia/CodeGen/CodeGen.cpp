@@ -447,7 +447,7 @@ llvm::Function *CodeGen::getOrCreateFunction(const FunctionDeclNode *node) {
         if (ann->args[0]->kind == NodeKind::Number) {
           auto *num = static_cast<const NumberNode *>(ann->args[0]);
           if (!num->isFloat) {
-            uint64_t sz = std::stoull(std::string(num->raw));
+            uint64_t sz = std::stoull(std::string(num->raw), nullptr, 0);
             addAttrObj(llvm::Attribute::getWithDereferenceableBytes(ctx, sz));
           }
         }
@@ -646,9 +646,24 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
     auto *num = static_cast<const NumberNode *>(node);
     std::string numStr(num->raw);
 
-    while (!numStr.empty() && !std::isdigit(numStr.back()) &&
-           numStr.back() != '.') {
-      numStr.pop_back();
+    bool isHex = false;
+    uint8_t radix = 10;
+    if (numStr.length() > 2 && numStr[0] == '0' &&
+        (numStr[1] == 'x' || numStr[1] == 'X')) {
+      isHex = true;
+      radix = 16;
+      numStr = numStr.substr(2); // Remove "0x"
+    }
+
+    while (!numStr.empty()) {
+      char back = numStr.back();
+      if (back == 'u' || back == 'U' || back == 'l' || back == 'L') {
+        numStr.pop_back();
+      } else if (!isHex && (back == 'f' || back == 'F')) {
+        numStr.pop_back();
+      } else {
+        break;
+      }
     }
 
     llvm::Type *llvmTy = num->exprType ? getLLVMType(num->exprType) : nullptr;
@@ -662,10 +677,10 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
     } else {
       if (llvmTy && llvmTy->isIntegerTy()) {
         auto *intTy = llvm::cast<llvm::IntegerType>(llvmTy);
-        return llvm::ConstantInt::get(intTy, llvm::StringRef(numStr), 10);
+        return llvm::ConstantInt::get(intTy, llvm::StringRef(numStr), radix);
       }
       return llvm::ConstantInt::get(builder.getInt32Ty(),
-                                    llvm::StringRef(numStr), 10);
+                                    llvm::StringRef(numStr), radix);
     }
   }
 
@@ -1135,9 +1150,25 @@ llvm::Value *CodeGen::visit(const BlockNode *node) {
 
 llvm::Value *CodeGen::visit(const NumberNode *node) {
   std::string numStr(node->raw);
-  while (!numStr.empty() && !std::isdigit(numStr.back()) &&
-         numStr.back() != '.') {
-    numStr.pop_back();
+
+  bool isHex = false;
+  uint8_t radix = 10;
+  if (numStr.length() > 2 && numStr[0] == '0' &&
+      (numStr[1] == 'x' || numStr[1] == 'X')) {
+    isHex = true;
+    radix = 16;
+    numStr = numStr.substr(2); // Remove "0x"
+  }
+
+  while (!numStr.empty()) {
+    char back = numStr.back();
+    if (back == 'u' || back == 'U' || back == 'l' || back == 'L') {
+      numStr.pop_back();
+    } else if (!isHex && (back == 'f' || back == 'F')) {
+      numStr.pop_back();
+    } else {
+      break;
+    }
   }
 
   llvm::Type *llvmTy = node->exprType ? getLLVMType(node->exprType) : nullptr;
@@ -1151,10 +1182,10 @@ llvm::Value *CodeGen::visit(const NumberNode *node) {
 
   if (llvmTy && llvmTy->isIntegerTy()) {
     auto *intTy = llvm::cast<llvm::IntegerType>(llvmTy);
-    return llvm::ConstantInt::get(intTy, llvm::StringRef(numStr), 10);
+    return llvm::ConstantInt::get(intTy, llvm::StringRef(numStr), radix);
   }
   return llvm::ConstantInt::get(builder.getInt32Ty(), llvm::StringRef(numStr),
-                                10);
+                                radix);
 }
 
 llvm::Value *CodeGen::visit(const BoolNode *node) {
@@ -1945,7 +1976,8 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
         if (ann->name == "align" && !ann->args.empty() &&
             ann->args[0]->kind == NodeKind::Number) {
           uint64_t typeAlign = std::stoull(
-              std::string(static_cast<const NumberNode *>(ann->args[0])->raw));
+              std::string(static_cast<const NumberNode *>(ann->args[0])->raw),
+              nullptr, 0);
           if (typeAlign > customAlign) {
             customAlign = typeAlign;
           }
@@ -1958,7 +1990,8 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
     if (ann->name == "align" && !ann->args.empty() &&
         ann->args[0]->kind == NodeKind::Number) {
       uint64_t varAlign = std::stoull(
-          std::string(static_cast<const NumberNode *>(ann->args[0])->raw));
+          std::string(static_cast<const NumberNode *>(ann->args[0])->raw),
+          nullptr, 0);
       if (varAlign > customAlign) {
         customAlign = varAlign;
       }

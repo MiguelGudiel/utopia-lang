@@ -289,27 +289,39 @@ Token Lexer::parseToken() {
 
   if (std::isdigit(c)) {
     size_t startCursor = cursor;
+    bool isHex = false;
 
-    while (cursor < source.length() && std::isdigit(source[cursor])) {
+    if (c == '0' && cursor + 1 < source.length() &&
+        (source[cursor + 1] == 'x' || source[cursor + 1] == 'X')) {
+      isHex = true;
       advance();
-    }
-
-    if (cursor < source.length() && source[cursor] == '.') {
       advance();
+      while (cursor < source.length() &&
+             std::isxdigit(static_cast<unsigned char>(source[cursor]))) {
+        advance();
+      }
+    } else {
       while (cursor < source.length() && std::isdigit(source[cursor])) {
         advance();
       }
-    }
 
-    if (cursor < source.length() &&
-        (source[cursor] == 'e' || source[cursor] == 'E')) {
-      advance();
+      if (cursor < source.length() && source[cursor] == '.') {
+        advance();
+        while (cursor < source.length() && std::isdigit(source[cursor])) {
+          advance();
+        }
+      }
+
       if (cursor < source.length() &&
-          (source[cursor] == '+' || source[cursor] == '-')) {
+          (source[cursor] == 'e' || source[cursor] == 'E')) {
         advance();
-      }
-      while (cursor < source.length() && std::isdigit(source[cursor])) {
-        advance();
+        if (cursor < source.length() &&
+            (source[cursor] == '+' || source[cursor] == '-')) {
+          advance();
+        }
+        while (cursor < source.length() && std::isdigit(source[cursor])) {
+          advance();
+        }
       }
     }
 

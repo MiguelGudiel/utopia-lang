@@ -390,8 +390,8 @@ const Type *Parser::applyArrayDeclarator(const Type *baseType) {
       expect(TokenType::RBRACKET, "Expected ']'");
       if (sizeExpr->kind == NodeKind::Number &&
           !static_cast<NumberNode *>(sizeExpr)->isFloat) {
-        sizes.push_back(
-            std::stoull(std::string(static_cast<NumberNode *>(sizeExpr)->raw)));
+        sizes.push_back(std::stoull(
+            std::string(static_cast<NumberNode *>(sizeExpr)->raw), nullptr, 0));
       } else {
         reportError(sizeExpr->line, sizeExpr->column, sizeExpr->length,
                     "Array size must be a constant integer literal");

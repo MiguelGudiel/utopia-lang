@@ -294,7 +294,7 @@ void TypeCheckPass::checkImplicitCastWarning(const Type *from, const Type *to,
               isLiteralFit = true;
             }
           } else {
-            uint64_t uval = std::stoull(std::string(numNode->raw));
+            uint64_t uval = std::stoull(std::string(numNode->raw), nullptr, 0);
             if (unqualTo->isInteger()) {
               int64_t sval = isNegative ? -static_cast<int64_t>(uval)
                                         : static_cast<int64_t>(uval);
@@ -1170,7 +1170,7 @@ SemaResult TypeCheckPass::visit(const NumberNode *node) {
     ty = ctx->astCtx.Float64Ty;
   } else {
     try {
-      uint64_t val = std::stoull(std::string(raw));
+      uint64_t val = std::stoull(std::string(raw), nullptr, 0);
       if (val > 9223372036854775807ULL) {
         ty = ctx->astCtx.UInt64Ty;
       } else if (val > 4294967295ULL) {
@@ -1181,6 +1181,9 @@ SemaResult TypeCheckPass::visit(const NumberNode *node) {
     } catch (const std::out_of_range &) {
       return ctx->reportError(node->line, node->column, node->length,
                               "Integer literal out of range");
+    } catch (const std::invalid_argument &) {
+      return ctx->reportError(node->line, node->column, node->length,
+                              "Invalid integer literal");
     }
   }
 
@@ -1231,7 +1234,8 @@ SemaResult TypeCheckPass::visit(const UnionDeclNode *node) {
         hasErrors = true;
       } else {
         uint64_t alignVal = std::stoull(
-            std::string(static_cast<const NumberNode *>(ann->args[0])->raw));
+            std::string(static_cast<const NumberNode *>(ann->args[0])->raw),
+            nullptr, 0);
         if (alignVal == 0 || (alignVal & (alignVal - 1)) != 0) {
           auto err = ctx->reportError(ann->line, ann->column, ann->length,
                                       "Alignment must be a power of 2.");
@@ -1301,7 +1305,8 @@ SemaResult TypeCheckPass::visit(const StructDeclNode *node) {
         hasErrors = true;
       } else {
         uint64_t alignVal = std::stoull(
-            std::string(static_cast<const NumberNode *>(ann->args[0])->raw));
+            std::string(static_cast<const NumberNode *>(ann->args[0])->raw),
+            nullptr, 0);
         if (alignVal == 0 || (alignVal & (alignVal - 1)) != 0) {
           auto err = ctx->reportError(ann->line, ann->column, ann->length,
                                       "Alignment must be a power of 2.");
@@ -1371,7 +1376,8 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
         hasErrors = true;
       } else {
         uint64_t alignVal = std::stoull(
-            std::string(static_cast<const NumberNode *>(ann->args[0])->raw));
+            std::string(static_cast<const NumberNode *>(ann->args[0])->raw),
+            nullptr, 0);
         if (alignVal == 0 || (alignVal & (alignVal - 1)) != 0) {
           auto err = ctx->reportError(ann->line, ann->column, ann->length,
                                       "Alignment must be a power of 2.");
@@ -1439,12 +1445,14 @@ SemaResult TypeCheckPass::visit(const EnumDeclNode *node) {
       // Basic compile-time evaluation for enum values
       if (init->kind == NodeKind::Number) {
         val =
-            std::stoll(std::string(static_cast<const NumberNode *>(init)->raw));
+            std::stoll(std::string(static_cast<const NumberNode *>(init)->raw),
+                       nullptr, 0);
       } else if (init->kind == NodeKind::UnaryOp) {
         auto uop = static_cast<const UnaryOpNode *>(init);
         if (uop->op == "-" && uop->expr->kind == NodeKind::Number) {
           val = -std::stoll(
-              std::string(static_cast<const NumberNode *>(uop->expr)->raw));
+              std::string(static_cast<const NumberNode *>(uop->expr)->raw),
+              nullptr, 0);
         } else {
           ctx->reportError(
               init->line, init->column, init->length,
