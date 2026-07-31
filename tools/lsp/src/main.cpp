@@ -1264,6 +1264,300 @@ void workerThread() {
   }
 }
 
+struct SemanticToken {
+  int line;
+  int col;
+  int length;
+  int type;
+  int modifiers;
+
+  bool operator<(const SemanticToken &other) const {
+    if (line != other.line)
+      return line < other.line;
+    return col < other.col;
+  }
+};
+
+class SemanticTokenVisitor : public ASTVisitor<SemanticTokenVisitor, void> {
+public:
+  std::vector<SemanticToken> tokens;
+  const std::string &docText;
+
+  SemanticTokenVisitor(const std::string &text) : docText(text) {}
+
+  void addToken(int line, int col, int length, int type, int modifiers = 0) {
+    if (line < 0 || col < 0 || length <= 0)
+      return;
+    tokens.push_back({line, col, length, type, modifiers});
+  }
+
+  void visit(const VariableNode *n) {
+    if (n->resolvedDecl) {
+      int type = 7; /* variable */
+      int mods = 0;
+      if (n->resolvedDecl->kind == NodeKind::ClassDecl)
+        type = 0;
+      else if (n->resolvedDecl->kind == NodeKind::StructDecl)
+        type = 1;
+      else if (n->resolvedDecl->kind == NodeKind::EnumDecl)
+        type = 2;
+      else if (n->resolvedDecl->kind == NodeKind::UnionDecl ||
+               n->resolvedDecl->kind == NodeKind::TypedefDecl)
+        type = 3;
+      else if (n->resolvedDecl->kind == NodeKind::FunctionDecl)
+        type = 4;
+      else if (n->resolvedDecl->kind == NodeKind::ParamDecl)
+        type = 8;
+      else if (n->resolvedDecl->kind == NodeKind::VarDecl) {
+        if (static_cast<const VarDeclNode *>(n->resolvedDecl)->isStatic)
+          mods |= 2;
+      }
+      addToken(n->line > 0 ? n->line - 1 : 0, n->column > 0 ? n->column - 1 : 0,
+               n->length, type, mods);
+    }
+  }
+
+  void visit(const MemberAccessNode *n) {
+    dispatch(n->object);
+    int type = 6; /* property */
+    int mods = 0;
+    if (n->isMethodRef)
+      type = 5; /* method */
+    else if (n->isEnumMember)
+      type = 9; /* enumMember */
+    else if (n->isStaticFieldRef) {
+      type = 6;
+      mods |= 2; /* static */
+    }
+    int memberCol = (n->column > 0 ? n->column - 1 : 0) + n->length -
+                    n->memberName.length();
+    addToken(n->line > 0 ? n->line - 1 : 0, memberCol, n->memberName.length(),
+             type, mods);
+  }
+
+  void visit(const FunctionCallNode *n) {
+    dispatch(n->target);
+    for (auto *arg : n->args)
+      dispatch(arg);
+  }
+
+  void visit(const VarDeclNode *n) {
+    auto loc = getExactNameLocation(docText, n);
+    addToken(loc.line, loc.col, loc.length, 7, n->isStatic ? 2 : 0);
+    if (n->initializer)
+      dispatch(n->initializer);
+  }
+
+  void visit(const ParamDeclNode *n) {
+    auto loc = getExactNameLocation(docText, n);
+    addToken(loc.line, loc.col, loc.length, 8, 0); /* parameter */
+    if (n->defaultValue)
+      dispatch(n->defaultValue);
+  }
+
+  void visit(const FunctionDeclNode *n) {
+    auto loc = getExactNameLocation(docText, n);
+    addToken(loc.line, loc.col, loc.length, n->isMethod ? 5 : 4,
+             n->isStatic ? 2 : 0);
+    for (auto *p : n->params)
+      dispatch(p);
+    if (n->body)
+      dispatch(n->body);
+  }
+
+  void visit(const ClassDeclNode *n) {
+    auto loc = getExactNameLocation(docText, n);
+    addToken(loc.line, loc.col, loc.length, 0, 0);
+    for (auto *f : n->fields)
+      dispatch(f);
+    for (auto *m : n->methods)
+      dispatch(m);
+    for (auto *c : n->constructors)
+      dispatch(c);
+    if (n->destructor)
+      dispatch(n->destructor);
+  }
+
+  void visit(const StructDeclNode *n) {
+    auto loc = getExactNameLocation(docText, n);
+    addToken(loc.line, loc.col, loc.length, 1, 0);
+    for (auto *f : n->fields)
+      dispatch(f);
+    for (auto *m : n->methods)
+      dispatch(m);
+    for (auto *c : n->constructors)
+      dispatch(c);
+    if (n->destructor)
+      dispatch(n->destructor);
+  }
+
+  void visit(const UnionDeclNode *n) {
+    auto loc = getExactNameLocation(docText, n);
+    addToken(loc.line, loc.col, loc.length, 3, 0);
+    for (auto *f : n->fields)
+      dispatch(f);
+    for (auto *m : n->methods)
+      dispatch(m);
+    for (auto *c : n->constructors)
+      dispatch(c);
+    if (n->destructor)
+      dispatch(n->destructor);
+  }
+
+  void visit(const EnumDeclNode *n) {
+    auto loc = getExactNameLocation(docText, n);
+    addToken(loc.line, loc.col, loc.length, 2, 0);
+    for (auto *m : n->members)
+      dispatch(m);
+  }
+
+  void visit(const EnumMemberNode *n) {
+    auto loc = getExactNameLocation(docText, n);
+    addToken(loc.line, loc.col, loc.length, 9, 0);
+    if (n->initializer)
+      dispatch(n->initializer);
+  }
+
+  void visit(const TypedefDeclNode *n) {
+    auto loc = getExactNameLocation(docText, n);
+    addToken(loc.line, loc.col, loc.length, 3, 0);
+  }
+
+  void visit(const AnnotationDeclNode *n) {
+    auto loc = getExactNameLocation(docText, n);
+    addToken(loc.line, loc.col, loc.length, 0, 0);
+    for (auto *f : n->fields)
+      dispatch(f);
+    if (n->constructor)
+      dispatch(n->constructor);
+  }
+
+  void visit(const BlockNode *n) {
+    for (auto *s : n->statements)
+      dispatch(s);
+  }
+  void visit(const IfNode *n) {
+    if (n->condition)
+      dispatch(n->condition);
+    if (n->thenBlock)
+      dispatch(n->thenBlock);
+    if (n->elseBlock)
+      dispatch(n->elseBlock);
+  }
+  void visit(const ForNode *n) {
+    if (n->initStatement)
+      dispatch(n->initStatement);
+    if (n->condition)
+      dispatch(n->condition);
+    if (n->increment)
+      dispatch(n->increment);
+    if (n->body)
+      dispatch(n->body);
+  }
+  void visit(const WhileNode *n) {
+    if (n->condition)
+      dispatch(n->condition);
+    if (n->body)
+      dispatch(n->body);
+  }
+  void visit(const SwitchNode *n) {
+    if (n->condition)
+      dispatch(n->condition);
+    for (auto *c : n->cases)
+      dispatch(c);
+  }
+  void visit(const CaseNode *n) {
+    if (n->value)
+      dispatch(n->value);
+    for (auto *s : n->statements)
+      dispatch(s);
+  }
+  void visit(const AssignNode *n) {
+    dispatch(n->target);
+    dispatch(n->value);
+  }
+  void visit(const ReturnNode *n) {
+    if (n->value)
+      dispatch(n->value);
+  }
+  void visit(const UnaryOpNode *n) { dispatch(n->expr); }
+  void visit(const BinaryOpNode *n) {
+    dispatch(n->left);
+    dispatch(n->right);
+  }
+  void visit(const CastNode *n) { dispatch(n->expr); }
+  void visit(const ImplicitCastNode *n) { dispatch(n->expr); }
+  void visit(const ArraySubscriptNode *n) {
+    dispatch(n->base);
+    dispatch(n->index);
+  }
+  void visit(const ArrayLiteralNode *n) {
+    for (auto *e : n->elements)
+      dispatch(e);
+  }
+  void visit(const NewExprNode *n) {
+    if (n->arraySize)
+      dispatch(n->arraySize);
+    for (auto *a : n->args)
+      dispatch(a);
+  }
+  void visit(const DeleteExprNode *n) { dispatch(n->ptr); }
+  void visit(const AnnotationNode *n) {
+    for (auto *a : n->args)
+      dispatch(a);
+  }
+  void visit(const ModuleNode *n) {
+    for (auto *s : n->statements)
+      dispatch(s);
+  }
+
+  void visit(const BreakNode *) {}
+  void visit(const ContinueNode *) {}
+  void visit(const NumberNode *) {}
+  void visit(const BoolNode *) {}
+  void visit(const CharNode *) {}
+  void visit(const RuneNode *) {}
+  void visit(const StringNode *) {}
+  void visit(const NullNode *) {}
+};
+
+void handleSemanticTokens(const json &req) {
+  std::string uri = req["params"]["textDocument"]["uri"];
+  json data = json::array();
+
+  std::shared_lock<std::shared_mutex> lock(docMutex);
+  if (documents.contains(uri)) {
+    auto &doc = documents[uri];
+    if (doc.ast) {
+      SemanticTokenVisitor visitor(doc.text);
+      visitor.dispatch(doc.ast);
+
+      std::vector<SemanticToken> tokens = std::move(visitor.tokens);
+      std::sort(tokens.begin(), tokens.end());
+
+      int prevLine = 0;
+      int prevCol = 0;
+
+      for (const auto &tok : tokens) {
+        int deltaLine = tok.line - prevLine;
+        int deltaCol = (deltaLine == 0) ? (tok.col - prevCol) : tok.col;
+
+        data.push_back(deltaLine);
+        data.push_back(deltaCol);
+        data.push_back(tok.length);
+        data.push_back(tok.type);
+        data.push_back(tok.modifiers);
+
+        prevLine = tok.line;
+        prevCol = tok.col;
+      }
+    }
+  }
+
+  sendResponse(
+      {{"jsonrpc", "2.0"}, {"id", req["id"]}, {"result", {{"data", data}}}});
+}
+
 } // namespace utopia::lsp
 
 int main() {
@@ -1290,13 +1584,25 @@ int main() {
                 {{"textDocumentSync", 1},
                  {"hoverProvider", true},
                  {"definitionProvider", true},
-                 {"completionProvider", {{"triggerCharacters", {"."}}}}}}}}});
+                 {"completionProvider", {{"triggerCharacters", {"."}}}},
+                 {"semanticTokensProvider",
+                  {{"legend",
+                    {{"tokenTypes",
+                      {"class", "struct", "enum", "type", "function", "method",
+                       "property", "variable", "parameter", "enumMember",
+                       "macro"}},
+                     {"tokenModifiers",
+                      {"declaration", "static", "readonly"}}}},
+                   {"range", false},
+                   {"full", true}}}}}}}});
       } else if (method == "textDocument/hover") {
         utopia::lsp::handleHover(req);
       } else if (method == "textDocument/definition") {
         utopia::lsp::handleDefinition(req);
       } else if (method == "textDocument/completion") {
         utopia::lsp::handleCompletion(req);
+      } else if (method == "textDocument/semanticTokens/full") {
+        utopia::lsp::handleSemanticTokens(req);
       } else if (method == "textDocument/didOpen" ||
                  method == "textDocument/didChange") {
         std::string uri = req["params"]["textDocument"]["uri"];
