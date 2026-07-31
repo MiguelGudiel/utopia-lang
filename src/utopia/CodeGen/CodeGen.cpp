@@ -394,8 +394,11 @@ llvm::Function *CodeGen::getOrCreateFunction(const FunctionDeclNode *node) {
 
   func->addFnAttr(llvm::Attribute::NoUnwind);
 
+  /* Map standard inline to an LLVM hint, and forceInline to AlwaysInline */
   for (const auto *ann : node->annotations) {
     if (ann->name == "inline")
+      func->addFnAttr(llvm::Attribute::InlineHint);
+    else if (ann->name == "forceInline")
       func->addFnAttr(llvm::Attribute::AlwaysInline);
     else if (ann->name == "readnone")
       func->setMemoryEffects(llvm::MemoryEffects::none());
@@ -3431,8 +3434,14 @@ void CodeGen::emitDefaultInitialization(llvm::Value *ptr, const Type *type) {
       layout = mod.getDataLayout().getStructLayout(llRecTy);
     }
 
+    unsigned instanceIdx = 0;
     for (size_t i = 0; i < fields.size(); ++i) {
       auto *fieldDecl = fields[i];
+
+      if (fieldDecl->isStatic) {
+        continue;
+      }
+
       if (fieldDecl->initializer) {
         llvm::Value *initVal = dispatch(fieldDecl->initializer);
         if (initVal) {
@@ -3443,9 +3452,9 @@ void CodeGen::emitDefaultInitialization(llvm::Value *ptr, const Type *type) {
           uint64_t offset = 0;
 
           if (type->getKind() != TypeKind::Union) {
-            gep = builder.CreateStructGEP(llTy, ptr, i,
+            gep = builder.CreateStructGEP(llTy, ptr, instanceIdx,
                                           std::string(fieldDecl->varName));
-            offset = layout->getElementOffset(i);
+            offset = layout->getElementOffset(instanceIdx);
           }
 
           llvm::MDNode *tbaaTag =
@@ -3454,6 +3463,8 @@ void CodeGen::emitDefaultInitialization(llvm::Value *ptr, const Type *type) {
           createTBAAStore(initVal, gep, tbaaTag);
         }
       }
+
+      instanceIdx++;
     }
   }
 }
