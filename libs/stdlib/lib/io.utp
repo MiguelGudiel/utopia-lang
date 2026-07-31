@@ -228,6 +228,35 @@ class File {
     return success;
   }
 
+  /*
+   * Copies the current file to the specified destination path.
+   * Uses buffered binary streams to ensure memory safety.
+   */
+  bool copy(String destPath) {
+    FileHandle src;
+    if (!src.open(this._path, "rb")) return false;
+
+    FileHandle dest;
+    if (!dest.open(destPath, "wb")) return false;
+
+    uint8[4096] buffer;
+    while (true) {
+      uint64 bytesRead = src.read(&buffer[0], 1, 4096);
+      if (bytesRead == 0) break;
+      dest.write(&buffer[0], 1, bytesRead);
+    }
+    
+    return true;
+  }
+
+  /*
+   * Moves the file to a new location.
+   * Acts as a semantic alias to the underlying rename operation.
+   */
+  bool move(String newPath) {
+    return this.rename(newPath);
+  }
+
   uint64 length() {
     void* file = _fopen(this._path.c_str(), "rb");
     if (file == null) return 0;
@@ -317,5 +346,48 @@ class Directory {
 
   bool remove() {
     return _rmdir(this._path.c_str()) == 0;
+  }
+
+  /*
+   * Renames the directory to a new path.
+   */
+  bool rename(String newPath) {
+    bool success = _rename(this._path.c_str(), newPath.c_str()) == 0;
+    if (success) {
+      this._path = newPath;
+    }
+    return success;
+  }
+
+  /*
+   * Moves the directory to a new location.
+   */
+  bool move(String newPath) {
+    return this.rename(newPath);
+  }
+
+  /*
+   * Recursively deletes the directory and all its contents.
+   * Relies on standard OS shell commands for cross-platform execution.
+   */
+  bool deleteRecursive() {
+    #if _WIN32
+    String cmd = "rmdir /s /q \"" + this._path + "\"";
+    #else
+    String cmd = "rm -rf \"" + this._path + "\"";
+    #endif
+    return system(cmd.c_str()) == 0;
+  }
+
+  /*
+   * Recursively copies the directory and all its contents to a new destination.
+   */
+  bool copy(String destPath) {
+    #if _WIN32
+    String cmd = "xcopy /E /I /Y /Q \"" + this._path + "\" \"" + destPath + "\"";
+    #else
+    String cmd = "cp -r \"" + this._path + "\" \"" + destPath + "\"";
+    #endif
+    return system(cmd.c_str()) == 0;
   }
 }
