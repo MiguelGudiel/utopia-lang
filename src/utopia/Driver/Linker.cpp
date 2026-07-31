@@ -28,12 +28,14 @@ bool Linker::link(const std::vector<std::string> &objPaths,
       cmd += "-shared ";
     }
 
-    for (const auto &flag : linkerFlags) {
-      cmd += flag + " ";
-    }
-
+    /* Object files must precede linker flags and static libraries
+     * to guarantee proper symbol resolution in single-pass linkers. */
     for (const auto &obj : objPaths) {
       cmd += obj + " ";
+    }
+
+    for (const auto &flag : linkerFlags) {
+      cmd += flag + " ";
     }
     cmd += "-o " + outPath;
   }
