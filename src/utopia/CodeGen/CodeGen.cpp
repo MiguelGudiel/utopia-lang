@@ -218,7 +218,7 @@ llvm::Type *CodeGen::getLLVMType(const Type *type) {
     diags.report({DiagLevel::Error, 0, 0, 0,
                   "Uninstantiated template parameter '" + type->toString() +
                       "' reached code generation.",
-                  ""});
+                  currentFilePath});
     return builder.getInt8Ty();
   }
 
@@ -321,7 +321,7 @@ llvm::Type *CodeGen::getLLVMType(const Type *type) {
   diags.report({DiagLevel::Error, 0, 0, 0,
                 "Unsupported or unresolved type reached code generation: " +
                     type->toString(),
-                ""});
+                currentFilePath});
   return builder.getInt8Ty();
 }
 
@@ -622,7 +622,8 @@ void CodeGen::emitConstructorCall(const FunctionCallNode *node,
 
     if (!argVal) {
       diags.report({DiagLevel::Error, arg->line, arg->column, arg->length,
-                    "Failed to evaluate argument for constructor call.", ""});
+                    "Failed to evaluate argument for constructor call.",
+                    currentFilePath});
       return;
     }
     argsArgs.push_back(argVal);
@@ -639,6 +640,92 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
 
   if (node->kind == NodeKind::Null) {
     return llvm::ConstantPointerNull::get(builder.getPtrTy());
+  }
+
+  if (node->kind == NodeKind::String) {
+    auto *strNode = static_cast<const StringNode *>(node);
+    llvm::Constant *strConst = llvm::ConstantDataArray::getString(
+        ctx, llvm::StringRef(strNode->value.data(), strNode->value.length()),
+        true);
+    auto *gv = new llvm::GlobalVariable(mod, strConst->getType(), true,
+                                        llvm::GlobalValue::PrivateLinkage,
+                                        strConst, ".str");
+    gv->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+    llvm::Constant *zero = llvm::ConstantInt::get(builder.getInt32Ty(), 0);
+    return llvm::ConstantExpr::getInBoundsGetElementPtr(
+        strConst->getType(), gv, llvm::ArrayRef<llvm::Constant *>{zero, zero});
+  }
+
+  if (node->kind == NodeKind::ImplicitCast || node->kind == NodeKind::Cast) {
+    const ExprNode *innerExpr = nullptr;
+    const Type *targetType = nullptr;
+    if (node->kind == NodeKind::ImplicitCast) {
+      auto *castNode = static_cast<const ImplicitCastNode *>(node);
+      innerExpr = castNode->expr;
+      targetType = castNode->targetType;
+    } else {
+      auto *castNode = static_cast<const CastNode *>(node);
+      innerExpr = castNode->expr;
+      targetType = castNode->targetType;
+    }
+
+    llvm::Constant *inner = evaluateAsConstant(innerExpr);
+    if (inner) {
+      llvm::Type *destTy = getLLVMType(targetType);
+      if (inner->getType() == destTy)
+        return inner;
+
+      // Pointer-based constant expressions are still supported in LLVM 15+
+      if (inner->getType()->isPointerTy() && destTy->isPointerTy())
+        return llvm::ConstantExpr::getBitCast(inner, destTy);
+      if (inner->getType()->isPointerTy() && destTy->isIntegerTy())
+        return llvm::ConstantExpr::getPtrToInt(inner, destTy);
+      if (inner->getType()->isIntegerTy() && destTy->isPointerTy())
+        return llvm::ConstantExpr::getIntToPtr(inner, destTy);
+
+      if (auto *ci = llvm::dyn_cast<llvm::ConstantInt>(inner)) {
+        if (destTy->isIntegerTy()) {
+          return llvm::ConstantInt::get(
+              ctx, ci->getValue().sextOrTrunc(destTy->getIntegerBitWidth()));
+        } else if (destTy->isFloatingPointTy()) {
+          llvm::APFloat apf(destTy->getFltSemantics());
+          apf.convertFromAPInt(ci->getValue(), true,
+                               llvm::APFloat::rmNearestTiesToEven);
+          return llvm::ConstantFP::get(ctx, apf);
+        }
+      } else if (auto *cfp = llvm::dyn_cast<llvm::ConstantFP>(inner)) {
+        if (destTy->isFloatingPointTy()) {
+          llvm::APFloat apf = cfp->getValueAPF();
+          bool losesInfo;
+          apf.convert(destTy->getFltSemantics(),
+                      llvm::APFloat::rmNearestTiesToEven, &losesInfo);
+          return llvm::ConstantFP::get(ctx, apf);
+        } else if (destTy->isIntegerTy()) {
+          llvm::APSInt api(destTy->getIntegerBitWidth(), false);
+          bool isExact;
+          cfp->getValueAPF().convertToInteger(api, llvm::APFloat::rmTowardZero,
+                                              &isExact);
+          return llvm::ConstantInt::get(ctx, api);
+        }
+      }
+
+      return llvm::ConstantExpr::getBitCast(inner, destTy);
+    }
+  }
+
+  if (node->kind == NodeKind::ArrayLiteral) {
+    auto *arrNode = static_cast<const ArrayLiteralNode *>(node);
+    std::vector<llvm::Constant *> elems;
+    for (const auto *elem : arrNode->elements) {
+      auto *c = evaluateAsConstant(elem);
+      if (!c)
+        return nullptr;
+      elems.push_back(c);
+    }
+    llvm::Type *destTy = getLLVMType(arrNode->exprType);
+    if (!destTy->isArrayTy())
+      return nullptr;
+    return llvm::ConstantArray::get(llvm::cast<llvm::ArrayType>(destTy), elems);
   }
 
   if (node->kind == NodeKind::Boolean) {
@@ -1129,13 +1216,22 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
       baseTy = static_cast<const ReferenceType *>(baseTy)->getPointeeType();
 
     llvm::Type *llvmBaseTy = getLLVMType(baseTy);
+    llvm::Value *gep = objPtr;
 
-    if (baseTy->getKind() == TypeKind::Union) {
-      return objPtr;
+    if (baseTy->getKind() != TypeKind::Union) {
+      gep = builder.CreateStructGEP(llvmBaseTy, objPtr, maNode->fieldIndex,
+                                    maNode->memberName);
     }
 
-    return builder.CreateStructGEP(llvmBaseTy, objPtr, maNode->fieldIndex,
-                                   maNode->memberName);
+    if (node->exprType->getKind() == TypeKind::Array) {
+      llvm::Type *arrTy = getLLVMType(node->exprType);
+      return builder.CreateInBoundsGEP(
+          arrTy, gep, {builder.getInt32(0), builder.getInt32(0)});
+    }
+
+    /* Return the memory address (pointer) directly for valid L-Value
+     * assignments */
+    return gep;
   }
 
   if (node->kind == NodeKind::UnaryOp) {
@@ -1602,7 +1698,7 @@ llvm::Value *CodeGen::visit(const SwitchNode *node) {
         diags.report({DiagLevel::Error, c->value->line, c->value->column,
                       c->value->length,
                       "Case value must evaluate to a compile-time constant",
-                      ""});
+                      currentFilePath});
         return nullptr;
       }
 
@@ -1612,7 +1708,7 @@ llvm::Value *CodeGen::visit(const SwitchNode *node) {
         diags.report({DiagLevel::Error, c->value->line, c->value->column,
                       c->value->length,
                       "Switch cases only support integer and enum constants",
-                      ""});
+                      currentFilePath});
         return nullptr;
       }
     }
@@ -1709,7 +1805,7 @@ llvm::Value *CodeGen::visit(const UnaryOpNode *node) {
     llvm::Value *ptr = dispatch(node->expr);
     if (!ptr) {
       diags.report({DiagLevel::Error, node->line, node->column, node->length,
-                    "Invalid operand for dereference.", ""});
+                    "Invalid operand for dereference.", currentFilePath});
       return nullptr;
     }
     llvm::Type *loadTy = getLLVMType(node->exprType);
@@ -1719,7 +1815,7 @@ llvm::Value *CodeGen::visit(const UnaryOpNode *node) {
     llvm::Value *val = dispatch(node->expr);
     if (!val) {
       diags.report({DiagLevel::Error, node->line, node->column, node->length,
-                    "Invalid operand for unary minus.", ""});
+                    "Invalid operand for unary minus.", currentFilePath});
       return nullptr;
     }
     if (val->getType()->isFloatingPointTy()) {
@@ -1736,7 +1832,8 @@ llvm::Value *CodeGen::visit(const UnaryOpNode *node) {
     if (!lval) {
       diags.report(
           {DiagLevel::Error, node->line, node->column, node->length,
-           "Invalid operand for " + std::string(node->op) + " operator.", ""});
+           "Invalid operand for " + std::string(node->op) + " operator.",
+           currentFilePath});
       return nullptr;
     }
 
@@ -2037,7 +2134,7 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
       diags.report({DiagLevel::Error, node->line, node->column, node->length,
                     "Reference '" + std::string(node->varName) +
                         "' lacks an initializer.",
-                    ""});
+                    currentFilePath});
       return nullptr;
     }
 
@@ -2050,7 +2147,8 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
 
     if (isGlobal) {
       diags.report({DiagLevel::Error, node->line, node->column, node->length,
-                    "Dynamic global references are not supported.", ""});
+                    "Dynamic global references are not supported.",
+                    currentFilePath});
       return nullptr;
     }
 
@@ -2123,7 +2221,7 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
             {DiagLevel::Error, node->initializer->line,
              node->initializer->column, node->initializer->length,
              "Global variable requires a compile-time constant initializer.",
-             ""});
+             currentFilePath});
       }
     }
 
@@ -2240,9 +2338,10 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
             llvm::Function *ctorFunc = getOrCreateFunction(node->copyCtor);
             builder.CreateCall(ctorFunc, {alloca, rvalAddr});
           } else {
-            diags.report(
-                {DiagLevel::Error, node->line, node->column, node->length,
-                 "Failed to resolve source for copy constructor.", ""});
+            diags.report({DiagLevel::Error, node->line, node->column,
+                          node->length,
+                          "Failed to resolve source for copy constructor.",
+                          currentFilePath});
           }
         } else if (isAggregate) {
           /* Fallback generic memcpy for records lacking a custom destructor */
@@ -2259,7 +2358,7 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
             } else {
               diags.report({DiagLevel::Error, node->line, node->column,
                             node->length, "Initialization failed for variable.",
-                            ""});
+                            currentFilePath});
             }
           }
         } else {
@@ -2272,7 +2371,7 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
           } else {
             diags.report({DiagLevel::Error, node->line, node->column,
                           node->length, "Initialization failed for variable.",
-                          ""});
+                          currentFilePath});
           }
         }
       }
@@ -2325,7 +2424,8 @@ llvm::Value *CodeGen::visit(const AssignNode *node) {
 
     if (!objPtr) {
       diags.report({DiagLevel::Error, node->target->line, node->target->column,
-                    node->target->length, "LHS is not an l-value", ""});
+                    node->target->length, "LHS is not an l-value",
+                    currentFilePath});
       return nullptr;
     }
 
@@ -2374,7 +2474,7 @@ llvm::Value *CodeGen::visit(const AssignNode *node) {
   if (!lval) {
     diags.report({DiagLevel::Error, node->target->line, node->target->column,
                   node->target->length, "Failed to evaluate LHS of assignment.",
-                  ""});
+                  currentFilePath});
     return nullptr;
   }
 
@@ -2416,7 +2516,7 @@ llvm::Value *CodeGen::visit(const AssignNode *node) {
   if (!rval) {
     diags.report({DiagLevel::Error, node->value->line, node->value->column,
                   node->value->length, "Failed to evaluate RHS of assignment.",
-                  ""});
+                  currentFilePath});
     return nullptr;
   }
 
@@ -2796,7 +2896,8 @@ llvm::Value *CodeGen::visit(const ReturnNode *node) {
       retVal = getLValue(node->value);
       if (!retVal) {
         diags.report({DiagLevel::Error, node->line, node->column, node->length,
-                      "Unresolved l-value in reference return.", ""});
+                      "Unresolved l-value in reference return.",
+                      currentFilePath});
         return nullptr;
       }
     } else {
@@ -2804,7 +2905,8 @@ llvm::Value *CodeGen::visit(const ReturnNode *node) {
       retVal = dispatch(node->value);
       if (!retVal) {
         diags.report({DiagLevel::Error, node->line, node->column, node->length,
-                      "Failed to evaluate return expression.", ""});
+                      "Failed to evaluate return expression.",
+                      currentFilePath});
         return nullptr;
       }
       if (currentFunc) {
@@ -3070,7 +3172,7 @@ llvm::Value *CodeGen::visit(const NewExprNode *node) {
           if (!argVal) {
             diags.report({DiagLevel::Error, arg->line, arg->column, arg->length,
                           "Failed to evaluate argument for constructor call.",
-                          ""});
+                          currentFilePath});
             return nullptr;
           }
           argsArgs.push_back(argVal);

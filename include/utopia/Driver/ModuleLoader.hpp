@@ -34,7 +34,9 @@ public:
    * occurs.
    */
   ModuleNode *loadModule(const std::string &importURI,
-                         const std::filesystem::path &currentFileDir = "");
+                         const std::filesystem::path &currentFileDir = "",
+                         int line = 0, int col = 0, int len = 0,
+                         std::string_view sourceFile = "");
 
 private:
   ASTContext &astCtx;

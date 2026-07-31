@@ -227,29 +227,6 @@ const Type *Parser::parseType(bool inNewExpr) {
     ty = astCtx.getConstType(ty);
   }
 
-  /* Parse function type definitions (e.g., int Function(int, float))
-   */
-  if (match(TokenType::FUNCTION_KW)) {
-    expect(TokenType::LPAREN, "Expected '(' after 'Function'");
-    std::vector<const Type *> paramTypes;
-    if (currentToken().type != TokenType::RPAREN &&
-        currentToken().type != TokenType::EOF_TOK) {
-      do {
-        paramTypes.push_back(parseType());
-      } while (match(TokenType::COMMA));
-    }
-    expect(TokenType::RPAREN, "Expected ')' after function parameters");
-
-    ty = astCtx.getFunctionType(ty, astCtx.copyArray<const Type *>(paramTypes));
-    /* Function variables inherently decay to pointers to support C-ABI and
-     * dynamic dispatch */
-    ty = astCtx.getPointerType(ty);
-  }
-
-  /*
-   * Process array brackets, pointers, references, and r-value references.
-   * TokenType::LOGICAL_AND is naturally emitted by the lexer for '&&'
-   */
   while (currentToken().type == TokenType::STAR ||
          currentToken().type == TokenType::AMPERSAND ||
          currentToken().type == TokenType::LOGICAL_AND ||
@@ -269,6 +246,44 @@ const Type *Parser::parseType(bool inNewExpr) {
       advance();
     } else if (!inNewExpr && currentToken().type == TokenType::LBRACKET) {
       ty = applyArrayDeclarator(ty);
+    }
+  }
+
+  if (match(TokenType::FUNCTION_KW)) {
+    expect(TokenType::LPAREN, "Expected '(' after 'Function'");
+    std::vector<const Type *> paramTypes;
+    if (currentToken().type != TokenType::RPAREN &&
+        currentToken().type != TokenType::EOF_TOK) {
+      do {
+        paramTypes.push_back(parseType());
+      } while (match(TokenType::COMMA));
+    }
+    expect(TokenType::RPAREN, "Expected ')' after function parameters");
+
+    ty = astCtx.getFunctionType(ty, astCtx.copyArray<const Type *>(paramTypes));
+
+    ty = astCtx.getPointerType(ty);
+
+    while (currentToken().type == TokenType::STAR ||
+           currentToken().type == TokenType::AMPERSAND ||
+           currentToken().type == TokenType::LOGICAL_AND ||
+           currentToken().type == TokenType::CONST_KW ||
+           (!inNewExpr && currentToken().type == TokenType::LBRACKET)) {
+      if (currentToken().type == TokenType::CONST_KW) {
+        ty = astCtx.getConstType(ty);
+        advance();
+      } else if (currentToken().type == TokenType::STAR) {
+        ty = astCtx.getPointerType(ty);
+        advance();
+      } else if (currentToken().type == TokenType::AMPERSAND) {
+        ty = astCtx.getReferenceType(ty);
+        advance();
+      } else if (currentToken().type == TokenType::LOGICAL_AND) {
+        ty = astCtx.getRValueReferenceType(ty);
+        advance();
+      } else if (!inNewExpr && currentToken().type == TokenType::LBRACKET) {
+        ty = applyArrayDeclarator(ty);
+      }
     }
   }
 
@@ -309,7 +324,11 @@ ModuleNode *Parser::parseModule(std::string_view filePath) {
           throw ParseException();
         }
 
+        int pathLine = currentToken().line;
+        int pathCol = currentToken().column;
         std::string_view path = currentToken().value;
+        int pathLen = path.length();
+
         advance();
 
         expect(TokenType::SEMICOLON, "Expected ';' after import statement");
@@ -322,7 +341,8 @@ ModuleNode *Parser::parseModule(std::string_view filePath) {
         if (moduleLoader) {
           std::filesystem::path currentDir =
               std::filesystem::path(filePath).parent_path();
-          moduleLoader->loadModule(std::string(path), currentDir);
+          moduleLoader->loadModule(std::string(path), currentDir, pathLine,
+                                   pathCol, pathLen, filePath);
         }
 
       } else if (currentToken().type != TokenType::EOF_TOK) {
@@ -734,7 +754,10 @@ ASTNode *Parser::parseStatement() {
              currentToken().type == TokenType::STATIC_KW ||
              ((currentToken().type == TokenType::TYPE_KW ||
                (currentToken().type == TokenType::IDENTIFIER &&
-                astCtx.getRecordType(currentToken().value) != nullptr)) &&
+                (astCtx.getRecordType(currentToken().value) != nullptr ||
+                 astCtx.getTypeAlias(currentToken().value) != nullptr ||
+                 astCtx.getEnumTypeByName(currentToken().value) != nullptr ||
+                 isTemplateParam(currentToken().value)))) &&
               peekToken().type != TokenType::DOT) ||
              (currentToken().type == TokenType::IDENTIFIER &&
               peekToken().type == TokenType::IDENTIFIER)) {

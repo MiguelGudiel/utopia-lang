@@ -96,10 +96,16 @@ ModuleLoader::resolveImportURI(std::string_view uri,
 }
 
 ModuleNode *ModuleLoader::loadModule(const std::string &importURI,
-                                     const fs::path &currentFileDir) {
+                                     const fs::path &currentFileDir, int line,
+                                     int col, int len,
+                                     std::string_view sourceFile) {
   auto resolvedPathResult = resolveImportURI(importURI, currentFileDir);
+
+  std::string diagFile = sourceFile.empty() ? "" : std::string(sourceFile);
+
   if (!resolvedPathResult) {
-    diags.report({DiagLevel::Error, 0, 0, 0, resolvedPathResult.error(), ""});
+    diags.report({DiagLevel::Error, line, col, len, resolvedPathResult.error(),
+                  diagFile});
     return nullptr;
   }
 
@@ -112,15 +118,15 @@ ModuleNode *ModuleLoader::loadModule(const std::string &importURI,
 
   /* Prevent infinite recursion resulting from circular dependencies */
   if (sourceCache.contains(key)) {
-    diags.report({DiagLevel::Error, 0, 0, 0,
-                  "Circular import dependency detected: " + key, ""});
+    diags.report({DiagLevel::Error, line, col, len,
+                  "Circular import dependency detected: " + key, diagFile});
     return nullptr;
   }
 
   std::ifstream file(absPath);
   if (!file) {
-    diags.report(
-        {DiagLevel::Error, 0, 0, 0, "Could not open file: " + key, ""});
+    diags.report({DiagLevel::Error, line, col, len,
+                  "Could not open file: " + key, diagFile});
     return nullptr;
   }
 
