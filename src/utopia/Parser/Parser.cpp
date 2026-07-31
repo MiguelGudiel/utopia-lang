@@ -2598,8 +2598,6 @@ ExprNode *Parser::parsePrimary() {
     int len = (int)raw.length();
     advance();
 
-    /* Identify explicitly defined hexadecimal literals to avoid conflicting
-     * with floating-point scientific notation or suffixes (e.g., 'e', 'f'). */
     bool isHex =
         raw.length() > 2 && raw[0] == '0' && (raw[1] == 'x' || raw[1] == 'X');
 
@@ -2620,28 +2618,58 @@ ExprNode *Parser::parsePrimary() {
     uint8_t val = 0;
     if (raw.length() >= 3) {
       if (raw[1] == '\\') {
-        switch (raw[2]) {
-        case 'n':
-          val = '\n';
-          break;
-        case 't':
-          val = '\t';
-          break;
-        case 'r':
-          val = '\r';
-          break;
-        case '0':
-          val = '\0';
-          break;
-        case '\\':
-          val = '\\';
-          break;
-        case '\'':
-          val = '\'';
-          break;
-        default:
-          val = raw[2];
-          break;
+        if (raw.length() > 3 && (raw[2] == 'x' || raw[2] == 'X')) {
+          /* Parse hexadecimal character escape */
+          for (size_t i = 3; i < raw.length() - 1; ++i) {
+            char hc = raw[i];
+            bool isHexDigit = (hc >= '0' && hc <= '9') ||
+                              (hc >= 'a' && hc <= 'f') ||
+                              (hc >= 'A' && hc <= 'F');
+            if (isHexDigit) {
+              uint8_t nibble = (hc >= '0' && hc <= '9')   ? (hc - '0')
+                               : (hc >= 'a' && hc <= 'f') ? (hc - 'a' + 10)
+                               : (hc >= 'A' && hc <= 'F') ? (hc - 'A' + 10)
+                                                          : 0;
+              val = (val << 4) | nibble;
+            } else {
+              break;
+            }
+          }
+        } else if (raw.length() > 2 && raw[2] >= '0' && raw[2] <= '7') {
+          /* Parse octal character escape */
+          for (size_t i = 2; i < raw.length() - 1; ++i) {
+            char oc = raw[i];
+            if (oc >= '0' && oc <= '7') {
+              val = (val << 3) | (oc - '0');
+            } else {
+              break;
+            }
+          }
+        } else {
+          /* Parse standard character escapes */
+          switch (raw[2]) {
+          case 'n':
+            val = '\n';
+            break;
+          case 't':
+            val = '\t';
+            break;
+          case 'r':
+            val = '\r';
+            break;
+          case '0':
+            val = '\0';
+            break;
+          case '\\':
+            val = '\\';
+            break;
+          case '\'':
+            val = '\'';
+            break;
+          default:
+            val = raw[2];
+            break;
+          }
         }
       } else {
         val = raw[1];
@@ -2658,17 +2686,74 @@ ExprNode *Parser::parsePrimary() {
     if (raw.length() >= 4) {
       std::string_view inner = raw.substr(2, raw.length() - 3);
       if (!inner.empty()) {
-        unsigned char c = inner[0];
-        if (c < 0x80) {
-          val = c;
-        } else if ((c & 0xE0) == 0xC0) {
-          val = ((c & 0x1F) << 6) | (inner[1] & 0x3F);
-        } else if ((c & 0xF0) == 0xE0) {
-          val =
-              ((c & 0x0F) << 12) | ((inner[1] & 0x3F) << 6) | (inner[2] & 0x3F);
-        } else if ((c & 0xF8) == 0xF0) {
-          val = ((c & 0x07) << 18) | ((inner[1] & 0x3F) << 12) |
-                ((inner[2] & 0x3F) << 6) | (inner[3] & 0x3F);
+        if (inner[0] == '\\') {
+          if (inner.length() > 1 && (inner[1] == 'x' || inner[1] == 'X')) {
+            /* Parse hexadecimal rune escape */
+            for (size_t i = 2; i < inner.length(); ++i) {
+              char hc = inner[i];
+              bool isHexDigit = (hc >= '0' && hc <= '9') ||
+                                (hc >= 'a' && hc <= 'f') ||
+                                (hc >= 'A' && hc <= 'F');
+              if (isHexDigit) {
+                uint32_t nibble = (hc >= '0' && hc <= '9')   ? (hc - '0')
+                                  : (hc >= 'a' && hc <= 'f') ? (hc - 'a' + 10)
+                                  : (hc >= 'A' && hc <= 'F') ? (hc - 'A' + 10)
+                                                             : 0;
+                val = (val << 4) | nibble;
+              } else {
+                break;
+              }
+            }
+          } else if (inner.length() > 1 && inner[1] >= '0' && inner[1] <= '7') {
+            /* Parse octal rune escape */
+            for (size_t i = 1; i < inner.length(); ++i) {
+              char oc = inner[i];
+              if (oc >= '0' && oc <= '7') {
+                val = (val << 3) | (oc - '0');
+              } else {
+                break;
+              }
+            }
+          } else if (inner.length() > 1) {
+            /* Parse standard rune escapes */
+            switch (inner[1]) {
+            case 'n':
+              val = '\n';
+              break;
+            case 't':
+              val = '\t';
+              break;
+            case 'r':
+              val = '\r';
+              break;
+            case '0':
+              val = '\0';
+              break;
+            case '\\':
+              val = '\\';
+              break;
+            case '\'':
+              val = '\'';
+              break;
+            default:
+              val = inner[1];
+              break;
+            }
+          }
+        } else {
+          /* Fallback to UTF-8 decoding */
+          unsigned char c = inner[0];
+          if (c < 0x80) {
+            val = c;
+          } else if ((c & 0xE0) == 0xC0) {
+            val = ((c & 0x1F) << 6) | (inner[1] & 0x3F);
+          } else if ((c & 0xF0) == 0xE0) {
+            val = ((c & 0x0F) << 12) | ((inner[1] & 0x3F) << 6) |
+                  (inner[2] & 0x3F);
+          } else if ((c & 0xF8) == 0xF0) {
+            val = ((c & 0x07) << 18) | ((inner[1] & 0x3F) << 12) |
+                  ((inner[2] & 0x3F) << 6) | (inner[3] & 0x3F);
+          }
         }
       }
     }
@@ -2687,28 +2772,69 @@ ExprNode *Parser::parsePrimary() {
     for (size_t i = 0; i < inner.length(); ++i) {
       if (inner[i] == '\\' && i + 1 < inner.length()) {
         ++i;
-        switch (inner[i]) {
-        case 'n':
-          unescaped += '\n';
-          break;
-        case 't':
-          unescaped += '\t';
-          break;
-        case 'r':
-          unescaped += '\r';
-          break;
-        case '0':
-          unescaped += '\0';
-          break;
-        case '\\':
-          unescaped += '\\';
-          break;
-        case '"':
-          unescaped += '"';
-          break;
-        default:
-          unescaped += inner[i];
-          break;
+        if (inner[i] == 'x' || inner[i] == 'X') {
+          /* Evaluate hex sequences bound to a maximum of 2 bytes to prevent
+           * greedy consumption of adjacent valid hex characters in string
+           * literals */
+          uint8_t hexVal = 0;
+          size_t hexCount = 0;
+          while (i + 1 < inner.length() && hexCount < 2) {
+            char hc = inner[i + 1];
+            bool isHexDigit = (hc >= '0' && hc <= '9') ||
+                              (hc >= 'a' && hc <= 'f') ||
+                              (hc >= 'A' && hc <= 'F');
+            if (!isHexDigit)
+              break;
+
+            ++i;
+            ++hexCount;
+            uint8_t nibble = (hc >= '0' && hc <= '9')   ? (hc - '0')
+                             : (hc >= 'a' && hc <= 'f') ? (hc - 'a' + 10)
+                             : (hc >= 'A' && hc <= 'F') ? (hc - 'A' + 10)
+                                                        : 0;
+            hexVal = (hexVal << 4) | nibble;
+          }
+          if (hexCount > 0) {
+            unescaped += static_cast<char>(hexVal);
+          } else {
+            unescaped += 'x';
+          }
+        } else if (inner[i] >= '0' && inner[i] <= '7') {
+          /* Evaluate octal sequences bound to a maximum of 3 bytes */
+          uint8_t octVal = inner[i] - '0';
+          size_t octCount = 1;
+          while (i + 1 < inner.length() && octCount < 3 &&
+                 inner[i + 1] >= '0' && inner[i + 1] <= '7') {
+            ++i;
+            ++octCount;
+            octVal = (octVal << 3) | (inner[i] - '0');
+          }
+          unescaped += static_cast<char>(octVal);
+        } else {
+          /* Evaluate standard structural escapes */
+          switch (inner[i]) {
+          case 'n':
+            unescaped += '\n';
+            break;
+          case 't':
+            unescaped += '\t';
+            break;
+          case 'r':
+            unescaped += '\r';
+            break;
+          case '0':
+            unescaped += '\0';
+            break;
+          case '\\':
+            unescaped += '\\';
+            break;
+          case '"':
+            unescaped += '"';
+            break;
+          default:
+            unescaped += inner[i];
+            break;
+          }
         }
       } else {
         unescaped += inner[i];
