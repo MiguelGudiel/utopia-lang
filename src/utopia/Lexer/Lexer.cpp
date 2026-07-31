@@ -266,6 +266,8 @@ Token Lexer::parseToken() {
       return {TokenType::FALSE_KW, id, startLine, startCol};
     if (id == "struct")
       return {TokenType::STRUCT_KW, id, startLine, startCol};
+    if (id == "union")
+      return {TokenType::UNION_KW, id, startLine, startCol};
     if (id == "class")
       return {TokenType::CLASS_KW, id, startLine, startCol};
     if (id == "this")

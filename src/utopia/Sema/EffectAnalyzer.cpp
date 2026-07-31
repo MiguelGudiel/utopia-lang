@@ -99,6 +99,8 @@ void EffectAnalyzer::visit(const UnaryOpNode *n) {
   dispatch(n->expr);
 }
 
+void EffectAnalyzer::visit(const UnionDeclNode *n) {}
+
 void EffectAnalyzer::visit(const ArraySubscriptNode *n) {
   if (n->overloadedOperator) {
     if (n->overloadedOperator->isExtern) {

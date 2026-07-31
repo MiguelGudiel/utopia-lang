@@ -44,7 +44,8 @@ static bool canImplicitlyCast(const Type *from, const Type *to,
 
   /* Process user-defined single-argument conversion constructors */
   if (allowUserDefined && (unqualTo->getKind() == TypeKind::Class ||
-                           unqualTo->getKind() == TypeKind::Struct)) {
+                           unqualTo->getKind() == TypeKind::Struct ||
+                           unqualTo->getKind() == TypeKind::Union)) {
     auto *recTy = static_cast<const RecordType *>(unqualTo);
     if (auto *decl = recTy->getDeclaration()) {
       llvm::ArrayRef<FunctionDeclNode *> ctors;
@@ -52,6 +53,8 @@ static bool canImplicitlyCast(const Type *from, const Type *to,
         ctors = static_cast<const ClassDeclNode *>(decl)->constructors;
       else if (decl->kind == NodeKind::StructDecl)
         ctors = static_cast<const StructDeclNode *>(decl)->constructors;
+      else if (decl->kind == NodeKind::UnionDecl)
+        ctors = static_cast<const UnionDeclNode *>(decl)->constructors;
 
       for (auto *ctor : ctors) {
         if (ctor->params.size() == 1) {
@@ -151,6 +154,7 @@ public:
   void visit(const ModuleNode *node);
   void visit(const FunctionDeclNode *node);
   void visit(const VarDeclNode *node);
+  void visit(const UnionDeclNode *node);
   void visit(const StructDeclNode *node);
   void visit(const ClassDeclNode *node);
   void visit(const TypedefDeclNode *node);
@@ -234,6 +238,7 @@ public:
   SemaResult visit(const CastNode *node);
   SemaResult visit(const ParamDeclNode *node);
   SemaResult visit(const ModuleNode *node);
+  SemaResult visit(const UnionDeclNode *node);
   SemaResult visit(const StructDeclNode *node);
   SemaResult visit(const ClassDeclNode *node);
   SemaResult visit(const MemberAccessNode *node);

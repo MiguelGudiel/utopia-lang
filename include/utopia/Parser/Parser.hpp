@@ -85,6 +85,7 @@ private:
   DeclNode *parseTypedefDecl();
 
   DeclNode *parseEnumDecl();
+  DeclNode *parseUnionDecl();
   DeclNode *parseStructDecl();
   BlockNode *parseBlock();
   BlockNode *parseStatementAsBlock();

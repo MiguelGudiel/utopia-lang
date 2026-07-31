@@ -23,11 +23,11 @@ enum class TokenType : uint8_t {
   WHILE_KW,
   IF_KW,
   ELSE_KW,
-  SWITCH_KW,  /*switch*/
-  CASE_KW,    /*case:*/
-  DEFAULT_KW, /*default:*/
-  BREAK_KW,   /*break*/
-  CONTINUE_KW,/*continue*/
+  SWITCH_KW,   /*switch*/
+  CASE_KW,     /*case:*/
+  DEFAULT_KW,  /*default:*/
+  BREAK_KW,    /*break*/
+  CONTINUE_KW, /*continue*/
   ELLIPSIS,
   AS,
   PLUS,
@@ -51,6 +51,7 @@ enum class TokenType : uint8_t {
   BANG,
   AT,
   STRUCT_KW,
+  UNION_KW, /* union */
   CLASS_KW,
   THIS_KW,
   DOT,

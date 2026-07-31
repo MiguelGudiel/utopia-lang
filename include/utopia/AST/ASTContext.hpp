@@ -132,6 +132,8 @@ public:
     RecordType *rec = nullptr;
     if (kind == TypeKind::Struct) {
       rec = create<StructType>(name);
+    } else if (kind == TypeKind::Union) {
+      rec = create<UnionType>(name);
     } else {
       rec = create<ClassType>(name);
     }

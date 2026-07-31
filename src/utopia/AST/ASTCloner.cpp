@@ -260,6 +260,24 @@ ASTNode *ASTCloner::visit(const FunctionDeclNode *n) {
   return node;
 }
 
+ASTNode *ASTCloner::visit(const UnionDeclNode *n) {
+  auto *node =
+      ctx.create<UnionDeclNode>(n->name, n->line, n->column, n->length);
+  node->fields = cloneArray(n->fields);
+  node->methods = cloneArray(n->methods);
+  node->constructors = cloneArray(n->constructors);
+  if (n->destructor)
+    node->destructor = static_cast<FunctionDeclNode *>(dispatch(n->destructor));
+  node->hasPublicMod = n->hasPublicMod;
+  node->hasPrivateMod = n->hasPrivateMod;
+  node->annotations = n->annotations;
+  node->docString = n->docString;
+  node->declFilePath = n->declFilePath;
+  node->isOpaque = n->isOpaque;
+  node->isTemplate = false;
+  return node;
+}
+
 ASTNode *ASTCloner::visit(const ClassDeclNode *n) {
   auto *node =
       ctx.create<ClassDeclNode>(n->name, n->line, n->column, n->length);

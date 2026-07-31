@@ -103,6 +103,9 @@ public:
     case NodeKind::ParamDecl:
       return static_cast<Derived *>(this)->visit(
           static_cast<const ParamDeclNode *>(node));
+    case NodeKind::UnionDecl:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const UnionDeclNode *>(node));
     case NodeKind::StructDecl:
       return static_cast<Derived *>(this)->visit(
           static_cast<const StructDeclNode *>(node));

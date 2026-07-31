@@ -117,7 +117,8 @@ std::string Mangler::mangleType(const Type *t) {
       return "v";
     }
   }
-  if (t->getKind() == TypeKind::Struct || t->getKind() == TypeKind::Class) {
+  if (t->getKind() == TypeKind::Struct || t->getKind() == TypeKind::Class ||
+      t->getKind() == TypeKind::Union) {
     auto name = static_cast<const RecordType *>(t)->getName();
     return std::to_string(name.length()) + std::string(name);
   }

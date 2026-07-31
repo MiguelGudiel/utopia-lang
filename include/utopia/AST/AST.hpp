@@ -36,6 +36,7 @@ enum class NodeKind : uint8_t {
   Cast,
   ParamDecl,
   StructDecl,
+  UnionDecl,
   ClassDecl,
   MemberAccess,
   ArraySubscript,
@@ -399,6 +400,21 @@ struct AnnotationDeclNode : public DeclNode {
   AnnotationDeclNode(std::string_view n, int l, int c, int len)
       : DeclNode(NodeKind::AnnotationDecl, l, c, len), name(n),
         constructor(nullptr) {}
+};
+
+struct UnionDeclNode : public DeclNode {
+  std::string_view name;
+  llvm::ArrayRef<VarDeclNode *> fields;
+  llvm::ArrayRef<FunctionDeclNode *> methods;
+  llvm::ArrayRef<FunctionDeclNode *> constructors;
+  FunctionDeclNode *destructor;
+
+  mutable const RecordType *recordType = nullptr;
+  bool isOpaque = false;
+
+  UnionDeclNode(std::string_view n, int l, int c, int len)
+      : DeclNode(NodeKind::UnionDecl, l, c, len), name(n), destructor(nullptr) {
+  }
 };
 
 struct StructDeclNode : public DeclNode {

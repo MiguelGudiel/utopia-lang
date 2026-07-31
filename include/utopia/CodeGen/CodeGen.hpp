@@ -47,6 +47,7 @@ public:
   llvm::Value *visit(const ParamDeclNode *node);
   llvm::Value *visit(const ModuleNode *node);
   llvm::Value *visit(const MemberAccessNode *node);
+  llvm::Value *visit(const UnionDeclNode *node);
   llvm::Value *visit(const StructDeclNode *node);
   llvm::Value *visit(const ClassDeclNode *node);
   llvm::Value *visit(const AnnotationDeclNode *node);

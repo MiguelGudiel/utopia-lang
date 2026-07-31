@@ -711,6 +711,8 @@ ASTNode *Parser::parseStatement() {
     node = parseEnumDecl();
   } else if (currentToken().type == TokenType::ANNOTATION_KW) {
     node = parseAnnotationDecl(annotations);
+  } else if (currentToken().type == TokenType::UNION_KW) {
+    node = parseUnionDecl();
   } else if (currentToken().type == TokenType::STRUCT_KW) {
     node = parseStructDecl();
   } else if (currentToken().type == TokenType::CLASS_KW) {
@@ -1259,6 +1261,287 @@ ExprNode *Parser::parseUnary() {
   }
 
   return parsePostfix();
+}
+
+DeclNode *Parser::parseUnionDecl() {
+  int line = currentToken().line;
+  int col = currentToken().column;
+  advance();
+
+  std::string_view name = currentToken().value;
+  expect(TokenType::IDENTIFIER, "Expected union name");
+
+  RecordType *unionTy = astCtx.createRecordType(TypeKind::Union, name);
+
+  if (match(TokenType::SEMICOLON)) {
+    auto node = astCtx.create<UnionDeclNode>(name, line, col,
+                                             currentToken().column - col);
+    node->isOpaque = true;
+    node->recordType = unionTy;
+    return node;
+  }
+
+  unionTy->setOpaque(false);
+
+  expect(TokenType::LBRACE, "Expected '{'");
+
+  std::vector<VarDeclNode *> fields;
+  std::vector<FunctionDeclNode *> methods;
+  std::vector<FunctionDeclNode *> constructors;
+  FunctionDeclNode *destructor = nullptr;
+
+  while (currentToken().type != TokenType::RBRACE &&
+         currentToken().type != TokenType::EOF_TOK) {
+
+    std::string doc = consumeComments();
+    auto memberAnnotations = parseAnnotations();
+
+    bool isPub = false, isPriv = false;
+    while (currentToken().type == TokenType::PUBLIC_KW ||
+           currentToken().type == TokenType::PRIVATE_KW) {
+      if (currentToken().type == TokenType::PUBLIC_KW)
+        isPub = true;
+      if (currentToken().type == TokenType::PRIVATE_KW)
+        isPriv = true;
+      advance();
+    }
+
+    if (currentToken().type == TokenType::RBRACE ||
+        currentToken().type == TokenType::EOF_TOK) {
+      if (!memberAnnotations.empty()) {
+        reportError(currentToken().line, currentToken().column,
+                    (int)currentToken().value.length(),
+                    "Annotations must be attached to a declaration.");
+      }
+      break;
+    }
+
+    if (currentToken().type == TokenType::TILDE) {
+      int dLine = currentToken().line;
+      int dCol = currentToken().column;
+
+      advance();
+
+      std::string_view dtorName = currentToken().value;
+      expect(TokenType::IDENTIFIER, "Expected union name after '~'");
+
+      if (dtorName != name) {
+        reportError(dLine, dCol, dtorName.length(),
+                    "Destructor name must match the union name.");
+        throw ParseException();
+      }
+
+      expect(TokenType::LPAREN, "Expected '('");
+      expect(TokenType::RPAREN, "Expected ')'");
+
+      destructor = astCtx.create<FunctionDeclNode>(astCtx.VoidTy, "~", dLine,
+                                                   dCol, false, true);
+      destructor->parentRecord = unionTy;
+      destructor->annotations = memberAnnotations;
+      destructor->hasPublicMod = isPub;
+      destructor->hasPrivateMod = isPriv;
+      if (!doc.empty())
+        destructor->docString = astCtx.copyString(doc);
+
+      destructor->body = parseFunctionBody(astCtx.VoidTy);
+      continue;
+    }
+
+    bool isConstCtor = false;
+    if (currentToken().type == TokenType::CONST_KW &&
+        peekToken().type == TokenType::IDENTIFIER &&
+        peekToken().value == name && peekToken(2).type == TokenType::LPAREN) {
+      isConstCtor = true;
+    }
+
+    if (isConstCtor || (currentToken().type == TokenType::IDENTIFIER &&
+                        currentToken().value == name &&
+                        peekToken().type == TokenType::LPAREN)) {
+      int cLine = currentToken().line;
+      int cCol = currentToken().column;
+
+      if (isConstCtor)
+        advance();
+      advance();
+      advance();
+
+      bool isVariadic = false;
+      auto params = parseParameterList(isVariadic);
+      expect(TokenType::RPAREN, "Expected ')'");
+
+      auto constructor =
+          astCtx.create<FunctionDeclNode>(astCtx.VoidTy, name, cLine, cCol,
+                                          isConstCtor, true, false, isVariadic);
+      constructor->parentRecord = unionTy;
+      constructor->params = astCtx.copyArray<ParamDeclNode *>(params);
+      constructor->annotations = memberAnnotations;
+      constructor->hasPublicMod = isPub;
+      constructor->hasPrivateMod = isPriv;
+      if (!doc.empty())
+        constructor->docString = astCtx.copyString(doc);
+
+      constructor->body = parseFunctionBody(astCtx.VoidTy);
+      constructors.push_back(constructor);
+      continue;
+    }
+
+    bool isStatic = false;
+    bool isExtern = false;
+
+    while (currentToken().type == TokenType::STATIC_KW ||
+           currentToken().type == TokenType::EXTERN_KW) {
+      if (currentToken().type == TokenType::STATIC_KW)
+        isStatic = true;
+      if (currentToken().type == TokenType::EXTERN_KW)
+        isExtern = true;
+      advance();
+    }
+
+    if (!isExtern) {
+      for (const auto *ann : memberAnnotations) {
+        if (ann->name == "extern") {
+          isExtern = true;
+          break;
+        }
+      }
+    }
+
+    int mLine = currentToken().line;
+    int mCol = currentToken().column;
+    const Type *memType = parseType();
+
+    std::string_view memName;
+    if (match(TokenType::OPERATOR_KW)) {
+      memName = parseOperatorName();
+    } else {
+      memName = currentToken().value;
+      expect(TokenType::IDENTIFIER, "Expected member name");
+    }
+
+    std::vector<std::string_view> methodTParams;
+    if (match(TokenType::LT)) {
+      astCtx.registerTemplateName(memName);
+      if (currentToken().type != TokenType::GT) {
+        do {
+          methodTParams.push_back(currentToken().value);
+          pushTemplateParam(methodTParams.back());
+          expect(TokenType::IDENTIFIER, "Expected template parameter name");
+        } while (match(TokenType::COMMA));
+      }
+      if (currentToken().type == TokenType::RSHIFT) {
+        const_cast<Token &>(currentToken()).type = TokenType::GT;
+        const_cast<Token &>(currentToken()).value = ">";
+      } else {
+        expect(TokenType::GT, "Expected '>'");
+      }
+    }
+
+    if (match(TokenType::LPAREN)) {
+      bool isVariadic = false;
+      auto params = parseParameterList(isVariadic);
+      expect(TokenType::RPAREN, "Expected ')'");
+
+      auto method = astCtx.create<FunctionDeclNode>(
+          memType, memName, mLine, mCol, false, true, isExtern, isVariadic);
+      method->parentRecord = unionTy;
+      method->isStatic = isStatic;
+      method->params = astCtx.copyArray<ParamDeclNode *>(params);
+      method->annotations = memberAnnotations;
+      method->hasPublicMod = isPub;
+      method->hasPrivateMod = isPriv;
+      if (!doc.empty())
+        method->docString = astCtx.copyString(doc);
+
+      if (isExtern) {
+        expect(TokenType::SEMICOLON,
+               "Expected ';' after extern method declaration");
+      } else {
+        method->body = parseFunctionBody(memType);
+      }
+
+      if (!methodTParams.empty()) {
+        method->isTemplate = true;
+        method->templateParams =
+            astCtx.copyArray<std::string_view>(methodTParams);
+        popTemplateParams(methodTParams.size());
+      }
+
+      methods.push_back(method);
+    } else {
+      if (!methodTParams.empty()) {
+        reportError(mLine, mCol, memName.length(),
+                    "Variables cannot have template parameters.");
+        throw ParseException();
+      }
+      if (isExtern) {
+        reportError(mLine, mCol, memName.length(),
+                    "Variables cannot be declared as extern.");
+        throw ParseException();
+      }
+
+      ExprNode *init = nullptr;
+      if (match(TokenType::ASSIGN)) {
+        init = parseExpression();
+      }
+      expect(TokenType::SEMICOLON, "Expected ';'");
+
+      auto field = astCtx.create<VarDeclNode>(memType, memName, init, mLine,
+                                              mCol, memName.length());
+      field->isStatic = isStatic;
+      field->annotations = memberAnnotations;
+      field->hasPublicMod = isPub;
+      field->hasPrivateMod = isPriv;
+      if (!doc.empty())
+        field->docString = astCtx.copyString(doc);
+
+      fields.push_back(field);
+    }
+  }
+
+  if (constructors.empty()) {
+    auto defaultCtor = astCtx.create<FunctionDeclNode>(
+        astCtx.VoidTy, name, line, col, false, true, false, false, true);
+    defaultCtor->parentRecord = unionTy;
+
+    auto emptyBody = astCtx.create<BlockNode>(line, col);
+    emptyBody->statements = {};
+    emptyBody->length = 0;
+    defaultCtor->body = emptyBody;
+
+    constructors.push_back(defaultCtor);
+  }
+
+  if (!destructor) {
+    destructor = astCtx.create<FunctionDeclNode>(
+        astCtx.VoidTy, "~", line, col, false, true, false, false, true);
+    destructor->parentRecord = unionTy;
+
+    auto emptyBody = astCtx.create<BlockNode>(line, col);
+    emptyBody->statements = {};
+    emptyBody->length = 0;
+    destructor->body = emptyBody;
+  }
+
+  int endCol = currentToken().column + 1;
+  expect(TokenType::RBRACE, "Expected '}'");
+
+  std::vector<FieldInfo> fInfos;
+  uint32_t instanceFieldIndex = 0;
+  for (size_t i = 0; i < fields.size(); ++i) {
+    if (fields[i]->isStatic)
+      continue;
+    fInfos.push_back({fields[i]->varName, fields[i]->type, instanceFieldIndex++,
+                      fields[i]->isPublic(fields[i]->varName)});
+  }
+  unionTy->setFields(astCtx.copyArray<FieldInfo>(fInfos));
+
+  auto node = astCtx.create<UnionDeclNode>(name, line, col, endCol - col);
+  node->fields = astCtx.copyArray<VarDeclNode *>(fields);
+  node->methods = astCtx.copyArray<FunctionDeclNode *>(methods);
+  node->constructors = astCtx.copyArray<FunctionDeclNode *>(constructors);
+  node->destructor = destructor;
+
+  return node;
 }
 
 DeclNode *Parser::parseStructDecl() {

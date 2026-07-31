@@ -80,15 +80,20 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
     std::string_view mangledView = ctx->astCtx.copyString(mangledName);
 
     if (tmplDecl->kind == NodeKind::ClassDecl ||
-        tmplDecl->kind == NodeKind::StructDecl) {
+        tmplDecl->kind == NodeKind::StructDecl ||
+        tmplDecl->kind == NodeKind::UnionDecl) {
       if (auto *existing = ctx->astCtx.getRecordType(mangledView)) {
         instTy->setResolvedType(existing);
         return existing;
       }
-      ctx->astCtx.createRecordType(tmplDecl->kind == NodeKind::ClassDecl
-                                       ? TypeKind::Class
-                                       : TypeKind::Struct,
-                                   mangledView);
+
+      TypeKind kind = TypeKind::Struct;
+      if (tmplDecl->kind == NodeKind::ClassDecl)
+        kind = TypeKind::Class;
+      else if (tmplDecl->kind == NodeKind::UnionDecl)
+        kind = TypeKind::Union;
+
+      ctx->astCtx.createRecordType(kind, mangledView);
     }
 
     std::unordered_map<std::string_view, const Type *> templateArgMap;
@@ -110,6 +115,8 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
         static_cast<ClassDeclNode *>(instDecl)->name = mangledView;
       } else if (instDecl->kind == NodeKind::StructDecl) {
         static_cast<StructDeclNode *>(instDecl)->name = mangledView;
+      } else if (instDecl->kind == NodeKind::UnionDecl) {
+        static_cast<UnionDeclNode *>(instDecl)->name = mangledView;
       } else if (instDecl->kind == NodeKind::FunctionDecl) {
         static_cast<FunctionDeclNode *>(instDecl)->name = mangledView;
       }
@@ -117,13 +124,19 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
       /* Dynamically repopulate FieldInfo array for RecordType bindings
        * post-clone */
       if (instDecl->kind == NodeKind::ClassDecl ||
-          instDecl->kind == NodeKind::StructDecl) {
+          instDecl->kind == NodeKind::StructDecl ||
+          instDecl->kind == NodeKind::UnionDecl) {
         RecordType *recTy = ctx->astCtx.getRecordType(mangledView);
         std::vector<FieldInfo> fInfos;
         uint32_t instanceFieldIndex = 0;
-        auto fields = (instDecl->kind == NodeKind::ClassDecl)
-                          ? static_cast<ClassDeclNode *>(instDecl)->fields
-                          : static_cast<StructDeclNode *>(instDecl)->fields;
+
+        llvm::ArrayRef<VarDeclNode *> fields;
+        if (instDecl->kind == NodeKind::ClassDecl)
+          fields = static_cast<ClassDeclNode *>(instDecl)->fields;
+        else if (instDecl->kind == NodeKind::StructDecl)
+          fields = static_cast<StructDeclNode *>(instDecl)->fields;
+        else
+          fields = static_cast<UnionDeclNode *>(instDecl)->fields;
 
         for (size_t i = 0; i < fields.size(); ++i) {
           if (fields[i]->isStatic)
@@ -152,7 +165,7 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
           if (cls->destructor) {
             cls->destructor->parentRecord = recTy;
           }
-        } else {
+        } else if (instDecl->kind == NodeKind::StructDecl) {
           auto *str = static_cast<StructDeclNode *>(instDecl);
           str->recordType = recTy;
           recTy->setOpaque(str->isOpaque);
@@ -160,6 +173,15 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
           updateParentRec(str->constructors);
           if (str->destructor) {
             str->destructor->parentRecord = recTy;
+          }
+        } else {
+          auto *uni = static_cast<UnionDeclNode *>(instDecl);
+          uni->recordType = recTy;
+          recTy->setOpaque(uni->isOpaque);
+          updateParentRec(uni->methods);
+          updateParentRec(uni->constructors);
+          if (uni->destructor) {
+            uni->destructor->parentRecord = recTy;
           }
         }
       }
@@ -182,7 +204,8 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
 
     const Type *res = ctx->astCtx.VoidTy;
     if (tmplDecl->kind == NodeKind::ClassDecl ||
-        tmplDecl->kind == NodeKind::StructDecl) {
+        tmplDecl->kind == NodeKind::StructDecl ||
+        tmplDecl->kind == NodeKind::UnionDecl) {
       res = ctx->astCtx.getRecordType(mangledView);
     }
     instTy->setResolvedType(res);
@@ -340,7 +363,8 @@ ExprNode *TypeCheckPass::performImplicitConversion(ExprNode *expr,
   /* Intercept and rewrite aggregate initialization to invoke conversion
    * constructors */
   if (unqualTo->getKind() == TypeKind::Class ||
-      unqualTo->getKind() == TypeKind::Struct) {
+      unqualTo->getKind() == TypeKind::Struct ||
+      unqualTo->getKind() == TypeKind::Union) {
     auto *recTy = static_cast<const RecordType *>(unqualTo);
     if (auto *decl = recTy->getDeclaration()) {
       llvm::ArrayRef<FunctionDeclNode *> ctors;
@@ -348,6 +372,8 @@ ExprNode *TypeCheckPass::performImplicitConversion(ExprNode *expr,
         ctors = static_cast<const ClassDeclNode *>(decl)->constructors;
       else if (decl->kind == NodeKind::StructDecl)
         ctors = static_cast<const StructDeclNode *>(decl)->constructors;
+      else
+        ctors = static_cast<const UnionDeclNode *>(decl)->constructors;
 
       for (auto *ctor : ctors) {
         if (ctor->params.size() == 1) {
@@ -389,6 +415,7 @@ void DeclCollectorPass::visit(const ModuleNode *node) {
   for (const auto &stmt : node->statements) {
     if (stmt->kind == NodeKind::FunctionDecl ||
         stmt->kind == NodeKind::VarDecl || stmt->kind == NodeKind::StructDecl ||
+        stmt->kind == NodeKind::UnionDecl ||
         stmt->kind == NodeKind::ClassDecl ||
         stmt->kind == NodeKind::AnnotationDecl ||
         stmt->kind == NodeKind::TypedefDecl ||
@@ -548,6 +575,107 @@ void DeclCollectorPass::visit(const SwitchNode *node) {
 
 void DeclCollectorPass::visit(const VarDeclNode *node) {
   ctx->addDecl(node->varName, node);
+}
+
+void DeclCollectorPass::visit(const UnionDeclNode *node) {
+  if (node->isTemplate) {
+    if (node->declFilePath.empty()) {
+      const_cast<UnionDeclNode *>(node)->declFilePath = ctx->currentFile;
+    }
+    ctx->templateRegistry[node->name] = node;
+    return;
+  }
+
+  if (node->declFilePath.empty()) {
+    const_cast<UnionDeclNode *>(node)->declFilePath = ctx->currentFile;
+  }
+
+  ctx->addDecl(node->name, node);
+  const_cast<UnionDeclNode *>(node)->recordType =
+      ctx->astCtx.getRecordType(node->name);
+
+  if (node->isOpaque)
+    return;
+
+  for (auto *field : node->fields) {
+    if (field->declFilePath.empty()) {
+      const_cast<VarDeclNode *>(field)->declFilePath = ctx->currentFile;
+    }
+    if (field->isStatic) {
+      const_cast<VarDeclNode *>(field)->mangledName =
+          Mangler::mangle(field, std::string(node->name));
+    }
+  }
+
+  if (node->destructor && node->destructor->isImplicit) {
+    const_cast<FunctionDeclNode *>(node->destructor)->hasPublicMod =
+        node->hasPublicMod;
+    const_cast<FunctionDeclNode *>(node->destructor)->hasPrivateMod =
+        node->hasPrivateMod;
+  }
+
+  for (auto *ctor : node->constructors) {
+    if (ctor->declFilePath.empty()) {
+      const_cast<FunctionDeclNode *>(ctor)->declFilePath = ctx->currentFile;
+    }
+    if (ctor->isImplicit) {
+      const_cast<FunctionDeclNode *>(ctor)->hasPublicMod = node->hasPublicMod;
+      const_cast<FunctionDeclNode *>(ctor)->hasPrivateMod = node->hasPrivateMod;
+    }
+    const_cast<FunctionDeclNode *>(ctor)->mangledName =
+        Mangler::mangle(ctor, std::string(node->name));
+    ctx->addDecl(node->name, ctor);
+  }
+
+  if (node->destructor) {
+    if (node->destructor->declFilePath.empty()) {
+      const_cast<FunctionDeclNode *>(node->destructor)->declFilePath =
+          ctx->currentFile;
+    }
+    const_cast<FunctionDeclNode *>(node->destructor)->mangledName =
+        Mangler::mangle(node->destructor, std::string(node->name));
+  }
+
+  for (auto *method : node->methods) {
+    if (method->declFilePath.empty()) {
+      const_cast<FunctionDeclNode *>(method)->declFilePath = ctx->currentFile;
+    }
+    bool isExport = false;
+
+    for (const auto *ann : method->annotations) {
+      if (ann->name == "export") {
+        isExport = true;
+      }
+
+      if (ann->name == "extern") {
+        if (ann->args.size() == 1 && ann->args[0]->kind == NodeKind::String) {
+          const_cast<FunctionDeclNode *>(method)->externAlias =
+              static_cast<const StringNode *>(ann->args[0])->value;
+        } else if (ann->args.empty()) {
+          const_cast<FunctionDeclNode *>(method)->externAlias = method->name;
+        } else {
+          SemaResult err =
+              ctx->reportError(ann->line, ann->column, ann->length,
+                               "The @extern annotation requires either zero or "
+                               "one string literal argument.");
+        }
+      }
+    }
+
+    if (method->isExtern) {
+      if (method->externAlias.empty()) {
+        const_cast<FunctionDeclNode *>(method)->externAlias = method->name;
+      }
+      const_cast<FunctionDeclNode *>(method)->mangledName =
+          std::string(method->externAlias);
+    } else if (isExport) {
+      const_cast<FunctionDeclNode *>(method)->mangledName =
+          std::string(method->name);
+    } else {
+      const_cast<FunctionDeclNode *>(method)->mangledName =
+          Mangler::mangle(method, std::string(node->name));
+    }
+  }
 }
 
 void DeclCollectorPass::visit(const StructDeclNode *node) {
@@ -807,6 +935,7 @@ TypeCheckPass::resolveOverloadedOperator(const Type *lhsType,
     }
     return unqual->getKind() == TypeKind::Struct ||
            unqual->getKind() == TypeKind::Class ||
+           unqual->getKind() == TypeKind::Union ||
            unqual->getKind() == TypeKind::Enum;
   };
 
@@ -844,7 +973,8 @@ TypeCheckPass::resolveOverloadedOperator(const Type *lhsType,
   }
 
   if (unqual->getKind() == TypeKind::Struct ||
-      unqual->getKind() == TypeKind::Class) {
+      unqual->getKind() == TypeKind::Class ||
+      unqual->getKind() == TypeKind::Union) {
     auto *recTy = static_cast<const RecordType *>(unqual);
     auto *decl = recTy->getDeclaration();
     if (decl) {
@@ -853,6 +983,8 @@ TypeCheckPass::resolveOverloadedOperator(const Type *lhsType,
         methods = static_cast<const ClassDeclNode *>(decl)->methods;
       } else if (decl->kind == NodeKind::StructDecl) {
         methods = static_cast<const StructDeclNode *>(decl)->methods;
+      } else if (decl->kind == NodeKind::UnionDecl) {
+        methods = static_cast<const UnionDeclNode *>(decl)->methods;
       }
 
       for (auto *m : methods) {
@@ -994,7 +1126,8 @@ bool TypeCheckPass::checkTypeVisibility(const Type *type, const ASTNode *node) {
                  ->getUnqualifiedType();
   }
   if (unqual->getKind() == TypeKind::Class ||
-      unqual->getKind() == TypeKind::Struct) {
+      unqual->getKind() == TypeKind::Struct ||
+      unqual->getKind() == TypeKind::Union) {
     auto *recTy = static_cast<const RecordType *>(unqual);
     auto *decl = recTy->getDeclaration();
     if (decl && !decl->isPublic(recTy->getName()) &&
@@ -1077,6 +1210,75 @@ SemaResult TypeCheckPass::visit(const StringNode *node) {
   const Type *ty = ctx->astCtx.getPointerType(ctx->astCtx.UInt8Ty);
   node->exprType = ty;
   return ty;
+}
+
+SemaResult TypeCheckPass::visit(const UnionDeclNode *node) {
+  if (node->isTemplate)
+    return ctx->astCtx.VoidTy;
+
+  bool hasErrors = false;
+
+  if (node->isOpaque)
+    return ctx->astCtx.VoidTy;
+
+  for (const auto *ann : node->annotations) {
+    if (ann->name == "align") {
+      if (ann->args.size() != 1 || ann->args[0]->kind != NodeKind::Number ||
+          static_cast<const NumberNode *>(ann->args[0])->isFloat) {
+        auto err = ctx->reportError(
+            ann->line, ann->column, ann->length,
+            "The @align annotation requires a single integer constant.");
+        hasErrors = true;
+      } else {
+        uint64_t alignVal = std::stoull(
+            std::string(static_cast<const NumberNode *>(ann->args[0])->raw));
+        if (alignVal == 0 || (alignVal & (alignVal - 1)) != 0) {
+          auto err = ctx->reportError(ann->line, ann->column, ann->length,
+                                      "Alignment must be a power of 2.");
+          hasErrors = true;
+        }
+      }
+    } else if (ann->name == "packed") {
+      if (!ann->args.empty()) {
+        auto err =
+            ctx->reportError(ann->line, ann->column, ann->length,
+                             "The @packed annotation does not take arguments.");
+        hasErrors = true;
+      }
+    }
+  }
+
+  auto prevContext = ctx->getCurrentRecordContext();
+  ctx->setCurrentRecordContext(node->recordType);
+
+  for (const auto *field : node->fields) {
+    auto res = dispatch(field);
+    if (!res)
+      hasErrors = true;
+  }
+  for (const auto *ctor : node->constructors) {
+    auto res = dispatch(ctor);
+    if (!res)
+      hasErrors = true;
+  }
+  if (node->destructor) {
+    auto res = dispatch(node->destructor);
+    if (!res)
+      hasErrors = true;
+  }
+  for (const auto *method : node->methods) {
+    auto res = dispatch(method);
+    if (!res)
+      hasErrors = true;
+  }
+
+  ctx->setCurrentRecordContext(prevContext);
+
+  if (hasErrors) {
+    return std::unexpected(ErrorInfo{node->line, node->column, node->length,
+                                     "Errors in union declaration"});
+  }
+  return ctx->astCtx.VoidTy;
 }
 
 SemaResult TypeCheckPass::visit(const StructDeclNode *node) {
@@ -1356,7 +1558,8 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
               static_cast<const PointerType *>(thisTy)->getPointeeType();
           const Type *unqualPointee = pointee->getUnqualifiedType();
           if (unqualPointee->getKind() == TypeKind::Class ||
-              unqualPointee->getKind() == TypeKind::Struct) {
+              unqualPointee->getKind() == TypeKind::Struct ||
+              unqualPointee->getKind() == TypeKind::Union) {
             auto clsTy = static_cast<const RecordType *>(unqualPointee);
             if (auto field = clsTy->getField(node->name)) {
               if (!field->isPublic && ctx->getCurrentRecordContext() != clsTy) {
@@ -1387,6 +1590,9 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
         } else if (recDecl->kind == NodeKind::StructDecl) {
           cFields = static_cast<const StructDeclNode *>(recDecl)->fields;
           cMethods = static_cast<const StructDeclNode *>(recDecl)->methods;
+        } else if (recDecl->kind == NodeKind::UnionDecl) {
+          cFields = static_cast<const UnionDeclNode *>(recDecl)->fields;
+          cMethods = static_cast<const UnionDeclNode *>(recDecl)->methods;
         }
 
         for (auto *f : cFields) {
@@ -1483,6 +1689,7 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
     ty = ctx->astCtx.VoidTy;
   } else if (target->kind == NodeKind::StructDecl ||
              target->kind == NodeKind::ClassDecl ||
+             target->kind == NodeKind::UnionDecl ||
              target->kind == NodeKind::EnumDecl) {
     ty = ctx->astCtx.VoidTy;
   } else {
@@ -1878,7 +2085,8 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
                        ->getUnqualifiedType();
   }
   if (baseUnqualTy->getKind() == TypeKind::Struct ||
-      baseUnqualTy->getKind() == TypeKind::Class) {
+      baseUnqualTy->getKind() == TypeKind::Class ||
+      baseUnqualTy->getKind() == TypeKind::Union) {
     auto *recTy = static_cast<const RecordType *>(baseUnqualTy);
     if (recTy->isOpaque()) {
       return ctx->reportError(
@@ -1962,7 +2170,8 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
         /* Evaluate deep copy construction to prevent shallow copy of aggregates
          * with destructors */
         if (baseUnqualTy->getKind() == TypeKind::Class ||
-            baseUnqualTy->getKind() == TypeKind::Struct) {
+            baseUnqualTy->getKind() == TypeKind::Struct ||
+            baseUnqualTy->getKind() == TypeKind::Union) {
 
           /* Extract the correctly promoted expression type post-conversion */
           const Type *initTypeStrp = node->initializer->exprType;
@@ -1985,6 +2194,8 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
                 ctors = static_cast<const ClassDeclNode *>(decl)->constructors;
               else if (decl->kind == NodeKind::StructDecl)
                 ctors = static_cast<const StructDeclNode *>(decl)->constructors;
+              else if (decl->kind == NodeKind::UnionDecl)
+                ctors = static_cast<const UnionDeclNode *>(decl)->constructors;
 
               const FunctionDeclNode *copyCtor = nullptr;
               int bestScore = -1;
@@ -2044,6 +2255,8 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
                   dtor = static_cast<const ClassDeclNode *>(decl)->destructor;
                 else if (decl->kind == NodeKind::StructDecl)
                   dtor = static_cast<const StructDeclNode *>(decl)->destructor;
+                else if (decl->kind == NodeKind::UnionDecl)
+                  dtor = static_cast<const UnionDeclNode *>(decl)->destructor;
 
                 if (dtor && !dtor->isImplicit) {
                   return ctx->reportError(
@@ -2159,9 +2372,16 @@ SemaResult TypeCheckPass::visit(const AssignNode *node) {
     baseLhs = static_cast<const ReferenceType *>(baseLhs)->getPointeeType();
   }
 
+  const Type *unqualTargetTy = node->target->exprType->getUnqualifiedType();
+  bool isAggregate = (unqualTargetTy->getKind() == TypeKind::Struct ||
+                      unqualTargetTy->getKind() == TypeKind::Class ||
+                      unqualTargetTy->getKind() == TypeKind::Union ||
+                      unqualTargetTy->getKind() == TypeKind::Array);
+
   const Type *unqualLhs = baseLhs->getUnqualifiedType();
   if (unqualLhs->getKind() == TypeKind::Class ||
-      unqualLhs->getKind() == TypeKind::Struct) {
+      unqualLhs->getKind() == TypeKind::Struct ||
+      unqualLhs->getKind() == TypeKind::Union) {
     auto *recTy = static_cast<const RecordType *>(unqualLhs);
     if (auto *decl = recTy->getDeclaration()) {
       const FunctionDeclNode *dtor = nullptr;
@@ -2169,6 +2389,8 @@ SemaResult TypeCheckPass::visit(const AssignNode *node) {
         dtor = static_cast<const ClassDeclNode *>(decl)->destructor;
       else if (decl->kind == NodeKind::StructDecl)
         dtor = static_cast<const StructDeclNode *>(decl)->destructor;
+      else if (decl->kind == NodeKind::UnionDecl)
+        dtor = static_cast<const UnionDeclNode *>(decl)->destructor;
 
       if (dtor && !dtor->isImplicit) {
         return ctx->reportError(
@@ -2235,14 +2457,18 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
                                     "' does not contain member '" +
                                     std::string(node->memberName) + "'");
       } else if (varNode->resolvedDecl->kind == NodeKind::ClassDecl ||
-                 varNode->resolvedDecl->kind == NodeKind::StructDecl) {
+                 varNode->resolvedDecl->kind == NodeKind::StructDecl ||
+                 varNode->resolvedDecl->kind == NodeKind::UnionDecl) {
         staticAccessDecl = varNode->resolvedDecl;
         if (staticAccessDecl->kind == NodeKind::ClassDecl)
           recordTy =
               static_cast<const ClassDeclNode *>(staticAccessDecl)->recordType;
-        else
+        else if (staticAccessDecl->kind == NodeKind::StructDecl)
           recordTy =
               static_cast<const StructDeclNode *>(staticAccessDecl)->recordType;
+        else
+          recordTy =
+              static_cast<const UnionDeclNode *>(staticAccessDecl)->recordType;
       }
     }
   }
@@ -2262,7 +2488,8 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
     const Type *unqualBaseTy = baseTy->getUnqualifiedType();
 
     if (unqualBaseTy->getKind() != TypeKind::Struct &&
-        unqualBaseTy->getKind() != TypeKind::Class) {
+        unqualBaseTy->getKind() != TypeKind::Class &&
+        unqualBaseTy->getKind() != TypeKind::Union) {
       return ctx->reportError(node->line, node->column, node->length,
                               "Member access on non-record type");
     }
@@ -2292,7 +2519,8 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
     auto recordDecls = ctx->lookup(recordTy->getName());
     const DeclNode *recDecl = nullptr;
     for (auto *d : recordDecls) {
-      if (d->kind == NodeKind::ClassDecl || d->kind == NodeKind::StructDecl) {
+      if (d->kind == NodeKind::ClassDecl || d->kind == NodeKind::StructDecl ||
+          d->kind == NodeKind::UnionDecl) {
         recDecl = d;
         break;
       }
@@ -2304,9 +2532,12 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
         if (staticAccessDecl->kind == NodeKind::ClassDecl)
           staticFields =
               static_cast<const ClassDeclNode *>(staticAccessDecl)->fields;
-        else
+        else if (staticAccessDecl->kind == NodeKind::StructDecl)
           staticFields =
               static_cast<const StructDeclNode *>(staticAccessDecl)->fields;
+        else
+          staticFields =
+              static_cast<const UnionDeclNode *>(staticAccessDecl)->fields;
 
         for (const auto *f : staticFields) {
           if (f->varName == node->memberName) {
@@ -2333,8 +2564,10 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
       llvm::ArrayRef<FunctionDeclNode *> methods;
       if (recDecl->kind == NodeKind::ClassDecl)
         methods = static_cast<const ClassDeclNode *>(recDecl)->methods;
-      else
+      else if (recDecl->kind == NodeKind::StructDecl)
         methods = static_cast<const StructDeclNode *>(recDecl)->methods;
+      else
+        methods = static_cast<const UnionDeclNode *>(recDecl)->methods;
 
       if (!node->templateArgs.empty()) {
         FunctionDeclNode *tmplDecl = nullptr;
@@ -2405,11 +2638,17 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
                 const_cast<ClassDeclNode *>(
                     static_cast<const ClassDeclNode *>(recDecl))
                     ->methods = methods;
-              } else {
+              } else if (recDecl->kind == NodeKind::StructDecl) {
                 methods =
                     ctx->astCtx.copyArray<FunctionDeclNode *>(updatedMethods);
                 const_cast<StructDeclNode *>(
                     static_cast<const StructDeclNode *>(recDecl))
+                    ->methods = methods;
+              } else {
+                methods =
+                    ctx->astCtx.copyArray<FunctionDeclNode *>(updatedMethods);
+                const_cast<UnionDeclNode *>(
+                    static_cast<const UnionDeclNode *>(recDecl))
                     ->methods = methods;
               }
 
@@ -3341,7 +3580,8 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
   }
 
   if (baseUnqualTy->getKind() == TypeKind::Class ||
-      baseUnqualTy->getKind() == TypeKind::Struct) {
+      baseUnqualTy->getKind() == TypeKind::Struct ||
+      baseUnqualTy->getKind() == TypeKind::Union) {
     auto *recTy = static_cast<const RecordType *>(baseUnqualTy);
 
     if (recTy->isOpaque()) {
@@ -3357,6 +3597,8 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
         ctors = static_cast<const ClassDeclNode *>(decl)->constructors;
       else if (decl->kind == NodeKind::StructDecl)
         ctors = static_cast<const StructDeclNode *>(decl)->constructors;
+      else if (decl->kind == NodeKind::UnionDecl)
+        ctors = static_cast<const UnionDeclNode *>(decl)->constructors;
 
       std::vector<const Type *> argTypes;
       bool hasErrors = false;
@@ -3575,6 +3817,27 @@ SemaResult TypeCheckPass::visit(const DeleteExprNode *node) {
   if (!ptrTy || !(*ptrTy)->getUnqualifiedType()->isPointerType()) {
     return ctx->reportError(node->line, node->column, node->length,
                             "Cannot delete non-pointer type");
+  }
+
+  const Type *pointeeTy =
+      static_cast<const PointerType *>(node->ptr->exprType)->getPointeeType();
+  const Type *unqual = pointeeTy->getUnqualifiedType();
+
+  const FunctionDeclNode *dtor = nullptr;
+  if (unqual->getKind() == TypeKind::Class ||
+      unqual->getKind() == TypeKind::Struct ||
+      unqual->getKind() == TypeKind::Union) {
+    auto *recTy = static_cast<const RecordType *>(unqual);
+
+    if (auto *decl = recTy->getDeclaration()) {
+      if (decl->kind == NodeKind::ClassDecl) {
+        dtor = static_cast<const ClassDeclNode *>(decl)->destructor;
+      } else if (decl->kind == NodeKind::StructDecl) {
+        dtor = static_cast<const StructDeclNode *>(decl)->destructor;
+      } else if (decl->kind == NodeKind::UnionDecl) {
+        dtor = static_cast<const UnionDeclNode *>(decl)->destructor;
+      }
+    }
   }
 
   node->exprType = ctx->astCtx.VoidTy;

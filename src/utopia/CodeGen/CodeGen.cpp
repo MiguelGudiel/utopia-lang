@@ -123,10 +123,14 @@ llvm::DIType *CodeGen::getDIType(const Type *type) {
         getDIType(arrTy->getElementType()),
         dBuilder->getOrCreateArray(subscripts));
   } else if (type->getKind() == TypeKind::Struct ||
-             type->getKind() == TypeKind::Class) {
+             type->getKind() == TypeKind::Class ||
+             type->getKind() == TypeKind::Union) {
     auto *recTy = static_cast<const RecordType *>(type);
+    unsigned tag = llvm::dwarf::DW_TAG_structure_type;
+    if (type->getKind() == TypeKind::Union)
+      tag = llvm::dwarf::DW_TAG_union_type;
     auto *fwdDecl = dBuilder->createReplaceableCompositeType(
-        llvm::dwarf::DW_TAG_structure_type, recTy->getName(), diCU, diFile, 0);
+        tag, recTy->getName(), diCU, diFile, 0);
     debugTypes[type] = fwdDecl;
 
     std::vector<llvm::Metadata *> elements;
@@ -142,8 +146,9 @@ llvm::DIType *CodeGen::getDIType(const Type *type) {
           mod.getDataLayout().getTypeAllocSizeInBits(getLLVMType(f.type));
       uint32_t alignInBits =
           mod.getDataLayout().getABITypeAlign(getLLVMType(f.type)).value() * 8;
-      uint64_t offsetInBits =
-          layout ? layout->getElementOffsetInBits(f.index) : 0;
+      uint64_t offsetInBits = (layout && type->getKind() != TypeKind::Union)
+                                  ? layout->getElementOffsetInBits(f.index)
+                                  : 0;
       elements.push_back(dBuilder->createMemberType(
           fwdDecl, f.name, diFile, 0, sizeInBits, alignInBits, offsetInBits,
           llvm::DINode::FlagZero, getDIType(f.type)));
@@ -247,7 +252,8 @@ llvm::Type *CodeGen::getLLVMType(const Type *type) {
     return llvm::ArrayType::get(getLLVMType(arrTy->getElementType()),
                                 arrTy->getSize());
   } else if (type->getKind() == TypeKind::Struct ||
-             type->getKind() == TypeKind::Class) {
+             type->getKind() == TypeKind::Class ||
+             type->getKind() == TypeKind::Union) {
     auto rec = static_cast<const RecordType *>(type);
 
     llvm::StructType *structTy =
@@ -261,21 +267,50 @@ llvm::Type *CodeGen::getLLVMType(const Type *type) {
 
     if (structTy->isOpaque() && !rec->isOpaque()) {
       std::vector<llvm::Type *> elements;
-      for (const auto &f : rec->getFields()) {
-        elements.push_back(getLLVMType(f.type));
-      }
 
-      bool isPacked = false;
-      if (const DeclNode *decl = rec->getDeclaration()) {
-        for (const auto *ann : decl->annotations) {
-          if (ann->name == "packed") {
-            isPacked = true;
-            break;
+      if (type->getKind() == TypeKind::Union) {
+        uint64_t maxSize = 0;
+        llvm::Type *maxAlignType = builder.getInt8Ty();
+        uint64_t maxAlign = 1;
+        for (const auto &f : rec->getFields()) {
+          llvm::Type *fTy = getLLVMType(f.type);
+          uint64_t sz = mod.getDataLayout().getTypeAllocSize(fTy);
+          uint64_t al = mod.getDataLayout().getABITypeAlign(fTy).value();
+          if (sz > maxSize)
+            maxSize = sz;
+          if (al > maxAlign) {
+            maxAlign = al;
+            maxAlignType = fTy;
           }
         }
-      }
 
-      structTy->setBody(elements, isPacked);
+        if (!rec->getFields().empty()) {
+          elements.push_back(maxAlignType);
+          uint64_t paddedSize = (maxSize + maxAlign - 1) & ~(maxAlign - 1);
+          uint64_t alignSize =
+              mod.getDataLayout().getTypeAllocSize(maxAlignType);
+          if (paddedSize > alignSize) {
+            elements.push_back(llvm::ArrayType::get(builder.getInt8Ty(),
+                                                    paddedSize - alignSize));
+          }
+        }
+        structTy->setBody(elements, false);
+      } else {
+        for (const auto &f : rec->getFields()) {
+          elements.push_back(getLLVMType(f.type));
+        }
+
+        bool isPacked = false;
+        if (const DeclNode *decl = rec->getDeclaration()) {
+          for (const auto *ann : decl->annotations) {
+            if (ann->name == "packed") {
+              isPacked = true;
+              break;
+            }
+          }
+        }
+        structTy->setBody(elements, isPacked);
+      }
     }
 
     return structTy;
@@ -854,7 +889,8 @@ llvm::Value *CodeGen::visit(const ImplicitCastNode *node) {
 
   const Type *unqual = objectType->getUnqualifiedType();
   if (unqual->getKind() == TypeKind::Class ||
-      unqual->getKind() == TypeKind::Struct) {
+      unqual->getKind() == TypeKind::Struct ||
+      unqual->getKind() == TypeKind::Union) {
     auto *recTy = static_cast<const RecordType *>(unqual);
     if (auto *decl = recTy->getDeclaration()) {
       const FunctionDeclNode *dtor = nullptr;
@@ -862,6 +898,8 @@ llvm::Value *CodeGen::visit(const ImplicitCastNode *node) {
         dtor = static_cast<const ClassDeclNode *>(decl)->destructor;
       else if (decl->kind == NodeKind::StructDecl)
         dtor = static_cast<const StructDeclNode *>(decl)->destructor;
+      else if (decl->kind == NodeKind::UnionDecl)
+        dtor = static_cast<const UnionDeclNode *>(decl)->destructor;
 
       if (dtor) {
         cgCtx.addCleanup(temp, dtor);
@@ -976,6 +1014,10 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
           builder.CreateLoad(builder.getPtrTy(), thisAddr, "this.val");
       llvm::Type *llvmBaseTy = getLLVMType(varNode->parentType);
 
+      if (varNode->parentType->getKind() == TypeKind::Union) {
+        return thisPtr;
+      }
+
       return builder.CreateStructGEP(llvmBaseTy, thisPtr, varNode->fieldIndex,
                                      varNode->name);
     }
@@ -1039,6 +1081,11 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
       baseTy = static_cast<const ReferenceType *>(baseTy)->getPointeeType();
 
     llvm::Type *llvmBaseTy = getLLVMType(baseTy);
+
+    if (baseTy->getKind() == TypeKind::Union) {
+      return objPtr;
+    }
+
     return builder.CreateStructGEP(llvmBaseTy, objPtr, maNode->fieldIndex,
                                    maNode->memberName);
   }
@@ -1129,6 +1176,34 @@ llvm::Value *CodeGen::visit(const StringNode *node) {
       llvm::StringRef(node->value.data(), node->value.length()), ".str");
 }
 
+llvm::Value *CodeGen::visit(const UnionDeclNode *node) {
+  if (node->isTemplate)
+    return nullptr;
+
+  if (node->recordType) {
+    getLLVMType(node->recordType);
+  }
+
+  if (node->isOpaque)
+    return nullptr;
+
+  for (const auto *field : node->fields) {
+    if (field->isStatic)
+      dispatch(field);
+  }
+
+  for (const auto *ctor : node->constructors)
+    dispatch(ctor);
+  if (node->destructor)
+    dispatch(node->destructor);
+
+  for (const auto *method : node->methods) {
+    dispatch(method);
+  }
+
+  return nullptr;
+}
+
 llvm::Value *CodeGen::visit(const StructDeclNode *node) {
   if (node->isTemplate)
     return nullptr;
@@ -1198,8 +1273,12 @@ llvm::Value *CodeGen::visit(const VariableNode *node) {
         builder.CreateLoad(builder.getPtrTy(), thisAddr, "this.val");
 
     llvm::Type *llvmBaseTy = getLLVMType(node->parentType);
-    llvm::Value *gep = builder.CreateStructGEP(llvmBaseTy, thisPtr,
-                                               node->fieldIndex, node->name);
+    llvm::Value *gep = thisPtr;
+
+    if (node->parentType->getKind() != TypeKind::Union) {
+      gep = builder.CreateStructGEP(llvmBaseTy, thisPtr, node->fieldIndex,
+                                    node->name);
+    }
     return createTBAALoad(getLLVMType(node->exprType), gep,
                           getTBAATagForExpr(node), node->name);
   }
@@ -1271,10 +1350,13 @@ llvm::Value *CodeGen::visit(const MemberAccessNode *node) {
     baseTy = static_cast<const ReferenceType *>(baseTy)->getPointeeType();
 
   llvm::Type *llvmBaseTy = getLLVMType(baseTy);
-  llvm::Value *gep = builder.CreateStructGEP(
-      llvmBaseTy, objPtr, node->fieldIndex, node->memberName);
+  llvm::Value *gep = objPtr;
 
-  /* Automatic array-to-pointer decay on record fields */
+  if (baseTy->getKind() != TypeKind::Union) {
+    gep = builder.CreateStructGEP(llvmBaseTy, objPtr, node->fieldIndex,
+                                  node->memberName);
+  }
+
   if (node->exprType->getKind() == TypeKind::Array) {
     llvm::Type *arrTy = getLLVMType(node->exprType);
     return builder.CreateInBoundsGEP(
@@ -1855,7 +1937,8 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
   }
 
   if (elemTyForAlign->getKind() == TypeKind::Struct ||
-      elemTyForAlign->getKind() == TypeKind::Class) {
+      elemTyForAlign->getKind() == TypeKind::Class ||
+      elemTyForAlign->getKind() == TypeKind::Union) {
     if (const DeclNode *decl =
             static_cast<const RecordType *>(elemTyForAlign)->getDeclaration()) {
       for (const auto *ann : decl->annotations) {
@@ -2031,7 +2114,8 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
 
   const auto *unqualTy = node->type->getUnqualifiedType();
   if (unqualTy->getKind() == TypeKind::Class ||
-      unqualTy->getKind() == TypeKind::Struct) {
+      unqualTy->getKind() == TypeKind::Struct ||
+      unqualTy->getKind() == TypeKind::Union) {
     auto *recTy = static_cast<const RecordType *>(unqualTy);
     auto *decl = recTy->getDeclaration();
     const FunctionDeclNode *dtor = nullptr;
@@ -2040,6 +2124,8 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
         dtor = static_cast<const ClassDeclNode *>(decl)->destructor;
       else if (decl->kind == NodeKind::StructDecl)
         dtor = static_cast<const StructDeclNode *>(decl)->destructor;
+      else if (decl->kind == NodeKind::UnionDecl)
+        dtor = static_cast<const UnionDeclNode *>(decl)->destructor;
     }
     if (dtor) {
       cgCtx.addCleanup(alloca, dtor);
@@ -2066,7 +2152,8 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
 
       if (!isRVO) {
         bool isAggregate = (unqualTy->getKind() == TypeKind::Struct ||
-                            unqualTy->getKind() == TypeKind::Class);
+                            unqualTy->getKind() == TypeKind::Class ||
+                            unqualTy->getKind() == TypeKind::Union);
 
         if (isAggregate && node->copyCtor) {
           llvm::Value *rvalAddr = getLValue(node->initializer);
@@ -2130,7 +2217,8 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
       emitDefaultInitialization(alloca, node->type);
 
       if (unqualTy->getKind() == TypeKind::Class ||
-          unqualTy->getKind() == TypeKind::Struct) {
+          unqualTy->getKind() == TypeKind::Struct ||
+          unqualTy->getKind() == TypeKind::Union) {
         auto *recTy = static_cast<const RecordType *>(unqualTy);
         auto *decl = recTy->getDeclaration();
         if (decl) {
@@ -2140,6 +2228,8 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
             ctors = static_cast<const ClassDeclNode *>(decl)->constructors;
           else if (decl->kind == NodeKind::StructDecl)
             ctors = static_cast<const StructDeclNode *>(decl)->constructors;
+          else if (decl->kind == NodeKind::UnionDecl)
+            ctors = static_cast<const UnionDeclNode *>(decl)->constructors;
 
           for (auto *ctor : ctors) {
             if (ctor->params.empty()) {
@@ -2237,6 +2327,7 @@ llvm::Value *CodeGen::visit(const AssignNode *node) {
   const Type *unqualTargetTy = node->target->exprType->getUnqualifiedType();
   bool isAggregate = (unqualTargetTy->getKind() == TypeKind::Struct ||
                       unqualTargetTy->getKind() == TypeKind::Class ||
+                      unqualTargetTy->getKind() == TypeKind::Union ||
                       unqualTargetTy->getKind() == TypeKind::Array);
 
   /* Map assignment to deep memory copy for aggregate types to preserve locality
@@ -2486,7 +2577,8 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
 
       const auto *unqual = node->exprType->getUnqualifiedType();
       if (unqual->getKind() == TypeKind::Class ||
-          unqual->getKind() == TypeKind::Struct) {
+          unqual->getKind() == TypeKind::Struct ||
+          unqual->getKind() == TypeKind::Union) {
         auto *recTy = static_cast<const RecordType *>(unqual);
         auto *decl = recTy->getDeclaration();
         if (decl) {
@@ -2495,6 +2587,8 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
             dtor = static_cast<const ClassDeclNode *>(decl)->destructor;
           else if (decl->kind == NodeKind::StructDecl)
             dtor = static_cast<const StructDeclNode *>(decl)->destructor;
+          else if (decl->kind == NodeKind::UnionDecl)
+            dtor = static_cast<const UnionDeclNode *>(decl)->destructor;
 
           if (dtor) {
             cgCtx.addCleanup(instance, dtor);
@@ -2951,7 +3045,8 @@ llvm::Value *CodeGen::visit(const DeleteExprNode *node) {
 
     const FunctionDeclNode *dtor = nullptr;
     if (unqual->getKind() == TypeKind::Class ||
-        unqual->getKind() == TypeKind::Struct) {
+        unqual->getKind() == TypeKind::Struct ||
+        unqual->getKind() == TypeKind::Union) {
       auto *recTy = static_cast<const RecordType *>(unqual);
 
       if (auto *decl = recTy->getDeclaration()) {
@@ -2959,6 +3054,8 @@ llvm::Value *CodeGen::visit(const DeleteExprNode *node) {
           dtor = static_cast<const ClassDeclNode *>(decl)->destructor;
         } else if (decl->kind == NodeKind::StructDecl) {
           dtor = static_cast<const StructDeclNode *>(decl)->destructor;
+        } else if (decl->kind == NodeKind::UnionDecl) {
+          dtor = static_cast<const UnionDeclNode *>(decl)->destructor;
         }
       }
     }
@@ -3009,7 +3106,8 @@ llvm::Value *CodeGen::visit(const DeleteExprNode *node) {
       const Type *unqual = pointeeTy->getUnqualifiedType();
 
       if (unqual->getKind() == TypeKind::Class ||
-          unqual->getKind() == TypeKind::Struct) {
+          unqual->getKind() == TypeKind::Struct ||
+          unqual->getKind() == TypeKind::Union) {
         auto *recTy = static_cast<const RecordType *>(unqual);
 
         if (auto *decl = recTy->getDeclaration()) {
@@ -3018,6 +3116,8 @@ llvm::Value *CodeGen::visit(const DeleteExprNode *node) {
             dtor = static_cast<const ClassDeclNode *>(decl)->destructor;
           } else if (decl->kind == NodeKind::StructDecl) {
             dtor = static_cast<const StructDeclNode *>(decl)->destructor;
+          } else if (decl->kind == NodeKind::UnionDecl) {
+            dtor = static_cast<const UnionDeclNode *>(decl)->destructor;
           }
 
           if (dtor) {
@@ -3057,21 +3157,26 @@ llvm::MDNode *CodeGen::getTBAATypeNode(const Type *type) {
   } else if (unqual->isBuiltinType()) {
     node = mdBuilder.createTBAAScalarTypeNode(unqual->toString(), charNode);
   } else if (unqual->getKind() == TypeKind::Class ||
-             unqual->getKind() == TypeKind::Struct) {
-    /* Struct-Path TBAA: Build precise topological map of the record type */
+             unqual->getKind() == TypeKind::Struct ||
+             unqual->getKind() == TypeKind::Union) {
     auto *recTy = static_cast<const RecordType *>(unqual);
-    llvm::StructType *structTy =
-        llvm::cast<llvm::StructType>(getLLVMType(recTy));
-    const llvm::StructLayout *layout =
-        mod.getDataLayout().getStructLayout(structTy);
 
-    std::vector<std::pair<llvm::MDNode *, uint64_t>> fields;
-    for (const auto &f : recTy->getFields()) {
-      uint64_t offset = layout->getElementOffset(f.index);
-      llvm::MDNode *fieldTypeNode = getTBAATypeNode(f.type);
-      fields.push_back({fieldTypeNode, offset});
+    if (unqual->getKind() == TypeKind::Union) {
+      node = mdBuilder.createTBAAScalarTypeNode(recTy->getName(), charNode);
+    } else {
+      llvm::StructType *structTy =
+          llvm::cast<llvm::StructType>(getLLVMType(recTy));
+      const llvm::StructLayout *layout =
+          mod.getDataLayout().getStructLayout(structTy);
+
+      std::vector<std::pair<llvm::MDNode *, uint64_t>> fields;
+      for (const auto &f : recTy->getFields()) {
+        uint64_t offset = layout->getElementOffset(f.index);
+        llvm::MDNode *fieldTypeNode = getTBAATypeNode(f.type);
+        fields.push_back({fieldTypeNode, offset});
+      }
+      node = mdBuilder.createTBAAStructTypeNode(recTy->getName(), fields);
     }
-    node = mdBuilder.createTBAAStructTypeNode(recTy->getName(), fields);
   } else {
     node = charNode;
   }
@@ -3121,6 +3226,7 @@ llvm::MDNode *CodeGen::getTBAATagForExpr(const ExprNode *node) {
   const Type *unqual = node->exprType->getUnqualifiedType();
   if (unqual->getKind() == TypeKind::Struct ||
       unqual->getKind() == TypeKind::Class ||
+      unqual->getKind() == TypeKind::Union ||
       unqual->getKind() == TypeKind::Array) {
     return nullptr;
   }
@@ -3140,6 +3246,10 @@ llvm::MDNode *CodeGen::getTBAATagForExpr(const ExprNode *node) {
       baseTy = static_cast<const ReferenceType *>(baseTy)->getPointeeType();
     }
 
+    if (baseTy->getKind() == TypeKind::Union) {
+      return getTBAAAccessTag(node->exprType);
+    }
+
     llvm::StructType *llBaseTy =
         llvm::cast<llvm::StructType>(getLLVMType(baseTy));
     uint64_t offset =
@@ -3152,6 +3262,10 @@ llvm::MDNode *CodeGen::getTBAATagForExpr(const ExprNode *node) {
   if (node->kind == NodeKind::Variable) {
     auto *varNode = static_cast<const VariableNode *>(node);
     if (varNode->isField) {
+      if (varNode->parentType->getKind() == TypeKind::Union) {
+        return getTBAAAccessTag(node->exprType);
+      }
+
       llvm::StructType *llBaseTy =
           llvm::cast<llvm::StructType>(getLLVMType(varNode->parentType));
       uint64_t offset =
@@ -3245,7 +3359,8 @@ void CodeGen::emitDefaultInitialization(llvm::Value *ptr, const Type *type) {
 
   const auto *unqual = type->getUnqualifiedType();
   if (unqual->getKind() == TypeKind::Struct ||
-      unqual->getKind() == TypeKind::Class) {
+      unqual->getKind() == TypeKind::Class ||
+      unqual->getKind() == TypeKind::Union) {
     auto *recTy = static_cast<const RecordType *>(unqual);
     auto *decl = recTy->getDeclaration();
     if (!decl)
@@ -3256,11 +3371,15 @@ void CodeGen::emitDefaultInitialization(llvm::Value *ptr, const Type *type) {
       fields = static_cast<const StructDeclNode *>(decl)->fields;
     } else if (decl->kind == NodeKind::ClassDecl) {
       fields = static_cast<const ClassDeclNode *>(decl)->fields;
+    } else if (decl->kind == NodeKind::UnionDecl) {
+      fields = static_cast<const UnionDeclNode *>(decl)->fields;
     }
 
     llvm::StructType *llRecTy = llvm::cast<llvm::StructType>(llTy);
-    const llvm::StructLayout *layout =
-        mod.getDataLayout().getStructLayout(llRecTy);
+    const llvm::StructLayout *layout = nullptr;
+    if (type->getKind() != TypeKind::Union) {
+      layout = mod.getDataLayout().getStructLayout(llRecTy);
+    }
 
     for (size_t i = 0; i < fields.size(); ++i) {
       auto *fieldDecl = fields[i];
@@ -3270,10 +3389,15 @@ void CodeGen::emitDefaultInitialization(llvm::Value *ptr, const Type *type) {
           llvm::Type *destTy = getLLVMType(fieldDecl->type);
           initVal = createImplicitCast(initVal, destTy);
 
-          llvm::Value *gep = builder.CreateStructGEP(
-              llTy, ptr, i, std::string(fieldDecl->varName));
+          llvm::Value *gep = ptr;
+          uint64_t offset = 0;
 
-          uint64_t offset = layout->getElementOffset(i);
+          if (type->getKind() != TypeKind::Union) {
+            gep = builder.CreateStructGEP(llTy, ptr, i,
+                                          std::string(fieldDecl->varName));
+            offset = layout->getElementOffset(i);
+          }
+
           llvm::MDNode *tbaaTag =
               getTBAAStructAccessTag(type, fieldDecl->type, offset);
 

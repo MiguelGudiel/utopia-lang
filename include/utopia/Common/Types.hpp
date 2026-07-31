@@ -23,6 +23,7 @@ enum class TypeKind {
   Const,
   Struct,
   Class,
+  Union,
   Array,
   Function,
   Alias,
@@ -157,6 +158,11 @@ public:
     }
     return nullptr;
   }
+};
+
+class UnionType : public RecordType {
+public:
+  explicit UnionType(std::string_view n) : RecordType(TypeKind::Union, n) {}
 };
 
 class StructType : public RecordType {

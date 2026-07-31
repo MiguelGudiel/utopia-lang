@@ -46,8 +46,9 @@ public:
   void visit(const AnnotationNode *) {}
   void visit(const ParamDeclNode *) {}
   void visit(const ModuleNode *) {}
-  void visit(const StructDeclNode *) {}
-  void visit(const ClassDeclNode *) {}
+  void visit(const UnionDeclNode *n);
+  void visit(const StructDeclNode *n) {}
+  void visit(const ClassDeclNode *n) {}
   void visit(const FunctionDeclNode *) {}
   void visit(const EnumDeclNode *) {}
   void visit(const EnumMemberNode *) {}
