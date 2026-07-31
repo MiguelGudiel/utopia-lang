@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <llvm/ADT/ArrayRef.h>
 #include <string_view>
+#include <unordered_set>
 
 namespace utopia {
 
@@ -383,11 +384,19 @@ struct ModuleNode : public ASTNode {
   std::string_view filePath;
   llvm::ArrayRef<std::string_view> rawImports;
   llvm::ArrayRef<ModuleNode *> importedModules;
+
+  llvm::ArrayRef<std::string_view> rawExports;
+  llvm::ArrayRef<ModuleNode *> exportedModules;
+
   llvm::ArrayRef<ASTNode *> statements;
   std::vector<ASTNode *> instantiatedTemplates;
 
   explicit ModuleNode(std::string_view path)
       : ASTNode(NodeKind::Module), filePath(path) {}
+
+  bool canSee(std::string_view targetFilePath) const;
+  bool exports(std::string_view targetFilePath,
+               std::unordered_set<const ModuleNode *> &visited) const;
 };
 
 struct AnnotationDeclNode : public DeclNode {

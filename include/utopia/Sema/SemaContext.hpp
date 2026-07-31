@@ -35,7 +35,7 @@ public:
   }
 
   llvm::SmallVector<const DeclNode *, 2> lookup(std::string_view name) const {
-    return symTable.lookup(name);
+    return symTable.lookup(name, currentModule);
   }
 
   SemaResult reportError(int line, int col, int len, const std::string &msg) {

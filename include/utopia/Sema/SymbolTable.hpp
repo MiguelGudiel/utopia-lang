@@ -8,8 +8,8 @@
 namespace utopia {
 
 /*
- * Represents a single lexical scope. 
- * Utilizes SmallVector to minimize heap allocations for typical symbol lookups 
+ * Represents a single lexical scope.
+ * Utilizes SmallVector to minimize heap allocations for typical symbol lookups
  * (usually 1 declaration per name, scaling up for function overloads).
  */
 class Scope {
@@ -29,12 +29,22 @@ public:
     scopes.back().symbols[name].push_back(decl);
   }
 
-  /* Performs a top-down search across scopes. Hides outer scope symbols on collision. */
-  llvm::SmallVector<const DeclNode *, 2> lookup(std::string_view name) const {
+  /* Performs a top-down search across scopes. Hides outer scope symbols on
+   * collision. */
+  llvm::SmallVector<const DeclNode *, 2>
+  lookup(std::string_view name,
+         const ModuleNode *currentModule = nullptr) const {
     for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
       auto found = it->symbols.find(name);
       if (found != it->symbols.end()) {
-        return found->second;
+        llvm::SmallVector<const DeclNode *, 2> results;
+        for (const auto *decl : found->second) {
+          if (!currentModule || currentModule->canSee(decl->declFilePath)) {
+            results.push_back(decl);
+          }
+        }
+        if (!results.empty())
+          return results;
       }
     }
     return {};

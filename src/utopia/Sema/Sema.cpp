@@ -68,6 +68,15 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
     }
 
     const DeclNode *tmplDecl = declIt->second;
+
+    if (ctx->currentModule &&
+        !ctx->currentModule->canSee(tmplDecl->declFilePath)) {
+      ctx->reportError(0, 0, 0,
+                       "Template '" + std::string(instTy->getBaseName()) +
+                           "' is not visible in this module.");
+      return ctx->astCtx.VoidTy;
+    }
+
     std::string mangledName = std::string(instTy->getBaseName());
     for (const auto *arg : instTy->getTemplateArgs()) {
       std::string argStr = arg->toString();
@@ -406,6 +415,9 @@ void DeclCollectorPass::visit(const ModuleNode *node) {
   for (const auto *imp : node->importedModules) {
     dispatch(imp);
   }
+  for (const auto *exp : node->exportedModules) {
+    dispatch(exp);
+  }
 
   auto prevFile = ctx->currentFile;
   auto prevMod = ctx->currentModule;
@@ -430,6 +442,9 @@ void DeclCollectorPass::visit(const ModuleNode *node) {
 
 void DeclCollectorPass::visit(const TypedefDeclNode *node) {
   ctx->addDecl(node->aliasName, node);
+  if (node->aliasType) {
+    node->aliasType->setDeclaration(node);
+  }
 }
 
 void DeclCollectorPass::visit(const AnnotationDeclNode *node) {
@@ -1125,28 +1140,38 @@ bool TypeCheckPass::checkTypeVisibility(const Type *type, const ASTNode *node) {
                  ->getElementType()
                  ->getUnqualifiedType();
   }
+
+  const DeclNode *decl = nullptr;
+  std::string_view typeName;
+
   if (unqual->getKind() == TypeKind::Class ||
       unqual->getKind() == TypeKind::Struct ||
       unqual->getKind() == TypeKind::Union) {
     auto *recTy = static_cast<const RecordType *>(unqual);
-    auto *decl = recTy->getDeclaration();
-    if (decl && !decl->isPublic(recTy->getName()) &&
-        decl->declFilePath != ctx->currentFile) {
+    decl = recTy->getDeclaration();
+    typeName = recTy->getName();
+  } else if (unqual->getKind() == TypeKind::Enum) {
+    auto *enumTy = static_cast<const EnumType *>(unqual);
+    decl = enumTy->getDeclaration();
+    typeName = enumTy->getName();
+  } else if (unqual->getKind() == TypeKind::Alias) {
+    auto *aliasTy = static_cast<const AliasType *>(unqual);
+    decl = aliasTy->getDeclaration();
+    typeName = aliasTy->getName();
+  }
+
+  if (decl) {
+    if (!decl->isPublic(typeName) && decl->declFilePath != ctx->currentFile) {
       ctx->reportError(node->line, node->column, node->length,
-                       "Cannot access private type '" +
-                           std::string(recTy->getName()) +
+                       "Cannot access private type '" + std::string(typeName) +
                            "' from outside its file.");
       return false;
     }
-  } else if (unqual->getKind() == TypeKind::Enum) {
-    auto *enumTy = static_cast<const EnumType *>(unqual);
-    auto *decl = enumTy->getDeclaration();
-    if (decl && !decl->isPublic(enumTy->getName()) &&
-        decl->declFilePath != ctx->currentFile) {
+
+    if (ctx->currentModule && !ctx->currentModule->canSee(decl->declFilePath)) {
       ctx->reportError(node->line, node->column, node->length,
-                       "Cannot access private enum '" +
-                           std::string(enumTy->getName()) +
-                           "' from outside its file.");
+                       "Type '" + std::string(typeName) +
+                           "' is not visible in this module.");
       return false;
     }
   }
@@ -1503,7 +1528,10 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
       auto it = ctx->templateRegistry.find(node->name);
       if (it != ctx->templateRegistry.end() &&
           it->second->kind == NodeKind::FunctionDecl) {
-        tmplDecl = const_cast<DeclNode *>(it->second);
+        if (!ctx->currentModule ||
+            ctx->currentModule->canSee(it->second->declFilePath)) {
+          tmplDecl = const_cast<DeclNode *>(it->second);
+        }
       }
     }
 
@@ -3491,6 +3519,11 @@ SemaResult TypeCheckPass::visit(const ModuleNode *node) {
 
   for (const auto *imp : node->importedModules) {
     auto res = dispatch(imp);
+    if (!res)
+      hasErrors = true;
+  }
+  for (const auto *exp : node->exportedModules) {
+    auto res = dispatch(exp);
     if (!res)
       hasErrors = true;
   }

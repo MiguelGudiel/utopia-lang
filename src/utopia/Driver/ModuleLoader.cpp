@@ -184,6 +184,19 @@ ModuleNode *ModuleLoader::loadModule(const std::string &importURI,
   }
 
   module->importedModules = astCtx.copyArray<ModuleNode *>(resolvedImports);
+
+  std::vector<ModuleNode *> resolvedExports;
+  for (std::string_view exp : module->rawExports) {
+    ModuleNode *loaded = loadModule(std::string(exp), absPath.parent_path());
+    if (loaded) {
+      if (std::find(resolvedExports.begin(), resolvedExports.end(), loaded) ==
+          resolvedExports.end()) {
+        resolvedExports.push_back(loaded);
+      }
+    }
+  }
+  module->exportedModules = astCtx.copyArray<ModuleNode *>(resolvedExports);
+
   return module;
 }
 

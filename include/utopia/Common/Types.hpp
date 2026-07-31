@@ -214,6 +214,7 @@ public:
 class AliasType : public Type {
   std::string_view aliasName;
   mutable const Type *target;
+  mutable const DeclNode *declaration = nullptr;
 
 public:
   explicit AliasType(std::string_view n)
@@ -221,6 +222,8 @@ public:
   std::string_view getName() const { return aliasName; }
   const Type *getTarget() const { return target; }
   void setTarget(const Type *t) const { target = t; }
+  const DeclNode *getDeclaration() const { return declaration; }
+  void setDeclaration(const DeclNode *decl) const { declaration = decl; }
 };
 
 class EnumType : public Type {

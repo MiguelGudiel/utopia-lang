@@ -131,8 +131,16 @@ bool CompilerDriver::run() {
       return true;
     compiledModules.insert(modNode);
 
+    /* Traverse standard explicit imports */
     for (const auto *imp : modNode->importedModules) {
       if (!self(imp, self))
+        return false;
+    }
+
+    /* Traverse re-exported dependencies to guarantee backend object generation
+     */
+    for (const auto *exp : modNode->exportedModules) {
+      if (!self(exp, self))
         return false;
     }
 
@@ -281,7 +289,7 @@ bool CompilerDriver::run() {
 
       std::string ext = ".a";
 #if defined(_WIN32)
-      ext = ".lib";
+      std::string ext = ".lib";
 #endif
 
       std::string libPath =

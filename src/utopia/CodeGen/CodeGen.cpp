@@ -2961,28 +2961,48 @@ llvm::Value *CodeGen::visit(const ModuleNode *node) {
     lexicalBlocks.push_back(diCU);
   }
 
-  for (const auto *imp : node->importedModules) {
-    for (const auto &stmt : imp->statements) {
-      if (stmt->kind == NodeKind::FunctionDecl) {
-        getOrCreateFunction(static_cast<const FunctionDeclNode *>(stmt));
-      } else if (stmt->kind == NodeKind::VarDecl) {
-        auto *varDecl = static_cast<const VarDeclNode *>(stmt);
-        if (varDecl->isGlobal) {
-          llvm::Type *ty = getLLVMType(varDecl->type);
-          std::string bindName = varDecl->mangledName.empty()
-                                     ? std::string(varDecl->varName)
-                                     : varDecl->mangledName;
-          llvm::GlobalVariable *gvar = mod.getGlobalVariable(bindName);
-          if (!gvar) {
-            gvar = new llvm::GlobalVariable(
-                mod, ty, varDecl->type->isConstQualified(),
-                llvm::GlobalValue::ExternalLinkage, nullptr, bindName);
+  std::unordered_set<const ModuleNode *> visitedDeps;
+
+  /* Recursively traverses the full module hierarchy to establish external
+   * linkages for global functions and variables, respecting export visibility
+   */
+  auto declareGlobals = [&](const ModuleNode *m, auto &self) -> void {
+    if (!m || visitedDeps.contains(m))
+      return;
+    visitedDeps.insert(m);
+
+    if (m != node) {
+      for (const auto &stmt : m->statements) {
+        if (stmt->kind == NodeKind::FunctionDecl) {
+          getOrCreateFunction(static_cast<const FunctionDeclNode *>(stmt));
+        } else if (stmt->kind == NodeKind::VarDecl) {
+          auto *varDecl = static_cast<const VarDeclNode *>(stmt);
+          if (varDecl->isGlobal) {
+            llvm::Type *ty = getLLVMType(varDecl->type);
+            std::string bindName = varDecl->mangledName.empty()
+                                       ? std::string(varDecl->varName)
+                                       : varDecl->mangledName;
+            llvm::GlobalVariable *gvar = mod.getGlobalVariable(bindName);
+            if (!gvar) {
+              gvar = new llvm::GlobalVariable(
+                  mod, ty, varDecl->type->isConstQualified(),
+                  llvm::GlobalValue::ExternalLinkage, nullptr, bindName);
+            }
+            cgCtx.bind(bindName, gvar, true);
           }
-          cgCtx.bind(bindName, gvar, true);
         }
       }
     }
-  }
+
+    for (const auto *imp : m->importedModules) {
+      self(imp, self);
+    }
+    for (const auto *exp : m->exportedModules) {
+      self(exp, self);
+    }
+  };
+
+  declareGlobals(node, declareGlobals);
 
   for (const auto &stmt : node->statements) {
     if (stmt->kind == NodeKind::StructDecl) {

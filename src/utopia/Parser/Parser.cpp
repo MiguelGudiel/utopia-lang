@@ -304,23 +304,30 @@ std::string Parser::consumeComments() {
 ModuleNode *Parser::parseModule(std::string_view filePath) {
   auto module = astCtx.create<ModuleNode>(filePath);
   std::vector<std::string_view> imports;
+  std::vector<std::string_view> exports;
   std::vector<ASTNode *> statements;
 
   while (currentToken().type != TokenType::EOF_TOK) {
     try {
       if (currentToken().type == TokenType::COMMENT &&
-          peekToken().value == "import") {
+          (peekToken().value == "import" || peekToken().value == "export")) {
         consumeComments();
       }
 
       if (currentToken().type == TokenType::IDENTIFIER &&
-          currentToken().value == "import") {
+          (currentToken().value == "import" ||
+           currentToken().value == "export")) {
+
+        bool isExport = (currentToken().value == "export");
         advance();
 
         if (currentToken().type != TokenType::STRING_LITERAL) {
-          reportError(currentToken().line, currentToken().column,
-                      (int)currentToken().value.length(),
-                      "Expected string literal for module path after 'import'");
+          reportError(
+              currentToken().line, currentToken().column,
+              (int)currentToken().value.length(),
+              isExport
+                  ? "Expected string literal for module path after 'export'"
+                  : "Expected string literal for module path after 'import'");
           throw ParseException();
         }
 
@@ -331,12 +338,18 @@ ModuleNode *Parser::parseModule(std::string_view filePath) {
 
         advance();
 
-        expect(TokenType::SEMICOLON, "Expected ';' after import statement");
-        imports.push_back(path);
+        expect(TokenType::SEMICOLON, "Expected ';' after statement");
 
-        /* Synchronously invoke the module loader upon evaluating an import
-         * directive. This pre-populates the ASTContext with available
-         * foreign types and guarantees downstream identifier resolution.
+        if (isExport) {
+          exports.push_back(path);
+        } else {
+          imports.push_back(path);
+        }
+
+        /* Synchronously invoke the module loader upon evaluating an
+         * import/export directive. This pre-populates the ASTContext with
+         * available foreign types and guarantees downstream identifier
+         * resolution.
          */
         if (moduleLoader) {
           std::filesystem::path currentDir =
@@ -356,6 +369,7 @@ ModuleNode *Parser::parseModule(std::string_view filePath) {
   }
 
   module->rawImports = astCtx.copyArray<std::string_view>(imports);
+  module->rawExports = astCtx.copyArray<std::string_view>(exports);
   module->statements = astCtx.copyArray<ASTNode *>(statements);
   return module;
 }
