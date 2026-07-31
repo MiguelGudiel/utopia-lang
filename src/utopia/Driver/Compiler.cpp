@@ -12,7 +12,8 @@ llvm::Module *Compiler::compileToIR(ModuleNode *root,
                                     DiagnosticsEngine &diags,
                                     bool emitDebugInfo) {
   llvm::Module *llvmMod = backendCtx.createModule(moduleName);
-  CodeGen codegen(backendCtx, *llvmMod, diags, emitDebugInfo);
+  CodeGen codegen(backendCtx, *llvmMod, diags, emitDebugInfo,
+                  std::string(root->filePath));
   codegen.dispatch(root);
 
   if (diags.hasErrors()) {

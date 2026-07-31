@@ -11,9 +11,11 @@ namespace fs = std::filesystem;
 namespace utopia {
 
 CodeGen::CodeGen(BackendContext &bCtx, llvm::Module &llvmMod,
-                 DiagnosticsEngine &diags, bool emitDebugInfo)
+                 DiagnosticsEngine &diags, bool emitDebugInfo,
+                 std::string filePath)
     : backend(bCtx), ctx(bCtx.getLLVMContext()), mod(llvmMod), builder(ctx),
-      diags(diags), mdBuilder(ctx), emitDebugInfo(emitDebugInfo) {
+      diags(diags), mdBuilder(ctx), emitDebugInfo(emitDebugInfo),
+      currentFilePath(std::move(filePath)) {
   tbaaRoot = mdBuilder.createTBAARoot("Utopia TBAA");
 
   llvm::FastMathFlags fmf;
@@ -1049,8 +1051,10 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
     SymbolInfo sym = cgCtx.lookupDetailed(lookupName);
 
     if (!sym.value) {
-      std::cerr << "[CodeGen Error] Unbound symbol in l-value resolution: '"
-                << lookupName << "'.\n";
+      diags.report(
+          {DiagLevel::Error, varNode->line, varNode->column, varNode->length,
+           "Unbound symbol in l-value resolution: '" + lookupName + "'.",
+           currentFilePath});
       return nullptr;
     }
 
@@ -1072,7 +1076,7 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
       SymbolInfo sym = cgCtx.lookupDetailed(gName);
       if (!sym.value) {
         diags.report({DiagLevel::Error, node->line, node->column, node->length,
-                      "Unbound static field.", ""});
+                      "Unbound static field.", currentFilePath});
         return nullptr;
       }
       return sym.value;
@@ -1864,7 +1868,7 @@ llvm::Value *CodeGen::visit(const BinaryOpNode *node) {
 
   if (!L || !R) {
     diags.report({DiagLevel::Error, node->line, node->column, node->length,
-                  "Failed to generate binary operands.", ""});
+                  "Failed to generate binary operands.", currentFilePath});
     return nullptr;
   }
 
@@ -2678,7 +2682,8 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
 
       if (!argVal) {
         diags.report({DiagLevel::Error, arg->line, arg->column, arg->length,
-                      "Failed to evaluate argument for function call.", ""});
+                      "Failed to evaluate argument for function call.",
+                      currentFilePath});
         return nullptr;
       }
       argsArgs.push_back(argVal);
@@ -2829,13 +2834,25 @@ llvm::Value *CodeGen::visit(const ModuleNode *node) {
     for (const auto &stmt : imp->statements) {
       if (stmt->kind == NodeKind::FunctionDecl) {
         getOrCreateFunction(static_cast<const FunctionDeclNode *>(stmt));
+      } else if (stmt->kind == NodeKind::VarDecl) {
+        auto *varDecl = static_cast<const VarDeclNode *>(stmt);
+        if (varDecl->isGlobal) {
+          llvm::Type *ty = getLLVMType(varDecl->type);
+          std::string bindName = varDecl->mangledName.empty()
+                                     ? std::string(varDecl->varName)
+                                     : varDecl->mangledName;
+          llvm::GlobalVariable *gvar = mod.getGlobalVariable(bindName);
+          if (!gvar) {
+            gvar = new llvm::GlobalVariable(
+                mod, ty, varDecl->type->isConstQualified(),
+                llvm::GlobalValue::ExternalLinkage, nullptr, bindName);
+          }
+          cgCtx.bind(bindName, gvar, true);
+        }
       }
     }
   }
 
-  /* Pass 1: Forward declare and materialize all record types in the translation
-   * unit before processing function bodies or variables that rely on their size
-   * and layout. */
   for (const auto &stmt : node->statements) {
     if (stmt->kind == NodeKind::StructDecl) {
       getLLVMType(static_cast<const StructDeclNode *>(stmt)->recordType);
@@ -3382,7 +3399,7 @@ void CodeGen::emitDefaultInitialization(llvm::Value *ptr, const Type *type) {
                   "Massive memory allocation detected (" +
                       std::to_string(size) +
                       " bytes). This may cause a stack overflow at runtime.",
-                  ""});
+                  currentFilePath});
   }
 
   if (size > 0) {

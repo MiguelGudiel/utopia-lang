@@ -88,6 +88,16 @@ ProjectConfig parseBuildManifest(const fs::path &manifestPath) {
         }
       }
     }
+
+    if (root["dependencies"] && root["dependencies"].IsSequence()) {
+      for (const auto &dep : root["dependencies"]) {
+        SubprojectConfig sub;
+        sub.path = dep["path"].as<std::string>();
+        sub.linkType = dep["link"] ? dep["link"].as<std::string>() : "static";
+        config.dependencies.push_back(sub);
+      }
+    }
+
   } catch (const YAML::Exception &e) {
     throw std::runtime_error("YAML parse error: " + std::string(e.what()));
   }

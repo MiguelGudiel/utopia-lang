@@ -9,9 +9,9 @@ namespace fs = std::filesystem;
 
 namespace utopia {
 
-std::expected<fs::path, std::string>
+std::expected<std::filesystem::path, std::string>
 ModuleLoader::resolveImportURI(std::string_view uri,
-                               const fs::path &currentDir) {
+                               const std::filesystem::path &currentDir) {
   std::string uriStr(uri);
 
   if (uriStr == "utopia:builder") {
@@ -19,57 +19,77 @@ ModuleLoader::resolveImportURI(std::string_view uri,
       return std::unexpected("The 'utopia:builder' module can only be imported "
                              "from build.utp scripts.");
     }
-    fs::path target = config.buildLibRoot / "builder.utp";
-    if (fs::exists(target)) {
-      return fs::weakly_canonical(target);
+    std::filesystem::path target = config.buildLibRoot / "builder.utp";
+    if (std::filesystem::exists(target)) {
+      return std::filesystem::weakly_canonical(target);
     }
     return std::unexpected("Builder library module not found at: " +
                            target.string());
   }
 
   if (uriStr == "prelude") {
-    fs::path target = config.preludeRoot / "prelude.utp";
-    if (fs::exists(target)) {
-      return fs::weakly_canonical(target);
+    std::filesystem::path target = config.preludeRoot / "prelude.utp";
+    if (std::filesystem::exists(target)) {
+      return std::filesystem::weakly_canonical(target);
     }
     return std::unexpected("Prelude module not found at: " + target.string());
   }
 
   if (uriStr.starts_with("utopia:")) {
     std::string libName = uriStr.substr(7);
-    fs::path target = config.stdlibRoot / libName;
+    std::filesystem::path target = config.stdlibRoot / libName;
     if (target.extension() != ".utp")
       target += ".utp";
 
-    if (fs::exists(target)) {
-      return fs::weakly_canonical(target);
+    if (std::filesystem::exists(target)) {
+      return std::filesystem::weakly_canonical(target);
     }
     return std::unexpected("Standard library module not found: " + libName);
   }
 
   if (uriStr.starts_with("package:")) {
     std::string pkgPath = uriStr.substr(8);
-    fs::path target = config.projectRoot / "utopia_modules" / pkgPath;
+    size_t slashPos = pkgPath.find('/');
+
+    std::string pkgName = pkgPath.substr(0, slashPos);
+    std::string subPath = (slashPos != std::string::npos)
+                              ? pkgPath.substr(slashPos + 1)
+                              : pkgName;
+
+    if (config.packages.contains(pkgName)) {
+      std::filesystem::path target =
+          std::filesystem::path(config.packages.at(pkgName)) / subPath;
+      if (target.extension() != ".utp")
+        target += ".utp";
+
+      if (std::filesystem::exists(target)) {
+        return std::filesystem::weakly_canonical(target);
+      }
+    }
+
+    std::filesystem::path target =
+        config.projectRoot / "utopia_modules" / pkgPath;
     if (target.extension() != ".utp")
       target += ".utp";
 
-    if (fs::exists(target)) {
-      return fs::weakly_canonical(target);
+    if (std::filesystem::exists(target)) {
+      return std::filesystem::weakly_canonical(target);
     }
     return std::unexpected("Package module not found: " + pkgPath);
   }
 
-  fs::path target(uriStr);
+  std::filesystem::path target(uriStr);
   if (target.extension() != ".utp")
     target += ".utp";
 
-  fs::path candidate = fs::weakly_canonical(currentDir / target);
-  if (fs::exists(candidate)) {
+  std::filesystem::path candidate =
+      std::filesystem::weakly_canonical(currentDir / target);
+  if (std::filesystem::exists(candidate)) {
     return candidate;
   }
 
-  if (fs::exists(target)) {
-    return fs::weakly_canonical(target);
+  if (std::filesystem::exists(target)) {
+    return std::filesystem::weakly_canonical(target);
   }
 
   return std::unexpected("Local module not found: " + uriStr);
@@ -132,7 +152,7 @@ ModuleNode *ModuleLoader::loadModule(const std::string &importURI,
     }
   }
 
-  Lexer lexer(sourceView);
+  Lexer lexer(sourceView, config.definedMacros);
   auto tokensVec = lexer.tokenize();
 
   auto tokens = astCtx.copyArray<Token>(tokensVec);

@@ -48,8 +48,9 @@ void Lexer::advance() {
   }
 }
 
-Lexer::Lexer(std::string_view sourceCode)
-    : source(sourceCode), cursor(0), line(1), col(1) {
+Lexer::Lexer(std::string_view sourceCode,
+             const std::unordered_set<std::string> &macros)
+    : source(sourceCode), cursor(0), line(1), col(1), definedMacros(macros) {
 
   // Register default target platform macros
 #if defined(_WIN32)

@@ -28,6 +28,38 @@ void UtopiaBuild_setOptLevel(int level) {
     g_CurrentBuildOptions->optLevel = level;
   }
 }
+void UtopiaBuild_addDefine(const char *name, bool isPublic) {
+  if (g_CurrentBuildOptions && name) {
+    if (isPublic) {
+      g_CurrentBuildOptions->publicMacros.insert(name);
+    } else {
+      g_CurrentBuildOptions->privateMacros.insert(name);
+    }
+  }
+}
+void UtopiaBuild_removeDefine(const char *name) {
+  if (g_CurrentBuildOptions && name) {
+    g_CurrentBuildOptions->publicMacros.erase(name);
+    g_CurrentBuildOptions->privateMacros.erase(name);
+  }
+}
+bool UtopiaBuild_isDefined(const char *name) {
+  if (g_CurrentBuildOptions && name) {
+    return g_CurrentBuildOptions->publicMacros.contains(name) ||
+           g_CurrentBuildOptions->privateMacros.contains(name);
+  }
+  return false;
+}
+void UtopiaBuild_addCacheDefine(const char *name, bool defaultValue,
+                                bool isPublic) {
+  if (!g_CurrentBuildOptions || !name)
+    return;
+  if (UtopiaBuild_isDefined(name))
+    return;
+  if (defaultValue) {
+    UtopiaBuild_addDefine(name, isPublic);
+  }
+}
 } // extern "C"
 
 bool BuildScriptRunner::run(const std::filesystem::path &scriptPath,
@@ -40,6 +72,11 @@ bool BuildScriptRunner::run(const std::filesystem::path &scriptPath,
   modConfig.stdlibRoot = options.stdlibRoot;
   modConfig.preludeRoot = options.preludeRoot;
   modConfig.buildLibRoot = options.buildLibRoot;
+  modConfig.includeDirs = options.includeDirs;
+  modConfig.packages = options.packages;
+  modConfig.definedMacros = options.publicMacros;
+  modConfig.definedMacros.insert(options.privateMacros.begin(),
+                                 options.privateMacros.end());
   modConfig.isBuildScript = true;
 
   DiagnosticsEngine diagEngine;
@@ -94,6 +131,10 @@ bool BuildScriptRunner::run(const std::filesystem::path &scriptPath,
   addSym("UtopiaBuild_addLinkerFlag", (void *)UtopiaBuild_addLinkerFlag);
   addSym("UtopiaBuild_addIncludeDir", (void *)UtopiaBuild_addIncludeDir);
   addSym("UtopiaBuild_setOptLevel", (void *)UtopiaBuild_setOptLevel);
+  addSym("UtopiaBuild_addDefine", (void *)UtopiaBuild_addDefine);
+  addSym("UtopiaBuild_removeDefine", (void *)UtopiaBuild_removeDefine);
+  addSym("UtopiaBuild_isDefined", (void *)UtopiaBuild_isDefined);
+  addSym("UtopiaBuild_addCacheDefine", (void *)UtopiaBuild_addCacheDefine);
 
   if (auto err = jd.define(llvm::orc::absoluteSymbols(symbols))) {
     g_CurrentBuildOptions = nullptr;
