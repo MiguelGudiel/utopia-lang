@@ -13,6 +13,12 @@
 #include <fstream>
 #include <sstream>
 
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <shared_mutex>
+#include <thread>
+
 using json = nlohmann::json;
 
 namespace utopia::lsp {
@@ -26,10 +32,25 @@ struct DocumentState {
 };
 
 std::map<std::string, DocumentState> documents;
+std::shared_mutex docMutex;
+std::mutex stdoutMutex;
+
+std::mutex cacheMutex;
+std::map<std::string, ModuleLoaderConfig> projectConfigCache;
+std::map<std::string, std::filesystem::path> uriToProjectRoot;
+
+std::mutex workerMutex;
+std::condition_variable workerCV;
+std::string pendingUri;
+std::string pendingText;
+bool hasPendingChange = false;
+std::atomic<bool> isRunning{true};
 
 void sendResponse(const json &res) {
   std::string content =
       res.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+
+  std::lock_guard<std::mutex> lock(stdoutMutex);
   std::cout << "Content-Length: " << content.length() << "\r\n\r\n"
             << content << std::flush;
 }
@@ -314,6 +335,8 @@ void handleHover(const json &req) {
   int col = req["params"]["position"]["character"].get<int>() + 1;
 
   json res = nullptr;
+
+  std::shared_lock<std::shared_mutex> lock(docMutex);
   if (documents.contains(uri)) {
     auto &doc = documents[uri];
     SearchVisitor searcher(line, col);
@@ -484,6 +507,8 @@ void handleDefinition(const json &req) {
   int col = req["params"]["position"]["character"].get<int>() + 1;
 
   json res = json::array();
+
+  std::shared_lock<std::shared_mutex> lock(docMutex);
   if (documents.contains(uri)) {
     auto &doc = documents[uri];
     SearchVisitor searcher(line, col);
@@ -647,6 +672,8 @@ void handleCompletion(const json &req) {
   };
 
   std::string targetLineStr = "";
+
+  std::shared_lock<std::shared_mutex> lock(docMutex);
   if (documents.contains(uri)) {
     const std::string &text = documents[uri].text;
     int currentLine = 0;
@@ -1110,71 +1137,94 @@ void loadPackagesLSP(const std::filesystem::path &manifestPath,
 }
 
 void processFile(const std::string &uri, std::string text) {
-  auto &state = documents[uri];
-  state.text = std::move(text);
-  state.astCtx = std::make_shared<ASTContext>();
-  state.diags = std::make_shared<DiagnosticsEngine>();
-
-  /* Disable stdout/stderr output in LSP mode to prevent routing errors to the
-   * Output tab */
-  state.diags->printToConsole = false;
+  DocumentState newState;
+  newState.text = std::move(text);
+  newState.astCtx = std::make_shared<ASTContext>();
+  newState.diags = std::make_shared<DiagnosticsEngine>();
+  newState.diags->printToConsole = false;
 
   std::string filePath = uriToPath(uri);
   std::filesystem::path currentPath(filePath);
-  std::filesystem::path projRoot = findProjectRootLSP(currentPath);
 
-  std::filesystem::path stdlibPath =
-      projRoot.empty()
-          ? ""
-          : projRoot.parent_path().parent_path() / "libs" / "stdlib" / "lib";
-  std::filesystem::path preludePath =
-      projRoot.empty()
-          ? ""
-          : projRoot.parent_path().parent_path() / "libs" / "prelude" / "lib";
-
-#ifdef UTOPIA_SOURCE_DIR
-  if (!std::filesystem::exists(stdlibPath)) {
-    stdlibPath =
-        std::filesystem::path(UTOPIA_SOURCE_DIR) / "libs" / "stdlib" / "lib";
-    preludePath =
-        std::filesystem::path(UTOPIA_SOURCE_DIR) / "libs" / "prelude" / "lib";
+  std::filesystem::path projRoot;
+  {
+    std::lock_guard<std::mutex> lock(cacheMutex);
+    if (uriToProjectRoot.contains(uri)) {
+      projRoot = uriToProjectRoot[uri];
+    } else {
+      projRoot = findProjectRootLSP(currentPath);
+      uriToProjectRoot[uri] = projRoot;
+    }
   }
-#endif
 
   ModuleLoaderConfig modConfig;
-  modConfig.projectRoot = projRoot;
-  modConfig.stdlibRoot = stdlibPath;
-  modConfig.preludeRoot = preludePath;
+  bool foundCache = false;
+  std::string projRootStr = projRoot.string();
 
-  if (!projRoot.empty()) {
-    std::unordered_set<std::string> visited;
-    loadPackagesLSP(projRoot / "build.yaml", modConfig.packages,
-                    modConfig.includeDirs, visited);
+  {
+    std::lock_guard<std::mutex> lock(cacheMutex);
+    if (projectConfigCache.contains(projRootStr)) {
+      modConfig = projectConfigCache[projRootStr];
+      foundCache = true;
+    }
   }
 
+  if (!foundCache) {
+    modConfig.projectRoot = projRoot;
+    std::filesystem::path stdlibPath =
+        projRoot.empty()
+            ? ""
+            : projRoot.parent_path().parent_path() / "libs" / "stdlib" / "lib";
+    std::filesystem::path preludePath =
+        projRoot.empty()
+            ? ""
+            : projRoot.parent_path().parent_path() / "libs" / "prelude" / "lib";
+
+#ifdef UTOPIA_SOURCE_DIR
+    if (!std::filesystem::exists(stdlibPath)) {
+      stdlibPath =
+          std::filesystem::path(UTOPIA_SOURCE_DIR) / "libs" / "stdlib" / "lib";
+      preludePath =
+          std::filesystem::path(UTOPIA_SOURCE_DIR) / "libs" / "prelude" / "lib";
+    }
+#endif
+
+    modConfig.stdlibRoot = stdlibPath;
+    modConfig.preludeRoot = preludePath;
+
+    if (!projRoot.empty()) {
+      std::unordered_set<std::string> visited;
+      loadPackagesLSP(projRoot / "build.yaml", modConfig.packages,
+                      modConfig.includeDirs, visited);
+    }
+
 #if defined(_WIN32)
-  modConfig.definedMacros.insert("_WIN32");
+    modConfig.definedMacros.insert("_WIN32");
 #elif defined(__APPLE__)
-  modConfig.definedMacros.insert("__APPLE__");
+    modConfig.definedMacros.insert("__APPLE__");
 #elif defined(__linux__) || defined(__gnu_linux__)
-  modConfig.definedMacros.insert("__gnu_linux__");
+    modConfig.definedMacros.insert("__gnu_linux__");
 #endif
 #if defined(__x86_64__) || defined(_M_X64)
-  modConfig.definedMacros.insert("x64");
+    modConfig.definedMacros.insert("x64");
 #elif defined(__aarch64__) || defined(_M_ARM64)
-  modConfig.definedMacros.insert("arm64");
+    modConfig.definedMacros.insert("arm64");
 #endif
 
-  ModuleLoader loader(*state.astCtx, modConfig, *state.diags);
+    std::lock_guard<std::mutex> lock(cacheMutex);
+    projectConfigCache[projRootStr] = modConfig;
+  }
+
+  ModuleLoader loader(*newState.astCtx, modConfig, *newState.diags);
 
   try {
-    state.ast = loader.loadModule(filePath, currentPath.parent_path(), 0, 0, 0,
-                                  filePath, state.text);
-    if (state.ast) {
-      state.sema =
-          std::make_shared<SemaContext>(*state.astCtx, *state.diags, filePath);
+    newState.ast = loader.loadModule(filePath, currentPath.parent_path(), 0, 0,
+                                     0, filePath, newState.text);
+    if (newState.ast) {
+      newState.sema = std::make_shared<SemaContext>(*newState.astCtx,
+                                                    *newState.diags, filePath);
       SemaPipeline pipeline;
-      pipeline.run(state.ast, *state.sema);
+      pipeline.run(newState.ast, *newState.sema);
     }
   } catch (...) {
   }
@@ -1182,12 +1232,43 @@ void processFile(const std::string &uri, std::string text) {
   sendResponse(
       {{"jsonrpc", "2.0"},
        {"method", "textDocument/publishDiagnostics"},
-       {"params", {{"uri", uri}, {"diagnostics", state.diags->toJSON()}}}});
+       {"params", {{"uri", uri}, {"diagnostics", newState.diags->toJSON()}}}});
+
+  {
+    std::unique_lock<std::shared_mutex> lock(docMutex);
+    documents[uri] = std::move(newState);
+  }
+}
+
+void workerThread() {
+  while (isRunning) {
+    std::string uri, text;
+    {
+      std::unique_lock<std::mutex> lock(workerMutex);
+      workerCV.wait(lock, [] { return hasPendingChange || !isRunning; });
+      if (!isRunning)
+        break;
+
+      while (hasPendingChange) {
+        hasPendingChange = false;
+        workerCV.wait_for(lock, std::chrono::milliseconds(200));
+      }
+
+      uri = pendingUri;
+      text = std::move(pendingText);
+    }
+
+    if (!uri.empty()) {
+      processFile(uri, text);
+    }
+  }
 }
 
 } // namespace utopia::lsp
 
 int main() {
+  std::thread worker(utopia::lsp::workerThread);
+
   std::string line;
   while (std::getline(std::cin, line)) {
     if (line.find("Content-Length:") == 0) {
@@ -1223,11 +1304,25 @@ int main() {
             (method == "textDocument/didOpen")
                 ? req["params"]["textDocument"]["text"].get<std::string>()
                 : req["params"]["contentChanges"][0]["text"].get<std::string>();
-        utopia::lsp::processFile(uri, std::move(text));
+
+        {
+          std::lock_guard<std::mutex> lock(utopia::lsp::workerMutex);
+          utopia::lsp::pendingUri = uri;
+          utopia::lsp::pendingText = std::move(text);
+          utopia::lsp::hasPendingChange = true;
+        }
+        utopia::lsp::workerCV.notify_one();
       } else if (method == "exit") {
+        utopia::lsp::isRunning = false;
+        utopia::lsp::workerCV.notify_one();
+        worker.join();
         return 0;
       }
     }
   }
+
+  utopia::lsp::isRunning = false;
+  utopia::lsp::workerCV.notify_one();
+  worker.join();
   return 0;
 }
