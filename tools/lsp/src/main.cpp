@@ -8,6 +8,7 @@
 #include <map>
 #include <nlohmann/json.hpp>
 #include <unordered_set>
+#include <yaml-cpp/yaml.h>
 
 using json = nlohmann::json;
 
@@ -675,14 +676,89 @@ std::filesystem::path findProjectRootLSP(std::filesystem::path current) {
   return "";
 }
 
+/*
+ * Recursively parses build.yaml manifests to map subproject dependencies
+ * to their respective include directories for LSP package resolution.
+ */
+void loadPackagesLSP(const std::filesystem::path &manifestPath,
+                     std::unordered_map<std::string, std::string> &packages,
+                     std::vector<std::string> &includeDirs,
+                     std::unordered_set<std::string> &visited) {
+  if (manifestPath.empty() || !std::filesystem::exists(manifestPath))
+    return;
+
+  std::string absPath = std::filesystem::absolute(manifestPath).string();
+  if (visited.contains(absPath))
+    return;
+  visited.insert(absPath);
+
+  try {
+    YAML::Node root = YAML::LoadFile(manifestPath.string());
+    std::string projName = "unknown";
+    if (root["project"] && root["project"]["name"]) {
+      projName = root["project"]["name"].as<std::string>();
+    }
+
+    std::filesystem::path baseDir = manifestPath.parent_path();
+    std::string selfPkgRoot = baseDir.string();
+
+    if (root["build"]) {
+      auto b = root["build"];
+      std::vector<std::string> dirs;
+
+      if (b["source_dirs"] && b["source_dirs"].IsSequence()) {
+        for (const auto &dir : b["source_dirs"]) {
+          dirs.push_back((baseDir / dir.as<std::string>()).string());
+        }
+      }
+
+      if (b["include_dirs"] && b["include_dirs"].IsSequence()) {
+        for (const auto &inc : b["include_dirs"]) {
+          dirs.push_back((baseDir / inc.as<std::string>()).string());
+        }
+      }
+
+      for (const auto &d : dirs) {
+        if (std::find(includeDirs.begin(), includeDirs.end(), d) ==
+            includeDirs.end()) {
+          includeDirs.push_back(d);
+        }
+      }
+
+      if (!dirs.empty()) {
+        selfPkgRoot = dirs.front();
+      }
+    }
+
+    if (std::find(includeDirs.begin(), includeDirs.end(), baseDir.string()) ==
+        includeDirs.end()) {
+      includeDirs.push_back(baseDir.string());
+    }
+
+    packages[projName] = selfPkgRoot;
+
+    if (root["dependencies"] && root["dependencies"].IsSequence()) {
+      for (const auto &dep : root["dependencies"]) {
+        if (dep["path"]) {
+          std::string depPath = dep["path"].as<std::string>();
+          std::filesystem::path depYaml = baseDir / depPath / "build.yaml";
+          loadPackagesLSP(depYaml, packages, includeDirs, visited);
+        }
+      }
+    }
+  } catch (...) {
+    /* Silently ignore YAML parsing errors in LSP to prevent crashes */
+  }
+}
+
 void processFile(const std::string &uri, std::string text) {
   auto &state = documents[uri];
   state.text = std::move(text);
   state.astCtx = std::make_shared<ASTContext>();
   state.diags = std::make_shared<DiagnosticsEngine>();
 
-  // Disable stdout/stderr output in LSP mode to prevent routing errors to the
-  // Output tab
+  /* Disable stdout/stderr output in LSP mode to prevent routing errors to the
+   * Output tab */
   state.diags->printToConsole = false;
 
   std::string filePath = uriToPath(uri);
@@ -711,8 +787,11 @@ void processFile(const std::string &uri, std::string text) {
   modConfig.projectRoot = projRoot;
   modConfig.stdlibRoot = stdlibPath;
   modConfig.preludeRoot = preludePath;
+
   if (!projRoot.empty()) {
-    modConfig.includeDirs.push_back(projRoot.string());
+    std::unordered_set<std::string> visited;
+    loadPackagesLSP(projRoot / "build.yaml", modConfig.packages,
+                    modConfig.includeDirs, visited);
   }
 
 #if defined(_WIN32)
