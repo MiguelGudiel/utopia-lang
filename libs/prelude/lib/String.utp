@@ -27,6 +27,9 @@ class String {
 
   @extern("atof")
   private static float64 c_atof(const uint8* str);
+  
+  @extern("snprintf")
+  private static int32 c_snprintf(uint8* str, uint64 size, const uint8* format, ...);
 
   public String() {
     this.len = 0;
@@ -47,6 +50,81 @@ class String {
     this.cap = this.len + 15;
     this.data = new uint8[this.cap + 1];
     String.c_strcpy(this.data, str, this.len);
+  }
+
+  public String(int8 v) {
+    this.cap = 15;
+    this.data = new uint8[16];
+    this.len = String.c_snprintf(this.data, 16, "%d", v) as uint64;
+  }
+
+  public String(uint8 v) {
+    this.cap = 15;
+    this.data = new uint8[16];
+    this.len = String.c_snprintf(this.data, 16, "%u", v) as uint64;
+  }
+
+  public String(int16 v) {
+    this.cap = 15;
+    this.data = new uint8[16];
+    this.len = String.c_snprintf(this.data, 16, "%d", v) as uint64;
+  }
+
+  public String(uint16 v) {
+    this.cap = 15;
+    this.data = new uint8[16];
+    this.len = String.c_snprintf(this.data, 16, "%u", v) as uint64;
+  }
+
+  public String(int32 v) {
+    this.cap = 15;
+    this.data = new uint8[16];
+    this.len = String.c_snprintf(this.data, 16, "%d", v) as uint64;
+  }
+
+  public String(uint32 v) {
+    this.cap = 15;
+    this.data = new uint8[16];
+    this.len = String.c_snprintf(this.data, 16, "%u", v) as uint64;
+  }
+
+  public String(int64 v) {
+    this.cap = 31;
+    this.data = new uint8[32];
+    /* Standard format specifier for 64-bit integer */
+    this.len = String.c_snprintf(this.data, 32, "%lld", v) as uint64;
+  }
+
+  public String(uint64 v) {
+    this.cap = 31;
+    this.data = new uint8[32];
+    this.len = String.c_snprintf(this.data, 32, "%llu", v) as uint64;
+  }
+
+  public String(float32 v) {
+    this.cap = 31;
+    this.data = new uint8[32];
+    /* CodeGen automatically promotes variadic float32 to float64, 
+     * making "%g" completely safe. */
+    this.len = String.c_snprintf(this.data, 32, "%g", v) as uint64;
+  }
+
+  public String(float64 v) {
+    this.cap = 31;
+    this.data = new uint8[32];
+    this.len = String.c_snprintf(this.data, 32, "%g", v) as uint64;
+  }
+
+  public String(bool v) {
+    this.cap = 15;
+    this.data = new uint8[16];
+    if (v) {
+      this.len = 4;
+      String.c_strcpy(this.data, "true", 4);
+    } else {
+      this.len = 5;
+      String.c_strcpy(this.data, "false", 5);
+    }
   }
 
   public String(const String& other) {

@@ -148,6 +148,7 @@ ASTNode *ASTCloner::visit(const CastNode *n) {
                                     cloneType(n->targetType), n->line,
                                     n->column, n->length);
   node->rawTargetTypeStr = n->rawTargetTypeStr;
+  node->conversionConstructor = n->conversionConstructor;
   return node;
 }
 

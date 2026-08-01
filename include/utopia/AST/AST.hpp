@@ -332,6 +332,10 @@ struct CastNode : public ExprNode {
   const Type *targetType;
   std::string_view rawTargetTypeStr;
 
+  /* Resolves to a valid single-argument constructor if the cast
+   * requires a user-defined conversion. */
+  const FunctionDeclNode *conversionConstructor = nullptr;
+
   CastNode(ExprNode *e, const Type *target, int l, int c, int len)
       : ExprNode(NodeKind::Cast, l, c, len), expr(e), targetType(target) {}
 };

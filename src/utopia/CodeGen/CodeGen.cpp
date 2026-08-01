@@ -2871,11 +2871,77 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
 llvm::Value *CodeGen::visit(const CastNode *node) {
   llvm::Value *src = nullptr;
 
+  if (node->conversionConstructor) {
+    llvm::Type *llTy = getLLVMType(node->targetType);
+    llvm::AllocaInst *temp = createEntryBlockAlloca(llTy, "explicit.cast.tmp");
+    emitDefaultInitialization(temp, node->targetType);
+
+    const Type *unqual = node->targetType->getUnqualifiedType();
+    if (unqual->getKind() == TypeKind::Class ||
+        unqual->getKind() == TypeKind::Struct ||
+        unqual->getKind() == TypeKind::Union) {
+      auto *recTy = static_cast<const RecordType *>(unqual);
+      if (auto *decl = recTy->getDeclaration()) {
+        const FunctionDeclNode *dtor = nullptr;
+        if (decl->kind == NodeKind::ClassDecl)
+          dtor = static_cast<const ClassDeclNode *>(decl)->destructor;
+        else if (decl->kind == NodeKind::StructDecl)
+          dtor = static_cast<const StructDeclNode *>(decl)->destructor;
+        else if (decl->kind == NodeKind::UnionDecl)
+          dtor = static_cast<const UnionDeclNode *>(decl)->destructor;
+
+        if (dtor) {
+          cgCtx.addCleanup(temp, dtor);
+          lastTemporaryAlloca = temp;
+        }
+      }
+    }
+
+    llvm::Function *ctorFunc = getOrCreateFunction(node->conversionConstructor);
+    std::vector<llvm::Value *> argsArgs;
+    argsArgs.push_back(temp);
+
+    llvm::Value *argVal = nullptr;
+    bool isRefParam = false;
+    if (node->conversionConstructor->params.size() > 0) {
+      const Type *pType = node->conversionConstructor->params[0]->type;
+      isRefParam = pType->isReferenceType() ||
+                   pType->getKind() == TypeKind::RValueReference;
+    }
+
+    if (isRefParam) {
+      argVal = getLValue(node->expr);
+      if (!argVal) {
+        llvm::Value *val = dispatch(node->expr);
+        argVal = createEntryBlockAlloca(val->getType(), "tmp.cast.arg");
+        builder.CreateStore(val, argVal);
+      }
+    } else {
+      argVal = dispatch(node->expr);
+      if (ctorFunc && argVal && ctorFunc->arg_size() > 1) {
+        llvm::Type *paramTy = ctorFunc->getFunctionType()->getParamType(1);
+        argVal = createImplicitCast(argVal, paramTy);
+      }
+    }
+
+    argsArgs.push_back(argVal);
+    builder.CreateCall(ctorFunc, argsArgs);
+
+    if (!node->exprType->isVoid()) {
+      if (node->exprType->isReferenceType() ||
+          node->exprType->getKind() == TypeKind::RValueReference) {
+        return temp;
+      }
+      return createTBAALoad(getLLVMType(node->exprType), temp, node->exprType);
+    }
+
+    return temp;
+  }
+
   if (node->targetType->isReferenceType() ||
       node->targetType->getKind() == TypeKind::RValueReference) {
     src = getLValue(node->expr);
     if (!src) {
-      // Allocate temporary storage for materialized xvalues or prvalues
       llvm::Value *val = dispatch(node->expr);
       if (val) {
         src = createEntryBlockAlloca(val->getType(), "tmp.cast.rval");

@@ -3485,8 +3485,6 @@ SemaResult TypeCheckPass::visit(const CastNode *node) {
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,
                                      "Cascading error in cast"});
 
-  /* Evaluate raw entity profiles to support implicit pointer casts through
-   * external C-API typedefs */
   const Type *srcUnqual = (*srcType)->getUnqualifiedType();
   const Type *destUnqual = destType->getUnqualifiedType();
 
@@ -3497,8 +3495,6 @@ SemaResult TypeCheckPass::visit(const CastNode *node) {
   bool isSrcEnum = srcUnqual->getKind() == TypeKind::Enum;
   bool isDestEnum = destUnqual->getKind() == TypeKind::Enum;
 
-  // Support numeric conversions, pointer <-> pointer casts (e.g. T* to void* or
-  // void* to T*), and pointer <-> integer conversions.
   if ((isSrcNumeric && isDestNumeric) || (isSrcPtr && isDestPtr) ||
       (isSrcPtr && isDestNumeric) || (isSrcNumeric && isDestPtr) ||
       (isSrcEnum && isDestNumeric) || (isSrcNumeric && isDestEnum) ||
@@ -3516,6 +3512,35 @@ SemaResult TypeCheckPass::visit(const CastNode *node) {
 
     node->exprType = destType;
     return destType;
+  }
+
+  /* Explore explicit user-defined conversions via constructors.
+   * Enables syntax like `Primitive as CustomType` if a matching constructor
+   * exists. */
+  if (destUnqual->getKind() == TypeKind::Class ||
+      destUnqual->getKind() == TypeKind::Struct ||
+      destUnqual->getKind() == TypeKind::Union) {
+    auto *recTy = static_cast<const RecordType *>(destUnqual);
+    if (auto *decl = recTy->getDeclaration()) {
+      llvm::ArrayRef<FunctionDeclNode *> ctors;
+      if (decl->kind == NodeKind::ClassDecl) {
+        ctors = static_cast<const ClassDeclNode *>(decl)->constructors;
+      } else if (decl->kind == NodeKind::StructDecl) {
+        ctors = static_cast<const StructDeclNode *>(decl)->constructors;
+      } else if (decl->kind == NodeKind::UnionDecl) {
+        ctors = static_cast<const UnionDeclNode *>(decl)->constructors;
+      }
+
+      for (auto *ctor : ctors) {
+        if (ctor->params.size() == 1 &&
+            canImplicitlyCast(*srcType, ctor->params[0]->type, false)) {
+          const_cast<CastNode *>(node)->conversionConstructor = ctor;
+          node->exprType = destType;
+          node->isLValue = false;
+          return destType;
+        }
+      }
+    }
   }
 
   return ctx->reportError(node->line, node->column, node->length,

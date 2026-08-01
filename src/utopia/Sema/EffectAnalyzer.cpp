@@ -158,7 +158,14 @@ void EffectAnalyzer::visit(const IfNode *n) {
     dispatch(n->elseBlock);
 }
 
-void EffectAnalyzer::visit(const CastNode *n) { dispatch(n->expr); }
+void EffectAnalyzer::visit(const CastNode *n) {
+  if (n->conversionConstructor) {
+    writesMem = true;
+    readsMem = true;
+    potentiallyInfinite = true;
+  }
+  dispatch(n->expr);
+}
 
 void EffectAnalyzer::visit(const BinaryOpNode *n) {
   dispatch(n->left);
