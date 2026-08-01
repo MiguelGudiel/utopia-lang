@@ -6,8 +6,10 @@
 #include "utopia/Driver/Compiler.hpp"
 #include "utopia/Driver/Linker.hpp"
 #include "utopia/Driver/ModuleLoader.hpp"
+#include "utopia/Format/Formatter.hpp"
 #include "utopia/Sema/Sema.hpp"
 
+#include <fstream>
 #include <iostream>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
@@ -107,6 +109,15 @@ bool CompilerDriver::run() {
   }
 
   Logger::debug("[Driver] AST generated successfully.");
+
+  if (options.doFormat) {
+    std::string formatted = Formatter::format(root);
+    std::ofstream outFile(options.sourcePath);
+    outFile << formatted;
+    std::cout << "\033[1;32m[Format Success]\033[0m Formatted "
+              << options.sourcePath << std::endl;
+    return true;
+  }
 
   {
     ScopedTimer timer("Semantic Analysis Pipeline");

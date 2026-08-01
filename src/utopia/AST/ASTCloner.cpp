@@ -133,24 +133,35 @@ ASTNode *ASTCloner::visit(const MemberAccessNode *n) {
 }
 
 ASTNode *ASTCloner::visit(const FunctionCallNode *n) {
-  return ctx.create<FunctionCallNode>(
+  auto *node = ctx.create<FunctionCallNode>(
       static_cast<ExprNode *>(dispatch(n->target)), cloneArray(n->args),
       ctx.copyArray<std::string_view>(n->argNames), n->line, n->column,
       n->length);
+  node->rawArgs = cloneArray(n->rawArgs);
+  node->rawArgNames = ctx.copyArray<std::string_view>(n->rawArgNames);
+  node->hasRawArgs = n->hasRawArgs;
+  return node;
 }
 
 ASTNode *ASTCloner::visit(const CastNode *n) {
-  return ctx.create<CastNode>(static_cast<ExprNode *>(dispatch(n->expr)),
-                              cloneType(n->targetType), n->line, n->column,
-                              n->length);
+  auto *node = ctx.create<CastNode>(static_cast<ExprNode *>(dispatch(n->expr)),
+                                    cloneType(n->targetType), n->line,
+                                    n->column, n->length);
+  node->rawTargetTypeStr = n->rawTargetTypeStr;
+  return node;
 }
 
 ASTNode *ASTCloner::visit(const NewExprNode *n) {
-  return ctx.create<NewExprNode>(
+  auto *node = ctx.create<NewExprNode>(
       cloneType(n->allocatedType),
       n->arraySize ? static_cast<ExprNode *>(dispatch(n->arraySize)) : nullptr,
       cloneArray(n->args), ctx.copyArray<std::string_view>(n->argNames),
       n->hasParens, n->line, n->column, n->length);
+  node->rawAllocatedTypeStr = n->rawAllocatedTypeStr;
+  node->rawArgs = cloneArray(n->rawArgs);
+  node->rawArgNames = ctx.copyArray<std::string_view>(n->rawArgNames);
+  node->hasRawArgs = n->hasRawArgs;
+  return node;
 }
 
 ASTNode *ASTCloner::visit(const DeleteExprNode *n) {
@@ -162,42 +173,54 @@ ASTNode *ASTCloner::visit(const BlockNode *n) {
   auto *b = ctx.create<BlockNode>(n->line, n->column);
   b->statements = cloneArray(n->statements);
   b->length = n->length;
+  b->endLine = n->endLine;
   return b;
 }
 
 ASTNode *ASTCloner::visit(const IfNode *n) {
-  return ctx.create<IfNode>(static_cast<ExprNode *>(dispatch(n->condition)),
-                            static_cast<BlockNode *>(dispatch(n->thenBlock)),
-                            n->elseBlock ? dispatch(n->elseBlock) : nullptr,
-                            n->line, n->column, n->length);
+  auto *node =
+      ctx.create<IfNode>(static_cast<ExprNode *>(dispatch(n->condition)),
+                         static_cast<BlockNode *>(dispatch(n->thenBlock)),
+                         n->elseBlock ? dispatch(n->elseBlock) : nullptr,
+                         n->line, n->column, n->length);
+  node->endLine = n->endLine;
+  return node;
 }
 
 ASTNode *ASTCloner::visit(const ForNode *n) {
-  return ctx.create<ForNode>(
+  auto *node = ctx.create<ForNode>(
       n->initStatement ? dispatch(n->initStatement) : nullptr,
       n->condition ? static_cast<ExprNode *>(dispatch(n->condition)) : nullptr,
       n->increment ? static_cast<ExprNode *>(dispatch(n->increment)) : nullptr,
       static_cast<BlockNode *>(dispatch(n->body)), n->line, n->column,
       n->length);
+  node->endLine = n->endLine;
+  return node;
 }
 
 ASTNode *ASTCloner::visit(const WhileNode *n) {
-  return ctx.create<WhileNode>(static_cast<ExprNode *>(dispatch(n->condition)),
-                               static_cast<BlockNode *>(dispatch(n->body)),
-                               n->line, n->column, n->length);
+  auto *node =
+      ctx.create<WhileNode>(static_cast<ExprNode *>(dispatch(n->condition)),
+                            static_cast<BlockNode *>(dispatch(n->body)),
+                            n->line, n->column, n->length);
+  node->endLine = n->endLine;
+  return node;
 }
 
 ASTNode *ASTCloner::visit(const SwitchNode *n) {
   auto *s = ctx.create<SwitchNode>(
       static_cast<ExprNode *>(dispatch(n->condition)), cloneArray(n->cases),
       n->hasDefault, n->line, n->column, n->length);
+  s->endLine = n->endLine;
   return s;
 }
 
 ASTNode *ASTCloner::visit(const CaseNode *n) {
-  return ctx.create<CaseNode>(
+  auto *node = ctx.create<CaseNode>(
       n->value ? static_cast<ExprNode *>(dispatch(n->value)) : nullptr,
       cloneArray(n->statements), n->line, n->column, n->length);
+  node->endLine = n->endLine;
+  return node;
 }
 
 ASTNode *ASTCloner::visit(const BreakNode *n) {
@@ -225,6 +248,9 @@ ASTNode *ASTCloner::visit(const VarDeclNode *n) {
   node->hasPrivateMod = n->hasPrivateMod;
   node->annotations = n->annotations;
   node->docString = n->docString;
+  node->trailingComment = n->trailingComment;
+  node->rawTypeStr = n->rawTypeStr;
+  node->endLine = n->endLine;
   return node;
 }
 
@@ -237,6 +263,9 @@ ASTNode *ASTCloner::visit(const ParamDeclNode *n) {
   node->hasPublicMod = n->hasPublicMod;
   node->hasPrivateMod = n->hasPrivateMod;
   node->annotations = n->annotations;
+  node->docString = n->docString;
+  node->trailingComment = n->trailingComment;
+  node->rawTypeStr = n->rawTypeStr;
   return node;
 }
 
@@ -253,10 +282,13 @@ ASTNode *ASTCloner::visit(const FunctionDeclNode *n) {
   node->hasPrivateMod = n->hasPrivateMod;
   node->annotations = n->annotations;
   node->docString = n->docString;
+  node->trailingComment = n->trailingComment;
   node->declFilePath = n->declFilePath;
   node->length = n->length;
   node->isTemplate = false;
   node->parentRecord = n->parentRecord;
+  node->rawReturnTypeStr = n->rawReturnTypeStr;
+  node->endLine = n->endLine;
   return node;
 }
 
@@ -272,9 +304,11 @@ ASTNode *ASTCloner::visit(const UnionDeclNode *n) {
   node->hasPrivateMod = n->hasPrivateMod;
   node->annotations = n->annotations;
   node->docString = n->docString;
+  node->trailingComment = n->trailingComment;
   node->declFilePath = n->declFilePath;
   node->isOpaque = n->isOpaque;
   node->isTemplate = false;
+  node->endLine = n->endLine;
   return node;
 }
 
@@ -290,9 +324,11 @@ ASTNode *ASTCloner::visit(const ClassDeclNode *n) {
   node->hasPrivateMod = n->hasPrivateMod;
   node->annotations = n->annotations;
   node->docString = n->docString;
+  node->trailingComment = n->trailingComment;
   node->declFilePath = n->declFilePath;
   node->isOpaque = n->isOpaque;
   node->isTemplate = false;
+  node->endLine = n->endLine;
   return node;
 }
 
@@ -308,9 +344,11 @@ ASTNode *ASTCloner::visit(const StructDeclNode *n) {
   node->hasPrivateMod = n->hasPrivateMod;
   node->annotations = n->annotations;
   node->docString = n->docString;
+  node->trailingComment = n->trailingComment;
   node->declFilePath = n->declFilePath;
   node->isOpaque = n->isOpaque;
   node->isTemplate = false;
+  node->endLine = n->endLine;
   return node;
 }
 

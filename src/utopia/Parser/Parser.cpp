@@ -292,12 +292,12 @@ const Type *Parser::parseType(bool inNewExpr) {
 
 std::string Parser::consumeComments() {
   std::string doc;
-  while (currentToken().type == TokenType::COMMENT) {
+  for (auto c : currentToken().leadingComments) {
     if (!doc.empty())
       doc += "\n";
-    doc += currentToken().value;
-    advance();
+    doc += c;
   }
+  const_cast<Token &>(currentToken()).leadingComments.clear();
   return doc;
 }
 
@@ -309,11 +309,6 @@ ModuleNode *Parser::parseModule(std::string_view filePath) {
 
   while (currentToken().type != TokenType::EOF_TOK) {
     try {
-      if (currentToken().type == TokenType::COMMENT &&
-          (peekToken().value == "import" || peekToken().value == "export")) {
-        consumeComments();
-      }
-
       if (currentToken().type == TokenType::IDENTIFIER &&
           (currentToken().value == "import" ||
            currentToken().value == "export")) {
@@ -337,7 +332,6 @@ ModuleNode *Parser::parseModule(std::string_view filePath) {
         int pathLen = path.length();
 
         advance();
-
         expect(TokenType::SEMICOLON, "Expected ';' after statement");
 
         if (isExport) {
@@ -453,16 +447,8 @@ std::vector<ParamDeclNode *> Parser::parseParameterList(bool &isVariadic) {
   bool inNamedBlock = false;
   bool optionalPositionalStarted = false;
 
-  while (currentToken().type == TokenType::COMMENT)
-    advance();
-
   while (currentToken().type != TokenType::RPAREN &&
          currentToken().type != TokenType::EOF_TOK) {
-
-    while (currentToken().type == TokenType::COMMENT)
-      advance();
-    if (currentToken().type == TokenType::RPAREN)
-      break;
 
     if (match(TokenType::ELLIPSIS)) {
       isVariadic = true;
@@ -471,8 +457,6 @@ std::vector<ParamDeclNode *> Parser::parseParameterList(bool &isVariadic) {
 
     if (!inNamedBlock && match(TokenType::LBRACE)) {
       inNamedBlock = true;
-      while (currentToken().type == TokenType::COMMENT)
-        advance();
       if (currentToken().type == TokenType::RBRACE) {
         // Empty named block permitted
       }
@@ -482,6 +466,8 @@ std::vector<ParamDeclNode *> Parser::parseParameterList(bool &isVariadic) {
       advance();
       break;
     }
+
+    std::string doc = consumeComments();
 
     int pLine = currentToken().line;
     int pCol = currentToken().column;
@@ -494,7 +480,12 @@ std::vector<ParamDeclNode *> Parser::parseParameterList(bool &isVariadic) {
       throw ParseException();
     }
 
+    const char *typeStart = currentToken().value.data();
     const Type *pType = parseType();
+    const char *typeEnd =
+        tokens[cursor - 1].value.data() + tokens[cursor - 1].value.length();
+    std::string_view rawTypeStr(typeStart, typeEnd - typeStart);
+
     std::string_view pName = currentToken().value;
     int pLen = (int)pName.length();
     expect(TokenType::IDENTIFIER, "Expected parameter name.");
@@ -530,11 +521,15 @@ std::vector<ParamDeclNode *> Parser::parseParameterList(bool &isVariadic) {
       }
     }
 
-    params.push_back(astCtx.create<ParamDeclNode>(
-        pType, pName, defVal, inNamedBlock, isRequired, pLine, pCol, pLen));
-
-    while (currentToken().type == TokenType::COMMENT)
-      advance();
+    auto paramNode = astCtx.create<ParamDeclNode>(
+        pType, pName, defVal, inNamedBlock, isRequired, pLine, pCol, pLen);
+    paramNode->rawTypeStr = rawTypeStr;
+    if (!doc.empty())
+      paramNode->docString = astCtx.copyString(doc);
+    if (cursor > 0 && !tokens[cursor - 1].trailingComment.empty()) {
+      paramNode->trailingComment = tokens[cursor - 1].trailingComment;
+    }
+    params.push_back(paramNode);
 
     if (!match(TokenType::COMMA)) {
       if (inNamedBlock) {
@@ -543,8 +538,6 @@ std::vector<ParamDeclNode *> Parser::parseParameterList(bool &isVariadic) {
       }
       break;
     } else {
-      while (currentToken().type == TokenType::COMMENT)
-        advance();
       if (inNamedBlock && currentToken().type == TokenType::RBRACE) {
         advance();
         break;
@@ -565,10 +558,12 @@ BlockNode *Parser::parseFunctionBody(const Type *returnType) {
 
     auto expr = parseExpression();
 
+    int endLine = currentToken().line;
     int endCol = currentToken().column + currentToken().value.length();
     expect(TokenType::SEMICOLON, "Expected ';' after '=>' expression");
 
     auto block = astCtx.create<BlockNode>(line, col);
+    block->isExpressionBody = true;
     ASTNode *stmt = expr;
 
     /* Transparently inject a ReturnNode if the function intrinsically expects a
@@ -579,6 +574,7 @@ BlockNode *Parser::parseFunctionBody(const Type *returnType) {
 
     block->statements = astCtx.copyArray<ASTNode *>(stmt);
     block->finalize(endCol);
+    block->endLine = endLine;
 
     return block;
   }
@@ -661,8 +657,12 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
       constructor->annotations = memberAnnotations;
       constructor->hasPublicMod = isPub;
       constructor->hasPrivateMod = isPriv;
+
       if (!doc.empty())
         constructor->docString = astCtx.copyString(doc);
+      if (cursor > 0 && !tokens[cursor - 1].trailingComment.empty()) {
+        constructor->trailingComment = tokens[cursor - 1].trailingComment;
+      }
 
       constructor->body = parseFunctionBody(astCtx.VoidTy);
       continue;
@@ -670,7 +670,13 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
 
     int mLine = currentToken().line;
     int mCol = currentToken().column;
+
+    const char *typeStart = currentToken().value.data();
     const Type *memType = parseType();
+    const char *typeEnd =
+        tokens[cursor - 1].value.data() + tokens[cursor - 1].value.length();
+    std::string_view rawTypeStr(typeStart, typeEnd - typeStart);
+
     std::string_view memName = currentToken().value;
 
     expect(TokenType::IDENTIFIER, "Expected member name");
@@ -681,12 +687,18 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
     field->annotations = memberAnnotations;
     field->hasPublicMod = isPub;
     field->hasPrivateMod = isPriv;
+    field->rawTypeStr = rawTypeStr;
+
     if (!doc.empty())
       field->docString = astCtx.copyString(doc);
+    if (cursor > 0 && !tokens[cursor - 1].trailingComment.empty()) {
+      field->trailingComment = tokens[cursor - 1].trailingComment;
+    }
 
     fields.push_back(field);
   }
 
+  int endLine = currentToken().line;
   int endCol = currentToken().column + 1;
   expect(TokenType::RBRACE, "Expected '}'");
 
@@ -701,6 +713,7 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
   node->fields = astCtx.copyArray<VarDeclNode *>(fields);
   node->constructor = constructor;
   node->annotations = annotations;
+  node->endLine = endLine;
 
   if (!constructor) {
     reportError(line, col, endCol - col,
@@ -725,8 +738,6 @@ ASTNode *Parser::parseStatement() {
     advance();
   }
 
-  /* Gracefully handle empty blocks or trailing comments mapping directly to
-   * closure */
   if (currentToken().type == TokenType::RBRACE ||
       currentToken().type == TokenType::EOF_TOK) {
     if (!annotations.empty()) {
@@ -790,8 +801,13 @@ ASTNode *Parser::parseStatement() {
     node = parseExpressionStatement();
   }
 
-  if (node && !doc.empty())
-    node->docString = astCtx.copyString(doc);
+  if (node) {
+    if (!doc.empty())
+      node->docString = astCtx.copyString(doc);
+    if (cursor > 0 && !tokens[cursor - 1].trailingComment.empty()) {
+      node->trailingComment = tokens[cursor - 1].trailingComment;
+    }
+  }
 
   if (node && !annotations.empty()) {
     if (node->kind == NodeKind::VarDecl ||
@@ -840,6 +856,7 @@ DeclNode *Parser::parseTypedefDecl() {
 
   expect(TokenType::ASSIGN, "Expected '=' in typedef declaration");
 
+  const char *typeStart = currentToken().value.data();
   const Type *targetType = nullptr;
   std::string_view targetEntity = "";
 
@@ -866,6 +883,11 @@ DeclNode *Parser::parseTypedefDecl() {
     throw ParseException();
   }
 
+  const char *typeEnd =
+      tokens[cursor - 1].value.data() + tokens[cursor - 1].value.length();
+  std::string_view rawTypeStr(typeStart, typeEnd - typeStart);
+
+  int endLine = currentToken().line;
   int endCol = currentToken().column + (int)currentToken().value.length();
   expect(TokenType::SEMICOLON, "Expected ';' after typedef target");
 
@@ -879,6 +901,10 @@ DeclNode *Parser::parseTypedefDecl() {
       astCtx.create<TypedefDeclNode>(name, targetType, line, col, endCol - col);
   decl->targetEntityName = targetEntity;
   decl->aliasType = aliasTy;
+  if (targetType) {
+    decl->rawTargetTypeStr = rawTypeStr;
+  }
+  decl->endLine = endLine;
   return decl;
 }
 
@@ -897,9 +923,11 @@ BlockNode *Parser::parseStatementAsBlock() {
     std::vector<ASTNode *> statements = {stmt};
     block->statements = astCtx.copyArray<ASTNode *>(statements);
     block->length = (stmt->column + stmt->length) - startCol;
+    block->endLine = stmt->endLine;
   } else {
     block->statements = {};
     block->length = 0;
+    block->endLine = startLine;
   }
 
   return block;
@@ -928,7 +956,9 @@ IfNode *Parser::parseIfStatement() {
   int len = (elseBlock ? (elseBlock->column + elseBlock->length)
                        : (thenBlock->column + thenBlock->length)) -
             col;
-  return astCtx.create<IfNode>(cond, thenBlock, elseBlock, line, col, len);
+  auto node = astCtx.create<IfNode>(cond, thenBlock, elseBlock, line, col, len);
+  node->endLine = elseBlock ? elseBlock->endLine : thenBlock->endLine;
+  return node;
 }
 
 ForNode *Parser::parseForStatement() {
@@ -968,7 +998,9 @@ ForNode *Parser::parseForStatement() {
   auto body = parseStatementAsBlock();
 
   int len = (body->column + body->length) - col;
-  return astCtx.create<ForNode>(initStmt, cond, inc, body, line, col, len);
+  auto node = astCtx.create<ForNode>(initStmt, cond, inc, body, line, col, len);
+  node->endLine = body->endLine;
+  return node;
 }
 
 WhileNode *Parser::parseWhileStatement() {
@@ -983,7 +1015,9 @@ WhileNode *Parser::parseWhileStatement() {
   auto body = parseStatementAsBlock();
 
   int len = (body->column + body->length) - col;
-  return astCtx.create<WhileNode>(cond, body, line, col, len);
+  auto node = astCtx.create<WhileNode>(cond, body, line, col, len);
+  node->endLine = body->endLine;
+  return node;
 }
 
 SwitchNode *Parser::parseSwitchStatement() {
@@ -1003,10 +1037,7 @@ SwitchNode *Parser::parseSwitchStatement() {
   while (currentToken().type != TokenType::RBRACE &&
          currentToken().type != TokenType::EOF_TOK) {
 
-    /* Consume any floating comments before case/default directives */
-    while (currentToken().type == TokenType::COMMENT) {
-      advance();
-    }
+    std::string doc = consumeComments();
 
     if (currentToken().type == TokenType::RBRACE ||
         currentToken().type == TokenType::EOF_TOK) {
@@ -1037,13 +1068,7 @@ SwitchNode *Parser::parseSwitchStatement() {
 
     std::vector<ASTNode *> stmts;
     while (true) {
-      /* Peek past comments to check if a case/default closure is approaching */
-      size_t offset = 0;
-      while (peekToken(offset).type == TokenType::COMMENT) {
-        offset++;
-      }
-
-      TokenType nextTy = peekToken(offset).type;
+      TokenType nextTy = currentToken().type;
       if (nextTy == TokenType::CASE_KW || nextTy == TokenType::DEFAULT_KW ||
           nextTy == TokenType::RBRACE || nextTy == TokenType::EOF_TOK) {
         break;
@@ -1055,15 +1080,31 @@ SwitchNode *Parser::parseSwitchStatement() {
     }
 
     int cLen = currentToken().column - cCol;
-    cases.push_back(astCtx.create<CaseNode>(
-        caseVal, astCtx.copyArray<ASTNode *>(stmts), cLine, cCol, cLen));
+    auto caseNode = astCtx.create<CaseNode>(
+        caseVal, astCtx.copyArray<ASTNode *>(stmts), cLine, cCol, cLen);
+
+    /* Track the actual lower bound of the case block for accurate line
+       difference measurement in the formatter */
+    caseNode->endLine = stmts.empty() ? cLine : stmts.back()->endLine;
+
+    if (!doc.empty())
+      caseNode->docString = astCtx.copyString(doc);
+    if (cursor > 0 && !tokens[cursor - 1].trailingComment.empty()) {
+      caseNode->trailingComment = tokens[cursor - 1].trailingComment;
+    }
+
+    cases.push_back(caseNode);
   }
 
+  int endLine = currentToken().line;
   int endCol = currentToken().column + 1;
   expect(TokenType::RBRACE, "Expected '}' at end of switch block");
 
-  return astCtx.create<SwitchNode>(cond, astCtx.copyArray<CaseNode *>(cases),
-                                   hasDefault, line, col, endCol - col);
+  auto node =
+      astCtx.create<SwitchNode>(cond, astCtx.copyArray<CaseNode *>(cases),
+                                hasDefault, line, col, endCol - col);
+  node->endLine = endLine;
+  return node;
 }
 
 BreakNode *Parser::parseBreakStatement() {
@@ -1211,7 +1252,13 @@ ExprNode *Parser::parseUnary() {
   if (match(TokenType::NEW_KW)) {
     int line = currentToken().line;
     int col = currentToken().column;
+
+    const char *typeStart = currentToken().value.data();
     const Type *allocTy = parseType(true);
+    const char *typeEnd =
+        tokens[cursor - 1].value.data() + tokens[cursor - 1].value.length();
+    std::string_view rawTypeStr(typeStart, typeEnd - typeStart);
+
     ExprNode *arraySize = nullptr;
 
     if (match(TokenType::LBRACKET)) {
@@ -1226,13 +1273,9 @@ ExprNode *Parser::parseUnary() {
 
     if (match(TokenType::LPAREN)) {
       hasParens = true;
-      while (currentToken().type == TokenType::COMMENT)
-        advance();
 
       if (currentToken().type != TokenType::RPAREN) {
         do {
-          while (currentToken().type == TokenType::COMMENT)
-            advance();
           if (currentToken().type == TokenType::RPAREN)
             break;
 
@@ -1242,8 +1285,6 @@ ExprNode *Parser::parseUnary() {
             argNames.push_back(currentToken().value);
             advance();
             advance();
-            while (currentToken().type == TokenType::COMMENT)
-              advance();
             args.push_back(parseExpression());
           } else {
             if (namedStarted) {
@@ -1257,19 +1298,21 @@ ExprNode *Parser::parseUnary() {
             args.push_back(parseExpression());
           }
 
-          while (currentToken().type == TokenType::COMMENT)
-            advance();
         } while (match(TokenType::COMMA));
       }
-      while (currentToken().type == TokenType::COMMENT)
-        advance();
       expect(TokenType::RPAREN, "Expected ')'");
     }
 
-    return astCtx.create<NewExprNode>(
-        allocTy, arraySize, astCtx.copyArray<ExprNode *>(args),
-        astCtx.copyArray<std::string_view>(argNames), hasParens, line, col,
-        currentToken().column - col);
+    auto argsRef = astCtx.copyArray<ExprNode *>(args);
+    auto namesRef = astCtx.copyArray<std::string_view>(argNames);
+    auto node = astCtx.create<NewExprNode>(allocTy, arraySize, argsRef,
+                                           namesRef, hasParens, line, col,
+                                           currentToken().column - col);
+    node->rawAllocatedTypeStr = rawTypeStr;
+    node->rawArgs = argsRef;
+    node->rawArgNames = namesRef;
+    node->hasRawArgs = true;
+    return node;
   }
 
   if (match(TokenType::DELETE_KW)) {
@@ -1300,7 +1343,7 @@ ExprNode *Parser::parseUnary() {
     std::string_view op = currentToken().value;
     advance();
     auto expr = parseUnary();
-    return astCtx.create<UnaryOpNode>(op, expr, line, col);
+    return astCtx.create<UnaryOpNode>(op, expr, line, col, false);
   }
 
   return parsePostfix();
@@ -1385,6 +1428,9 @@ DeclNode *Parser::parseUnionDecl() {
       destructor->hasPrivateMod = isPriv;
       if (!doc.empty())
         destructor->docString = astCtx.copyString(doc);
+      if (cursor > 0 && !tokens[cursor - 1].trailingComment.empty()) {
+        destructor->trailingComment = tokens[cursor - 1].trailingComment;
+      }
 
       destructor->body = parseFunctionBody(astCtx.VoidTy);
       continue;
@@ -1420,8 +1466,12 @@ DeclNode *Parser::parseUnionDecl() {
       constructor->annotations = memberAnnotations;
       constructor->hasPublicMod = isPub;
       constructor->hasPrivateMod = isPriv;
+
       if (!doc.empty())
         constructor->docString = astCtx.copyString(doc);
+      if (cursor > 0 && !tokens[cursor - 1].trailingComment.empty()) {
+        constructor->trailingComment = tokens[cursor - 1].trailingComment;
+      }
 
       constructor->body = parseFunctionBody(astCtx.VoidTy);
       constructors.push_back(constructor);
@@ -1451,7 +1501,12 @@ DeclNode *Parser::parseUnionDecl() {
 
     int mLine = currentToken().line;
     int mCol = currentToken().column;
+
+    const char *typeStart = currentToken().value.data();
     const Type *memType = parseType();
+    const char *typeEnd =
+        tokens[cursor - 1].value.data() + tokens[cursor - 1].value.length();
+    std::string_view rawTypeStr(typeStart, typeEnd - typeStart);
 
     std::string_view memName;
     if (match(TokenType::OPERATOR_KW)) {
@@ -1492,6 +1547,8 @@ DeclNode *Parser::parseUnionDecl() {
       method->annotations = memberAnnotations;
       method->hasPublicMod = isPub;
       method->hasPrivateMod = isPriv;
+      method->rawReturnTypeStr = rawTypeStr;
+
       if (!doc.empty())
         method->docString = astCtx.copyString(doc);
 
@@ -1500,6 +1557,10 @@ DeclNode *Parser::parseUnionDecl() {
                "Expected ';' after extern method declaration");
       } else {
         method->body = parseFunctionBody(memType);
+      }
+
+      if (cursor > 0 && !tokens[cursor - 1].trailingComment.empty()) {
+        method->trailingComment = tokens[cursor - 1].trailingComment;
       }
 
       if (!methodTParams.empty()) {
@@ -1534,8 +1595,13 @@ DeclNode *Parser::parseUnionDecl() {
       field->annotations = memberAnnotations;
       field->hasPublicMod = isPub;
       field->hasPrivateMod = isPriv;
+      field->rawTypeStr = rawTypeStr;
+
       if (!doc.empty())
         field->docString = astCtx.copyString(doc);
+      if (cursor > 0 && !tokens[cursor - 1].trailingComment.empty()) {
+        field->trailingComment = tokens[cursor - 1].trailingComment;
+      }
 
       fields.push_back(field);
     }
@@ -1565,6 +1631,7 @@ DeclNode *Parser::parseUnionDecl() {
     destructor->body = emptyBody;
   }
 
+  int endLine = currentToken().line;
   int endCol = currentToken().column + 1;
   expect(TokenType::RBRACE, "Expected '}'");
 
@@ -1583,6 +1650,7 @@ DeclNode *Parser::parseUnionDecl() {
   node->methods = astCtx.copyArray<FunctionDeclNode *>(methods);
   node->constructors = astCtx.copyArray<FunctionDeclNode *>(constructors);
   node->destructor = destructor;
+  node->endLine = endLine;
 
   return node;
 }
@@ -1606,7 +1674,6 @@ DeclNode *Parser::parseStructDecl() {
   }
 
   structTy->setOpaque(false);
-
   expect(TokenType::LBRACE, "Expected '{'");
 
   std::vector<VarDeclNode *> fields;
@@ -1664,8 +1731,12 @@ DeclNode *Parser::parseStructDecl() {
       destructor->annotations = memberAnnotations;
       destructor->hasPublicMod = isPub;
       destructor->hasPrivateMod = isPriv;
+
       if (!doc.empty())
         destructor->docString = astCtx.copyString(doc);
+      if (cursor > 0 && !tokens[cursor - 1].trailingComment.empty()) {
+        destructor->trailingComment = tokens[cursor - 1].trailingComment;
+      }
 
       destructor->body = parseFunctionBody(astCtx.VoidTy);
       continue;
@@ -1701,8 +1772,12 @@ DeclNode *Parser::parseStructDecl() {
       constructor->annotations = memberAnnotations;
       constructor->hasPublicMod = isPub;
       constructor->hasPrivateMod = isPriv;
+
       if (!doc.empty())
         constructor->docString = astCtx.copyString(doc);
+      if (cursor > 0 && !tokens[cursor - 1].trailingComment.empty()) {
+        constructor->trailingComment = tokens[cursor - 1].trailingComment;
+      }
 
       constructor->body = parseFunctionBody(astCtx.VoidTy);
       constructors.push_back(constructor);
@@ -1732,7 +1807,12 @@ DeclNode *Parser::parseStructDecl() {
 
     int mLine = currentToken().line;
     int mCol = currentToken().column;
+
+    const char *typeStart = currentToken().value.data();
     const Type *memType = parseType();
+    const char *typeEnd =
+        tokens[cursor - 1].value.data() + tokens[cursor - 1].value.length();
+    std::string_view rawTypeStr(typeStart, typeEnd - typeStart);
 
     std::string_view memName;
     if (match(TokenType::OPERATOR_KW)) {
@@ -1773,6 +1853,8 @@ DeclNode *Parser::parseStructDecl() {
       method->annotations = memberAnnotations;
       method->hasPublicMod = isPub;
       method->hasPrivateMod = isPriv;
+      method->rawReturnTypeStr = rawTypeStr;
+
       if (!doc.empty())
         method->docString = astCtx.copyString(doc);
 
@@ -1781,6 +1863,10 @@ DeclNode *Parser::parseStructDecl() {
                "Expected ';' after extern method declaration");
       } else {
         method->body = parseFunctionBody(memType);
+      }
+
+      if (cursor > 0 && !tokens[cursor - 1].trailingComment.empty()) {
+        method->trailingComment = tokens[cursor - 1].trailingComment;
       }
 
       if (!methodTParams.empty()) {
@@ -1815,8 +1901,13 @@ DeclNode *Parser::parseStructDecl() {
       field->annotations = memberAnnotations;
       field->hasPublicMod = isPub;
       field->hasPrivateMod = isPriv;
+      field->rawTypeStr = rawTypeStr;
+
       if (!doc.empty())
         field->docString = astCtx.copyString(doc);
+      if (cursor > 0 && !tokens[cursor - 1].trailingComment.empty()) {
+        field->trailingComment = tokens[cursor - 1].trailingComment;
+      }
 
       fields.push_back(field);
     }
@@ -1846,6 +1937,7 @@ DeclNode *Parser::parseStructDecl() {
     destructor->body = emptyBody;
   }
 
+  int endLine = currentToken().line;
   int endCol = currentToken().column + 1;
   expect(TokenType::RBRACE, "Expected '}'");
 
@@ -1864,6 +1956,7 @@ DeclNode *Parser::parseStructDecl() {
   node->methods = astCtx.copyArray<FunctionDeclNode *>(methods);
   node->constructors = astCtx.copyArray<FunctionDeclNode *>(constructors);
   node->destructor = destructor;
+  node->endLine = endLine;
 
   return node;
 }
@@ -1878,7 +1971,7 @@ DeclNode *Parser::parseClassDecl() {
 
   std::vector<std::string_view> tParams;
   if (match(TokenType::LT)) {
-    astCtx.registerTemplateName(name); // Register class template
+    astCtx.registerTemplateName(name);
     if (currentToken().type != TokenType::GT) {
       do {
         tParams.push_back(currentToken().value);
@@ -1966,8 +2059,12 @@ DeclNode *Parser::parseClassDecl() {
       destructor->annotations = memberAnnotations;
       destructor->hasPublicMod = isPub;
       destructor->hasPrivateMod = isPriv;
+
       if (!doc.empty())
         destructor->docString = astCtx.copyString(doc);
+      if (cursor > 0 && !tokens[cursor - 1].trailingComment.empty()) {
+        destructor->trailingComment = tokens[cursor - 1].trailingComment;
+      }
 
       destructor->body = parseFunctionBody(astCtx.VoidTy);
       continue;
@@ -2004,8 +2101,12 @@ DeclNode *Parser::parseClassDecl() {
       constructor->annotations = memberAnnotations;
       constructor->hasPublicMod = isPub;
       constructor->hasPrivateMod = isPriv;
+
       if (!doc.empty())
         constructor->docString = astCtx.copyString(doc);
+      if (cursor > 0 && !tokens[cursor - 1].trailingComment.empty()) {
+        constructor->trailingComment = tokens[cursor - 1].trailingComment;
+      }
 
       constructor->body = parseFunctionBody(astCtx.VoidTy);
       constructors.push_back(constructor);
@@ -2035,7 +2136,12 @@ DeclNode *Parser::parseClassDecl() {
 
     int mLine = currentToken().line;
     int mCol = currentToken().column;
+
+    const char *typeStart = currentToken().value.data();
     const Type *memType = parseType();
+    const char *typeEnd =
+        tokens[cursor - 1].value.data() + tokens[cursor - 1].value.length();
+    std::string_view rawTypeStr(typeStart, typeEnd - typeStart);
 
     std::string_view memName;
     if (match(TokenType::OPERATOR_KW)) {
@@ -2047,7 +2153,7 @@ DeclNode *Parser::parseClassDecl() {
 
     std::vector<std::string_view> methodTParams;
     if (match(TokenType::LT)) {
-      astCtx.registerTemplateName(memName); // Register method template
+      astCtx.registerTemplateName(memName);
       if (currentToken().type != TokenType::GT) {
         do {
           methodTParams.push_back(currentToken().value);
@@ -2076,6 +2182,7 @@ DeclNode *Parser::parseClassDecl() {
       method->annotations = memberAnnotations;
       method->hasPublicMod = isPub;
       method->hasPrivateMod = isPriv;
+      method->rawReturnTypeStr = rawTypeStr;
 
       if (!doc.empty())
         method->docString = astCtx.copyString(doc);
@@ -2085,6 +2192,10 @@ DeclNode *Parser::parseClassDecl() {
                "Expected ';' after extern method declaration");
       } else {
         method->body = parseFunctionBody(memType);
+      }
+
+      if (cursor > 0 && !tokens[cursor - 1].trailingComment.empty()) {
+        method->trailingComment = tokens[cursor - 1].trailingComment;
       }
 
       if (!methodTParams.empty()) {
@@ -2119,8 +2230,13 @@ DeclNode *Parser::parseClassDecl() {
       field->annotations = memberAnnotations;
       field->hasPublicMod = isPub;
       field->hasPrivateMod = isPriv;
+      field->rawTypeStr = rawTypeStr;
+
       if (!doc.empty())
         field->docString = astCtx.copyString(doc);
+      if (cursor > 0 && !tokens[cursor - 1].trailingComment.empty()) {
+        field->trailingComment = tokens[cursor - 1].trailingComment;
+      }
 
       fields.push_back(field);
     }
@@ -2150,6 +2266,7 @@ DeclNode *Parser::parseClassDecl() {
     destructor->body = emptyBody;
   }
 
+  int endLine = currentToken().line;
   int endCol = currentToken().column + 1;
   expect(TokenType::RBRACE, "Expected '}'");
 
@@ -2168,6 +2285,7 @@ DeclNode *Parser::parseClassDecl() {
   node->methods = astCtx.copyArray<FunctionDeclNode *>(methods);
   node->constructors = astCtx.copyArray<FunctionDeclNode *>(constructors);
   node->destructor = destructor;
+  node->endLine = endLine;
 
   popTemplateParams(tParams.size());
 
@@ -2206,8 +2324,7 @@ DeclNode *Parser::parseEnumDecl() {
   std::vector<EnumMemberNode *> members;
   while (currentToken().type != TokenType::RBRACE &&
          currentToken().type != TokenType::EOF_TOK) {
-    while (currentToken().type == TokenType::COMMENT)
-      advance();
+
     if (currentToken().type == TokenType::RBRACE)
       break;
 
@@ -2220,6 +2337,8 @@ DeclNode *Parser::parseEnumDecl() {
         isPriv = true;
       advance();
     }
+
+    std::string doc = consumeComments();
 
     int mLine = currentToken().line;
     int mCol = currentToken().column;
@@ -2235,6 +2354,13 @@ DeclNode *Parser::parseEnumDecl() {
         mName, init, mLine, mCol, currentToken().column - mCol);
     memberNode->hasPublicMod = isPub;
     memberNode->hasPrivateMod = isPriv;
+
+    if (!doc.empty())
+      memberNode->docString = astCtx.copyString(doc);
+    if (cursor > 0 && !tokens[cursor - 1].trailingComment.empty()) {
+      memberNode->trailingComment = tokens[cursor - 1].trailingComment;
+    }
+
     members.push_back(memberNode);
 
     if (!match(TokenType::COMMA)) {
@@ -2242,6 +2368,7 @@ DeclNode *Parser::parseEnumDecl() {
     }
   }
 
+  int endLine = currentToken().line;
   int endCol = currentToken().column + 1;
   expect(TokenType::RBRACE, "Expected '}'");
 
@@ -2249,6 +2376,7 @@ DeclNode *Parser::parseEnumDecl() {
                                           endCol - col);
   node->members = astCtx.copyArray<EnumMemberNode *>(members);
   node->enumType = astCtx.getEnumType(name, underlyingType);
+  node->endLine = endLine;
   return node;
 }
 
@@ -2269,7 +2397,6 @@ DeclNode *Parser::parseDeclarationOrFunction(
     advance();
   }
 
-  /* Fallback to checking the presence of the @extern annotation */
   if (!isExtern) {
     for (const auto *ann : annotations) {
       if (ann->name == "extern") {
@@ -2279,7 +2406,11 @@ DeclNode *Parser::parseDeclarationOrFunction(
     }
   }
 
+  const char *typeStart = currentToken().value.data();
   const Type *nodeType = parseType();
+  const char *typeEnd =
+      tokens[cursor - 1].value.data() + tokens[cursor - 1].value.length();
+  std::string_view rawTypeStr(typeStart, typeEnd - typeStart);
 
   std::string_view id;
   if (match(TokenType::OPERATOR_KW)) {
@@ -2293,7 +2424,7 @@ DeclNode *Parser::parseDeclarationOrFunction(
 
   std::vector<std::string_view> tParams;
   if (match(TokenType::LT)) {
-    astCtx.registerTemplateName(id); // Register function template
+    astCtx.registerTemplateName(id);
     if (currentToken().type != TokenType::GT) {
       do {
         tParams.push_back(currentToken().value);
@@ -2320,15 +2451,19 @@ DeclNode *Parser::parseDeclarationOrFunction(
         nodeType, id, line, col, isFuncConst, false, isExtern, isVariadic);
     funcDecl->isStatic = isStatic;
     funcDecl->params = astCtx.copyArray<ParamDeclNode *>(params);
+    funcDecl->rawReturnTypeStr = rawTypeStr;
 
     if (isExtern) {
+      int endLine = currentToken().line;
       int endCol = currentToken().column + currentToken().value.length();
       expect(TokenType::SEMICOLON,
              "Expected ';' after extern function declaration");
       funcDecl->length = endCol - col;
+      funcDecl->endLine = endLine;
     } else {
       funcDecl->body = parseFunctionBody(nodeType);
       funcDecl->length = funcDecl->body->column + funcDecl->body->length - col;
+      funcDecl->endLine = funcDecl->body->endLine;
     }
 
     popTemplateParams(tParams.size());
@@ -2354,11 +2489,15 @@ DeclNode *Parser::parseDeclarationOrFunction(
   if (match(TokenType::ASSIGN)) {
     init = parseExpression();
   }
+  int endLine = currentToken().line;
   int endCol = currentToken().column + (int)currentToken().value.length();
   expect(TokenType::SEMICOLON, "Expected ';' after variable declaration");
 
-  return astCtx.create<VarDeclNode>(nodeType, id, init, line, col,
-                                    endCol - col);
+  auto varDecl =
+      astCtx.create<VarDeclNode>(nodeType, id, init, line, col, endCol - col);
+  varDecl->rawTypeStr = rawTypeStr;
+  varDecl->endLine = endLine;
+  return varDecl;
 }
 
 BlockNode *Parser::parseBlock() {
@@ -2376,10 +2515,12 @@ BlockNode *Parser::parseBlock() {
     }
   }
 
+  int endLine = currentToken().line;
   int endCol = currentToken().column + 1;
   expect(TokenType::RBRACE, "Expected '}'");
   block->statements = astCtx.copyArray<ASTNode *>(statements);
   block->finalize(endCol);
+  block->endLine = endLine;
   return block;
 }
 
@@ -2391,14 +2532,19 @@ ReturnNode *Parser::parseReturn() {
   if (currentToken().type != TokenType::SEMICOLON) {
     val = parseExpression();
   }
+  int endLine = currentToken().line;
   int endCol = currentToken().column + (int)currentToken().value.length();
   expect(TokenType::SEMICOLON, "Expected ';'");
-  return astCtx.create<ReturnNode>(val, line, col, endCol - col);
+  auto ret = astCtx.create<ReturnNode>(val, line, col, endCol - col);
+  ret->endLine = endLine;
+  return ret;
 }
 
 ExprNode *Parser::parseExpressionStatement() {
   auto expr = parseExpression();
+  int endLine = currentToken().line;
   expect(TokenType::SEMICOLON, "Expected ';'");
+  expr->endLine = endLine;
   return expr;
 }
 
@@ -2477,12 +2623,17 @@ ExprNode *Parser::parseCast() {
     int col = left->column;
     advance();
 
+    const char *typeStart = currentToken().value.data();
     const Type *targetType = parseType();
+    const char *typeEnd =
+        tokens[cursor - 1].value.data() + tokens[cursor - 1].value.length();
+    std::string_view rawTypeStr(typeStart, typeEnd - typeStart);
 
     /* Securely calculate the end column using the parsed type's last token */
     int endCol = tokens[cursor - 1].column + tokens[cursor - 1].value.length();
 
     left = astCtx.create<CastNode>(left, targetType, line, col, endCol - col);
+    static_cast<CastNode *>(left)->rawTargetTypeStr = rawTypeStr;
   }
   return left;
 }
@@ -2490,9 +2641,6 @@ ExprNode *Parser::parseCast() {
 ExprNode *Parser::parsePostfix() {
   auto expr = parsePrimary();
   while (true) {
-    while (currentToken().type == TokenType::COMMENT)
-      advance();
-
     if (match(TokenType::DOT)) {
       int line = expr->line;
       int col = expr->column;
@@ -2548,13 +2696,8 @@ ExprNode *Parser::parsePostfix() {
       std::vector<std::string_view> argNames;
       bool namedStarted = false;
 
-      while (currentToken().type == TokenType::COMMENT)
-        advance();
-
       if (currentToken().type != TokenType::RPAREN) {
         do {
-          while (currentToken().type == TokenType::COMMENT)
-            advance();
           if (currentToken().type == TokenType::RPAREN)
             break;
 
@@ -2564,8 +2707,6 @@ ExprNode *Parser::parsePostfix() {
             argNames.push_back(currentToken().value);
             advance();
             advance();
-            while (currentToken().type == TokenType::COMMENT)
-              advance();
             args.push_back(parseExpression());
           } else {
             if (namedStarted) {
@@ -2579,12 +2720,8 @@ ExprNode *Parser::parsePostfix() {
             args.push_back(parseExpression());
           }
 
-          while (currentToken().type == TokenType::COMMENT)
-            advance();
         } while (match(TokenType::COMMA));
       }
-      while (currentToken().type == TokenType::COMMENT)
-        advance();
       int endCol = currentToken().column + (int)currentToken().value.length();
       expect(TokenType::RPAREN, "Expected ')'");
 
@@ -2592,6 +2729,9 @@ ExprNode *Parser::parsePostfix() {
       auto namesRef = astCtx.copyArray<std::string_view>(argNames);
       expr = astCtx.create<FunctionCallNode>(expr, argsRef, namesRef, line, col,
                                              endCol - col);
+      static_cast<FunctionCallNode *>(expr)->rawArgs = argsRef;
+      static_cast<FunctionCallNode *>(expr)->rawArgNames = namesRef;
+      static_cast<FunctionCallNode *>(expr)->hasRawArgs = true;
     } else if (currentToken().type == TokenType::PLUS_PLUS ||
                currentToken().type == TokenType::MINUS_MINUS) {
       int line = expr->line;
@@ -2623,6 +2763,7 @@ ExprNode *Parser::parsePrimary() {
   if (match(TokenType::LPAREN)) {
     auto expr = parseExpression();
     expect(TokenType::RPAREN, "Expected ')'");
+    expr->hasParens = true;
     return expr;
   }
 
@@ -2821,9 +2962,7 @@ ExprNode *Parser::parsePrimary() {
       if (inner[i] == '\\' && i + 1 < inner.length()) {
         ++i;
         if (inner[i] == 'x' || inner[i] == 'X') {
-          /* Evaluate hex sequences bound to a maximum of 2 bytes to prevent
-           * greedy consumption of adjacent valid hex characters in string
-           * literals */
+          /* Evaluate hex sequences bound to a maximum of 2 bytes */
           uint8_t hexVal = 0;
           size_t hexCount = 0;
           while (i + 1 < inner.length() && hexCount < 2) {

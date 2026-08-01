@@ -1,6 +1,7 @@
 #include "SearchVisitor.hpp"
 #include "utopia/AST/ASTVisitor.hpp"
 #include "utopia/Driver/ModuleLoader.hpp"
+#include "utopia/Format/Formatter.hpp"
 #include "utopia/Lexer/Lexer.hpp"
 #include "utopia/Parser/Parser.hpp"
 #include "utopia/Sema/Sema.hpp"
@@ -1287,6 +1288,29 @@ void processFile(const std::string &uri, std::string text) {
   }
 }
 
+void handleFormatting(const json &req) {
+  syncWorker();
+  std::string uri = req["params"]["textDocument"]["uri"];
+  json res = nullptr;
+
+  std::shared_lock<std::shared_mutex> lock(docMutex);
+  if (documents.contains(uri)) {
+    auto &doc = documents[uri];
+    if (doc.ast) {
+      std::string formatted = Formatter::format(doc.ast);
+      if (!formatted.empty()) {
+        int lineCount = std::count(doc.text.begin(), doc.text.end(), '\n') + 1;
+        res = json::array();
+        res.push_back({{"range",
+                        {{"start", {{"line", 0}, {"character", 0}}},
+                         {"end", {{"line", lineCount}, {"character", 0}}}}},
+                       {"newText", formatted}});
+      }
+    }
+  }
+  sendResponse({{"jsonrpc", "2.0"}, {"id", req["id"]}, {"result", res}});
+}
+
 void workerThread() {
   while (isRunning) {
     std::string uri, text;
@@ -1694,6 +1718,7 @@ int main() {
                  {"hoverProvider", true},
                  {"definitionProvider", true},
                  {"completionProvider", {{"triggerCharacters", {"."}}}},
+                 {"documentFormattingProvider", true},
                  {"semanticTokensProvider",
                   {{"legend",
                     {{"tokenTypes",
@@ -1710,6 +1735,8 @@ int main() {
         utopia::lsp::handleDefinition(req);
       } else if (method == "textDocument/completion") {
         utopia::lsp::handleCompletion(req);
+      } else if (method == "textDocument/formatting") {
+        utopia::lsp::handleFormatting(req);
       } else if (method == "textDocument/semanticTokens/full") {
         utopia::lsp::handleSemanticTokens(req);
       } else if (method == "textDocument/didOpen" ||
