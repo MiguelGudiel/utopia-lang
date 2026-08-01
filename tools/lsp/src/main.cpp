@@ -1213,6 +1213,10 @@ void processFile(const std::string &uri, std::string text) {
         projRoot.empty()
             ? ""
             : projRoot.parent_path().parent_path() / "libs" / "prelude" / "lib";
+    std::filesystem::path buildLibPath =
+        projRoot.empty()
+            ? ""
+            : projRoot.parent_path().parent_path() / "libs" / "builder" / "lib";
 
 #ifdef UTOPIA_SOURCE_DIR
     if (!std::filesystem::exists(stdlibPath)) {
@@ -1220,11 +1224,14 @@ void processFile(const std::string &uri, std::string text) {
           std::filesystem::path(UTOPIA_SOURCE_DIR) / "libs" / "stdlib" / "lib";
       preludePath =
           std::filesystem::path(UTOPIA_SOURCE_DIR) / "libs" / "prelude" / "lib";
+      buildLibPath =
+          std::filesystem::path(UTOPIA_SOURCE_DIR) / "libs" / "builder" / "lib";
     }
 #endif
 
     modConfig.stdlibRoot = stdlibPath;
     modConfig.preludeRoot = preludePath;
+    modConfig.buildLibRoot = buildLibPath;
 
     if (!projRoot.empty()) {
       std::unordered_set<std::string> visited;
@@ -1247,6 +1254,12 @@ void processFile(const std::string &uri, std::string text) {
 
     std::lock_guard<std::mutex> lock(cacheMutex);
     projectConfigCache[projRootStr] = modConfig;
+  }
+
+  /* Flag the current configuration to allow builder API resolution if
+   * applicable */
+  if (currentPath.filename() == "build.utp") {
+    modConfig.isBuildScript = true;
   }
 
   ModuleLoader loader(*newState.astCtx, modConfig, *newState.diags);
