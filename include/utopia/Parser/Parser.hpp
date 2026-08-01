@@ -71,6 +71,15 @@ private:
                      name) != currentTemplateParams.end();
   }
 
+  void checkRecordMemberRedefinition(
+      std::string_view name, const std::vector<VarDeclNode *> &fields,
+      const std::vector<FunctionDeclNode *> &methods,
+      const FunctionDeclNode *newMethod, int line, int col, int len);
+
+  void checkConstructorRedefinition(
+      const std::vector<FunctionDeclNode *> &constructors,
+      const FunctionDeclNode *newCtor, int line, int col, int len);
+
   std::string_view parseOperatorName();
 
   const Type *parseType(bool inNewExpr = false);

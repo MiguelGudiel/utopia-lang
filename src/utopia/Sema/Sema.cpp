@@ -1775,7 +1775,7 @@ SemaResult TypeCheckPass::visit(const IfNode *node) {
 }
 
 SemaResult TypeCheckPass::visit(const ForNode *node) {
-  ScopeGuard guard(*ctx);
+  ScopeGuard guard(*ctx, ScopeKind::ControlFlowInit);
 
   if (node->initStatement) {
     auto initRes = dispatch(node->initStatement);
@@ -2876,7 +2876,7 @@ SemaResult TypeCheckPass::visit(const FunctionDeclNode *node) {
   const Type *prevRet = ctx->getFunctionReturnType();
   ctx->setFunctionReturnType(node->returnType);
 
-  ScopeGuard guard(*ctx);
+  ScopeGuard guard(*ctx, ScopeKind::FunctionParams);
   bool hasErrors = false;
 
   if (node->isMethod && !node->isExtern && !node->isStatic &&

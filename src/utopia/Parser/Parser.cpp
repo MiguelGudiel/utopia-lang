@@ -582,6 +582,83 @@ BlockNode *Parser::parseFunctionBody(const Type *returnType) {
   return parseBlock();
 }
 
+void Parser::checkRecordMemberRedefinition(
+    std::string_view name, const std::vector<VarDeclNode *> &fields,
+    const std::vector<FunctionDeclNode *> &methods,
+    const FunctionDeclNode *newMethod, int line, int col, int len) {
+  for (auto *f : fields) {
+    if (f->varName == name) {
+      reportError(line, col, len,
+                  "Redefinition of field '" + std::string(name) + "'.");
+      throw ParseException();
+    }
+  }
+  if (newMethod) {
+    for (auto *m : methods) {
+      if (m->name == name) {
+        bool sameSignature = true;
+        if (m->params.size() != newMethod->params.size()) {
+          sameSignature = false;
+        } else {
+          for (size_t i = 0; i < m->params.size(); ++i) {
+            if (m->params[i]->type->toString() !=
+                newMethod->params[i]->type->toString()) {
+              sameSignature = false;
+              break;
+            }
+          }
+        }
+
+        /* Method const qualifier evaluates into the overload resolution
+         * signature */
+        if (sameSignature && m->isConst != newMethod->isConst) {
+          sameSignature = false;
+        }
+
+        if (sameSignature) {
+          reportError(line, col, len,
+                      "Redefinition of method '" + std::string(name) +
+                          "' with the same signature.");
+          throw ParseException();
+        }
+      }
+    }
+  } else {
+    for (auto *m : methods) {
+      if (m->name == name) {
+        reportError(line, col, len,
+                    "Redefinition of '" + std::string(name) +
+                        "' as a different kind of symbol.");
+        throw ParseException();
+      }
+    }
+  }
+}
+
+void Parser::checkConstructorRedefinition(
+    const std::vector<FunctionDeclNode *> &constructors,
+    const FunctionDeclNode *newCtor, int line, int col, int len) {
+  for (auto *c : constructors) {
+    bool sameSignature = true;
+    if (c->params.size() != newCtor->params.size()) {
+      sameSignature = false;
+    } else {
+      for (size_t i = 0; i < c->params.size(); ++i) {
+        if (c->params[i]->type->toString() !=
+            newCtor->params[i]->type->toString()) {
+          sameSignature = false;
+          break;
+        }
+      }
+    }
+    if (sameSignature) {
+      reportError(line, col, len,
+                  "Redefinition of constructor with the same signature.");
+      throw ParseException();
+    }
+  }
+}
+
 DeclNode *
 Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
   int line = currentToken().line;
@@ -650,6 +727,12 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
       }
       expect(TokenType::RPAREN, "Expected ')'");
 
+      if (constructor != nullptr) {
+        reportError(cLine, cCol, name.length(),
+                    "Redefinition of annotation constructor.");
+        throw ParseException();
+      }
+
       constructor = astCtx.create<FunctionDeclNode>(astCtx.VoidTy, name, cLine,
                                                     cCol, true, true);
       constructor->parentRecord = classTy;
@@ -681,6 +764,9 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
 
     expect(TokenType::IDENTIFIER, "Expected member name");
     expect(TokenType::SEMICOLON, "Expected ';'");
+
+    checkRecordMemberRedefinition(memName, fields, {}, nullptr, mLine, mCol,
+                                  memName.length());
 
     auto field = astCtx.create<VarDeclNode>(memType, memName, nullptr, mLine,
                                             mCol, memName.length());
@@ -1420,6 +1506,12 @@ DeclNode *Parser::parseUnionDecl() {
       expect(TokenType::LPAREN, "Expected '('");
       expect(TokenType::RPAREN, "Expected ')'");
 
+      if (destructor != nullptr) {
+        reportError(dLine, dCol, dtorName.length(),
+                    "Redefinition of destructor.");
+        throw ParseException();
+      }
+
       destructor = astCtx.create<FunctionDeclNode>(astCtx.VoidTy, "~", dLine,
                                                    dCol, false, true);
       destructor->parentRecord = unionTy;
@@ -1474,6 +1566,8 @@ DeclNode *Parser::parseUnionDecl() {
       }
 
       constructor->body = parseFunctionBody(astCtx.VoidTy);
+      checkConstructorRedefinition(constructors, constructor, cLine, cCol,
+                                   name.length());
       constructors.push_back(constructor);
       continue;
     }
@@ -1521,6 +1615,15 @@ DeclNode *Parser::parseUnionDecl() {
       astCtx.registerTemplateName(memName);
       if (currentToken().type != TokenType::GT) {
         do {
+          for (auto tp : methodTParams) {
+            if (tp == currentToken().value) {
+              reportError(currentToken().line, currentToken().column,
+                          currentToken().value.length(),
+                          "Redefinition of template parameter '" +
+                              std::string(tp) + "'.");
+              throw ParseException();
+            }
+          }
           methodTParams.push_back(currentToken().value);
           pushTemplateParam(methodTParams.back());
           expect(TokenType::IDENTIFIER, "Expected template parameter name");
@@ -1570,6 +1673,8 @@ DeclNode *Parser::parseUnionDecl() {
         popTemplateParams(methodTParams.size());
       }
 
+      checkRecordMemberRedefinition(memName, fields, methods, method, mLine,
+                                    mCol, memName.length());
       methods.push_back(method);
     } else {
       if (!methodTParams.empty()) {
@@ -1588,6 +1693,9 @@ DeclNode *Parser::parseUnionDecl() {
         init = parseExpression();
       }
       expect(TokenType::SEMICOLON, "Expected ';'");
+
+      checkRecordMemberRedefinition(memName, fields, methods, nullptr, mLine,
+                                    mCol, memName.length());
 
       auto field = astCtx.create<VarDeclNode>(memType, memName, init, mLine,
                                               mCol, memName.length());
@@ -1725,6 +1833,12 @@ DeclNode *Parser::parseStructDecl() {
       expect(TokenType::LPAREN, "Expected '('");
       expect(TokenType::RPAREN, "Expected ')'");
 
+      if (destructor != nullptr) {
+        reportError(dLine, dCol, dtorName.length(),
+                    "Redefinition of destructor.");
+        throw ParseException();
+      }
+
       destructor = astCtx.create<FunctionDeclNode>(astCtx.VoidTy, "~", dLine,
                                                    dCol, false, true);
       destructor->parentRecord = structTy;
@@ -1780,6 +1894,8 @@ DeclNode *Parser::parseStructDecl() {
       }
 
       constructor->body = parseFunctionBody(astCtx.VoidTy);
+      checkConstructorRedefinition(constructors, constructor, cLine, cCol,
+                                   name.length());
       constructors.push_back(constructor);
       continue;
     }
@@ -1827,6 +1943,15 @@ DeclNode *Parser::parseStructDecl() {
       astCtx.registerTemplateName(memName);
       if (currentToken().type != TokenType::GT) {
         do {
+          for (auto tp : methodTParams) {
+            if (tp == currentToken().value) {
+              reportError(currentToken().line, currentToken().column,
+                          currentToken().value.length(),
+                          "Redefinition of template parameter '" +
+                              std::string(tp) + "'.");
+              throw ParseException();
+            }
+          }
           methodTParams.push_back(currentToken().value);
           pushTemplateParam(methodTParams.back());
           expect(TokenType::IDENTIFIER, "Expected template parameter name");
@@ -1876,6 +2001,8 @@ DeclNode *Parser::parseStructDecl() {
         popTemplateParams(methodTParams.size());
       }
 
+      checkRecordMemberRedefinition(memName, fields, methods, method, mLine,
+                                    mCol, memName.length());
       methods.push_back(method);
     } else {
       if (!methodTParams.empty()) {
@@ -1894,6 +2021,9 @@ DeclNode *Parser::parseStructDecl() {
         init = parseExpression();
       }
       expect(TokenType::SEMICOLON, "Expected ';'");
+
+      checkRecordMemberRedefinition(memName, fields, methods, nullptr, mLine,
+                                    mCol, memName.length());
 
       auto field = astCtx.create<VarDeclNode>(memType, memName, init, mLine,
                                               mCol, memName.length());
@@ -1974,6 +2104,15 @@ DeclNode *Parser::parseClassDecl() {
     astCtx.registerTemplateName(name);
     if (currentToken().type != TokenType::GT) {
       do {
+        for (auto tp : tParams) {
+          if (tp == currentToken().value) {
+            reportError(currentToken().line, currentToken().column,
+                        currentToken().value.length(),
+                        "Redefinition of template parameter '" +
+                            std::string(tp) + "'.");
+            throw ParseException();
+          }
+        }
         tParams.push_back(currentToken().value);
         pushTemplateParam(tParams.back());
         expect(TokenType::IDENTIFIER, "Expected template parameter name");
@@ -2053,6 +2192,12 @@ DeclNode *Parser::parseClassDecl() {
       expect(TokenType::LPAREN, "Expected '('");
       expect(TokenType::RPAREN, "Expected ')'");
 
+      if (destructor != nullptr) {
+        reportError(dLine, dCol, dtorName.length(),
+                    "Redefinition of destructor.");
+        throw ParseException();
+      }
+
       destructor = astCtx.create<FunctionDeclNode>(astCtx.VoidTy, "~", dLine,
                                                    dCol, false, true);
       destructor->parentRecord = classTy;
@@ -2109,6 +2254,8 @@ DeclNode *Parser::parseClassDecl() {
       }
 
       constructor->body = parseFunctionBody(astCtx.VoidTy);
+      checkConstructorRedefinition(constructors, constructor, cLine, cCol,
+                                   name.length());
       constructors.push_back(constructor);
       continue;
     }
@@ -2156,6 +2303,15 @@ DeclNode *Parser::parseClassDecl() {
       astCtx.registerTemplateName(memName);
       if (currentToken().type != TokenType::GT) {
         do {
+          for (auto tp : methodTParams) {
+            if (tp == currentToken().value) {
+              reportError(currentToken().line, currentToken().column,
+                          currentToken().value.length(),
+                          "Redefinition of template parameter '" +
+                              std::string(tp) + "'.");
+              throw ParseException();
+            }
+          }
           methodTParams.push_back(currentToken().value);
           pushTemplateParam(methodTParams.back());
           expect(TokenType::IDENTIFIER, "Expected template parameter name");
@@ -2205,6 +2361,8 @@ DeclNode *Parser::parseClassDecl() {
         popTemplateParams(methodTParams.size());
       }
 
+      checkRecordMemberRedefinition(memName, fields, methods, method, mLine,
+                                    mCol, memName.length());
       methods.push_back(method);
     } else {
       if (!methodTParams.empty()) {
@@ -2223,6 +2381,9 @@ DeclNode *Parser::parseClassDecl() {
         init = parseExpression();
       }
       expect(TokenType::SEMICOLON, "Expected ';'");
+
+      checkRecordMemberRedefinition(memName, fields, methods, nullptr, mLine,
+                                    mCol, memName.length());
 
       auto field = astCtx.create<VarDeclNode>(memType, memName, init, mLine,
                                               mCol, memName.length());
@@ -2345,6 +2506,15 @@ DeclNode *Parser::parseEnumDecl() {
     std::string_view mName = currentToken().value;
     expect(TokenType::IDENTIFIER, "Expected enum member name");
 
+    for (auto *existing : members) {
+      if (existing->name == mName) {
+        reportError(mLine, mCol, currentToken().column - mCol,
+                    "Redefinition of enum member '" + std::string(mName) +
+                        "'.");
+        throw ParseException();
+      }
+    }
+
     ExprNode *init = nullptr;
     if (match(TokenType::ASSIGN)) {
       init = parseExpression();
@@ -2427,6 +2597,15 @@ DeclNode *Parser::parseDeclarationOrFunction(
     astCtx.registerTemplateName(id);
     if (currentToken().type != TokenType::GT) {
       do {
+        for (auto tp : tParams) {
+          if (tp == currentToken().value) {
+            reportError(currentToken().line, currentToken().column,
+                        currentToken().value.length(),
+                        "Redefinition of template parameter '" +
+                            std::string(tp) + "'.");
+            throw ParseException();
+          }
+        }
         tParams.push_back(currentToken().value);
         pushTemplateParam(tParams.back());
         expect(TokenType::IDENTIFIER, "Expected template parameter name");
