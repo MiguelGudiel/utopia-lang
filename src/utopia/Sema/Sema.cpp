@@ -3010,7 +3010,27 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
             errors.push_back("Missing mandatory positional parameter '" +
                              pName + "'.");
           } else {
-            errors.push_back("Missing parameter '" + pName + "'.");
+            const Type *pType = fDecl->params[p]->type;
+            const Type *unqual = pType->getUnqualifiedType();
+            if (unqual->isNumeric()) {
+              auto num = ctx->astCtx.create<NumberNode>("0", unqual->isFloat(),
+                                                        0, 0, 0);
+              num->exprType = pType;
+              resolvedArgs[p] = num;
+              resolvedTypes[p] = pType;
+            } else if (unqual->isBuiltinType() &&
+                       static_cast<const BuiltinType *>(unqual)
+                               ->getBuiltinKind() == BuiltinKind::Bool) {
+              auto bNode = ctx->astCtx.create<BoolNode>(false, 0, 0, 0);
+              bNode->exprType = pType;
+              resolvedArgs[p] = bNode;
+              resolvedTypes[p] = pType;
+            } else {
+              auto nNode = ctx->astCtx.create<NullNode>(0, 0, 0);
+              nNode->exprType = pType;
+              resolvedArgs[p] = nNode;
+              resolvedTypes[p] = pType;
+            }
           }
         }
       }
@@ -3763,7 +3783,27 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
                 errors.push_back("Missing mandatory positional parameter '" +
                                  pName + "'.");
               } else {
-                errors.push_back("Missing parameter '" + pName + "'.");
+                const Type *pType = ctor->params[p]->type;
+                const Type *unqual = pType->getUnqualifiedType();
+                if (unqual->isNumeric()) {
+                  auto num = ctx->astCtx.create<NumberNode>(
+                      "0", unqual->isFloat(), 0, 0, 0);
+                  num->exprType = pType;
+                  resolvedArgs[p] = num;
+                  resolvedTypes[p] = pType;
+                } else if (unqual->isBuiltinType() &&
+                           static_cast<const BuiltinType *>(unqual)
+                                   ->getBuiltinKind() == BuiltinKind::Bool) {
+                  auto bNode = ctx->astCtx.create<BoolNode>(false, 0, 0, 0);
+                  bNode->exprType = pType;
+                  resolvedArgs[p] = bNode;
+                  resolvedTypes[p] = pType;
+                } else {
+                  auto nNode = ctx->astCtx.create<NullNode>(0, 0, 0);
+                  nNode->exprType = pType;
+                  resolvedArgs[p] = nNode;
+                  resolvedTypes[p] = pType;
+                }
               }
             }
           }
