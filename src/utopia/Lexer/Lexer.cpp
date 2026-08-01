@@ -7,12 +7,39 @@ namespace utopia {
 
 std::vector<Token> Lexer::tokenize() {
   std::vector<Token> tokens;
-  Token tok = nextToken();
-  while (tok.type != TokenType::EOF_TOK) {
+  std::vector<std::string_view> pendingLeading;
+
+  while (true) {
+    Token tok = nextToken();
+
+    if (tok.type == TokenType::COMMENT) {
+      if (!tokens.empty() && tokens.back().line == tok.line &&
+          tokens.back().trailingComment.empty()) {
+
+        /* Expand the string_view backwards to capture exact whitespace
+           preceding the trailing comment for accurate formatting retention. */
+        const char *start = tok.value.data();
+        size_t len = tok.value.length();
+        while (start > source.data() &&
+               (*(start - 1) == ' ' || *(start - 1) == '\t')) {
+          start--;
+          len++;
+        }
+        tokens.back().trailingComment = std::string_view(start, len);
+      } else {
+        pendingLeading.push_back(tok.value);
+      }
+      continue;
+    }
+
+    tok.leadingComments = pendingLeading;
+    pendingLeading.clear();
+
     tokens.push_back(tok);
-    tok = nextToken();
+    if (tok.type == TokenType::EOF_TOK) {
+      break;
+    }
   }
-  tokens.push_back(tok);
   return tokens;
 }
 
@@ -128,11 +155,9 @@ Token Lexer::parseToken() {
 
   if (c == '/') {
     if (cursor + 1 < source.length() && source[cursor + 1] == '/') {
+      size_t startStr = cursor; // Comenzar a capturar incluyendo el '//'
       advance();
       advance();
-      while (cursor < source.length() && source[cursor] == ' ')
-        advance();
-      size_t startStr = cursor;
       while (cursor < source.length() && source[cursor] != '\n')
         advance();
       return {TokenType::COMMENT,
@@ -140,23 +165,19 @@ Token Lexer::parseToken() {
               startLine, startCol};
     }
     if (cursor + 1 < source.length() && source[cursor + 1] == '*') {
+      size_t startStr = cursor; // Comenzar a capturar incluyendo el '/*'
       advance();
       advance();
-      while (cursor < source.length() && source[cursor] == ' ')
-        advance();
-      size_t startStr = cursor;
       while (cursor + 1 < source.length() &&
              !(source[cursor] == '*' && source[cursor + 1] == '/')) {
         advance();
       }
-      size_t endStr = cursor;
       if (cursor + 1 < source.length()) {
         advance();
         advance();
       }
+      size_t endStr = cursor;
       std::string_view val(source.data() + startStr, endStr - startStr);
-      if (!val.empty() && val.back() == ' ')
-        val.remove_suffix(1);
       return {TokenType::COMMENT, val, startLine, startCol};
     }
   }

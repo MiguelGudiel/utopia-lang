@@ -373,7 +373,8 @@ inline std::string Type::toString() const {
                ->getPointeeType()
                ->toString() +
            "&&";
-  } else if (kind == TypeKind::Struct || kind == TypeKind::Class) {
+  } else if (kind == TypeKind::Struct || kind == TypeKind::Class ||
+             kind == TypeKind::Union) {
     return std::string(static_cast<const RecordType *>(this)->getName());
   }
   return "unknown";

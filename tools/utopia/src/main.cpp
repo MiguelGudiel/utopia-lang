@@ -20,6 +20,7 @@ struct GlobalOptions {
   bool emitAsm = false;
   bool isJIT = false;
   bool isDebug = false;
+  bool doFormat = false;
   std::optional<int> cliOptLevel;
   std::string stdlibRoot;
   std::string preludeRoot;
@@ -75,6 +76,7 @@ bool buildProject(const fs::path &projRoot, CompileOptions &parentOptions,
   options.emitAsm = globalOpts.emitAsm;
   options.isJIT = globalOpts.isJIT;
   options.isDebug = globalOpts.isDebug;
+  options.doFormat = globalOpts.doFormat;
 
   /* Override inherited configurations with explicit YAML values */
   if (config.optLevel.has_value()) {
@@ -208,6 +210,8 @@ int main(int argc, char **argv) {
         globalOpts.emitAsm = true;
       } else if (arg == "--jit") {
         globalOpts.isJIT = true;
+      } else if (arg == "--format") {
+        globalOpts.doFormat = true;
       } else if (arg == "-g" || arg == "--debug") {
         globalOpts.isDebug = true;
       } else if (arg.starts_with("-O")) {

@@ -30,6 +30,7 @@ struct CompileOptions {
   bool emitLLVM = false;
   bool emitAsm = false;
   bool isJIT = false;
+  bool doFormat = false;
 
   int optLevel = 0;
   bool isDebug = false;

@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <string_view>
+#include <vector>
 
 namespace utopia {
 
@@ -101,6 +102,8 @@ struct Token {
   std::string_view value;
   int line;
   int column;
+  std::vector<std::string_view> leadingComments;
+  std::string_view trailingComment;
 };
 
 } // namespace utopia

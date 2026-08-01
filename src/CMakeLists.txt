@@ -11,6 +11,7 @@ set(CORE_SOURCES
     utopia/Driver/BuildCache.cpp
     utopia/Driver/Compiler.cpp
     utopia/Driver/Linker.cpp
+    utopia/Format/PieceFactory.cpp
     utopia/Lexer/Lexer.cpp
     utopia/Parser/Parser.cpp
     utopia/Sema/Sema.cpp
