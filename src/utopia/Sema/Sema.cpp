@@ -1,10 +1,11 @@
 #include "utopia/Sema/Sema.hpp"
 #include "utopia/AST/ASTCloner.hpp"
 #include "utopia/CodeGen/Mangler.hpp"
+#include "utopia/Common/Logger.hpp"
 #include "utopia/Parser/Parser.hpp"
 #include "utopia/Sema/EffectAnalyzer.hpp"
 
-#include "utopia/Common/Logger.hpp"
+#include <limits>
 
 namespace utopia {
 
@@ -974,7 +975,7 @@ TypeCheckPass::resolveOverloadedOperator(const Type *lhsType,
 
   std::string opFuncName = "operator" + std::string(opName);
   const FunctionDeclNode *bestMatch = nullptr;
-  int bestScore = -1;
+  int bestScore = std::numeric_limits<int>::min();
 
   const Type *unqual = lhsType->getUnqualifiedType();
   if (unqual->isPointerType()) {
@@ -3011,6 +3012,7 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
 
     std::vector<ExprNode *> resolvedArgs(expectedParams, nullptr);
     std::vector<const Type *> resolvedTypes(expectedParams, nullptr);
+    std::vector<bool> explicitlyProvided(expectedParams, false);
 
     size_t posArgCount = 0;
     std::unordered_set<std::string_view> providedNamedArgs;
@@ -3036,6 +3038,7 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
         }
         resolvedArgs[posArgCount] = node->args[i];
         resolvedTypes[posArgCount] = argTypes[i];
+        explicitlyProvided[posArgCount] = true;
         posArgCount++;
       } else {
         auto name = node->argNames[i];
@@ -3055,6 +3058,7 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
             }
             resolvedArgs[p] = node->args[i];
             resolvedTypes[p] = argTypes[i];
+            explicitlyProvided[p] = true;
             found = true;
             break;
           }
@@ -3069,8 +3073,12 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
     for (size_t p = 0; p < expectedParams; ++p) {
       if (!resolvedArgs[p]) {
         if (fDecl->params[p]->defaultValue) {
-          resolvedArgs[p] = fDecl->params[p]->defaultValue;
-          resolvedTypes[p] = fDecl->params[p]->defaultValue->exprType;
+          auto defNode = fDecl->params[p]->defaultValue;
+          if (!defNode->exprType) {
+            dispatch(defNode);
+          }
+          resolvedArgs[p] = defNode;
+          resolvedTypes[p] = defNode->exprType;
         } else {
           auto pName = std::string(fDecl->params[p]->name);
           if (fDecl->params[p]->isRequired) {
@@ -3119,12 +3127,15 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
       }
 
       if (!canImplicitlyCast(resolvedTypes[p], paramType)) {
+        std::string gotType = resolvedTypes[p] ? resolvedTypes[p]->toString()
+                                               : "unresolved/unknown";
         errors.push_back("Type mismatch for parameter '" +
                          std::string(fDecl->params[p]->name) + "': expected '" +
-                         paramType->toString() + "', but got '" +
-                         resolvedTypes[p]->toString() + "'.");
+                         paramType->toString() + "', but got '" + gotType +
+                         "'.");
       } else {
-        if (canImplicitlyCast(resolvedTypes[p], paramType, false)) {
+        if (explicitlyProvided[p] &&
+            canImplicitlyCast(resolvedTypes[p], paramType, false)) {
           outScore += 10;
         }
 
@@ -3134,7 +3145,7 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
             errors.push_back(
                 "Cannot bind an l-value to r-value reference parameter '" +
                 std::string(fDecl->params[p]->name) + "'.");
-          } else {
+          } else if (explicitlyProvided[p]) {
             outScore += 3;
           }
         } else if (paramType->isReferenceType()) {
@@ -3145,14 +3156,20 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
               errors.push_back(
                   "Cannot bind an r-value to non-const reference parameter '" +
                   std::string(fDecl->params[p]->name) + "'.");
-            } else {
+            } else if (explicitlyProvided[p]) {
               outScore += 3;
             }
-          } else {
+          } else if (explicitlyProvided[p]) {
             outScore += 2;
           }
-        } else {
+        } else if (explicitlyProvided[p]) {
           outScore += 1;
+        }
+
+        /* Penalize overloads that implicitly fill parameters not explicitly
+         * provided by the caller to prefer exact arity match. */
+        if (!explicitlyProvided[p]) {
+          outScore -= 1;
         }
       }
     }
@@ -3230,7 +3247,7 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
 
       if (recDecl) {
         const FunctionDeclNode *bestMatch = nullptr;
-        int bestScore = -1;
+        int bestScore = std::numeric_limits<int>::min();
         std::vector<std::vector<std::string>> overloadErrors;
         std::vector<ExprNode *> bestResolvedArgs;
 
@@ -3334,7 +3351,7 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
 
     if (hasCallable) {
       const FunctionDeclNode *bestMatch = nullptr;
-      int bestScore = -1;
+      int bestScore = std::numeric_limits<int>::min();
       bool isConstructorCall = false;
       std::vector<std::vector<std::string>> overloadErrors;
       std::vector<ExprNode *> bestResolvedArgs;
@@ -3789,7 +3806,7 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
       }
 
       const FunctionDeclNode *bestMatch = nullptr;
-      int bestScore = -1;
+      int bestScore = std::numeric_limits<int>::min();
       std::vector<std::vector<std::string>> overloadErrors;
       std::vector<ExprNode *> bestResolvedArgs;
 
@@ -3804,6 +3821,7 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
 
         std::vector<ExprNode *> resolvedArgs(expectedParams, nullptr);
         std::vector<const Type *> resolvedTypes(expectedParams, nullptr);
+        std::vector<bool> explicitlyProvided(expectedParams, false);
 
         size_t posArgCount = 0;
         std::unordered_set<std::string_view> providedNamedArgs;
@@ -3829,6 +3847,7 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
             }
             resolvedArgs[posArgCount] = node->args[i];
             resolvedTypes[posArgCount] = argTypes[i];
+            explicitlyProvided[posArgCount] = true;
             posArgCount++;
           } else {
             auto name = node->argNames[i];
@@ -3848,6 +3867,7 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
                 }
                 resolvedArgs[p] = node->args[i];
                 resolvedTypes[p] = argTypes[i];
+                explicitlyProvided[p] = true;
                 found = true;
                 break;
               }
@@ -3867,8 +3887,12 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
         for (size_t p = 0; p < expectedParams; ++p) {
           if (!resolvedArgs[p]) {
             if (ctor->params[p]->defaultValue) {
-              resolvedArgs[p] = ctor->params[p]->defaultValue;
-              resolvedTypes[p] = ctor->params[p]->defaultValue->exprType;
+              auto defNode = ctor->params[p]->defaultValue;
+              if (!defNode->exprType) {
+                dispatch(defNode);
+              }
+              resolvedArgs[p] = defNode;
+              resolvedTypes[p] = defNode->exprType;
             } else {
               auto pName = std::string(ctor->params[p]->name);
               if (ctor->params[p]->isRequired) {
@@ -3925,7 +3949,8 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
             break;
           }
 
-          if (canImplicitlyCast(resolvedTypes[p], paramType, false)) {
+          if (explicitlyProvided[p] &&
+              canImplicitlyCast(resolvedTypes[p], paramType, false)) {
             currentScore += 10;
           }
 
@@ -3934,8 +3959,9 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
             if (isLValue) {
               match = false;
               break;
+            } else if (explicitlyProvided[p]) {
+              currentScore += 3;
             }
-            currentScore += 3;
           } else if (paramType->isReferenceType()) {
             const Type *pointee =
                 static_cast<const ReferenceType *>(paramType)->getPointeeType();
@@ -3943,13 +3969,18 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
               if (!isLValue) {
                 match = false;
                 break;
+              } else if (explicitlyProvided[p]) {
+                currentScore += 3;
               }
-              currentScore += 3;
-            } else {
+            } else if (explicitlyProvided[p]) {
               currentScore += 2;
             }
-          } else {
+          } else if (explicitlyProvided[p]) {
             currentScore += 1;
+          }
+
+          if (!explicitlyProvided[p]) {
+            currentScore -= 1;
           }
         }
 

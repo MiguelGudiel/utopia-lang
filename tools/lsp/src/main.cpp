@@ -260,18 +260,19 @@ SourceLocation getExactNameLocation(const std::string &text,
   size_t maxSearchLen = std::min(text.length() - startIdx, (size_t)150);
   std::string_view searchArea(text.data() + startIdx, maxSearchLen);
 
-  size_t pos = searchArea.find(name);
-  if (pos != std::string_view::npos) {
-    bool leftOk = pos == 0 || (!std::isalnum(searchArea[pos - 1]) &&
-                               searchArea[pos - 1] != '_');
-    bool rightOk = pos + name.length() >= searchArea.length() ||
-                   (!std::isalnum(searchArea[pos + name.length()]) &&
-                    searchArea[pos + name.length()] != '_');
+  size_t searchPos = 0;
+  while ((searchPos = searchArea.find(name, searchPos)) !=
+         std::string_view::npos) {
+    bool leftOk = searchPos == 0 || (!std::isalnum(searchArea[searchPos - 1]) &&
+                                     searchArea[searchPos - 1] != '_');
+    bool rightOk = searchPos + name.length() >= searchArea.length() ||
+                   (!std::isalnum(searchArea[searchPos + name.length()]) &&
+                    searchArea[searchPos + name.length()] != '_');
 
     if (leftOk && rightOk) {
       int newCol = 0;
       int newLine = 0;
-      for (size_t i = 0; i < startIdx + pos; ++i) {
+      for (size_t i = 0; i < startIdx + searchPos; ++i) {
         if (text[i] == '\n') {
           newLine++;
           newCol = 0;
@@ -281,6 +282,7 @@ SourceLocation getExactNameLocation(const std::string &text,
       }
       return {newLine, newCol, (int)name.length()};
     }
+    searchPos += name.length();
   }
 
   return {loc.line, loc.col, (int)name.length()};
@@ -361,6 +363,165 @@ std::string getHoverTextForDecl(const DeclNode *decl) {
   return text;
 }
 
+std::string formatFunctionSignature(const FunctionDeclNode *func) {
+  std::string sig = "";
+
+  for (auto *ann : func->annotations) {
+    sig += "@" + std::string(ann->name);
+    if (!ann->args.empty()) {
+      sig += "(...)";
+    }
+    sig += "\n";
+  }
+
+  if (func->isExtern)
+    sig += "extern ";
+
+  if (func->returnType && !func->isImplicit) {
+    if (!func->rawReturnTypeStr.empty()) {
+      sig += std::string(func->rawReturnTypeStr) + " ";
+    } else {
+      sig += func->returnType->toString() + " ";
+    }
+  }
+
+  sig += std::string(func->name);
+
+  if (func->isTemplate && !func->templateParams.empty()) {
+    sig += "<";
+    for (size_t i = 0; i < func->templateParams.size(); ++i) {
+      sig += std::string(func->templateParams[i]);
+      if (i + 1 < func->templateParams.size())
+        sig += ", ";
+    }
+    sig += ">";
+  }
+
+  sig += "(";
+  bool inNamed = false;
+  bool firstParam = true;
+
+  for (size_t i = 0; i < func->params.size(); ++i) {
+    const ParamDeclNode *p = func->params[i];
+
+    /* Skip the implicit instance pointer for methods */
+    if (p->name == "this")
+      continue;
+
+    if (p->isNamed && !inNamed) {
+      if (!firstParam)
+        sig += ", ";
+      sig += "{";
+      inNamed = true;
+      firstParam = true;
+    } else {
+      if (!firstParam)
+        sig += ", ";
+    }
+
+    firstParam = false;
+
+    if (p->isRequired)
+      sig += "required ";
+
+    if (!p->rawTypeStr.empty()) {
+      sig += std::string(p->rawTypeStr) + " ";
+    } else if (p->type) {
+      sig += p->type->toString() + " ";
+    }
+
+    sig += std::string(p->name);
+
+    if (p->defaultValue) {
+      std::string defStr = Formatter::format(p->defaultValue);
+      while (!defStr.empty() &&
+             (defStr.back() == '\n' || defStr.back() == '\r' ||
+              defStr.back() == ';')) {
+        defStr.pop_back();
+      }
+      sig += " = " + defStr;
+    }
+  }
+
+  if (func->isVariadic) {
+    if (!firstParam)
+      sig += ", ";
+    sig += "...";
+  }
+
+  if (inNamed)
+    sig += "}";
+  sig += ")";
+
+  if (func->isConst && func->isMethod) {
+    sig += " const";
+  }
+
+  return sig;
+}
+
+std::vector<const FunctionDeclNode *> getOverloads(const FunctionDeclNode *func,
+                                                   SemaContext *sema) {
+  std::vector<const FunctionDeclNode *> overloads;
+  if (!func)
+    return overloads;
+
+  if (func->parentRecord) {
+    const DeclNode *recDecl = func->parentRecord->getDeclaration();
+    if (recDecl) {
+      llvm::ArrayRef<FunctionDeclNode *> methods;
+      llvm::ArrayRef<FunctionDeclNode *> ctors;
+
+      if (recDecl->kind == NodeKind::ClassDecl) {
+        methods = static_cast<const ClassDeclNode *>(recDecl)->methods;
+        ctors = static_cast<const ClassDeclNode *>(recDecl)->constructors;
+      } else if (recDecl->kind == NodeKind::StructDecl) {
+        methods = static_cast<const StructDeclNode *>(recDecl)->methods;
+        ctors = static_cast<const StructDeclNode *>(recDecl)->constructors;
+      } else if (recDecl->kind == NodeKind::UnionDecl) {
+        methods = static_cast<const UnionDeclNode *>(recDecl)->methods;
+        ctors = static_cast<const UnionDeclNode *>(recDecl)->constructors;
+      }
+
+      if (func->name == func->parentRecord->getName()) {
+        for (auto *c : ctors) {
+          if (!c->isImplicit)
+            overloads.push_back(c);
+        }
+      } else {
+        for (auto *m : methods) {
+          if (m->name == func->name)
+            overloads.push_back(m);
+        }
+      }
+    }
+  } else if (sema) {
+    auto results = sema->lookup(func->name);
+    for (const DeclNode *d : results) {
+      if (d->kind == NodeKind::FunctionDecl) {
+        overloads.push_back(static_cast<const FunctionDeclNode *>(d));
+      }
+    }
+  }
+
+  if (std::find(overloads.begin(), overloads.end(), func) == overloads.end()) {
+    overloads.insert(overloads.begin(), func);
+  }
+
+  return overloads;
+}
+
+std::string buildFunctionHover(const FunctionDeclNode *targetFunc) {
+  if (!targetFunc)
+    return "";
+  std::string res =
+      "```utopia\n" + formatFunctionSignature(targetFunc) + "\n```";
+  if (!targetFunc->docString.empty()) {
+    res += "\n---\n" + std::string(targetFunc->docString);
+  }
+  return res;
+}
+
 void handleHover(const json &req) {
   syncWorker();
   std::string uri = req["params"]["textDocument"]["uri"];
@@ -392,10 +553,7 @@ void handleHover(const json &req) {
           } else if (varNode->resolvedDecl->kind == NodeKind::FunctionDecl) {
             auto decl =
                 static_cast<const FunctionDeclNode *>(varNode->resolvedDecl);
-            hoverText = "```utopia\n" + decl->returnType->toString() + " " +
-                        std::string(decl->name) + "(...)\n```";
-            if (!decl->docString.empty())
-              hoverText += "\n---\n" + std::string(decl->docString);
+            hoverText = buildFunctionHover(decl);
           } else if (varNode->resolvedDecl->kind == NodeKind::ParamDecl) {
             auto decl =
                 static_cast<const ParamDeclNode *>(varNode->resolvedDecl);
@@ -408,28 +566,14 @@ void handleHover(const json &req) {
       } else if (node->kind == NodeKind::FunctionCall) {
         auto callNode = static_cast<const FunctionCallNode *>(node);
         if (callNode->resolvedFunc) {
-          auto funcRes = callNode->resolvedFunc;
-          declTarget = funcRes;
-          hoverText = "```utopia\n" + funcRes->returnType->toString() + " " +
-                      std::string(funcRes->name) + "(";
-          for (size_t i = 0; i < funcRes->params.size(); ++i) {
-            hoverText += funcRes->params[i]->type->toString();
-            if (i + 1 < funcRes->params.size())
-              hoverText += ", ";
-          }
-          hoverText += ")\n```";
-          if (!funcRes->docString.empty())
-            hoverText += "\n---\n" + std::string(funcRes->docString);
+          declTarget = callNode->resolvedFunc;
+          hoverText = buildFunctionHover(callNode->resolvedFunc);
         }
       } else if (node->kind == NodeKind::MemberAccess) {
         auto ma = static_cast<const MemberAccessNode *>(node);
         if (ma->isMethodRef && ma->resolvedMethod) {
           declTarget = ma->resolvedMethod;
-          hoverText = "```utopia\n" +
-                      ma->resolvedMethod->returnType->toString() + " " +
-                      std::string(ma->resolvedMethod->name) + "(...)\n```";
-          if (!ma->resolvedMethod->docString.empty())
-            hoverText += "\n---\n" + std::string(ma->resolvedMethod->docString);
+          hoverText = buildFunctionHover(ma->resolvedMethod);
         } else if (ma->isStaticFieldRef && ma->resolvedVar) {
           declTarget = ma->resolvedVar;
           hoverText = "```utopia\n" + ma->resolvedVar->type->toString() + " " +
@@ -442,6 +586,17 @@ void handleHover(const json &req) {
               "```utopia\n" + std::string(ma->enumMember->name) + "\n```";
           if (!ma->enumMember->docString.empty())
             hoverText += "\n---\n" + std::string(ma->enumMember->docString);
+        }
+      } else if (node->kind == NodeKind::Cast) {
+        auto castNode = static_cast<const CastNode *>(node);
+        if (castNode->targetType) {
+          if (auto typeDecl = getTypeDeclaration(castNode->targetType)) {
+            declTarget = typeDecl;
+            hoverText = getHoverTextForDecl(typeDecl);
+          } else {
+            hoverText =
+                "```utopia\n" + castNode->targetType->toString() + "\n```";
+          }
         }
       } else if (node->kind == NodeKind::FunctionDecl ||
                  node->kind == NodeKind::VarDecl ||
@@ -478,11 +633,8 @@ void handleHover(const json &req) {
 
         if (hoverText.empty()) {
           if (declTarget->kind == NodeKind::FunctionDecl) {
-            auto declNode = static_cast<const FunctionDeclNode *>(declTarget);
-            hoverText = "```utopia\n" + declNode->returnType->toString() + " " +
-                        std::string(declNode->name) + "(...)\n```";
-            if (!declNode->docString.empty())
-              hoverText += "\n---\n" + std::string(declNode->docString);
+            hoverText = buildFunctionHover(
+                static_cast<const FunctionDeclNode *>(declTarget));
           } else if (declTarget->kind == NodeKind::VarDecl) {
             auto declNode = static_cast<const VarDeclNode *>(declTarget);
             hoverText = "```utopia\n" + declNode->type->toString() + " " +
@@ -531,6 +683,99 @@ void handleHover(const json &req) {
       }
     }
   }
+  sendResponse({{"jsonrpc", "2.0"}, {"id", req["id"]}, {"result", res}});
+}
+
+void handleSignatureHelp(const json &req) {
+  syncWorker();
+  std::string uri = req["params"]["textDocument"]["uri"];
+  int line = req["params"]["position"]["line"].get<int>() + 1;
+  int col = req["params"]["position"]["character"].get<int>() + 1;
+
+  json res = nullptr;
+
+  std::shared_lock<std::shared_mutex> lock(docMutex);
+  if (documents.contains(uri)) {
+    auto &doc = documents[uri];
+    SearchVisitor searcher(line, col);
+    searcher.find(doc.ast);
+
+    if (searcher.innermostCall) {
+      auto callNode = searcher.innermostCall;
+      const FunctionDeclNode *targetFunc = callNode->resolvedFunc;
+
+      if (!targetFunc && callNode->target->kind == NodeKind::Variable) {
+        auto varNode = static_cast<const VariableNode *>(callNode->target);
+        if (varNode->resolvedDecl &&
+            varNode->resolvedDecl->kind == NodeKind::FunctionDecl) {
+          targetFunc =
+              static_cast<const FunctionDeclNode *>(varNode->resolvedDecl);
+        }
+      } else if (!targetFunc &&
+                 callNode->target->kind == NodeKind::MemberAccess) {
+        auto maNode = static_cast<const MemberAccessNode *>(callNode->target);
+        if (maNode->resolvedMethod) {
+          targetFunc = maNode->resolvedMethod;
+        }
+      }
+
+      if (targetFunc) {
+        auto overloads = getOverloads(targetFunc, doc.sema.get());
+
+        json signatures = json::array();
+        int activeSignature = 0;
+
+        for (size_t i = 0; i < overloads.size(); ++i) {
+          auto *f = overloads[i];
+          json sig = {{"label", formatFunctionSignature(f)}};
+          if (!f->docString.empty()) {
+            sig["documentation"] = {{"kind", "markdown"},
+                                    {"value", std::string(f->docString)}};
+          }
+
+          json parameters = json::array();
+          for (const auto *p : f->params) {
+            if (p->name == "this")
+              continue;
+
+            std::string pLabel = "";
+            if (p->isRequired)
+              pLabel += "required ";
+
+            if (!p->rawTypeStr.empty())
+              pLabel += std::string(p->rawTypeStr) + " ";
+            else if (p->type)
+              pLabel += p->type->toString() + " ";
+
+            pLabel += std::string(p->name);
+
+            json paramInfo = {{"label", pLabel}};
+            if (!p->docString.empty()) {
+              paramInfo["documentation"] = {
+                  {"kind", "markdown"}, {"value", std::string(p->docString)}};
+            }
+            parameters.push_back(paramInfo);
+          }
+          sig["parameters"] = parameters;
+          signatures.push_back(sig);
+
+          if (f == callNode->resolvedFunc) {
+            activeSignature = (int)i;
+          }
+        }
+
+        int activeParameter = 0;
+        if (!callNode->args.empty()) {
+          activeParameter = callNode->args.size() - 1;
+        }
+
+        res = {{"signatures", signatures},
+               {"activeSignature", activeSignature},
+               {"activeParameter", activeParameter}};
+      }
+    }
+  }
+
   sendResponse({{"jsonrpc", "2.0"}, {"id", req["id"]}, {"result", res}});
 }
 
@@ -625,6 +870,9 @@ void handleDefinition(const json &req) {
       } else if (node->kind == NodeKind::New) {
         targetDecl =
             static_cast<const NewExprNode *>(node)->resolvedConstructor;
+      } else if (node->kind == NodeKind::Cast) {
+        targetDecl =
+            getTypeDeclaration(static_cast<const CastNode *>(node)->targetType);
       } else if (node->kind == NodeKind::FunctionDecl ||
                  node->kind == NodeKind::VarDecl ||
                  node->kind == NodeKind::ParamDecl ||
@@ -1718,6 +1966,7 @@ int main() {
                  {"hoverProvider", true},
                  {"definitionProvider", true},
                  {"completionProvider", {{"triggerCharacters", {"."}}}},
+                 {"signatureHelpProvider", {{"triggerCharacters", {"(", ","}}}},
                  {"documentFormattingProvider", true},
                  {"semanticTokensProvider",
                   {{"legend",
@@ -1735,6 +1984,8 @@ int main() {
         utopia::lsp::handleDefinition(req);
       } else if (method == "textDocument/completion") {
         utopia::lsp::handleCompletion(req);
+      } else if (method == "textDocument/signatureHelp") {
+        utopia::lsp::handleSignatureHelp(req);
       } else if (method == "textDocument/formatting") {
         utopia::lsp::handleFormatting(req);
       } else if (method == "textDocument/semanticTokens/full") {

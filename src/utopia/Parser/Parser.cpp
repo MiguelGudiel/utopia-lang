@@ -2901,6 +2901,8 @@ ExprNode *Parser::parsePostfix() {
 
         } while (match(TokenType::COMMA));
       }
+
+      int endLine = currentToken().line;
       int endCol = currentToken().column + (int)currentToken().value.length();
       expect(TokenType::RPAREN, "Expected ')'");
 
@@ -2908,6 +2910,7 @@ ExprNode *Parser::parsePostfix() {
       auto namesRef = astCtx.copyArray<std::string_view>(argNames);
       expr = astCtx.create<FunctionCallNode>(expr, argsRef, namesRef, line, col,
                                              endCol - col);
+      expr->endLine = endLine;
       static_cast<FunctionCallNode *>(expr)->rawArgs = argsRef;
       static_cast<FunctionCallNode *>(expr)->rawArgNames = namesRef;
       static_cast<FunctionCallNode *>(expr)->hasRawArgs = true;

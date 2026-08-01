@@ -8,6 +8,8 @@ class SearchVisitor : public ASTVisitor<SearchVisitor, const ASTNode *> {
   int targetCol;
 
 public:
+  const FunctionCallNode *innermostCall = nullptr;
+
   SearchVisitor(int line, int col) : targetLine(line), targetCol(col) {}
 
   const ASTNode *find(const ASTNode *root) {
@@ -19,6 +21,17 @@ public:
   bool isHit(const ASTNode *n) const {
     if (!n)
       return false;
+
+    if (n->endLine > n->line) {
+      /* Multiline node: column resolution is unreliable at the boundary,
+       * accept any position within the line range after the start line. */
+      if (targetLine < n->line || targetLine > n->endLine)
+        return false;
+      if (targetLine == n->line && targetCol < n->column)
+        return false;
+      return true;
+    }
+
     return (targetLine == n->line && targetCol >= n->column &&
             targetCol < (n->column + n->length));
   }
@@ -136,6 +149,9 @@ public:
   }
 
   const ASTNode *visit(const FunctionCallNode *n) {
+    if (isHit(n)) {
+      innermostCall = n;
+    }
     if (auto found = find(n->target))
       return found;
     for (auto *a : n->args)
