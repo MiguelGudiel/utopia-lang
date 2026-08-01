@@ -41,10 +41,29 @@ std::map<std::string, std::filesystem::path> uriToProjectRoot;
 
 std::mutex workerMutex;
 std::condition_variable workerCV;
+std::condition_variable doneCV;
 std::string pendingUri;
 std::string pendingText;
 bool hasPendingChange = false;
+bool isProcessing = false;
+bool forceProcess = false;
 std::atomic<bool> isRunning{true};
+
+/*
+ * Synchronizes the main LSP thread with the worker thread.
+ * If there is a pending document change, it forces the worker to skip
+ * the debounce timer, process the file immediately, and waits until completion.
+ */
+void syncWorker() {
+  std::unique_lock<std::mutex> lock(workerMutex);
+  if (hasPendingChange) {
+    forceProcess = true;
+    workerCV.notify_one();
+  }
+  if (hasPendingChange || isProcessing) {
+    doneCV.wait(lock, [] { return !hasPendingChange && !isProcessing; });
+  }
+}
 
 void sendResponse(const json &res) {
   std::string content =
@@ -188,6 +207,10 @@ struct SourceLocation {
 
 SourceLocation getExactNameLocation(const std::string &text,
                                     const DeclNode *decl) {
+  if (!decl) {
+    return {-1, -1, 0};
+  }
+
   SourceLocation loc{decl->line > 0 ? decl->line - 1 : 0,
                      decl->column > 0 ? decl->column - 1 : 0,
                      decl->length > 0 ? decl->length : 1};
@@ -211,6 +234,10 @@ SourceLocation getExactNameLocation(const std::string &text,
     name = static_cast<const EnumDeclNode *>(decl)->name;
   else if (decl->kind == NodeKind::TypedefDecl)
     name = static_cast<const TypedefDeclNode *>(decl)->aliasName;
+  else if (decl->kind == NodeKind::EnumMember)
+    name = static_cast<const EnumMemberNode *>(decl)->name;
+  else if (decl->kind == NodeKind::AnnotationDecl)
+    name = static_cast<const AnnotationDeclNode *>(decl)->name;
 
   if (name.empty())
     return loc;
@@ -229,18 +256,21 @@ SourceLocation getExactNameLocation(const std::string &text,
   if (startIdx >= text.length())
     return loc;
 
-  size_t pos = text.find(name, startIdx);
-  if (pos != std::string::npos && pos - startIdx < 150) {
-    bool leftOk =
-        pos == 0 || (!std::isalnum(text[pos - 1]) && text[pos - 1] != '_');
-    bool rightOk = pos + name.length() >= text.length() ||
-                   (!std::isalnum(text[pos + name.length()]) &&
-                    text[pos + name.length()] != '_');
+  size_t maxSearchLen = std::min(text.length() - startIdx, (size_t)150);
+  std::string_view searchArea(text.data() + startIdx, maxSearchLen);
+
+  size_t pos = searchArea.find(name);
+  if (pos != std::string_view::npos) {
+    bool leftOk = pos == 0 || (!std::isalnum(searchArea[pos - 1]) &&
+                               searchArea[pos - 1] != '_');
+    bool rightOk = pos + name.length() >= searchArea.length() ||
+                   (!std::isalnum(searchArea[pos + name.length()]) &&
+                    searchArea[pos + name.length()] != '_');
 
     if (leftOk && rightOk) {
       int newCol = 0;
       int newLine = 0;
-      for (size_t i = 0; i < pos; ++i) {
+      for (size_t i = 0; i < startIdx + pos; ++i) {
         if (text[i] == '\n') {
           newLine++;
           newCol = 0;
@@ -251,7 +281,8 @@ SourceLocation getExactNameLocation(const std::string &text,
       return {newLine, newCol, (int)name.length()};
     }
   }
-  return loc;
+
+  return {loc.line, loc.col, (int)name.length()};
 }
 
 const DeclNode *getTypeDeclaration(const Type *ty) {
@@ -330,6 +361,7 @@ std::string getHoverTextForDecl(const DeclNode *decl) {
 }
 
 void handleHover(const json &req) {
+  syncWorker();
   std::string uri = req["params"]["textDocument"]["uri"];
   int line = req["params"]["position"]["line"].get<int>() + 1;
   int col = req["params"]["position"]["character"].get<int>() + 1;
@@ -502,6 +534,7 @@ void handleHover(const json &req) {
 }
 
 void handleDefinition(const json &req) {
+  syncWorker();
   std::string uri = req["params"]["textDocument"]["uri"];
   int line = req["params"]["position"]["line"].get<int>() + 1;
   int col = req["params"]["position"]["character"].get<int>() + 1;
@@ -652,6 +685,7 @@ void handleDefinition(const json &req) {
 }
 
 void handleCompletion(const json &req) {
+  syncWorker();
   std::string uri = req["params"]["textDocument"]["uri"];
   int line = req["params"]["position"]["line"].get<int>() + 1;
   int reqCol = req["params"]["position"]["character"].get<int>();
@@ -1245,21 +1279,36 @@ void workerThread() {
     std::string uri, text;
     {
       std::unique_lock<std::mutex> lock(workerMutex);
-      workerCV.wait(lock, [] { return hasPendingChange || !isRunning; });
+      workerCV.wait(
+          lock, [] { return hasPendingChange || forceProcess || !isRunning; });
       if (!isRunning)
         break;
 
-      while (hasPendingChange) {
-        hasPendingChange = false;
-        workerCV.wait_for(lock, std::chrono::milliseconds(200));
+      bool interrupted = true;
+      /* Only wait the 200ms debounce interval if processing isn't being forced
+       */
+      while (interrupted && !forceProcess) {
+        auto status = workerCV.wait_for(lock, std::chrono::milliseconds(200));
+        if (status == std::cv_status::timeout) {
+          interrupted = false;
+        }
       }
 
+      forceProcess = false;
+      hasPendingChange = false;
       uri = pendingUri;
       text = std::move(pendingText);
+      isProcessing = true;
     }
 
     if (!uri.empty()) {
       processFile(uri, text);
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(workerMutex);
+      isProcessing = false;
+      doneCV.notify_all();
     }
   }
 }
@@ -1295,6 +1344,7 @@ public:
     if (n->resolvedDecl) {
       int type = 7; /* variable */
       int mods = 0;
+
       if (n->resolvedDecl->kind == NodeKind::ClassDecl)
         type = 0;
       else if (n->resolvedDecl->kind == NodeKind::StructDecl)
@@ -1312,8 +1362,10 @@ public:
         if (static_cast<const VarDeclNode *>(n->resolvedDecl)->isStatic)
           mods |= 2;
       }
+
+      int trueLen = std::min(n->length, (int)n->name.length());
       addToken(n->line > 0 ? n->line - 1 : 0, n->column > 0 ? n->column - 1 : 0,
-               n->length, type, mods);
+               trueLen, type, mods);
     }
   }
 
@@ -1329,6 +1381,7 @@ public:
       type = 6;
       mods |= 2; /* static */
     }
+
     int memberCol = (n->column > 0 ? n->column - 1 : 0) + n->length -
                     n->memberName.length();
     addToken(n->line > 0 ? n->line - 1 : 0, memberCol, n->memberName.length(),
@@ -1344,6 +1397,15 @@ public:
   void visit(const VarDeclNode *n) {
     auto loc = getExactNameLocation(docText, n);
     addToken(loc.line, loc.col, loc.length, 7, n->isStatic ? 2 : 0);
+
+    if (n->type && !n->type->getUnqualifiedType()->isBuiltinType()) {
+      auto typeLoc = getExactNameLocation(docText, getTypeDeclaration(n->type));
+      if (typeLoc.length > 0 && n->type->getKind() != TypeKind::Builtin) {
+        addToken(n->line > 0 ? n->line - 1 : 0,
+                 n->column > 0 ? n->column - 1 : 0, typeLoc.length, 3, 0);
+      }
+    }
+
     if (n->initializer)
       dispatch(n->initializer);
   }
@@ -1351,14 +1413,37 @@ public:
   void visit(const ParamDeclNode *n) {
     auto loc = getExactNameLocation(docText, n);
     addToken(loc.line, loc.col, loc.length, 8, 0); /* parameter */
+
+    if (n->type && !n->type->getUnqualifiedType()->isBuiltinType()) {
+      auto typeLoc = getExactNameLocation(docText, getTypeDeclaration(n->type));
+      if (typeLoc.length > 0 && n->type->getKind() != TypeKind::Builtin) {
+        addToken(n->line > 0 ? n->line - 1 : 0,
+                 n->column > 0 ? n->column - 1 : 0, typeLoc.length, 3, 0);
+      }
+    }
+
     if (n->defaultValue)
       dispatch(n->defaultValue);
   }
 
   void visit(const FunctionDeclNode *n) {
+    if (n->isImplicit)
+      return;
+
     auto loc = getExactNameLocation(docText, n);
     addToken(loc.line, loc.col, loc.length, n->isMethod ? 5 : 4,
              n->isStatic ? 2 : 0);
+
+    if (n->returnType &&
+        !n->returnType->getUnqualifiedType()->isBuiltinType()) {
+      auto typeLoc =
+          getExactNameLocation(docText, getTypeDeclaration(n->returnType));
+      if (typeLoc.length > 0 && n->returnType->getKind() != TypeKind::Builtin) {
+        addToken(n->line > 0 ? n->line - 1 : 0,
+                 n->column > 0 ? n->column - 1 : 0, typeLoc.length, 3, 0);
+      }
+    }
+
     for (auto *p : n->params)
       dispatch(p);
     if (n->body)
@@ -1496,6 +1581,16 @@ public:
       dispatch(e);
   }
   void visit(const NewExprNode *n) {
+    if (n->allocatedType &&
+        !n->allocatedType->getUnqualifiedType()->isBuiltinType()) {
+      auto typeLoc =
+          getExactNameLocation(docText, getTypeDeclaration(n->allocatedType));
+      if (typeLoc.length > 0 &&
+          n->allocatedType->getKind() != TypeKind::Builtin) {
+        addToken(n->line > 0 ? n->line - 1 : 0,
+                 n->column > 0 ? n->column + 3 : 0, typeLoc.length, 3, 0);
+      }
+    }
     if (n->arraySize)
       dispatch(n->arraySize);
     for (auto *a : n->args)
@@ -1522,6 +1617,7 @@ public:
 };
 
 void handleSemanticTokens(const json &req) {
+  syncWorker();
   std::string uri = req["params"]["textDocument"]["uri"];
   json data = json::array();
 

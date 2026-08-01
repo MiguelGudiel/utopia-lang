@@ -2479,9 +2479,10 @@ ExprNode *Parser::parseCast() {
 
     const Type *targetType = parseType();
 
-    left = astCtx.create<CastNode>(
-        left, targetType, line, col,
-        (currentToken().column + currentToken().value.length()) - col);
+    /* Securely calculate the end column using the parsed type's last token */
+    int endCol = tokens[cursor - 1].column + tokens[cursor - 1].value.length();
+
+    left = astCtx.create<CastNode>(left, targetType, line, col, endCol - col);
   }
   return left;
 }
@@ -2497,6 +2498,10 @@ ExprNode *Parser::parsePostfix() {
       int col = expr->column;
       std::string_view memberName = currentToken().value;
       int memLen = memberName.length();
+
+      /* Capture the exact column of the identifier before advancing the token
+       * stream */
+      int memCol = currentToken().column;
       expect(TokenType::IDENTIFIER, "Expected member name after '.'");
 
       /* Check for template invocation using semantic awareness rather than
@@ -2507,8 +2512,8 @@ ExprNode *Parser::parsePostfix() {
         isTemplateCall = true;
       }
 
-      auto maNode = astCtx.create<MemberAccessNode>(
-          expr, memberName, line, col, (currentToken().column + memLen) - col);
+      auto maNode = astCtx.create<MemberAccessNode>(expr, memberName, line, col,
+                                                    (memCol + memLen) - col);
 
       if (isTemplateCall) {
         advance(); /* Consume '<' */

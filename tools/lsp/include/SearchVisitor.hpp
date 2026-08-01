@@ -203,9 +203,13 @@ public:
   }
 
   const ASTNode *visit(const FunctionDeclNode *n) {
+    if (n->isImplicit)
+      return nullptr;
+
     if (n->body)
       if (auto found = find(n->body))
         return found;
+
     return isHit(n) ? n : nullptr;
   }
 
