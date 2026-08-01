@@ -386,8 +386,14 @@ llvm::Function *CodeGen::getOrCreateFunction(const FunctionDeclNode *node) {
     }
   }
 
-  llvm::FunctionType *funcType = llvm::FunctionType::get(
-      getLLVMType(node->returnType), paramTypes, node->isVariadic);
+  llvm::Type *retTy = getLLVMType(node->returnType);
+
+  if (node->name == "main" && !node->isMethod && node->returnType->isVoid()) {
+    retTy = builder.getInt32Ty();
+  }
+
+  llvm::FunctionType *funcType =
+      llvm::FunctionType::get(retTy, paramTypes, node->isVariadic);
 
   func = llvm::Function::Create(funcType, llvm::Function::ExternalLinkage,
                                 irName, mod);
@@ -2694,7 +2700,10 @@ llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
 
       emitScopeCleanups();
 
-      if (func->getReturnType()->isVoidTy()) {
+      if (node->name == "main" && !node->isMethod &&
+          node->returnType->isVoid()) {
+        builder.CreateRet(llvm::ConstantInt::get(builder.getInt32Ty(), 0));
+      } else if (func->getReturnType()->isVoidTy()) {
         builder.CreateRetVoid();
       } else {
         builder.CreateRet(llvm::UndefValue::get(func->getReturnType()));
@@ -2945,6 +2954,12 @@ llvm::Value *CodeGen::visit(const ReturnNode *node) {
   if (retVal) {
     return builder.CreateRet(retVal);
   }
+
+  if (currentFunc && currentFunc->name == "main" && !currentFunc->isMethod &&
+      currentFunc->returnType->isVoid()) {
+    return builder.CreateRet(llvm::ConstantInt::get(builder.getInt32Ty(), 0));
+  }
+
   return builder.CreateRetVoid();
 }
 

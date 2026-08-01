@@ -2803,6 +2803,76 @@ SemaResult TypeCheckPass::visit(const FunctionDeclNode *node) {
                                      "Type visibility error"});
   }
 
+  if (node->name == "main" && !node->isMethod) {
+    const Type *unqualRet = node->returnType->getUnqualifiedType();
+    bool validRet = false;
+
+    if (unqualRet->isBuiltinType()) {
+      auto bKind =
+          static_cast<const BuiltinType *>(unqualRet)->getBuiltinKind();
+      if (bKind == BuiltinKind::Int32 || bKind == BuiltinKind::Void) {
+        validRet = true;
+      }
+    }
+
+    if (!validRet) {
+      ctx->reportError(node->line, node->column, node->length,
+                       "The 'main' function must return 'int32' or 'void'.");
+    }
+
+    if (!node->params.empty()) {
+      if (node->params.size() != 2) {
+        ctx->reportError(node->line, node->column, node->length,
+                         "The 'main' function must take either 0 arguments or "
+                         "exactly 2: (int32 argc, uint8** argv).");
+      } else {
+        const Type *p0 = node->params[0]->type->getUnqualifiedType();
+        const Type *p1 = node->params[1]->type->getUnqualifiedType();
+
+        bool p0Valid = p0->isBuiltinType() &&
+                       static_cast<const BuiltinType *>(p0)->getBuiltinKind() ==
+                           BuiltinKind::Int32;
+        bool p1Valid = false;
+
+        if (p1->isPointerType()) {
+          const Type *p1Base = static_cast<const PointerType *>(p1)
+                                   ->getPointeeType()
+                                   ->getUnqualifiedType();
+          if (p1Base->isPointerType()) {
+            const Type *p1BaseBase = static_cast<const PointerType *>(p1Base)
+                                         ->getPointeeType()
+                                         ->getUnqualifiedType();
+            if (p1BaseBase->isBuiltinType() &&
+                static_cast<const BuiltinType *>(p1BaseBase)
+                        ->getBuiltinKind() == BuiltinKind::UInt8) {
+              p1Valid = true;
+            }
+          }
+        } else if (p1->getKind() == TypeKind::Array) {
+          const Type *p1Elem = static_cast<const ArrayType *>(p1)
+                                   ->getElementType()
+                                   ->getUnqualifiedType();
+          if (p1Elem->isPointerType()) {
+            const Type *p1ElemBase = static_cast<const PointerType *>(p1Elem)
+                                         ->getPointeeType()
+                                         ->getUnqualifiedType();
+            if (p1ElemBase->isBuiltinType() &&
+                static_cast<const BuiltinType *>(p1ElemBase)
+                        ->getBuiltinKind() == BuiltinKind::UInt8) {
+              p1Valid = true;
+            }
+          }
+        }
+
+        if (!p0Valid || !p1Valid) {
+          ctx->reportError(node->line, node->column, node->length,
+                           "The 'main' function arguments must be exactly "
+                           "(int32 argc, uint8** argv).");
+        }
+      }
+    }
+  }
+
   const Type *prevRet = ctx->getFunctionReturnType();
   ctx->setFunctionReturnType(node->returnType);
 
