@@ -71,12 +71,12 @@ Piece *PieceFactory::dispatchStmt(const ASTNode *node) {
       tComment = " " + tComment;
     }
     p = create<ConcatPiece>(
-        std::vector<Piece *>{p, create<TextPiece>(tComment)});
+        std::vector<Piece *>{p, create<StringPiece>(tComment)});
   }
 
   if (!node->docString.empty()) {
     p = create<SequencePiece>(std::vector<Piece *>{
-        create<TextPiece>(formatCommentString(std::string(node->docString))),
+        create<StringPiece>(formatCommentString(std::string(node->docString))),
         p});
   }
   return p;
@@ -334,8 +334,9 @@ Piece *PieceFactory::visit(const BlockNode *node) {
 
     if (i < node->statements.size() - 1) {
       auto *nextStmt = node->statements[i + 1];
-      if (getActualStartLine(nextStmt) > stmt->endLine + 1) {
-        stmts.push_back(create<BlankLinePiece>());
+      int diff = getActualStartLine(nextStmt) - stmt->endLine;
+      if (diff > 1) {
+        stmts.push_back(create<NewlinesPiece>(diff));
       }
     }
   }
@@ -435,7 +436,7 @@ Piece *PieceFactory::visit(const MemberAccessNode *node) {
 Piece *PieceFactory::visit(const VarDeclNode *node) {
   std::vector<Piece *> parts;
   for (auto *ann : node->annotations) {
-    parts.push_back(create<TextPiece>("@" + std::string(ann->name)));
+    parts.push_back(dispatch(ann));
   }
 
   std::string pfx = "";
@@ -492,7 +493,7 @@ Piece *PieceFactory::visit(const FunctionDeclNode *node) {
   std::vector<Piece *> sigParts;
 
   for (auto *ann : node->annotations) {
-    sigParts.push_back(create<TextPiece>("@" + std::string(ann->name)));
+    sigParts.push_back(dispatch(ann));
   }
 
   std::string pfx = "";
@@ -500,8 +501,6 @@ Piece *PieceFactory::visit(const FunctionDeclNode *node) {
     pfx += "public ";
   if (node->hasPrivateMod)
     pfx += "private ";
-  if (node->isExtern)
-    pfx += "extern ";
   if (node->isStatic)
     pfx += "static ";
   if (node->isConst)
@@ -537,6 +536,10 @@ Piece *PieceFactory::visit(const FunctionDeclNode *node) {
           std::vector<Piece *>{pPiece, create<TextPiece>("}")});
     }
     params.push_back(pPiece);
+  }
+
+  if (node->isVariadic) {
+    params.push_back(create<TextPiece>("..."));
   }
 
   signature.push_back(create<ListPiece>(
@@ -691,8 +694,9 @@ Piece *PieceFactory::visit(const ModuleNode *node) {
 
     if (i < node->statements.size() - 1) {
       auto *nextStmt = node->statements[i + 1];
-      if (getActualStartLine(nextStmt) > stmt->endLine + 1) {
-        stmts.push_back(create<BlankLinePiece>());
+      int diff = getActualStartLine(nextStmt) - stmt->endLine;
+      if (diff > 1) {
+        stmts.push_back(create<NewlinesPiece>(diff));
       }
     }
   }
@@ -702,7 +706,7 @@ Piece *PieceFactory::visit(const ModuleNode *node) {
 Piece *PieceFactory::visit(const EnumDeclNode *node) {
   std::vector<Piece *> parts;
   for (auto *ann : node->annotations) {
-    parts.push_back(create<TextPiece>("@" + std::string(ann->name)));
+    parts.push_back(dispatch(ann));
   }
 
   std::string pfx = "enum " + std::string(node->name);
@@ -733,47 +737,53 @@ template <typename T>
 Piece *createRecord(PieceFactory *factory, const T *node, const char *kw) {
   std::vector<Piece *> parts;
   for (auto *ann : node->annotations) {
-    parts.push_back(factory->create<TextPiece>("@" + std::string(ann->name)));
+    parts.push_back(factory->dispatch(ann));
   }
 
   std::string pfx = std::string(kw) + " " + std::string(node->name);
-  std::vector<Piece *> stmts;
+  Piece *mainRecord;
 
-  std::vector<const ASTNode *> allMembers;
-  for (auto *f : node->fields) {
-    allMembers.push_back(f);
-  }
-  for (auto *c : node->constructors) {
-    if (!c->isImplicit) {
-      allMembers.push_back(c);
+  if (node->isOpaque) {
+    mainRecord = factory->create<TextPiece>(pfx + ";");
+  } else {
+    std::vector<Piece *> stmts;
+
+    std::vector<const ASTNode *> allMembers;
+    for (auto *f : node->fields) {
+      allMembers.push_back(f);
     }
-  }
-  if (node->destructor && !node->destructor->isImplicit) {
-    allMembers.push_back(node->destructor);
-  }
-  for (auto *m : node->methods) {
-    allMembers.push_back(m);
-  }
-
-  /* Sort members by line number to ensure the original code structure
-     and blank lines are accurately preserved. */
-  std::sort(
-      allMembers.begin(), allMembers.end(),
-      [](const ASTNode *a, const ASTNode *b) { return a->line < b->line; });
-
-  for (size_t i = 0; i < allMembers.size(); ++i) {
-    stmts.push_back(factory->dispatchStmt(allMembers[i]));
-    if (i < allMembers.size() - 1) {
-      auto *nextStmt = allMembers[i + 1];
-      if (getActualStartLine(nextStmt) > allMembers[i]->endLine + 1) {
-        stmts.push_back(factory->create<BlankLinePiece>());
+    for (auto *c : node->constructors) {
+      if (!c->isImplicit) {
+        allMembers.push_back(c);
       }
     }
-  }
+    if (node->destructor && !node->destructor->isImplicit) {
+      allMembers.push_back(node->destructor);
+    }
+    for (auto *m : node->methods) {
+      allMembers.push_back(m);
+    }
 
-  Piece *body = factory->create<BlockPiece>(std::move(stmts));
-  Piece *mainRecord = factory->create<ConcatPiece>(std::vector<Piece *>{
-      factory->create<TextPiece>(pfx), factory->create<TextPiece>(" "), body});
+    std::sort(
+        allMembers.begin(), allMembers.end(),
+        [](const ASTNode *a, const ASTNode *b) { return a->line < b->line; });
+
+    for (size_t i = 0; i < allMembers.size(); ++i) {
+      stmts.push_back(factory->dispatchStmt(allMembers[i]));
+      if (i < allMembers.size() - 1) {
+        auto *nextStmt = allMembers[i + 1];
+        int diff = getActualStartLine(nextStmt) - allMembers[i]->endLine;
+        if (diff > 1) {
+          stmts.push_back(factory->create<NewlinesPiece>(diff));
+        }
+      }
+    }
+
+    Piece *body = factory->create<BlockPiece>(std::move(stmts));
+    mainRecord = factory->create<ConcatPiece>(
+        std::vector<Piece *>{factory->create<TextPiece>(pfx),
+                             factory->create<TextPiece>(" "), body});
+  }
 
   if (parts.empty()) {
     return mainRecord;
@@ -796,7 +806,7 @@ Piece *PieceFactory::visit(const UnionDeclNode *node) {
 Piece *PieceFactory::visit(const TypedefDeclNode *node) {
   std::vector<Piece *> parts;
   for (auto *ann : node->annotations) {
-    parts.push_back(create<TextPiece>("@" + std::string(ann->name)));
+    parts.push_back(dispatch(ann));
   }
 
   std::string tName;
@@ -820,7 +830,7 @@ Piece *PieceFactory::visit(const TypedefDeclNode *node) {
 Piece *PieceFactory::visit(const AnnotationDeclNode *node) {
   std::vector<Piece *> parts;
   for (auto *ann : node->annotations) {
-    parts.push_back(create<TextPiece>("@" + std::string(ann->name)));
+    parts.push_back(dispatch(ann));
   }
 
   std::string pfx = "annotation " + std::string(node->name);
@@ -842,8 +852,9 @@ Piece *PieceFactory::visit(const AnnotationDeclNode *node) {
     stmts.push_back(dispatchStmt(allMembers[i]));
     if (i < allMembers.size() - 1) {
       auto *nextStmt = allMembers[i + 1];
-      if (getActualStartLine(nextStmt) > allMembers[i]->endLine + 1) {
-        stmts.push_back(create<BlankLinePiece>());
+      int diff = getActualStartLine(nextStmt) - allMembers[i]->endLine;
+      if (diff > 1) {
+        stmts.push_back(create<NewlinesPiece>(diff));
       }
     }
   }
@@ -870,6 +881,7 @@ Piece *PieceFactory::visit(const AnnotationNode *node) {
   }
   return create<ConcatPiece>(std::move(parts));
 }
+
 Piece *PieceFactory::visit(const SwitchNode *node) {
   Piece *cond = dispatchExpr(node->condition);
   std::vector<Piece *> cases;
@@ -878,12 +890,11 @@ Piece *PieceFactory::visit(const SwitchNode *node) {
     auto *c = node->cases[i];
     cases.push_back(dispatchStmt(c));
 
-    /* Safely preserve user's intentional blank lines between disparate case
-     * blocks */
     if (i < node->cases.size() - 1) {
       auto *nextCase = node->cases[i + 1];
-      if (getActualStartLine(nextCase) > c->endLine + 1) {
-        cases.push_back(create<BlankLinePiece>());
+      int diff = getActualStartLine(nextCase) - c->endLine;
+      if (diff > 1) {
+        cases.push_back(create<NewlinesPiece>(diff));
       }
     }
   }
@@ -915,8 +926,9 @@ Piece *PieceFactory::visit(const CaseNode *node) {
 
     if (i < node->statements.size() - 1) {
       auto *nextStmt = node->statements[i + 1];
-      if (getActualStartLine(nextStmt) > s->endLine + 1) {
-        stmts.push_back(create<BlankLinePiece>());
+      int diff = getActualStartLine(nextStmt) - s->endLine;
+      if (diff > 1) {
+        stmts.push_back(create<NewlinesPiece>(diff));
       }
     }
   }

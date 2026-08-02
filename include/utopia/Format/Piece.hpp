@@ -64,6 +64,20 @@ public:
   }
 };
 
+class NewlinesPiece : public Piece {
+public:
+  explicit NewlinesPiece(int count) : count(count) {}
+
+  void
+  format(CodeWriter &writer, const State &state,
+         const std::function<void(const Piece *, State)> &) const override {
+    writer.exactNewlines(count);
+  }
+
+private:
+  int count;
+};
+
 class ConcatPiece : public Piece {
 public:
   explicit ConcatPiece(std::vector<Piece *> elements)
@@ -318,13 +332,11 @@ public:
       writer.newline();
       for (size_t i = 0; i < elements.size(); ++i) {
         formatChild(elements[i], State::Unsplit);
-        if (i < elements.size() - 1) {
-          writer.write(",");
-          writer.newline();
-        }
+        /* Enforce trailing commas for all elements to match Dart styling */
+        writer.write(",");
+        writer.newline();
       }
       writer.popIndent();
-      writer.newline();
     } else {
       for (size_t i = 0; i < elements.size(); ++i) {
         formatChild(elements[i], State::Unsplit);

@@ -20,7 +20,7 @@ struct Solution {
 
 class Solver {
 public:
-  static constexpr int MaxAttempts = 10000;
+  static constexpr int MaxAttempts = 100000;
 
   Solution solve(const Piece *root, int pageWidth = 80) {
     std::priority_queue<Solution, std::vector<Solution>, std::greater<Solution>>
@@ -91,7 +91,7 @@ public:
 private:
   std::vector<const Piece *> evaluateSolution(Solution &sol, const Piece *root,
                                               int pageWidth) {
-    CodeWriter writer(pageWidth, 0, true);
+    CodeWriter writer(pageWidth, 0, true, &sol.boundStates);
     sol.cost = 0;
 
     std::function<void(const Piece *, State)> formatTree =

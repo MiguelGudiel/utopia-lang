@@ -2,6 +2,7 @@
 #include "utopia/Format/FormatCore.hpp"
 #include <algorithm>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace utopia {
@@ -10,10 +11,11 @@ class Piece;
 
 class CodeWriter {
 public:
-  explicit CodeWriter(int pageWidth = 80, int baseIndent = 0,
-                      bool measureOnly = false)
+  explicit CodeWriter(
+      int pageWidth = 80, int baseIndent = 0, bool measureOnly = false,
+      const std::unordered_map<const Piece *, State> *boundStates = nullptr)
       : pageWidth(pageWidth), currentIndent(baseIndent),
-        measureOnly(measureOnly) {}
+        measureOnly(measureOnly), boundStates(boundStates) {}
 
   void pushPiece(const Piece *p) { activePieces.push_back(p); }
   void popPiece() { activePieces.pop_back(); }
@@ -57,6 +59,11 @@ public:
 
       if (!chunk.empty() || nextNewline == std::string::npos) {
         flushWhitespace();
+
+        if (!measureOnly) {
+          buffer += chunk;
+        }
+
         for (const Piece *p : activePieces) {
           if (std::find(currentLinePieces.begin(), currentLinePieces.end(),
                         p) == currentLinePieces.end()) {
@@ -64,11 +71,12 @@ public:
           }
         }
         currentColumn += chunk.length();
-        if (!measureOnly) {
-          buffer += chunk;
-        }
         if (isStringLiteral) {
           forgiveOverflow = true;
+        }
+
+        if (currentColumn > pageWidth && !forgiveOverflow && !hasOverflowed) {
+          recordPotentialOverflow();
         }
       }
 
@@ -76,8 +84,7 @@ public:
         if (currentColumn > pageWidth && !forgiveOverflow) {
           totalOverflow += (currentColumn - pageWidth);
           if (!hasOverflowed) {
-            hasOverflowed = true;
-            firstOverflowPieces = currentLinePieces;
+            recordPotentialOverflow();
           }
         }
         currentLinePieces.clear();
@@ -102,8 +109,7 @@ public:
     if (currentColumn > pageWidth && !forgiveOverflow) {
       totalOverflow += (currentColumn - pageWidth);
       if (!hasOverflowed) {
-        hasOverflowed = true;
-        firstOverflowPieces = currentLinePieces;
+        recordPotentialOverflow();
       }
     }
   }
@@ -117,6 +123,12 @@ public:
     if (!indentStack.empty()) {
       indentStack.pop_back();
       recalculateIndent();
+    }
+  }
+
+  void exactNewlines(int count) {
+    if (count > pendingNewlines) {
+      pendingNewlines = count;
     }
   }
 
@@ -142,6 +154,7 @@ private:
   int currentColumn = 0;
   int totalOverflow = 0;
   int currentLine = 0;
+  int pendingNewlines = 0;
   bool measureOnly;
   bool forgiveOverflow = false;
 
@@ -154,11 +167,15 @@ private:
   std::vector<const Piece *> firstOverflowPieces;
   bool hasOverflowed = false;
 
+  const std::unordered_map<const Piece *, State> *boundStates;
+
+  void recordPotentialOverflow();
+
   void flushWhitespace() {
-    if (pendingWhitespace == Whitespace::None)
+    if (pendingWhitespace == Whitespace::None && pendingNewlines == 0)
       return;
 
-    if (pendingWhitespace == Whitespace::Space) {
+    if (pendingWhitespace == Whitespace::Space && pendingNewlines == 0) {
       currentColumn += 1;
       if (!measureOnly)
         buffer += " ";
@@ -166,29 +183,27 @@ private:
       if (currentColumn > pageWidth && !forgiveOverflow) {
         totalOverflow += (currentColumn - pageWidth);
         if (!hasOverflowed) {
-          hasOverflowed = true;
-          firstOverflowPieces = currentLinePieces;
+          recordPotentialOverflow();
         }
       }
 
       currentLinePieces.clear();
       currentColumn = 0;
 
+      int defaultLines = (pendingWhitespace == Whitespace::BlankLine) ? 2 : 1;
+      int lines = std::max(pendingNewlines, defaultLines);
+
       if (!measureOnly) {
-        if (pendingWhitespace == Whitespace::BlankLine) {
-          buffer += "\n\n";
-          currentLine += 2;
-        } else {
-          buffer += "\n";
-          currentLine += 1;
-        }
+        buffer += std::string(lines, '\n');
+        currentLine += lines;
         buffer.append(currentIndent, ' ');
       } else {
-        currentLine += (pendingWhitespace == Whitespace::BlankLine) ? 2 : 1;
+        currentLine += lines;
       }
       currentColumn += currentIndent;
     }
     pendingWhitespace = Whitespace::None;
+    pendingNewlines = 0;
     forgiveOverflow = false;
   }
 

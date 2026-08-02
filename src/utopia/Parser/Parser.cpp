@@ -292,11 +292,44 @@ const Type *Parser::parseType(bool inNewExpr) {
 
 std::string Parser::consumeComments() {
   std::string doc;
-  for (auto c : currentToken().leadingComments) {
-    if (!doc.empty())
-      doc += "\n";
+  for (size_t i = 0; i < currentToken().leadingComments.size(); ++i) {
+    auto c = currentToken().leadingComments[i];
+    if (i > 0) {
+      auto prev = currentToken().leadingComments[i - 1];
+      const char *gapStart = prev.data() + prev.length();
+      const char *gapEnd = c.data();
+      if (gapEnd != nullptr && gapStart <= gapEnd) {
+        int newlines = 0;
+        for (const char *p = gapStart; p < gapEnd; ++p) {
+          if (*p == '\n')
+            newlines++;
+        }
+        if (newlines == 0)
+          newlines = 1;
+        doc += std::string(newlines, '\n');
+      } else {
+        doc += "\n";
+      }
+    }
     doc += c;
   }
+
+  if (!currentToken().leadingComments.empty()) {
+    auto last = currentToken().leadingComments.back();
+    const char *gapStart = last.data() + last.length();
+    const char *gapEnd = currentToken().value.data();
+    if (gapEnd != nullptr && gapStart <= gapEnd) {
+      int newlines = 0;
+      for (const char *p = gapStart; p < gapEnd; ++p) {
+        if (*p == '\n')
+          newlines++;
+      }
+      if (newlines > 1) {
+        doc += std::string(newlines - 1, '\n');
+      }
+    }
+  }
+
   const_cast<Token &>(currentToken()).leadingComments.clear();
   return doc;
 }
