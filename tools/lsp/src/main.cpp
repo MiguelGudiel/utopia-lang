@@ -954,6 +954,18 @@ void handleCompletion(const json &req) {
     items.push_back(item);
   };
 
+  auto addBuiltInAnnotations = [&]() {
+    std::vector<std::string> builtInAnnotations = {
+        "extern",         "export",       "align",     "packed",
+        "nodiscard",      "deprecated",   "inline",    "forceInline",
+        "readnone",       "readonly",     "nosync",    "nofree",
+        "willreturn",     "mustprogress", "nocapture", "nonnull",
+        "dereferenceable"};
+    for (const auto &ann : builtInAnnotations) {
+      addCompletion(ann, 8, "Built-in Annotation");
+    }
+  };
+
   std::string targetLineStr = "";
 
   std::shared_lock<std::shared_mutex> lock(docMutex);
@@ -975,19 +987,37 @@ void handleCompletion(const json &req) {
     }
   }
 
-  int dotPos = reqCol - 1;
-  if (dotPos >= (int)targetLineStr.length()) {
-    dotPos = (int)targetLineStr.length() - 1;
-  }
-  while (dotPos >= 0 && std::isspace(targetLineStr[dotPos])) {
-    dotPos--;
-  }
-
-  bool isDotCompletion = (dotPos >= 0 && targetLineStr[dotPos] == '.');
+  bool isDotCompletion = false;
+  bool isAtCompletion = false;
   std::string triggerWord = "";
 
+  int cursorIdx = reqCol - 1;
+  if (cursorIdx >= (int)targetLineStr.length()) {
+    cursorIdx = (int)targetLineStr.length() - 1;
+  }
+
+  int tokenStart = cursorIdx;
+  while (tokenStart >= 0 && (std::isalnum(targetLineStr[tokenStart]) ||
+                             targetLineStr[tokenStart] == '_')) {
+    tokenStart--;
+  }
+
+  int triggerSymbolIdx = tokenStart;
+  while (triggerSymbolIdx >= 0 &&
+         std::isspace(targetLineStr[triggerSymbolIdx])) {
+    triggerSymbolIdx--;
+  }
+
+  if (triggerSymbolIdx >= 0) {
+    if (targetLineStr[triggerSymbolIdx] == '.') {
+      isDotCompletion = true;
+    } else if (targetLineStr[triggerSymbolIdx] == '@') {
+      isAtCompletion = true;
+    }
+  }
+
   if (isDotCompletion) {
-    int idEnd = dotPos - 1;
+    int idEnd = triggerSymbolIdx - 1;
     while (idEnd >= 0 && std::isspace(targetLineStr[idEnd])) {
       idEnd--;
     }
@@ -1002,7 +1032,9 @@ void handleCompletion(const json &req) {
     }
   }
 
-  if (!isDotCompletion) {
+  if (isAtCompletion) {
+    addBuiltInAnnotations();
+  } else if (!isDotCompletion) {
     std::vector<std::string> keywords = {
         "if",      "else",     "while",      "for",      "switch", "case",
         "default", "break",    "continue",   "return",   "import", "export",
@@ -1030,6 +1062,8 @@ void handleCompletion(const json &req) {
     for (const auto &mc : macros) {
       addCompletion(mc, 21, "Preprocessor Macro");
     }
+
+    addBuiltInAnnotations();
   }
 
   if (documents.contains(uri)) {
@@ -1247,6 +1281,14 @@ void handleCompletion(const json &req) {
               addCompletion(std::string(em->name), 20, "enum member",
                             std::string(em->docString));
             }
+          }
+        }
+      } else if (isAtCompletion) {
+        for (const auto *decl : globals) {
+          if (decl->kind == NodeKind::AnnotationDecl) {
+            auto *a = static_cast<const AnnotationDeclNode *>(decl);
+            addCompletion(std::string(a->name), 8, "annotation",
+                          std::string(a->docString));
           }
         }
       } else if (!isDotCompletion) {
@@ -1965,7 +2007,7 @@ int main() {
                 {{"textDocumentSync", 1},
                  {"hoverProvider", true},
                  {"definitionProvider", true},
-                 {"completionProvider", {{"triggerCharacters", {"."}}}},
+                 {"completionProvider", {{"triggerCharacters", {".", "@"}}}},
                  {"signatureHelpProvider", {{"triggerCharacters", {"(", ","}}}},
                  {"documentFormattingProvider", true},
                  {"semanticTokensProvider",
