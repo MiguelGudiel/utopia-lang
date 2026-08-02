@@ -24,18 +24,110 @@ public:
     currentFunctionReturn = astCtx.VoidTy;
   }
 
-  void pushScope() { symTable.pushScope(); }
+  void pushScope(ScopeKind kind = ScopeKind::Regular) {
+    symTable.pushScope(kind);
+  }
   void popScope() { symTable.popScope(); }
+
+  /**
+   * Compares two types structurally by string representation to safely handle
+   * unresolved template parameters during the initial collection pass.
+   */
+  bool isSameType(const Type *a, const Type *b) const {
+    if (a == b)
+      return true;
+    if (!a || !b)
+      return false;
+    return a->toString() == b->toString();
+  }
 
   void addDecl(std::string_view name, const DeclNode *decl) {
     if (decl->declFilePath.empty()) {
       const_cast<DeclNode *>(decl)->declFilePath = currentFile;
     }
+
+    const auto &scopes = symTable.getScopes();
+    if (scopes.empty())
+      return;
+
+    const auto &currentScope = scopes.back();
+    if (auto it = currentScope.symbols.find(name);
+        it != currentScope.symbols.end()) {
+      for (const DeclNode *existing : it->second) {
+        /* Constructors natively share the exact name of their parent
+           record type. This permits Record declarations and Function
+           declarations to coexist under the same identifier. */
+        bool isRecordAndCtor = ((existing->kind == NodeKind::ClassDecl ||
+                                 existing->kind == NodeKind::StructDecl ||
+                                 existing->kind == NodeKind::UnionDecl ||
+                                 existing->kind == NodeKind::AnnotationDecl) &&
+                                decl->kind == NodeKind::FunctionDecl) ||
+                               ((decl->kind == NodeKind::ClassDecl ||
+                                 decl->kind == NodeKind::StructDecl ||
+                                 decl->kind == NodeKind::UnionDecl ||
+                                 decl->kind == NodeKind::AnnotationDecl) &&
+                                existing->kind == NodeKind::FunctionDecl);
+
+        if (decl->kind == NodeKind::FunctionDecl &&
+            existing->kind == NodeKind::FunctionDecl) {
+          auto *funcA = static_cast<const FunctionDeclNode *>(decl);
+          auto *funcB = static_cast<const FunctionDeclNode *>(existing);
+          bool sameSignature = true;
+
+          if (funcA->params.size() != funcB->params.size()) {
+            sameSignature = false;
+          } else {
+            for (size_t i = 0; i < funcA->params.size(); ++i) {
+              if (!isSameType(funcA->params[i]->type, funcB->params[i]->type)) {
+                sameSignature = false;
+                break;
+              }
+            }
+          }
+
+          /* Method const qualifier evaluates into the overload resolution
+           * signature */
+          if (sameSignature && funcA->isMethod && funcB->isMethod) {
+            if (funcA->isConst != funcB->isConst) {
+              sameSignature = false;
+            }
+          }
+
+          if (sameSignature) {
+            reportError(decl->line, decl->column, decl->length,
+                        "Redefinition of function '" + std::string(name) +
+                            "' with the same signature.");
+            return;
+          }
+        } else if (!isRecordAndCtor) {
+          reportError(decl->line, decl->column, decl->length,
+                      "Redefinition of '" + std::string(name) + "'.");
+          return;
+        }
+      }
+    }
+
+    // Prevent shadowing variables from parent control-flow or
+    // parameter scopes
+    if (scopes.size() > 1) {
+      for (auto it = scopes.rbegin() + 1; it != scopes.rend(); ++it) {
+        if (it->kind == ScopeKind::Regular) {
+          break; // Stop at the regular block boundary (allows normal shadowing)
+        }
+        if (it->symbols.find(name) != it->symbols.end()) {
+          reportError(decl->line, decl->column, decl->length,
+                      "Redefinition of '" + std::string(name) +
+                          "'. Shadows a parameter or control-flow variable.");
+          return;
+        }
+      }
+    }
+
     symTable.addSymbol(name, decl);
   }
 
   llvm::SmallVector<const DeclNode *, 2> lookup(std::string_view name) const {
-    return symTable.lookup(name);
+    return symTable.lookup(name, currentModule);
   }
 
   SemaResult reportError(int line, int col, int len, const std::string &msg) {
@@ -86,7 +178,10 @@ class ScopeGuard {
   SemaContext &ctx;
 
 public:
-  explicit ScopeGuard(SemaContext &c) : ctx(c) { ctx.pushScope(); }
+  explicit ScopeGuard(SemaContext &c, ScopeKind kind = ScopeKind::Regular)
+      : ctx(c) {
+    ctx.pushScope(kind);
+  }
   ~ScopeGuard() { ctx.popScope(); }
 };
 

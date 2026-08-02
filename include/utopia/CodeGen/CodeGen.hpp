@@ -2,24 +2,27 @@
 #include "utopia/AST/ASTVisitor.hpp"
 #include "utopia/CodeGen/BackendContext.hpp"
 #include "utopia/CodeGen/CodeGenContext.hpp"
+#include "utopia/CodeGen/DebugInfoEmitter.hpp"
+#include "utopia/CodeGen/TBAAManager.hpp"
 #include "utopia/Common/Diagnostics.hpp"
-#include <llvm/IR/DIBuilder.h>
-#include <llvm/IR/DebugInfo.h>
-#include <llvm/IR/DebugLoc.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/InstrTypes.h>
 #include <llvm/IR/LLVMContext.h>
-#include <llvm/IR/MDBuilder.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Value.h>
 
 namespace utopia {
+class Intrinsic;
+
 class CodeGen : public ASTVisitor<CodeGen, llvm::Value *> {
+  friend class Intrinsic;
+  friend class DebugInfoEmitter;
+  friend class TBAAManager;
+
 public:
   CodeGen(BackendContext &bCtx, llvm::Module &llvmMod, DiagnosticsEngine &diags,
-          bool emitDebugInfo);
+          bool emitDebugInfo, std::string filePath);
 
-  /* Intercepts and sets the debug location securely prior to evaluation */
   llvm::Value *dispatch(const ASTNode *node);
 
   llvm::Value *visit(const NumberNode *node);
@@ -47,6 +50,7 @@ public:
   llvm::Value *visit(const ParamDeclNode *node);
   llvm::Value *visit(const ModuleNode *node);
   llvm::Value *visit(const MemberAccessNode *node);
+  llvm::Value *visit(const UnionDeclNode *node);
   llvm::Value *visit(const StructDeclNode *node);
   llvm::Value *visit(const ClassDeclNode *node);
   llvm::Value *visit(const AnnotationDeclNode *node);
@@ -55,6 +59,7 @@ public:
   llvm::Value *visit(const ArraySubscriptNode *node);
   llvm::Value *visit(const NewExprNode *node);
   llvm::Value *visit(const DeleteExprNode *node);
+  llvm::Value *visit(const TypeLiteralNode *node);
   llvm::Value *visit(const ArrayLiteralNode *node);
   llvm::Value *visit(const NullNode *node);
   llvm::Value *visit(const EnumDeclNode *node);
@@ -73,35 +78,17 @@ private:
   DiagnosticsEngine &diags;
   const FunctionDeclNode *currentFunc = nullptr;
   llvm::AllocaInst *lastTemporaryAlloca = nullptr;
+  std::string currentFilePath;
 
-  /* Debug Metadata Emitters */
-  bool emitDebugInfo;
-  std::unique_ptr<llvm::DIBuilder> dBuilder;
-  llvm::DICompileUnit *diCU = nullptr;
-  llvm::DIFile *diFile = nullptr;
-  std::vector<llvm::DIScope *> lexicalBlocks;
-  std::unordered_map<const Type *, llvm::DIType *> debugTypes;
+  DebugInfoEmitter diEmitter;
+  TBAAManager tbaaManager;
 
-  llvm::DIType *getDIType(const Type *type);
   void emitLocation(const ASTNode *node);
-
-  /* LLVM IR Metadata builders and trackers */
-  llvm::MDBuilder mdBuilder;
-  llvm::MDNode *tbaaRoot = nullptr;
-  std::unordered_map<const Type *, llvm::MDNode *> tbaaTypes;
 
   llvm::Type *getLLVMType(const Type *type);
   llvm::Value *getLValue(const ExprNode *node);
-  llvm::Value *evaluateAsReference(const ExprNode *expr);
   llvm::Constant *evaluateAsConstant(const ExprNode *node);
   llvm::Function *getOrCreateFunction(const FunctionDeclNode *node);
-
-  /* TBAA Context Resolution */
-  llvm::MDNode *getTBAATypeNode(const Type *type);
-  llvm::MDNode *getTBAAAccessTag(const Type *type);
-  llvm::MDNode *getTBAAStructAccessTag(const Type *baseType,
-                                       const Type *accessType, uint64_t offset);
-  llvm::MDNode *getTBAATagForExpr(const ExprNode *node);
 
   llvm::LoadInst *createTBAALoad(llvm::Type *llTy, llvm::Value *ptr,
                                  const Type *utopiaTy,
@@ -114,6 +101,9 @@ private:
                                    const Type *utopiaTy);
   llvm::StoreInst *createTBAAStore(llvm::Value *val, llvm::Value *ptr,
                                    llvm::MDNode *tbaaTag);
+
+  llvm::Constant *createTypeReflectionConstant(const Type *t,
+                                               llvm::StructType *structTy);
 
   /* Lifetime Intrinsic Emission */
   void emitLifetimeStart(llvm::AllocaInst *allocaInst, uint64_t size);

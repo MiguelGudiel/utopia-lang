@@ -32,6 +32,7 @@ public:
   const BuiltinType *UInt64Ty;
   const BuiltinType *Float32Ty;
   const BuiltinType *Float64Ty;
+  const BuiltinType *TypeValTy;
 
   ASTContext() {
     VoidTy = create<BuiltinType>(BuiltinKind::Void);
@@ -46,6 +47,7 @@ public:
     UInt64Ty = create<BuiltinType>(BuiltinKind::UInt64);
     Float32Ty = create<BuiltinType>(BuiltinKind::Float32);
     Float64Ty = create<BuiltinType>(BuiltinKind::Float64);
+    TypeValTy = create<BuiltinType>(BuiltinKind::TypeVal);
   }
   ~ASTContext() = default;
 
@@ -132,6 +134,8 @@ public:
     RecordType *rec = nullptr;
     if (kind == TypeKind::Struct) {
       rec = create<StructType>(name);
+    } else if (kind == TypeKind::Union) {
+      rec = create<UnionType>(name);
     } else {
       rec = create<ClassType>(name);
     }

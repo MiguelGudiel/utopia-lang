@@ -1,28 +1,61 @@
 #include "utopia/CodeGen/CodeGen.hpp"
-#include <filesystem>
-#include <iostream>
+#include "utopia/CodeGen/Intrinsics.hpp"
 #include <llvm/ADT/APSInt.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/Support/ModRef.h>
 #include <optional>
 #include <string>
-namespace fs = std::filesystem;
 
 namespace utopia {
 
+namespace {
+enum class BinOpCode {
+  Add,
+  Sub,
+  Mul,
+  Div,
+  Rem,
+  And,
+  Or,
+  Xor,
+  Shl,
+  Shr,
+  Eq,
+  Ne,
+  Lt,
+  Le,
+  Gt,
+  Ge
+};
+
+static const std::unordered_map<std::string_view, BinOpCode> binOpMap = {
+    {"+", BinOpCode::Add},  {"-", BinOpCode::Sub}, {"*", BinOpCode::Mul},
+    {"/", BinOpCode::Div},  {"%", BinOpCode::Rem}, {"&", BinOpCode::And},
+    {"|", BinOpCode::Or},   {"^", BinOpCode::Xor}, {"<<", BinOpCode::Shl},
+    {">>", BinOpCode::Shr}, {"==", BinOpCode::Eq}, {"!=", BinOpCode::Ne},
+    {"<", BinOpCode::Lt},   {"<=", BinOpCode::Le}, {">", BinOpCode::Gt},
+    {">=", BinOpCode::Ge}};
+
+enum class AssignOpCode { Add, Sub, Mul, Div, Rem, And, Or, Xor, Shl, Shr };
+
+static const std::unordered_map<std::string_view, AssignOpCode> assignOpMap = {
+    {"+", AssignOpCode::Add},  {"-", AssignOpCode::Sub},
+    {"*", AssignOpCode::Mul},  {"/", AssignOpCode::Div},
+    {"%", AssignOpCode::Rem},  {"&", AssignOpCode::And},
+    {"|", AssignOpCode::Or},   {"^", AssignOpCode::Xor},
+    {"<<", AssignOpCode::Shl}, {">>", AssignOpCode::Shr}};
+} // namespace
+
 CodeGen::CodeGen(BackendContext &bCtx, llvm::Module &llvmMod,
-                 DiagnosticsEngine &diags, bool emitDebugInfo)
+                 DiagnosticsEngine &diags, bool emitDebugInfo,
+                 std::string filePath)
     : backend(bCtx), ctx(bCtx.getLLVMContext()), mod(llvmMod), builder(ctx),
-      diags(diags), mdBuilder(ctx), emitDebugInfo(emitDebugInfo) {
-  tbaaRoot = mdBuilder.createTBAARoot("Utopia TBAA");
+      diags(diags), currentFilePath(std::move(filePath)),
+      diEmitter(llvmMod, emitDebugInfo), tbaaManager(ctx) {
 
   llvm::FastMathFlags fmf;
   fmf.setFast();
   builder.setFastMathFlags(fmf);
-
-  if (emitDebugInfo) {
-    dBuilder = std::make_unique<llvm::DIBuilder>(mod);
-  }
 }
 
 llvm::Value *CodeGen::dispatch(const ASTNode *node) {
@@ -33,150 +66,7 @@ llvm::Value *CodeGen::dispatch(const ASTNode *node) {
 }
 
 void CodeGen::emitLocation(const ASTNode *node) {
-  if (!emitDebugInfo || !node)
-    return;
-  if (node->line == 0)
-    return;
-  llvm::DIScope *scope = lexicalBlocks.empty() ? diCU : lexicalBlocks.back();
-  builder.SetCurrentDebugLocation(
-      llvm::DILocation::get(ctx, node->line, node->column, scope));
-}
-
-llvm::DIType *CodeGen::getDIType(const Type *type) {
-  if (!type)
-    return nullptr;
-  if (debugTypes.contains(type))
-    return debugTypes[type];
-
-  llvm::DIType *diTy = nullptr;
-  if (type->isBuiltinType()) {
-    auto *bTy = static_cast<const BuiltinType *>(type);
-    switch (bTy->getBuiltinKind()) {
-    case BuiltinKind::Int8:
-      diTy = dBuilder->createBasicType("int8", 8, llvm::dwarf::DW_ATE_signed);
-      break;
-    case BuiltinKind::UInt8:
-      diTy =
-          dBuilder->createBasicType("uint8", 8, llvm::dwarf::DW_ATE_unsigned);
-      break;
-    case BuiltinKind::Int16:
-      diTy = dBuilder->createBasicType("int16", 16, llvm::dwarf::DW_ATE_signed);
-      break;
-    case BuiltinKind::UInt16:
-      diTy =
-          dBuilder->createBasicType("uint16", 16, llvm::dwarf::DW_ATE_unsigned);
-      break;
-    case BuiltinKind::Int32:
-      diTy = dBuilder->createBasicType("int32", 32, llvm::dwarf::DW_ATE_signed);
-      break;
-    case BuiltinKind::UInt32:
-      diTy =
-          dBuilder->createBasicType("uint32", 32, llvm::dwarf::DW_ATE_unsigned);
-      break;
-    case BuiltinKind::Int64:
-      diTy = dBuilder->createBasicType("int64", 64, llvm::dwarf::DW_ATE_signed);
-      break;
-    case BuiltinKind::UInt64:
-      diTy =
-          dBuilder->createBasicType("uint64", 64, llvm::dwarf::DW_ATE_unsigned);
-      break;
-    case BuiltinKind::Float32:
-      diTy =
-          dBuilder->createBasicType("float32", 32, llvm::dwarf::DW_ATE_float);
-      break;
-    case BuiltinKind::Float64:
-      diTy =
-          dBuilder->createBasicType("float64", 64, llvm::dwarf::DW_ATE_float);
-      break;
-    case BuiltinKind::Bool:
-      diTy = dBuilder->createBasicType("bool", 8, llvm::dwarf::DW_ATE_boolean);
-      break;
-    case BuiltinKind::Void:
-      diTy = nullptr;
-      break;
-    }
-  } else if (type->isPointerType() || type->isReferenceType() ||
-             type->getKind() == TypeKind::RValueReference) {
-    const Type *pointee = nullptr;
-    if (type->isPointerType())
-      pointee = static_cast<const PointerType *>(type)->getPointeeType();
-    else if (type->isReferenceType())
-      pointee = static_cast<const ReferenceType *>(type)->getPointeeType();
-    else
-      pointee =
-          static_cast<const RValueReferenceType *>(type)->getPointeeType();
-
-    diTy = dBuilder->createPointerType(getDIType(pointee), 64);
-  } else if (type->getKind() == TypeKind::Array) {
-    auto *arrTy = static_cast<const ArrayType *>(type);
-    llvm::SmallVector<llvm::Metadata *, 1> subscripts;
-    subscripts.push_back(dBuilder->getOrCreateSubrange(0, arrTy->getSize()));
-    diTy = dBuilder->createArrayType(
-        arrTy->getSize() *
-            mod.getDataLayout().getTypeAllocSize(
-                getLLVMType(arrTy->getElementType())) *
-            8,
-        mod.getDataLayout()
-                .getABITypeAlign(getLLVMType(arrTy->getElementType()))
-                .value() *
-            8,
-        getDIType(arrTy->getElementType()),
-        dBuilder->getOrCreateArray(subscripts));
-  } else if (type->getKind() == TypeKind::Struct ||
-             type->getKind() == TypeKind::Class) {
-    auto *recTy = static_cast<const RecordType *>(type);
-    auto *fwdDecl = dBuilder->createReplaceableCompositeType(
-        llvm::dwarf::DW_TAG_structure_type, recTy->getName(), diCU, diFile, 0);
-    debugTypes[type] = fwdDecl;
-
-    std::vector<llvm::Metadata *> elements;
-    llvm::StructType *llStruct =
-        llvm::cast<llvm::StructType>(getLLVMType(type));
-    const llvm::StructLayout *layout = nullptr;
-    if (!llStruct->isOpaque()) {
-      layout = mod.getDataLayout().getStructLayout(llStruct);
-    }
-
-    for (const auto &f : recTy->getFields()) {
-      uint64_t sizeInBits =
-          mod.getDataLayout().getTypeAllocSizeInBits(getLLVMType(f.type));
-      uint32_t alignInBits =
-          mod.getDataLayout().getABITypeAlign(getLLVMType(f.type)).value() * 8;
-      uint64_t offsetInBits =
-          layout ? layout->getElementOffsetInBits(f.index) : 0;
-      elements.push_back(dBuilder->createMemberType(
-          fwdDecl, f.name, diFile, 0, sizeInBits, alignInBits, offsetInBits,
-          llvm::DINode::FlagZero, getDIType(f.type)));
-    }
-    diTy = dBuilder->createStructType(
-        diCU, recTy->getName(), diFile, 0, layout ? layout->getSizeInBits() : 0,
-        layout ? layout->getAlignment().value() * 8 : 0, llvm::DINode::FlagZero,
-        nullptr, dBuilder->getOrCreateArray(elements));
-    dBuilder->replaceTemporary(llvm::TempDINode(fwdDecl), diTy);
-  } else if (type->getKind() == TypeKind::Alias) {
-    auto *alias = static_cast<const AliasType *>(type);
-    diTy = dBuilder->createTypedef(getDIType(alias->getTarget()),
-                                   alias->getName(), diFile, 0, diCU);
-  } else if (type->getKind() == TypeKind::Enum) {
-    diTy = dBuilder->createBasicType(
-        static_cast<const EnumType *>(type)->getName(), 32,
-        llvm::dwarf::DW_ATE_signed);
-  } else if (type->getKind() == TypeKind::Function) {
-    auto *fTy = static_cast<const FunctionType *>(type);
-    std::vector<llvm::Metadata *> types;
-    types.push_back(getDIType(fTy->getReturnType()));
-    for (auto *p : fTy->getParamTypes())
-      types.push_back(getDIType(p));
-    diTy =
-        dBuilder->createSubroutineType(dBuilder->getOrCreateTypeArray(types));
-  } else if (type->getKind() == TypeKind::Const) {
-    auto *constTy = static_cast<const ConstType *>(type);
-    diTy = dBuilder->createQualifiedType(llvm::dwarf::DW_TAG_const_type,
-                                         getDIType(constTy->getBaseType()));
-  }
-
-  debugTypes[type] = diTy;
-  return diTy;
+  diEmitter.emitLocation(builder, node);
 }
 
 llvm::Type *CodeGen::getLLVMType(const Type *type) {
@@ -211,13 +101,16 @@ llvm::Type *CodeGen::getLLVMType(const Type *type) {
     diags.report({DiagLevel::Error, 0, 0, 0,
                   "Uninstantiated template parameter '" + type->toString() +
                       "' reached code generation.",
-                  ""});
+                  currentFilePath});
     return builder.getInt8Ty();
   }
 
   if (type->isBuiltinType()) {
     auto *bTy = static_cast<const BuiltinType *>(type);
     switch (bTy->getBuiltinKind()) {
+    case BuiltinKind::TypeVal:
+      return builder.getInt8Ty(); /* Dummy representation. Handled internally by
+                                     intrinsics */
     case BuiltinKind::Int8:
     case BuiltinKind::UInt8:
       return builder.getInt8Ty();
@@ -247,7 +140,8 @@ llvm::Type *CodeGen::getLLVMType(const Type *type) {
     return llvm::ArrayType::get(getLLVMType(arrTy->getElementType()),
                                 arrTy->getSize());
   } else if (type->getKind() == TypeKind::Struct ||
-             type->getKind() == TypeKind::Class) {
+             type->getKind() == TypeKind::Class ||
+             type->getKind() == TypeKind::Union) {
     auto rec = static_cast<const RecordType *>(type);
 
     llvm::StructType *structTy =
@@ -261,21 +155,50 @@ llvm::Type *CodeGen::getLLVMType(const Type *type) {
 
     if (structTy->isOpaque() && !rec->isOpaque()) {
       std::vector<llvm::Type *> elements;
-      for (const auto &f : rec->getFields()) {
-        elements.push_back(getLLVMType(f.type));
-      }
 
-      bool isPacked = false;
-      if (const DeclNode *decl = rec->getDeclaration()) {
-        for (const auto *ann : decl->annotations) {
-          if (ann->name == "packed") {
-            isPacked = true;
-            break;
+      if (type->getKind() == TypeKind::Union) {
+        uint64_t maxSize = 0;
+        llvm::Type *maxAlignType = builder.getInt8Ty();
+        uint64_t maxAlign = 1;
+        for (const auto &f : rec->getFields()) {
+          llvm::Type *fTy = getLLVMType(f.type);
+          uint64_t sz = mod.getDataLayout().getTypeAllocSize(fTy);
+          uint64_t al = mod.getDataLayout().getABITypeAlign(fTy).value();
+          if (sz > maxSize)
+            maxSize = sz;
+          if (al > maxAlign) {
+            maxAlign = al;
+            maxAlignType = fTy;
           }
         }
-      }
 
-      structTy->setBody(elements, isPacked);
+        if (!rec->getFields().empty()) {
+          elements.push_back(maxAlignType);
+          uint64_t paddedSize = (maxSize + maxAlign - 1) & ~(maxAlign - 1);
+          uint64_t alignSize =
+              mod.getDataLayout().getTypeAllocSize(maxAlignType);
+          if (paddedSize > alignSize) {
+            elements.push_back(llvm::ArrayType::get(builder.getInt8Ty(),
+                                                    paddedSize - alignSize));
+          }
+        }
+        structTy->setBody(elements, false);
+      } else {
+        for (const auto &f : rec->getFields()) {
+          elements.push_back(getLLVMType(f.type));
+        }
+
+        bool isPacked = false;
+        if (const DeclNode *decl = rec->getDeclaration()) {
+          for (const auto *ann : decl->annotations) {
+            if (ann->name == "packed") {
+              isPacked = true;
+              break;
+            }
+          }
+        }
+        structTy->setBody(elements, isPacked);
+      }
     }
 
     return structTy;
@@ -284,8 +207,55 @@ llvm::Type *CodeGen::getLLVMType(const Type *type) {
   diags.report({DiagLevel::Error, 0, 0, 0,
                 "Unsupported or unresolved type reached code generation: " +
                     type->toString(),
-                ""});
+                currentFilePath});
   return builder.getInt8Ty();
+}
+
+llvm::Constant *
+CodeGen::createTypeReflectionConstant(const Type *t,
+                                      llvm::StructType *structTy) {
+  if (!t)
+    return llvm::UndefValue::get(structTy);
+
+  auto createStr = [&](const std::string &str) -> llvm::Constant * {
+    llvm::Constant *strConst =
+        llvm::ConstantDataArray::getString(ctx, str, true);
+    auto *gv = new llvm::GlobalVariable(mod, strConst->getType(), true,
+                                        llvm::GlobalValue::PrivateLinkage,
+                                        strConst, ".str.type");
+    gv->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+    llvm::Constant *zero = llvm::ConstantInt::get(builder.getInt32Ty(), 0);
+    return llvm::ConstantExpr::getInBoundsGetElementPtr(
+        strConst->getType(), gv, llvm::ArrayRef<llvm::Constant *>{zero, zero});
+  };
+
+  std::vector<llvm::Constant *> fields;
+  /* uint8* name */
+  fields.push_back(createStr(t->toString()));
+
+  const Type *unqual = t->getUnqualifiedType();
+
+  bool isClass = unqual->getKind() == TypeKind::Class;
+  bool isStruct = unqual->getKind() == TypeKind::Struct;
+  bool isPrimitive = unqual->isBuiltinType();
+  bool isEnum = unqual->getKind() == TypeKind::Enum;
+  bool isArray = unqual->getKind() == TypeKind::Array;
+  bool isPointer = unqual->isPointerType();
+
+  /* Bools in LLVM ABI */
+  fields.push_back(
+      llvm::ConstantInt::get(builder.getInt1Ty(), isClass ? 1 : 0));
+  fields.push_back(
+      llvm::ConstantInt::get(builder.getInt1Ty(), isStruct ? 1 : 0));
+  fields.push_back(
+      llvm::ConstantInt::get(builder.getInt1Ty(), isPrimitive ? 1 : 0));
+  fields.push_back(llvm::ConstantInt::get(builder.getInt1Ty(), isEnum ? 1 : 0));
+  fields.push_back(
+      llvm::ConstantInt::get(builder.getInt1Ty(), isArray ? 1 : 0));
+  fields.push_back(
+      llvm::ConstantInt::get(builder.getInt1Ty(), isPointer ? 1 : 0));
+
+  return llvm::ConstantStruct::get(structTy, fields);
 }
 
 llvm::Value *CodeGen::createImplicitCast(llvm::Value *src, llvm::Type *destTy) {
@@ -349,16 +319,38 @@ llvm::Function *CodeGen::getOrCreateFunction(const FunctionDeclNode *node) {
     }
   }
 
-  llvm::FunctionType *funcType = llvm::FunctionType::get(
-      getLLVMType(node->returnType), paramTypes, node->isVariadic);
+  llvm::Type *retTy = getLLVMType(node->returnType);
 
-  func = llvm::Function::Create(funcType, llvm::Function::ExternalLinkage,
-                                irName, mod);
+  if (node->name == "main" && !node->isMethod && node->returnType->isVoid()) {
+    retTy = builder.getInt32Ty();
+  }
+
+  llvm::FunctionType *funcType =
+      llvm::FunctionType::get(retTy, paramTypes, node->isVariadic);
+
+  /* Apply weak linkage if the function is annotated with @weak */
+  llvm::GlobalValue::LinkageTypes linkage =
+      node->isWeak ? llvm::GlobalValue::WeakAnyLinkage
+                   : llvm::GlobalValue::ExternalLinkage;
+
+  func = llvm::Function::Create(funcType, linkage, irName, mod);
+
+  /* Apply the parsed calling convention before setting other attributes */
+  if (node->callingConv == "stdcall") {
+    func->setCallingConv(llvm::CallingConv::X86_StdCall);
+  } else if (node->callingConv == "fastcall") {
+    func->setCallingConv(llvm::CallingConv::X86_FastCall);
+  } else {
+    func->setCallingConv(llvm::CallingConv::C);
+  }
 
   func->addFnAttr(llvm::Attribute::NoUnwind);
 
+  /* Map standard inline to an LLVM hint, and forceInline to AlwaysInline */
   for (const auto *ann : node->annotations) {
     if (ann->name == "inline")
+      func->addFnAttr(llvm::Attribute::InlineHint);
+    else if (ann->name == "forceInline")
       func->addFnAttr(llvm::Attribute::AlwaysInline);
     else if (ann->name == "readnone")
       func->setMemoryEffects(llvm::MemoryEffects::none());
@@ -412,7 +404,7 @@ llvm::Function *CodeGen::getOrCreateFunction(const FunctionDeclNode *node) {
         if (ann->args[0]->kind == NodeKind::Number) {
           auto *num = static_cast<const NumberNode *>(ann->args[0]);
           if (!num->isFloat) {
-            uint64_t sz = std::stoull(std::string(num->raw));
+            uint64_t sz = std::stoull(std::string(num->raw), nullptr, 0);
             addAttrObj(llvm::Attribute::getWithDereferenceableBytes(ctx, sz));
           }
         }
@@ -582,7 +574,8 @@ void CodeGen::emitConstructorCall(const FunctionCallNode *node,
 
     if (!argVal) {
       diags.report({DiagLevel::Error, arg->line, arg->column, arg->length,
-                    "Failed to evaluate argument for constructor call.", ""});
+                    "Failed to evaluate argument for constructor call.",
+                    currentFilePath});
       return;
     }
     argsArgs.push_back(argVal);
@@ -597,8 +590,104 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
   if (!node)
     return nullptr;
 
+  if (node->kind == NodeKind::FunctionCall) {
+    auto *call = static_cast<const FunctionCallNode *>(node);
+    if (call->resolvedFunc && call->resolvedFunc->isIntrinsic) {
+      if (const Intrinsic *intrinsic = IntrinsicRegistry::instance().get(
+              call->resolvedFunc->intrinsicName)) {
+        return intrinsic->evaluateConstant(*this, call);
+      }
+    }
+  }
+
   if (node->kind == NodeKind::Null) {
     return llvm::ConstantPointerNull::get(builder.getPtrTy());
+  }
+
+  if (node->kind == NodeKind::String) {
+    auto *strNode = static_cast<const StringNode *>(node);
+    llvm::Constant *strConst = llvm::ConstantDataArray::getString(
+        ctx, llvm::StringRef(strNode->value.data(), strNode->value.length()),
+        true);
+    auto *gv = new llvm::GlobalVariable(mod, strConst->getType(), true,
+                                        llvm::GlobalValue::PrivateLinkage,
+                                        strConst, ".str");
+    gv->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+    llvm::Constant *zero = llvm::ConstantInt::get(builder.getInt32Ty(), 0);
+    return llvm::ConstantExpr::getInBoundsGetElementPtr(
+        strConst->getType(), gv, llvm::ArrayRef<llvm::Constant *>{zero, zero});
+  }
+
+  if (node->kind == NodeKind::ImplicitCast || node->kind == NodeKind::Cast) {
+    const ExprNode *innerExpr = nullptr;
+    const Type *targetType = nullptr;
+    if (node->kind == NodeKind::ImplicitCast) {
+      auto *castNode = static_cast<const ImplicitCastNode *>(node);
+      innerExpr = castNode->expr;
+      targetType = castNode->targetType;
+    } else {
+      auto *castNode = static_cast<const CastNode *>(node);
+      innerExpr = castNode->expr;
+      targetType = castNode->targetType;
+    }
+
+    llvm::Constant *inner = evaluateAsConstant(innerExpr);
+    if (inner) {
+      llvm::Type *destTy = getLLVMType(targetType);
+      if (inner->getType() == destTy)
+        return inner;
+
+      // Pointer-based constant expressions are still supported in LLVM 15+
+      if (inner->getType()->isPointerTy() && destTy->isPointerTy())
+        return llvm::ConstantExpr::getBitCast(inner, destTy);
+      if (inner->getType()->isPointerTy() && destTy->isIntegerTy())
+        return llvm::ConstantExpr::getPtrToInt(inner, destTy);
+      if (inner->getType()->isIntegerTy() && destTy->isPointerTy())
+        return llvm::ConstantExpr::getIntToPtr(inner, destTy);
+
+      if (auto *ci = llvm::dyn_cast<llvm::ConstantInt>(inner)) {
+        if (destTy->isIntegerTy()) {
+          return llvm::ConstantInt::get(
+              ctx, ci->getValue().sextOrTrunc(destTy->getIntegerBitWidth()));
+        } else if (destTy->isFloatingPointTy()) {
+          llvm::APFloat apf(destTy->getFltSemantics());
+          apf.convertFromAPInt(ci->getValue(), true,
+                               llvm::APFloat::rmNearestTiesToEven);
+          return llvm::ConstantFP::get(ctx, apf);
+        }
+      } else if (auto *cfp = llvm::dyn_cast<llvm::ConstantFP>(inner)) {
+        if (destTy->isFloatingPointTy()) {
+          llvm::APFloat apf = cfp->getValueAPF();
+          bool losesInfo;
+          apf.convert(destTy->getFltSemantics(),
+                      llvm::APFloat::rmNearestTiesToEven, &losesInfo);
+          return llvm::ConstantFP::get(ctx, apf);
+        } else if (destTy->isIntegerTy()) {
+          llvm::APSInt api(destTy->getIntegerBitWidth(), false);
+          bool isExact;
+          cfp->getValueAPF().convertToInteger(api, llvm::APFloat::rmTowardZero,
+                                              &isExact);
+          return llvm::ConstantInt::get(ctx, api);
+        }
+      }
+
+      return llvm::ConstantExpr::getBitCast(inner, destTy);
+    }
+  }
+
+  if (node->kind == NodeKind::ArrayLiteral) {
+    auto *arrNode = static_cast<const ArrayLiteralNode *>(node);
+    std::vector<llvm::Constant *> elems;
+    for (const auto *elem : arrNode->elements) {
+      auto *c = evaluateAsConstant(elem);
+      if (!c)
+        return nullptr;
+      elems.push_back(c);
+    }
+    llvm::Type *destTy = getLLVMType(arrNode->exprType);
+    if (!destTy->isArrayTy())
+      return nullptr;
+    return llvm::ConstantArray::get(llvm::cast<llvm::ArrayType>(destTy), elems);
   }
 
   if (node->kind == NodeKind::Boolean) {
@@ -611,9 +700,24 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
     auto *num = static_cast<const NumberNode *>(node);
     std::string numStr(num->raw);
 
-    while (!numStr.empty() && !std::isdigit(numStr.back()) &&
-           numStr.back() != '.') {
-      numStr.pop_back();
+    bool isHex = false;
+    uint8_t radix = 10;
+    if (numStr.length() > 2 && numStr[0] == '0' &&
+        (numStr[1] == 'x' || numStr[1] == 'X')) {
+      isHex = true;
+      radix = 16;
+      numStr = numStr.substr(2); // Remove "0x"
+    }
+
+    while (!numStr.empty()) {
+      char back = numStr.back();
+      if (back == 'u' || back == 'U' || back == 'l' || back == 'L') {
+        numStr.pop_back();
+      } else if (!isHex && (back == 'f' || back == 'F')) {
+        numStr.pop_back();
+      } else {
+        break;
+      }
     }
 
     llvm::Type *llvmTy = num->exprType ? getLLVMType(num->exprType) : nullptr;
@@ -627,10 +731,10 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
     } else {
       if (llvmTy && llvmTy->isIntegerTy()) {
         auto *intTy = llvm::cast<llvm::IntegerType>(llvmTy);
-        return llvm::ConstantInt::get(intTy, llvm::StringRef(numStr), 10);
+        return llvm::ConstantInt::get(intTy, llvm::StringRef(numStr), radix);
       }
       return llvm::ConstantInt::get(builder.getInt32Ty(),
-                                    llvm::StringRef(numStr), 10);
+                                    llvm::StringRef(numStr), radix);
     }
   }
 
@@ -646,9 +750,25 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
 
   if (node->kind == NodeKind::Variable) {
     auto *varNode = static_cast<const VariableNode *>(node);
-    SymbolInfo sym = cgCtx.lookupDetailed(varNode->name);
+    std::string lookupName = std::string(varNode->name);
+
+    if (varNode->resolvedDecl &&
+        varNode->resolvedDecl->kind == NodeKind::VarDecl) {
+      auto *varDecl = static_cast<const VarDeclNode *>(varNode->resolvedDecl);
+      if (varDecl->isStatic && !varDecl->mangledName.empty()) {
+        lookupName = varDecl->mangledName;
+      }
+    }
+
+    SymbolInfo sym = cgCtx.lookupDetailed(lookupName);
 
     if (sym.value) {
+      /* Resolve scalar values directly from global variable initializers */
+      if (auto *gv = llvm::dyn_cast<llvm::GlobalVariable>(sym.value)) {
+        if (gv->isConstant() && gv->hasInitializer()) {
+          return gv->getInitializer();
+        }
+      }
       return llvm::dyn_cast<llvm::Constant>(sym.value);
     }
 
@@ -670,7 +790,17 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
 
     if (unNode->op == "&" && unNode->expr->kind == NodeKind::Variable) {
       auto *varNode = static_cast<const VariableNode *>(unNode->expr);
-      SymbolInfo sym = cgCtx.lookupDetailed(varNode->name);
+      std::string lookupName = std::string(varNode->name);
+
+      if (varNode->resolvedDecl &&
+          varNode->resolvedDecl->kind == NodeKind::VarDecl) {
+        auto *varDecl = static_cast<const VarDeclNode *>(varNode->resolvedDecl);
+        if (varDecl->isStatic && !varDecl->mangledName.empty()) {
+          lookupName = varDecl->mangledName;
+        }
+      }
+
+      SymbolInfo sym = cgCtx.lookupDetailed(lookupName);
       if (sym.value && llvm::isa<llvm::Constant>(sym.value)) {
         return llvm::cast<llvm::Constant>(sym.value);
       }
@@ -729,106 +859,115 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
                  bKind == BuiltinKind::UInt32 || bKind == BuiltinKind::UInt64);
           }
 
-          if (binNode->op == "+")
-            return llvm::ConstantInt::get(ctx, vL + vR);
-          if (binNode->op == "-")
-            return llvm::ConstantInt::get(ctx, vL - vR);
-          if (binNode->op == "*")
-            return llvm::ConstantInt::get(ctx, vL * vR);
-          if (binNode->op == "/") {
-            if (vR.isZero())
-              return nullptr;
-            return llvm::ConstantInt::get(ctx, isUnsigned ? vL.udiv(vR)
-                                                          : vL.sdiv(vR));
-          }
-          if (binNode->op == "%") {
-            if (vR.isZero())
-              return nullptr;
-            return llvm::ConstantInt::get(ctx, isUnsigned ? vL.urem(vR)
-                                                          : vL.srem(vR));
-          }
-          if (binNode->op == "&")
-            return llvm::ConstantInt::get(ctx, vL & vR);
-          if (binNode->op == "|")
-            return llvm::ConstantInt::get(ctx, vL | vR);
-          if (binNode->op == "^")
-            return llvm::ConstantInt::get(ctx, vL ^ vR);
-          if (binNode->op == "<<")
-            return llvm::ConstantInt::get(ctx, vL.shl(vR));
-          if (binNode->op == ">>")
-            return llvm::ConstantInt::get(ctx, isUnsigned ? vL.lshr(vR)
-                                                          : vL.ashr(vR));
-
           if (binNode->op == "&&")
             return llvm::ConstantInt::get(builder.getInt1Ty(),
                                           (vL != 0) && (vR != 0));
           if (binNode->op == "||")
             return llvm::ConstantInt::get(builder.getInt1Ty(),
                                           (vL != 0) || (vR != 0));
-          if (binNode->op == "==")
-            return llvm::ConstantInt::get(builder.getInt1Ty(), vL == vR);
-          if (binNode->op == "!=")
-            return llvm::ConstantInt::get(builder.getInt1Ty(), vL != vR);
-          if (binNode->op == "<")
-            return llvm::ConstantInt::get(builder.getInt1Ty(),
-                                          isUnsigned ? vL.ult(vR) : vL.slt(vR));
-          if (binNode->op == "<=")
-            return llvm::ConstantInt::get(builder.getInt1Ty(),
-                                          isUnsigned ? vL.ule(vR) : vL.sle(vR));
-          if (binNode->op == ">")
-            return llvm::ConstantInt::get(builder.getInt1Ty(),
-                                          isUnsigned ? vL.ugt(vR) : vL.sgt(vR));
-          if (binNode->op == ">=")
-            return llvm::ConstantInt::get(builder.getInt1Ty(),
-                                          isUnsigned ? vL.uge(vR) : vL.sge(vR));
+
+          auto opIt = binOpMap.find(binNode->op);
+          if (opIt != binOpMap.end()) {
+            switch (opIt->second) {
+            case BinOpCode::Add:
+              return llvm::ConstantInt::get(ctx, vL + vR);
+            case BinOpCode::Sub:
+              return llvm::ConstantInt::get(ctx, vL - vR);
+            case BinOpCode::Mul:
+              return llvm::ConstantInt::get(ctx, vL * vR);
+            case BinOpCode::Div:
+              if (vR.isZero())
+                return nullptr;
+              return llvm::ConstantInt::get(ctx, isUnsigned ? vL.udiv(vR)
+                                                            : vL.sdiv(vR));
+            case BinOpCode::Rem:
+              if (vR.isZero())
+                return nullptr;
+              return llvm::ConstantInt::get(ctx, isUnsigned ? vL.urem(vR)
+                                                            : vL.srem(vR));
+            case BinOpCode::And:
+              return llvm::ConstantInt::get(ctx, vL & vR);
+            case BinOpCode::Or:
+              return llvm::ConstantInt::get(ctx, vL | vR);
+            case BinOpCode::Xor:
+              return llvm::ConstantInt::get(ctx, vL ^ vR);
+            case BinOpCode::Shl:
+              return llvm::ConstantInt::get(ctx, vL.shl(vR));
+            case BinOpCode::Shr:
+              return llvm::ConstantInt::get(ctx, isUnsigned ? vL.lshr(vR)
+                                                            : vL.ashr(vR));
+            case BinOpCode::Eq:
+              return llvm::ConstantInt::get(builder.getInt1Ty(), vL == vR);
+            case BinOpCode::Ne:
+              return llvm::ConstantInt::get(builder.getInt1Ty(), vL != vR);
+            case BinOpCode::Lt:
+              return llvm::ConstantInt::get(
+                  builder.getInt1Ty(), isUnsigned ? vL.ult(vR) : vL.slt(vR));
+            case BinOpCode::Le:
+              return llvm::ConstantInt::get(
+                  builder.getInt1Ty(), isUnsigned ? vL.ule(vR) : vL.sle(vR));
+            case BinOpCode::Gt:
+              return llvm::ConstantInt::get(
+                  builder.getInt1Ty(), isUnsigned ? vL.ugt(vR) : vL.sgt(vR));
+            case BinOpCode::Ge:
+              return llvm::ConstantInt::get(
+                  builder.getInt1Ty(), isUnsigned ? vL.uge(vR) : vL.sge(vR));
+            }
+          }
         }
       } else if (auto *cfpL = llvm::dyn_cast<llvm::ConstantFP>(L)) {
         if (auto *cfpR = llvm::dyn_cast<llvm::ConstantFP>(R)) {
           llvm::APFloat vL = cfpL->getValueAPF();
           llvm::APFloat vR = cfpR->getValueAPF();
 
-          if (binNode->op == "+") {
-            vL.add(vR, llvm::APFloat::rmNearestTiesToEven);
-            return llvm::ConstantFP::get(ctx, vL);
+          auto opIt = binOpMap.find(binNode->op);
+          if (opIt != binOpMap.end()) {
+            switch (opIt->second) {
+            case BinOpCode::Add:
+              vL.add(vR, llvm::APFloat::rmNearestTiesToEven);
+              return llvm::ConstantFP::get(ctx, vL);
+            case BinOpCode::Sub:
+              vL.subtract(vR, llvm::APFloat::rmNearestTiesToEven);
+              return llvm::ConstantFP::get(ctx, vL);
+            case BinOpCode::Mul:
+              vL.multiply(vR, llvm::APFloat::rmNearestTiesToEven);
+              return llvm::ConstantFP::get(ctx, vL);
+            case BinOpCode::Div:
+              vL.divide(vR, llvm::APFloat::rmNearestTiesToEven);
+              return llvm::ConstantFP::get(ctx, vL);
+            case BinOpCode::Rem:
+              vL.mod(vR);
+              return llvm::ConstantFP::get(ctx, vL);
+            case BinOpCode::Eq:
+              return llvm::ConstantInt::get(builder.getInt1Ty(),
+                                            vL.compare(vR) ==
+                                                llvm::APFloat::cmpEqual);
+            case BinOpCode::Ne:
+              return llvm::ConstantInt::get(builder.getInt1Ty(),
+                                            vL.compare(vR) !=
+                                                llvm::APFloat::cmpEqual);
+            case BinOpCode::Lt:
+              return llvm::ConstantInt::get(builder.getInt1Ty(),
+                                            vL.compare(vR) ==
+                                                llvm::APFloat::cmpLessThan);
+            case BinOpCode::Le:
+              return llvm::ConstantInt::get(
+                  builder.getInt1Ty(),
+                  vL.compare(vR) == llvm::APFloat::cmpLessThan ||
+                      vL.compare(vR) == llvm::APFloat::cmpEqual);
+            case BinOpCode::Gt:
+              return llvm::ConstantInt::get(builder.getInt1Ty(),
+                                            vL.compare(vR) ==
+                                                llvm::APFloat::cmpGreaterThan);
+            case BinOpCode::Ge:
+              return llvm::ConstantInt::get(
+                  builder.getInt1Ty(),
+                  vL.compare(vR) == llvm::APFloat::cmpGreaterThan ||
+                      vL.compare(vR) == llvm::APFloat::cmpEqual);
+            default:
+              break;
+            }
           }
-          if (binNode->op == "-") {
-            vL.subtract(vR, llvm::APFloat::rmNearestTiesToEven);
-            return llvm::ConstantFP::get(ctx, vL);
-          }
-          if (binNode->op == "*") {
-            vL.multiply(vR, llvm::APFloat::rmNearestTiesToEven);
-            return llvm::ConstantFP::get(ctx, vL);
-          }
-          if (binNode->op == "/") {
-            vL.divide(vR, llvm::APFloat::rmNearestTiesToEven);
-            return llvm::ConstantFP::get(ctx, vL);
-          }
-          if (binNode->op == "%") {
-            vL.mod(vR);
-            return llvm::ConstantFP::get(ctx, vL);
-          }
-
-          auto cmp = vL.compare(vR);
-          if (binNode->op == "==")
-            return llvm::ConstantInt::get(builder.getInt1Ty(),
-                                          cmp == llvm::APFloat::cmpEqual);
-          if (binNode->op == "!=")
-            return llvm::ConstantInt::get(builder.getInt1Ty(),
-                                          cmp != llvm::APFloat::cmpEqual);
-          if (binNode->op == "<")
-            return llvm::ConstantInt::get(builder.getInt1Ty(),
-                                          cmp == llvm::APFloat::cmpLessThan);
-          if (binNode->op == "<=")
-            return llvm::ConstantInt::get(builder.getInt1Ty(),
-                                          cmp == llvm::APFloat::cmpLessThan ||
-                                              cmp == llvm::APFloat::cmpEqual);
-          if (binNode->op == ">")
-            return llvm::ConstantInt::get(builder.getInt1Ty(),
-                                          cmp == llvm::APFloat::cmpGreaterThan);
-          if (binNode->op == ">=")
-            return llvm::ConstantInt::get(
-                builder.getInt1Ty(), cmp == llvm::APFloat::cmpGreaterThan ||
-                                         cmp == llvm::APFloat::cmpEqual);
         }
       }
     }
@@ -854,7 +993,8 @@ llvm::Value *CodeGen::visit(const ImplicitCastNode *node) {
 
   const Type *unqual = objectType->getUnqualifiedType();
   if (unqual->getKind() == TypeKind::Class ||
-      unqual->getKind() == TypeKind::Struct) {
+      unqual->getKind() == TypeKind::Struct ||
+      unqual->getKind() == TypeKind::Union) {
     auto *recTy = static_cast<const RecordType *>(unqual);
     if (auto *decl = recTy->getDeclaration()) {
       const FunctionDeclNode *dtor = nullptr;
@@ -862,6 +1002,8 @@ llvm::Value *CodeGen::visit(const ImplicitCastNode *node) {
         dtor = static_cast<const ClassDeclNode *>(decl)->destructor;
       else if (decl->kind == NodeKind::StructDecl)
         dtor = static_cast<const StructDeclNode *>(decl)->destructor;
+      else if (decl->kind == NodeKind::UnionDecl)
+        dtor = static_cast<const UnionDeclNode *>(decl)->destructor;
 
       if (dtor) {
         cgCtx.addCleanup(temp, dtor);
@@ -976,6 +1118,10 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
           builder.CreateLoad(builder.getPtrTy(), thisAddr, "this.val");
       llvm::Type *llvmBaseTy = getLLVMType(varNode->parentType);
 
+      if (varNode->parentType->getKind() == TypeKind::Union) {
+        return thisPtr;
+      }
+
       return builder.CreateStructGEP(llvmBaseTy, thisPtr, varNode->fieldIndex,
                                      varNode->name);
     }
@@ -992,8 +1138,10 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
     SymbolInfo sym = cgCtx.lookupDetailed(lookupName);
 
     if (!sym.value) {
-      std::cerr << "[CodeGen Error] Unbound symbol in l-value resolution: '"
-                << lookupName << "'.\n";
+      diags.report(
+          {DiagLevel::Error, varNode->line, varNode->column, varNode->length,
+           "Unbound symbol in l-value resolution: '" + lookupName + "'.",
+           currentFilePath});
       return nullptr;
     }
 
@@ -1015,7 +1163,7 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
       SymbolInfo sym = cgCtx.lookupDetailed(gName);
       if (!sym.value) {
         diags.report({DiagLevel::Error, node->line, node->column, node->length,
-                      "Unbound static field.", ""});
+                      "Unbound static field.", currentFilePath});
         return nullptr;
       }
       return sym.value;
@@ -1039,8 +1187,22 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
       baseTy = static_cast<const ReferenceType *>(baseTy)->getPointeeType();
 
     llvm::Type *llvmBaseTy = getLLVMType(baseTy);
-    return builder.CreateStructGEP(llvmBaseTy, objPtr, maNode->fieldIndex,
-                                   maNode->memberName);
+    llvm::Value *gep = objPtr;
+
+    if (baseTy->getKind() != TypeKind::Union) {
+      gep = builder.CreateStructGEP(llvmBaseTy, objPtr, maNode->fieldIndex,
+                                    maNode->memberName);
+    }
+
+    if (node->exprType->getKind() == TypeKind::Array) {
+      llvm::Type *arrTy = getLLVMType(node->exprType);
+      return builder.CreateInBoundsGEP(
+          arrTy, gep, {builder.getInt32(0), builder.getInt32(0)});
+    }
+
+    /* Return the memory address (pointer) directly for valid L-Value
+     * assignments */
+    return gep;
   }
 
   if (node->kind == NodeKind::UnaryOp) {
@@ -1062,11 +1224,7 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
 llvm::Value *CodeGen::visit(const BlockNode *node) {
   CGScopeGuard guard(cgCtx);
 
-  if (emitDebugInfo && !lexicalBlocks.empty()) {
-    llvm::DILexicalBlock *block = dBuilder->createLexicalBlock(
-        lexicalBlocks.back(), diFile, node->line, node->column);
-    lexicalBlocks.push_back(block);
-  }
+  diEmitter.pushLexicalBlock(node, ctx);
 
   for (const auto *stmt : node->statements) {
     dispatch(stmt);
@@ -1079,18 +1237,32 @@ llvm::Value *CodeGen::visit(const BlockNode *node) {
     emitScopeCleanups();
   }
 
-  if (emitDebugInfo) {
-    lexicalBlocks.pop_back();
-  }
+  diEmitter.popLexicalBlock();
 
   return nullptr;
 }
 
 llvm::Value *CodeGen::visit(const NumberNode *node) {
   std::string numStr(node->raw);
-  while (!numStr.empty() && !std::isdigit(numStr.back()) &&
-         numStr.back() != '.') {
-    numStr.pop_back();
+
+  bool isHex = false;
+  uint8_t radix = 10;
+  if (numStr.length() > 2 && numStr[0] == '0' &&
+      (numStr[1] == 'x' || numStr[1] == 'X')) {
+    isHex = true;
+    radix = 16;
+    numStr = numStr.substr(2); // Remove "0x"
+  }
+
+  while (!numStr.empty()) {
+    char back = numStr.back();
+    if (back == 'u' || back == 'U' || back == 'l' || back == 'L') {
+      numStr.pop_back();
+    } else if (!isHex && (back == 'f' || back == 'F')) {
+      numStr.pop_back();
+    } else {
+      break;
+    }
   }
 
   llvm::Type *llvmTy = node->exprType ? getLLVMType(node->exprType) : nullptr;
@@ -1104,10 +1276,10 @@ llvm::Value *CodeGen::visit(const NumberNode *node) {
 
   if (llvmTy && llvmTy->isIntegerTy()) {
     auto *intTy = llvm::cast<llvm::IntegerType>(llvmTy);
-    return llvm::ConstantInt::get(intTy, llvm::StringRef(numStr), 10);
+    return llvm::ConstantInt::get(intTy, llvm::StringRef(numStr), radix);
   }
   return llvm::ConstantInt::get(builder.getInt32Ty(), llvm::StringRef(numStr),
-                                10);
+                                radix);
 }
 
 llvm::Value *CodeGen::visit(const BoolNode *node) {
@@ -1127,6 +1299,34 @@ llvm::Value *CodeGen::visit(const RuneNode *node) {
 llvm::Value *CodeGen::visit(const StringNode *node) {
   return builder.CreateGlobalString(
       llvm::StringRef(node->value.data(), node->value.length()), ".str");
+}
+
+llvm::Value *CodeGen::visit(const UnionDeclNode *node) {
+  if (node->isTemplate)
+    return nullptr;
+
+  if (node->recordType) {
+    getLLVMType(node->recordType);
+  }
+
+  if (node->isOpaque)
+    return nullptr;
+
+  for (const auto *field : node->fields) {
+    if (field->isStatic)
+      dispatch(field);
+  }
+
+  for (const auto *ctor : node->constructors)
+    dispatch(ctor);
+  if (node->destructor)
+    dispatch(node->destructor);
+
+  for (const auto *method : node->methods) {
+    dispatch(method);
+  }
+
+  return nullptr;
 }
 
 llvm::Value *CodeGen::visit(const StructDeclNode *node) {
@@ -1189,6 +1389,10 @@ llvm::Value *CodeGen::visit(const EnumDeclNode *node) { return nullptr; }
 
 llvm::Value *CodeGen::visit(const EnumMemberNode *node) { return nullptr; }
 
+llvm::Value *CodeGen::visit(const TypeLiteralNode *node) {
+  return llvm::UndefValue::get(builder.getInt8Ty());
+}
+
 llvm::Value *CodeGen::visit(const VariableNode *node) {
   if (node->isField) {
     SymbolInfo sym = cgCtx.lookupDetailed("this");
@@ -1198,10 +1402,15 @@ llvm::Value *CodeGen::visit(const VariableNode *node) {
         builder.CreateLoad(builder.getPtrTy(), thisAddr, "this.val");
 
     llvm::Type *llvmBaseTy = getLLVMType(node->parentType);
-    llvm::Value *gep = builder.CreateStructGEP(llvmBaseTy, thisPtr,
-                                               node->fieldIndex, node->name);
+    llvm::Value *gep = thisPtr;
+
+    if (node->parentType->getKind() != TypeKind::Union) {
+      gep = builder.CreateStructGEP(llvmBaseTy, thisPtr, node->fieldIndex,
+                                    node->name);
+    }
     return createTBAALoad(getLLVMType(node->exprType), gep,
-                          getTBAATagForExpr(node), node->name);
+                          tbaaManager.getTBAATagForExpr(*this, node),
+                          node->name);
   }
 
   /* Return direct pointer evaluation if identifier statically targets a
@@ -1250,7 +1459,8 @@ llvm::Value *CodeGen::visit(const MemberAccessNode *node) {
     if (!sym.value)
       return nullptr;
     return createTBAALoad(getLLVMType(node->exprType), sym.value,
-                          getTBAATagForExpr(node), node->memberName);
+                          tbaaManager.getTBAATagForExpr(*this, node),
+                          node->memberName);
   }
 
   llvm::Value *objPtr = nullptr;
@@ -1271,10 +1481,13 @@ llvm::Value *CodeGen::visit(const MemberAccessNode *node) {
     baseTy = static_cast<const ReferenceType *>(baseTy)->getPointeeType();
 
   llvm::Type *llvmBaseTy = getLLVMType(baseTy);
-  llvm::Value *gep = builder.CreateStructGEP(
-      llvmBaseTy, objPtr, node->fieldIndex, node->memberName);
+  llvm::Value *gep = objPtr;
 
-  /* Automatic array-to-pointer decay on record fields */
+  if (baseTy->getKind() != TypeKind::Union) {
+    gep = builder.CreateStructGEP(llvmBaseTy, objPtr, node->fieldIndex,
+                                  node->memberName);
+  }
+
   if (node->exprType->getKind() == TypeKind::Array) {
     llvm::Type *arrTy = getLLVMType(node->exprType);
     return builder.CreateInBoundsGEP(
@@ -1282,7 +1495,8 @@ llvm::Value *CodeGen::visit(const MemberAccessNode *node) {
   }
 
   return createTBAALoad(getLLVMType(node->exprType), gep,
-                        getTBAATagForExpr(node), node->memberName);
+                        tbaaManager.getTBAATagForExpr(*this, node),
+                        node->memberName);
 }
 
 llvm::Value *CodeGen::visit(const IfNode *node) {
@@ -1456,7 +1670,7 @@ llvm::Value *CodeGen::visit(const SwitchNode *node) {
         diags.report({DiagLevel::Error, c->value->line, c->value->column,
                       c->value->length,
                       "Case value must evaluate to a compile-time constant",
-                      ""});
+                      currentFilePath});
         return nullptr;
       }
 
@@ -1466,7 +1680,7 @@ llvm::Value *CodeGen::visit(const SwitchNode *node) {
         diags.report({DiagLevel::Error, c->value->line, c->value->column,
                       c->value->length,
                       "Switch cases only support integer and enum constants",
-                      ""});
+                      currentFilePath});
         return nullptr;
       }
     }
@@ -1563,7 +1777,7 @@ llvm::Value *CodeGen::visit(const UnaryOpNode *node) {
     llvm::Value *ptr = dispatch(node->expr);
     if (!ptr) {
       diags.report({DiagLevel::Error, node->line, node->column, node->length,
-                    "Invalid operand for dereference.", ""});
+                    "Invalid operand for dereference.", currentFilePath});
       return nullptr;
     }
     llvm::Type *loadTy = getLLVMType(node->exprType);
@@ -1573,7 +1787,7 @@ llvm::Value *CodeGen::visit(const UnaryOpNode *node) {
     llvm::Value *val = dispatch(node->expr);
     if (!val) {
       diags.report({DiagLevel::Error, node->line, node->column, node->length,
-                    "Invalid operand for unary minus.", ""});
+                    "Invalid operand for unary minus.", currentFilePath});
       return nullptr;
     }
     if (val->getType()->isFloatingPointTy()) {
@@ -1590,7 +1804,8 @@ llvm::Value *CodeGen::visit(const UnaryOpNode *node) {
     if (!lval) {
       diags.report(
           {DiagLevel::Error, node->line, node->column, node->length,
-           "Invalid operand for " + std::string(node->op) + " operator.", ""});
+           "Invalid operand for " + std::string(node->op) + " operator.",
+           currentFilePath});
       return nullptr;
     }
 
@@ -1611,7 +1826,8 @@ llvm::Value *CodeGen::visit(const UnaryOpNode *node) {
         newVal = builder.CreateSub(oldVal, llvm::ConstantInt::get(valTy, 1));
     }
 
-    createTBAAStore(newVal, lval, getTBAATagForExpr(node->expr));
+    createTBAAStore(newVal, lval,
+                    tbaaManager.getTBAATagForExpr(*this, node->expr));
 
     return node->isPostfix ? oldVal : newVal;
   }
@@ -1751,7 +1967,7 @@ llvm::Value *CodeGen::visit(const BinaryOpNode *node) {
 
   if (!L || !R) {
     diags.report({DiagLevel::Error, node->line, node->column, node->length,
-                  "Failed to generate binary operands.", ""});
+                  "Failed to generate binary operands.", currentFilePath});
     return nullptr;
   }
 
@@ -1792,51 +2008,55 @@ llvm::Value *CodeGen::visit(const BinaryOpNode *node) {
                   bKind == BuiltinKind::UInt32 || bKind == BuiltinKind::UInt64);
   }
 
-  if (node->op == "+")
-    return isFloat ? builder.CreateFAdd(L, R) : builder.CreateAdd(L, R);
-  if (node->op == "-")
-    return isFloat ? builder.CreateFSub(L, R) : builder.CreateSub(L, R);
-  if (node->op == "*")
-    return isFloat ? builder.CreateFMul(L, R) : builder.CreateMul(L, R);
-  if (node->op == "/")
-    return isFloat ? builder.CreateFDiv(L, R)
-                   : (isUnsigned ? builder.CreateUDiv(L, R)
-                                 : builder.CreateSDiv(L, R));
-  if (node->op == "%")
-    return isFloat ? builder.CreateFRem(L, R)
-                   : (isUnsigned ? builder.CreateURem(L, R)
-                                 : builder.CreateSRem(L, R));
-  if (node->op == "&")
-    return builder.CreateAnd(L, R);
-  if (node->op == "|")
-    return builder.CreateOr(L, R);
-  if (node->op == "^")
-    return builder.CreateXor(L, R);
-  if (node->op == "<<")
-    return builder.CreateShl(L, R);
-  if (node->op == ">>")
-    return isUnsigned ? builder.CreateLShr(L, R) : builder.CreateAShr(L, R);
-
-  if (node->op == "==")
-    return isFloat ? builder.CreateFCmpOEQ(L, R) : builder.CreateICmpEQ(L, R);
-  if (node->op == "!=")
-    return isFloat ? builder.CreateFCmpONE(L, R) : builder.CreateICmpNE(L, R);
-  if (node->op == "<")
-    return isFloat ? builder.CreateFCmpOLT(L, R)
-                   : (isUnsigned ? builder.CreateICmpULT(L, R)
-                                 : builder.CreateICmpSLT(L, R));
-  if (node->op == "<=")
-    return isFloat ? builder.CreateFCmpOLE(L, R)
-                   : (isUnsigned ? builder.CreateICmpULE(L, R)
-                                 : builder.CreateICmpSLE(L, R));
-  if (node->op == ">")
-    return isFloat ? builder.CreateFCmpOGT(L, R)
-                   : (isUnsigned ? builder.CreateICmpUGT(L, R)
-                                 : builder.CreateICmpSGT(L, R));
-  if (node->op == ">=")
-    return isFloat ? builder.CreateFCmpOGE(L, R)
-                   : (isUnsigned ? builder.CreateICmpUGE(L, R)
-                                 : builder.CreateICmpSGE(L, R));
+  auto opIt = binOpMap.find(node->op);
+  if (opIt != binOpMap.end()) {
+    switch (opIt->second) {
+    case BinOpCode::Add:
+      return isFloat ? builder.CreateFAdd(L, R) : builder.CreateAdd(L, R);
+    case BinOpCode::Sub:
+      return isFloat ? builder.CreateFSub(L, R) : builder.CreateSub(L, R);
+    case BinOpCode::Mul:
+      return isFloat ? builder.CreateFMul(L, R) : builder.CreateMul(L, R);
+    case BinOpCode::Div:
+      return isFloat ? builder.CreateFDiv(L, R)
+                     : (isUnsigned ? builder.CreateUDiv(L, R)
+                                   : builder.CreateSDiv(L, R));
+    case BinOpCode::Rem:
+      return isFloat ? builder.CreateFRem(L, R)
+                     : (isUnsigned ? builder.CreateURem(L, R)
+                                   : builder.CreateSRem(L, R));
+    case BinOpCode::And:
+      return builder.CreateAnd(L, R);
+    case BinOpCode::Or:
+      return builder.CreateOr(L, R);
+    case BinOpCode::Xor:
+      return builder.CreateXor(L, R);
+    case BinOpCode::Shl:
+      return builder.CreateShl(L, R);
+    case BinOpCode::Shr:
+      return isUnsigned ? builder.CreateLShr(L, R) : builder.CreateAShr(L, R);
+    case BinOpCode::Eq:
+      return isFloat ? builder.CreateFCmpOEQ(L, R) : builder.CreateICmpEQ(L, R);
+    case BinOpCode::Ne:
+      return isFloat ? builder.CreateFCmpONE(L, R) : builder.CreateICmpNE(L, R);
+    case BinOpCode::Lt:
+      return isFloat ? builder.CreateFCmpOLT(L, R)
+                     : (isUnsigned ? builder.CreateICmpULT(L, R)
+                                   : builder.CreateICmpSLT(L, R));
+    case BinOpCode::Le:
+      return isFloat ? builder.CreateFCmpOLE(L, R)
+                     : (isUnsigned ? builder.CreateICmpULE(L, R)
+                                   : builder.CreateICmpSLE(L, R));
+    case BinOpCode::Gt:
+      return isFloat ? builder.CreateFCmpOGT(L, R)
+                     : (isUnsigned ? builder.CreateICmpUGT(L, R)
+                                   : builder.CreateICmpSGT(L, R));
+    case BinOpCode::Ge:
+      return isFloat ? builder.CreateFCmpOGE(L, R)
+                     : (isUnsigned ? builder.CreateICmpUGE(L, R)
+                                   : builder.CreateICmpSGE(L, R));
+    }
+  }
 
   return nullptr;
 }
@@ -1855,14 +2075,16 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
   }
 
   if (elemTyForAlign->getKind() == TypeKind::Struct ||
-      elemTyForAlign->getKind() == TypeKind::Class) {
+      elemTyForAlign->getKind() == TypeKind::Class ||
+      elemTyForAlign->getKind() == TypeKind::Union) {
     if (const DeclNode *decl =
             static_cast<const RecordType *>(elemTyForAlign)->getDeclaration()) {
       for (const auto *ann : decl->annotations) {
         if (ann->name == "align" && !ann->args.empty() &&
             ann->args[0]->kind == NodeKind::Number) {
           uint64_t typeAlign = std::stoull(
-              std::string(static_cast<const NumberNode *>(ann->args[0])->raw));
+              std::string(static_cast<const NumberNode *>(ann->args[0])->raw),
+              nullptr, 0);
           if (typeAlign > customAlign) {
             customAlign = typeAlign;
           }
@@ -1875,7 +2097,8 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
     if (ann->name == "align" && !ann->args.empty() &&
         ann->args[0]->kind == NodeKind::Number) {
       uint64_t varAlign = std::stoull(
-          std::string(static_cast<const NumberNode *>(ann->args[0])->raw));
+          std::string(static_cast<const NumberNode *>(ann->args[0])->raw),
+          nullptr, 0);
       if (varAlign > customAlign) {
         customAlign = varAlign;
       }
@@ -1888,7 +2111,7 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
       diags.report({DiagLevel::Error, node->line, node->column, node->length,
                     "Reference '" + std::string(node->varName) +
                         "' lacks an initializer.",
-                    ""});
+                    currentFilePath});
       return nullptr;
     }
 
@@ -1901,7 +2124,8 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
 
     if (isGlobal) {
       diags.report({DiagLevel::Error, node->line, node->column, node->length,
-                    "Dynamic global references are not supported.", ""});
+                    "Dynamic global references are not supported.",
+                    currentFilePath});
       return nullptr;
     }
 
@@ -1917,17 +2141,7 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
     emitLifetimeStart(alloca, allocSize);
     cgCtx.addLifetime(alloca, allocSize);
 
-    if (emitDebugInfo && !lexicalBlocks.empty()) {
-      auto *diTy = getDIType(node->type);
-      llvm::DILocalVariable *dVar = dBuilder->createAutoVariable(
-          lexicalBlocks.back(), std::string(node->varName), diFile, node->line,
-          diTy);
-      dBuilder->insertDeclare(alloca, dVar, dBuilder->createExpression(),
-                              llvm::DILocation::get(ctx, node->line,
-                                                    node->column,
-                                                    lexicalBlocks.back()),
-                              builder.GetInsertBlock());
-    }
+    diEmitter.emitLocalVariable(*this, builder, alloca, node);
 
     createTBAAStore(initAddr, alloca, node->type);
     cgCtx.bind(node->varName, alloca, false);
@@ -1974,7 +2188,7 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
             {DiagLevel::Error, node->initializer->line,
              node->initializer->column, node->initializer->length,
              "Global variable requires a compile-time constant initializer.",
-             ""});
+             currentFilePath});
       }
     }
 
@@ -1986,20 +2200,20 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
     std::string bindName = node->mangledName.empty()
                                ? std::string(node->varName)
                                : node->mangledName;
-    auto *gvar = new llvm::GlobalVariable(mod, ty, isConstant,
-                                          llvm::GlobalValue::ExternalLinkage,
+
+    /* Apply weak linkage if the global variable is annotated with @weak */
+    llvm::GlobalValue::LinkageTypes linkage =
+        node->isWeak ? llvm::GlobalValue::WeakAnyLinkage
+                     : llvm::GlobalValue::ExternalLinkage;
+
+    auto *gvar = new llvm::GlobalVariable(mod, ty, isConstant, linkage,
                                           initConst, bindName);
 
     if (customAlign > 0) {
       gvar->setAlignment(llvm::Align(customAlign));
     }
 
-    if (emitDebugInfo) {
-      auto *diTy = getDIType(node->type);
-      auto *gve = dBuilder->createGlobalVariableExpression(
-          diCU, bindName, bindName, diFile, node->line, diTy, false);
-      gvar->addDebugInfo(gve);
-    }
+    diEmitter.emitGlobalVariable(*this, gvar, node, bindName);
 
     cgCtx.bind(bindName, gvar, true);
     return gvar;
@@ -2012,16 +2226,7 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
     alloca->setAlignment(llvm::Align(customAlign));
   }
 
-  if (emitDebugInfo && !lexicalBlocks.empty()) {
-    auto *diTy = getDIType(node->type);
-    llvm::DILocalVariable *dVar = dBuilder->createAutoVariable(
-        lexicalBlocks.back(), std::string(node->varName), diFile, node->line,
-        diTy);
-    dBuilder->insertDeclare(alloca, dVar, dBuilder->createExpression(),
-                            llvm::DILocation::get(ctx, node->line, node->column,
-                                                  lexicalBlocks.back()),
-                            builder.GetInsertBlock());
-  }
+  diEmitter.emitLocalVariable(*this, builder, alloca, node);
 
   cgCtx.bind(node->varName, alloca, true);
 
@@ -2031,7 +2236,8 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
 
   const auto *unqualTy = node->type->getUnqualifiedType();
   if (unqualTy->getKind() == TypeKind::Class ||
-      unqualTy->getKind() == TypeKind::Struct) {
+      unqualTy->getKind() == TypeKind::Struct ||
+      unqualTy->getKind() == TypeKind::Union) {
     auto *recTy = static_cast<const RecordType *>(unqualTy);
     auto *decl = recTy->getDeclaration();
     const FunctionDeclNode *dtor = nullptr;
@@ -2040,6 +2246,8 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
         dtor = static_cast<const ClassDeclNode *>(decl)->destructor;
       else if (decl->kind == NodeKind::StructDecl)
         dtor = static_cast<const StructDeclNode *>(decl)->destructor;
+      else if (decl->kind == NodeKind::UnionDecl)
+        dtor = static_cast<const UnionDeclNode *>(decl)->destructor;
     }
     if (dtor) {
       cgCtx.addCleanup(alloca, dtor);
@@ -2066,7 +2274,8 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
 
       if (!isRVO) {
         bool isAggregate = (unqualTy->getKind() == TypeKind::Struct ||
-                            unqualTy->getKind() == TypeKind::Class);
+                            unqualTy->getKind() == TypeKind::Class ||
+                            unqualTy->getKind() == TypeKind::Union);
 
         if (isAggregate && node->copyCtor) {
           llvm::Value *rvalAddr = getLValue(node->initializer);
@@ -2087,9 +2296,10 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
             llvm::Function *ctorFunc = getOrCreateFunction(node->copyCtor);
             builder.CreateCall(ctorFunc, {alloca, rvalAddr});
           } else {
-            diags.report(
-                {DiagLevel::Error, node->line, node->column, node->length,
-                 "Failed to resolve source for copy constructor.", ""});
+            diags.report({DiagLevel::Error, node->line, node->column,
+                          node->length,
+                          "Failed to resolve source for copy constructor.",
+                          currentFilePath});
           }
         } else if (isAggregate) {
           /* Fallback generic memcpy for records lacking a custom destructor */
@@ -2106,7 +2316,7 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
             } else {
               diags.report({DiagLevel::Error, node->line, node->column,
                             node->length, "Initialization failed for variable.",
-                            ""});
+                            currentFilePath});
             }
           }
         } else {
@@ -2119,7 +2329,7 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
           } else {
             diags.report({DiagLevel::Error, node->line, node->column,
                           node->length, "Initialization failed for variable.",
-                          ""});
+                          currentFilePath});
           }
         }
       }
@@ -2130,7 +2340,8 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
       emitDefaultInitialization(alloca, node->type);
 
       if (unqualTy->getKind() == TypeKind::Class ||
-          unqualTy->getKind() == TypeKind::Struct) {
+          unqualTy->getKind() == TypeKind::Struct ||
+          unqualTy->getKind() == TypeKind::Union) {
         auto *recTy = static_cast<const RecordType *>(unqualTy);
         auto *decl = recTy->getDeclaration();
         if (decl) {
@@ -2140,6 +2351,8 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
             ctors = static_cast<const ClassDeclNode *>(decl)->constructors;
           else if (decl->kind == NodeKind::StructDecl)
             ctors = static_cast<const StructDeclNode *>(decl)->constructors;
+          else if (decl->kind == NodeKind::UnionDecl)
+            ctors = static_cast<const UnionDeclNode *>(decl)->constructors;
 
           for (auto *ctor : ctors) {
             if (ctor->params.empty()) {
@@ -2169,7 +2382,8 @@ llvm::Value *CodeGen::visit(const AssignNode *node) {
 
     if (!objPtr) {
       diags.report({DiagLevel::Error, node->target->line, node->target->column,
-                    node->target->length, "LHS is not an l-value", ""});
+                    node->target->length, "LHS is not an l-value",
+                    currentFilePath});
       return nullptr;
     }
 
@@ -2218,7 +2432,7 @@ llvm::Value *CodeGen::visit(const AssignNode *node) {
   if (!lval) {
     diags.report({DiagLevel::Error, node->target->line, node->target->column,
                   node->target->length, "Failed to evaluate LHS of assignment.",
-                  ""});
+                  currentFilePath});
     return nullptr;
   }
 
@@ -2228,8 +2442,9 @@ llvm::Value *CodeGen::visit(const AssignNode *node) {
       if (callNode->resolvedFunc && callNode->resolvedFunc->isMethod &&
           callNode->resolvedFunc->returnType->isVoid()) {
         emitConstructorCall(callNode, lval);
-        return createTBAALoad(getLLVMType(node->exprType), lval,
-                              getTBAATagForExpr(node->target));
+        return createTBAALoad(
+            getLLVMType(node->exprType), lval,
+            tbaaManager.getTBAATagForExpr(*this, node->target));
       }
     }
   }
@@ -2237,6 +2452,7 @@ llvm::Value *CodeGen::visit(const AssignNode *node) {
   const Type *unqualTargetTy = node->target->exprType->getUnqualifiedType();
   bool isAggregate = (unqualTargetTy->getKind() == TypeKind::Struct ||
                       unqualTargetTy->getKind() == TypeKind::Class ||
+                      unqualTargetTy->getKind() == TypeKind::Union ||
                       unqualTargetTy->getKind() == TypeKind::Array);
 
   /* Map assignment to deep memory copy for aggregate types to preserve locality
@@ -2259,7 +2475,7 @@ llvm::Value *CodeGen::visit(const AssignNode *node) {
   if (!rval) {
     diags.report({DiagLevel::Error, node->value->line, node->value->column,
                   node->value->length, "Failed to evaluate RHS of assignment.",
-                  ""});
+                  currentFilePath});
     return nullptr;
   }
 
@@ -2280,40 +2496,56 @@ llvm::Value *CodeGen::visit(const AssignNode *node) {
            bKind == BuiltinKind::UInt32 || bKind == BuiltinKind::UInt64);
     }
 
-    if (binOp == "+")
-      rval = isFloat ? builder.CreateFAdd(oldVal, castedRval)
-                     : builder.CreateAdd(oldVal, castedRval);
-    else if (binOp == "-")
-      rval = isFloat ? builder.CreateFSub(oldVal, castedRval)
-                     : builder.CreateSub(oldVal, castedRval);
-    else if (binOp == "*")
-      rval = isFloat ? builder.CreateFMul(oldVal, castedRval)
-                     : builder.CreateMul(oldVal, castedRval);
-    else if (binOp == "/")
-      rval = isFloat ? builder.CreateFDiv(oldVal, castedRval)
-                     : (isUnsigned ? builder.CreateUDiv(oldVal, castedRval)
-                                   : builder.CreateSDiv(oldVal, castedRval));
-    else if (binOp == "%")
-      rval = isFloat ? builder.CreateFRem(oldVal, castedRval)
-                     : (isUnsigned ? builder.CreateURem(oldVal, castedRval)
-                                   : builder.CreateSRem(oldVal, castedRval));
-    else if (binOp == "&")
-      rval = builder.CreateAnd(oldVal, castedRval);
-    else if (binOp == "|")
-      rval = builder.CreateOr(oldVal, castedRval);
-    else if (binOp == "^")
-      rval = builder.CreateXor(oldVal, castedRval);
-    else if (binOp == "<<")
-      rval = builder.CreateShl(oldVal, castedRval);
-    else if (binOp == ">>")
-      rval = isUnsigned ? builder.CreateLShr(oldVal, castedRval)
-                        : builder.CreateAShr(oldVal, castedRval);
+    auto opIt = assignOpMap.find(binOp);
+    if (opIt != assignOpMap.end()) {
+      switch (opIt->second) {
+      case AssignOpCode::Add:
+        rval = isFloat ? builder.CreateFAdd(oldVal, castedRval)
+                       : builder.CreateAdd(oldVal, castedRval);
+        break;
+      case AssignOpCode::Sub:
+        rval = isFloat ? builder.CreateFSub(oldVal, castedRval)
+                       : builder.CreateSub(oldVal, castedRval);
+        break;
+      case AssignOpCode::Mul:
+        rval = isFloat ? builder.CreateFMul(oldVal, castedRval)
+                       : builder.CreateMul(oldVal, castedRval);
+        break;
+      case AssignOpCode::Div:
+        rval = isFloat ? builder.CreateFDiv(oldVal, castedRval)
+                       : (isUnsigned ? builder.CreateUDiv(oldVal, castedRval)
+                                     : builder.CreateSDiv(oldVal, castedRval));
+        break;
+      case AssignOpCode::Rem:
+        rval = isFloat ? builder.CreateFRem(oldVal, castedRval)
+                       : (isUnsigned ? builder.CreateURem(oldVal, castedRval)
+                                     : builder.CreateSRem(oldVal, castedRval));
+        break;
+      case AssignOpCode::And:
+        rval = builder.CreateAnd(oldVal, castedRval);
+        break;
+      case AssignOpCode::Or:
+        rval = builder.CreateOr(oldVal, castedRval);
+        break;
+      case AssignOpCode::Xor:
+        rval = builder.CreateXor(oldVal, castedRval);
+        break;
+      case AssignOpCode::Shl:
+        rval = builder.CreateShl(oldVal, castedRval);
+        break;
+      case AssignOpCode::Shr:
+        rval = isUnsigned ? builder.CreateLShr(oldVal, castedRval)
+                          : builder.CreateAShr(oldVal, castedRval);
+        break;
+      }
+    }
   } else {
     llvm::Type *destTy = getLLVMType(node->target->exprType);
     rval = createImplicitCast(rval, destTy);
   }
 
-  createTBAAStore(rval, lval, getTBAATagForExpr(node->target));
+  createTBAAStore(rval, lval,
+                  tbaaManager.getTBAATagForExpr(*this, node->target));
 
   return rval;
 }
@@ -2345,28 +2577,7 @@ llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
   const FunctionDeclNode *prevFunc = currentFunc;
   currentFunc = node;
 
-  if (emitDebugInfo && diFile) {
-    std::vector<llvm::Metadata *> paramTys;
-    paramTys.push_back(getDIType(node->returnType));
-    if (node->isMethod && !node->isExtern && !node->isStatic &&
-        node->parentRecord) {
-      paramTys.push_back(
-          dBuilder->createPointerType(getDIType(node->parentRecord), 64));
-    }
-    for (const auto *p : node->params)
-      paramTys.push_back(getDIType(p->type));
-
-    llvm::DISubroutineType *diFuncTy = dBuilder->createSubroutineType(
-        dBuilder->getOrCreateTypeArray(paramTys));
-
-    llvm::DISubprogram *sp = dBuilder->createFunction(
-        diFile, node->name, func->getName(), diFile, node->line, diFuncTy,
-        node->line, llvm::DINode::FlagPrototyped,
-        llvm::DISubprogram::SPFlagDefinition);
-    func->setSubprogram(sp);
-    lexicalBlocks.push_back(sp);
-    emitLocation(node);
-  }
+  diEmitter.emitFunctionStart(*this, func, node);
 
   llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", func);
   builder.SetInsertPoint(entry);
@@ -2384,17 +2595,19 @@ llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
     builder.CreateStore(&*argIt, alloca);
     cgCtx.bind("this", alloca, true);
 
-    if (emitDebugInfo) {
-      auto *diTy =
-          dBuilder->createPointerType(getDIType(node->parentRecord), 64);
-      llvm::DILocalVariable *dVar = dBuilder->createParameterVariable(
-          lexicalBlocks.back(), "this", 1, diFile, node->line, diTy,
-          llvm::DINode::FlagArtificial | llvm::DINode::FlagObjectPointer);
-      dBuilder->insertDeclare(alloca, dVar, dBuilder->createExpression(),
-                              llvm::DILocation::get(ctx, node->line,
-                                                    node->column,
-                                                    lexicalBlocks.back()),
-                              builder.GetInsertBlock());
+    if (diEmitter.isEnabled()) {
+      auto *diTy = diEmitter.getDIType(*this, node->parentRecord);
+      auto *ptrTy = diEmitter.getBuilder()->createPointerType(diTy, 64);
+      llvm::DILocalVariable *dVar =
+          diEmitter.getBuilder()->createParameterVariable(
+              diEmitter.getCurrentScope(), "this", 1, diEmitter.getFile(),
+              node->line, ptrTy,
+              llvm::DINode::FlagArtificial | llvm::DINode::FlagObjectPointer);
+      diEmitter.getBuilder()->insertDeclare(
+          alloca, dVar, diEmitter.getBuilder()->createExpression(),
+          llvm::DILocation::get(ctx, node->line, node->column,
+                                diEmitter.getCurrentScope()),
+          builder.GetInsertBlock());
     }
 
     ++argIt;
@@ -2410,18 +2623,8 @@ llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
         createEntryBlockAlloca(argType, std::string(pName) + ".addr");
     builder.CreateStore(&*argIt, alloca);
 
-    if (emitDebugInfo) {
-      unsigned argNo =
-          astParamIdx + (node->isMethod && !node->isStatic ? 2 : 1);
-      llvm::DILocalVariable *dVar = dBuilder->createParameterVariable(
-          lexicalBlocks.back(), std::string(pName), argNo, diFile,
-          paramDecl->line, getDIType(paramDecl->type));
-      dBuilder->insertDeclare(alloca, dVar, dBuilder->createExpression(),
-                              llvm::DILocation::get(ctx, paramDecl->line,
-                                                    paramDecl->column,
-                                                    lexicalBlocks.back()),
-                              builder.GetInsertBlock());
-    }
+    unsigned argNo = astParamIdx + (node->isMethod && !node->isStatic ? 2 : 1);
+    diEmitter.emitParameterVariable(*this, builder, alloca, paramDecl, argNo);
 
     bool isRef = paramDecl->type->isReferenceType() ||
                  paramDecl->type->getKind() == TypeKind::RValueReference;
@@ -2437,7 +2640,10 @@ llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
 
       emitScopeCleanups();
 
-      if (func->getReturnType()->isVoidTy()) {
+      if (node->name == "main" && !node->isMethod &&
+          node->returnType->isVoid()) {
+        builder.CreateRet(llvm::ConstantInt::get(builder.getInt32Ty(), 0));
+      } else if (func->getReturnType()->isVoidTy()) {
         builder.CreateRetVoid();
       } else {
         builder.CreateRet(llvm::UndefValue::get(func->getReturnType()));
@@ -2448,9 +2654,7 @@ llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
   builder.ClearInsertionPoint();
   currentFunc = prevFunc;
 
-  if (emitDebugInfo) {
-    lexicalBlocks.pop_back();
-  }
+  diEmitter.emitFunctionEnd();
 
   return func;
 }
@@ -2460,6 +2664,13 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
   std::vector<llvm::Value *> argsArgs;
 
   if (node->resolvedFunc) {
+    if (node->resolvedFunc->isIntrinsic) {
+      if (const Intrinsic *intrinsic = IntrinsicRegistry::instance().get(
+              node->resolvedFunc->intrinsicName)) {
+        return intrinsic->evaluateRuntime(*this, node);
+      }
+    }
+
     func = getOrCreateFunction(node->resolvedFunc);
 
     if (node->target->kind == NodeKind::MemberAccess) {
@@ -2486,7 +2697,8 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
 
       const auto *unqual = node->exprType->getUnqualifiedType();
       if (unqual->getKind() == TypeKind::Class ||
-          unqual->getKind() == TypeKind::Struct) {
+          unqual->getKind() == TypeKind::Struct ||
+          unqual->getKind() == TypeKind::Union) {
         auto *recTy = static_cast<const RecordType *>(unqual);
         auto *decl = recTy->getDeclaration();
         if (decl) {
@@ -2495,6 +2707,8 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
             dtor = static_cast<const ClassDeclNode *>(decl)->destructor;
           else if (decl->kind == NodeKind::StructDecl)
             dtor = static_cast<const StructDeclNode *>(decl)->destructor;
+          else if (decl->kind == NodeKind::UnionDecl)
+            dtor = static_cast<const UnionDeclNode *>(decl)->destructor;
 
           if (dtor) {
             cgCtx.addCleanup(instance, dtor);
@@ -2551,7 +2765,8 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
 
       if (!argVal) {
         diags.report({DiagLevel::Error, arg->line, arg->column, arg->length,
-                      "Failed to evaluate argument for function call.", ""});
+                      "Failed to evaluate argument for function call.",
+                      currentFilePath});
         return nullptr;
       }
       argsArgs.push_back(argVal);
@@ -2601,11 +2816,77 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
 llvm::Value *CodeGen::visit(const CastNode *node) {
   llvm::Value *src = nullptr;
 
+  if (node->conversionConstructor) {
+    llvm::Type *llTy = getLLVMType(node->targetType);
+    llvm::AllocaInst *temp = createEntryBlockAlloca(llTy, "explicit.cast.tmp");
+    emitDefaultInitialization(temp, node->targetType);
+
+    const Type *unqual = node->targetType->getUnqualifiedType();
+    if (unqual->getKind() == TypeKind::Class ||
+        unqual->getKind() == TypeKind::Struct ||
+        unqual->getKind() == TypeKind::Union) {
+      auto *recTy = static_cast<const RecordType *>(unqual);
+      if (auto *decl = recTy->getDeclaration()) {
+        const FunctionDeclNode *dtor = nullptr;
+        if (decl->kind == NodeKind::ClassDecl)
+          dtor = static_cast<const ClassDeclNode *>(decl)->destructor;
+        else if (decl->kind == NodeKind::StructDecl)
+          dtor = static_cast<const StructDeclNode *>(decl)->destructor;
+        else if (decl->kind == NodeKind::UnionDecl)
+          dtor = static_cast<const UnionDeclNode *>(decl)->destructor;
+
+        if (dtor) {
+          cgCtx.addCleanup(temp, dtor);
+          lastTemporaryAlloca = temp;
+        }
+      }
+    }
+
+    llvm::Function *ctorFunc = getOrCreateFunction(node->conversionConstructor);
+    std::vector<llvm::Value *> argsArgs;
+    argsArgs.push_back(temp);
+
+    llvm::Value *argVal = nullptr;
+    bool isRefParam = false;
+    if (node->conversionConstructor->params.size() > 0) {
+      const Type *pType = node->conversionConstructor->params[0]->type;
+      isRefParam = pType->isReferenceType() ||
+                   pType->getKind() == TypeKind::RValueReference;
+    }
+
+    if (isRefParam) {
+      argVal = getLValue(node->expr);
+      if (!argVal) {
+        llvm::Value *val = dispatch(node->expr);
+        argVal = createEntryBlockAlloca(val->getType(), "tmp.cast.arg");
+        builder.CreateStore(val, argVal);
+      }
+    } else {
+      argVal = dispatch(node->expr);
+      if (ctorFunc && argVal && ctorFunc->arg_size() > 1) {
+        llvm::Type *paramTy = ctorFunc->getFunctionType()->getParamType(1);
+        argVal = createImplicitCast(argVal, paramTy);
+      }
+    }
+
+    argsArgs.push_back(argVal);
+    builder.CreateCall(ctorFunc, argsArgs);
+
+    if (!node->exprType->isVoid()) {
+      if (node->exprType->isReferenceType() ||
+          node->exprType->getKind() == TypeKind::RValueReference) {
+        return temp;
+      }
+      return createTBAALoad(getLLVMType(node->exprType), temp, node->exprType);
+    }
+
+    return temp;
+  }
+
   if (node->targetType->isReferenceType() ||
       node->targetType->getKind() == TypeKind::RValueReference) {
     src = getLValue(node->expr);
     if (!src) {
-      // Allocate temporary storage for materialized xvalues or prvalues
       llvm::Value *val = dispatch(node->expr);
       if (val) {
         src = createEntryBlockAlloca(val->getType(), "tmp.cast.rval");
@@ -2635,7 +2916,8 @@ llvm::Value *CodeGen::visit(const ReturnNode *node) {
       retVal = getLValue(node->value);
       if (!retVal) {
         diags.report({DiagLevel::Error, node->line, node->column, node->length,
-                      "Unresolved l-value in reference return.", ""});
+                      "Unresolved l-value in reference return.",
+                      currentFilePath});
         return nullptr;
       }
     } else {
@@ -2643,7 +2925,8 @@ llvm::Value *CodeGen::visit(const ReturnNode *node) {
       retVal = dispatch(node->value);
       if (!retVal) {
         diags.report({DiagLevel::Error, node->line, node->column, node->length,
-                      "Failed to evaluate return expression.", ""});
+                      "Failed to evaluate return expression.",
+                      currentFilePath});
         return nullptr;
       }
       if (currentFunc) {
@@ -2682,33 +2965,67 @@ llvm::Value *CodeGen::visit(const ReturnNode *node) {
   if (retVal) {
     return builder.CreateRet(retVal);
   }
+
+  if (currentFunc && currentFunc->name == "main" && !currentFunc->isMethod &&
+      currentFunc->returnType->isVoid()) {
+    return builder.CreateRet(llvm::ConstantInt::get(builder.getInt32Ty(), 0));
+  }
+
   return builder.CreateRetVoid();
 }
 
 llvm::Value *CodeGen::visit(const ModuleNode *node) {
-  if (emitDebugInfo) {
-    mod.addModuleFlag(llvm::Module::Warning, "Debug Info Version",
-                      llvm::DEBUG_METADATA_VERSION);
-    mod.addModuleFlag(llvm::Module::Warning, "Dwarf Version", 4);
-    fs::path p(node->filePath);
-    diFile =
-        dBuilder->createFile(p.filename().string(), p.parent_path().string());
-    diCU = dBuilder->createCompileUnit(llvm::dwarf::DW_LANG_C, diFile,
-                                       "Utopia Compiler", false, "", 0);
-    lexicalBlocks.push_back(diCU);
-  }
+  diEmitter.initializeModule(node);
 
-  for (const auto *imp : node->importedModules) {
-    for (const auto &stmt : imp->statements) {
-      if (stmt->kind == NodeKind::FunctionDecl) {
-        getOrCreateFunction(static_cast<const FunctionDeclNode *>(stmt));
+  std::unordered_set<const ModuleNode *> visitedDeps;
+
+  /* Recursively traverses the full module hierarchy to establish external
+   * linkages for global functions and variables, respecting export visibility
+   */
+  auto declareGlobals = [&](const ModuleNode *m, auto &self) -> void {
+    if (!m || visitedDeps.contains(m))
+      return;
+    visitedDeps.insert(m);
+
+    if (m != node) {
+      for (const auto &stmt : m->statements) {
+        if (stmt->kind == NodeKind::FunctionDecl) {
+          getOrCreateFunction(static_cast<const FunctionDeclNode *>(stmt));
+        } else if (stmt->kind == NodeKind::VarDecl) {
+          auto *varDecl = static_cast<const VarDeclNode *>(stmt);
+          if (varDecl->isGlobal) {
+            llvm::Type *ty = getLLVMType(varDecl->type);
+            std::string bindName = varDecl->mangledName.empty()
+                                       ? std::string(varDecl->varName)
+                                       : varDecl->mangledName;
+            llvm::GlobalVariable *gvar = mod.getGlobalVariable(bindName);
+            if (!gvar) {
+              /* Apply weak linkage if the dependency variable is annotated with
+               * @weak */
+              llvm::GlobalValue::LinkageTypes linkage =
+                  varDecl->isWeak ? llvm::GlobalValue::WeakAnyLinkage
+                                  : llvm::GlobalValue::ExternalLinkage;
+
+              gvar = new llvm::GlobalVariable(mod, ty,
+                                              varDecl->type->isConstQualified(),
+                                              linkage, nullptr, bindName);
+            }
+            cgCtx.bind(bindName, gvar, true);
+          }
+        }
       }
     }
-  }
 
-  /* Pass 1: Forward declare and materialize all record types in the translation
-   * unit before processing function bodies or variables that rely on their size
-   * and layout. */
+    for (const auto *imp : m->importedModules) {
+      self(imp, self);
+    }
+    for (const auto *exp : m->exportedModules) {
+      self(exp, self);
+    }
+  };
+
+  declareGlobals(node, declareGlobals);
+
   for (const auto &stmt : node->statements) {
     if (stmt->kind == NodeKind::StructDecl) {
       getLLVMType(static_cast<const StructDeclNode *>(stmt)->recordType);
@@ -2737,10 +3054,7 @@ llvm::Value *CodeGen::visit(const ModuleNode *node) {
     dispatch(stmt);
   }
 
-  if (emitDebugInfo) {
-    dBuilder->finalize();
-    lexicalBlocks.pop_back();
-  }
+  diEmitter.finalize();
 
   return nullptr;
 }
@@ -2897,7 +3211,7 @@ llvm::Value *CodeGen::visit(const NewExprNode *node) {
           if (!argVal) {
             diags.report({DiagLevel::Error, arg->line, arg->column, arg->length,
                           "Failed to evaluate argument for constructor call.",
-                          ""});
+                          currentFilePath});
             return nullptr;
           }
           argsArgs.push_back(argVal);
@@ -2951,7 +3265,8 @@ llvm::Value *CodeGen::visit(const DeleteExprNode *node) {
 
     const FunctionDeclNode *dtor = nullptr;
     if (unqual->getKind() == TypeKind::Class ||
-        unqual->getKind() == TypeKind::Struct) {
+        unqual->getKind() == TypeKind::Struct ||
+        unqual->getKind() == TypeKind::Union) {
       auto *recTy = static_cast<const RecordType *>(unqual);
 
       if (auto *decl = recTy->getDeclaration()) {
@@ -2959,6 +3274,8 @@ llvm::Value *CodeGen::visit(const DeleteExprNode *node) {
           dtor = static_cast<const ClassDeclNode *>(decl)->destructor;
         } else if (decl->kind == NodeKind::StructDecl) {
           dtor = static_cast<const StructDeclNode *>(decl)->destructor;
+        } else if (decl->kind == NodeKind::UnionDecl) {
+          dtor = static_cast<const UnionDeclNode *>(decl)->destructor;
         }
       }
     }
@@ -3009,7 +3326,8 @@ llvm::Value *CodeGen::visit(const DeleteExprNode *node) {
       const Type *unqual = pointeeTy->getUnqualifiedType();
 
       if (unqual->getKind() == TypeKind::Class ||
-          unqual->getKind() == TypeKind::Struct) {
+          unqual->getKind() == TypeKind::Struct ||
+          unqual->getKind() == TypeKind::Union) {
         auto *recTy = static_cast<const RecordType *>(unqual);
 
         if (auto *decl = recTy->getDeclaration()) {
@@ -3018,6 +3336,8 @@ llvm::Value *CodeGen::visit(const DeleteExprNode *node) {
             dtor = static_cast<const ClassDeclNode *>(decl)->destructor;
           } else if (decl->kind == NodeKind::StructDecl) {
             dtor = static_cast<const StructDeclNode *>(decl)->destructor;
+          } else if (decl->kind == NodeKind::UnionDecl) {
+            dtor = static_cast<const UnionDeclNode *>(decl)->destructor;
           }
 
           if (dtor) {
@@ -3037,136 +3357,6 @@ llvm::Value *CodeGen::visit(const DeleteExprNode *node) {
   return nullptr;
 }
 
-llvm::MDNode *CodeGen::getTBAATypeNode(const Type *type) {
-  if (!type || type->isVoid())
-    return nullptr;
-
-  const Type *unqual = type->getUnqualifiedType();
-  if (tbaaTypes.contains(unqual))
-    return tbaaTypes[unqual];
-
-  /* Enforce hierarchical scalar derivations to enable aggressive pointer
-   * disjointing */
-  llvm::MDNode *charNode =
-      mdBuilder.createTBAAScalarTypeNode("omnipotent char", tbaaRoot);
-  llvm::MDNode *node = nullptr;
-
-  if (unqual->isPointerType() || unqual->isReferenceType() ||
-      unqual->getKind() == TypeKind::RValueReference) {
-    node = mdBuilder.createTBAAScalarTypeNode("any pointer", charNode);
-  } else if (unqual->isBuiltinType()) {
-    node = mdBuilder.createTBAAScalarTypeNode(unqual->toString(), charNode);
-  } else if (unqual->getKind() == TypeKind::Class ||
-             unqual->getKind() == TypeKind::Struct) {
-    /* Struct-Path TBAA: Build precise topological map of the record type */
-    auto *recTy = static_cast<const RecordType *>(unqual);
-    llvm::StructType *structTy =
-        llvm::cast<llvm::StructType>(getLLVMType(recTy));
-    const llvm::StructLayout *layout =
-        mod.getDataLayout().getStructLayout(structTy);
-
-    std::vector<std::pair<llvm::MDNode *, uint64_t>> fields;
-    for (const auto &f : recTy->getFields()) {
-      uint64_t offset = layout->getElementOffset(f.index);
-      llvm::MDNode *fieldTypeNode = getTBAATypeNode(f.type);
-      fields.push_back({fieldTypeNode, offset});
-    }
-    node = mdBuilder.createTBAAStructTypeNode(recTy->getName(), fields);
-  } else {
-    node = charNode;
-  }
-
-  tbaaTypes[unqual] = node;
-  return node;
-}
-
-llvm::MDNode *CodeGen::getTBAAAccessTag(const Type *type) {
-  if (!type || type->isVoid())
-    return nullptr;
-
-  const Type *unqual = type->getUnqualifiedType();
-  if (unqual->getKind() == TypeKind::Struct ||
-      unqual->getKind() == TypeKind::Class ||
-      unqual->getKind() == TypeKind::Array) {
-    return nullptr;
-  }
-
-  llvm::MDNode *typeNode = getTBAATypeNode(type);
-  return mdBuilder.createTBAAStructTagNode(typeNode, typeNode, 0);
-}
-
-llvm::MDNode *CodeGen::getTBAAStructAccessTag(const Type *baseType,
-                                              const Type *accessType,
-                                              uint64_t offset) {
-  if (!baseType || !accessType)
-    return nullptr;
-
-  const Type *unqualAccess = accessType->getUnqualifiedType();
-  if (unqualAccess->getKind() == TypeKind::Struct ||
-      unqualAccess->getKind() == TypeKind::Class ||
-      unqualAccess->getKind() == TypeKind::Array) {
-    return nullptr;
-  }
-
-  llvm::MDNode *baseNode = getTBAATypeNode(baseType);
-  llvm::MDNode *accessNode = getTBAATypeNode(accessType);
-
-  return mdBuilder.createTBAAStructTagNode(baseNode, accessNode, offset);
-}
-
-llvm::MDNode *CodeGen::getTBAATagForExpr(const ExprNode *node) {
-  if (!node || !node->exprType)
-    return nullptr;
-
-  const Type *unqual = node->exprType->getUnqualifiedType();
-  if (unqual->getKind() == TypeKind::Struct ||
-      unqual->getKind() == TypeKind::Class ||
-      unqual->getKind() == TypeKind::Array) {
-    return nullptr;
-  }
-
-  if (node->kind == NodeKind::MemberAccess) {
-    auto *ma = static_cast<const MemberAccessNode *>(node);
-    if (ma->isMethodRef)
-      return nullptr;
-    if (ma->isStaticFieldRef)
-      return getTBAAAccessTag(node->exprType);
-
-    const Type *baseTy = ma->object->exprType;
-    if (baseTy->isPointerType()) {
-      baseTy = static_cast<const PointerType *>(baseTy)->getPointeeType();
-    } else if (baseTy->isReferenceType() ||
-               baseTy->getKind() == TypeKind::RValueReference) {
-      baseTy = static_cast<const ReferenceType *>(baseTy)->getPointeeType();
-    }
-
-    llvm::StructType *llBaseTy =
-        llvm::cast<llvm::StructType>(getLLVMType(baseTy));
-    uint64_t offset =
-        mod.getDataLayout().getStructLayout(llBaseTy)->getElementOffset(
-            ma->fieldIndex);
-
-    return getTBAAStructAccessTag(baseTy, ma->exprType, offset);
-  }
-
-  if (node->kind == NodeKind::Variable) {
-    auto *varNode = static_cast<const VariableNode *>(node);
-    if (varNode->isField) {
-      llvm::StructType *llBaseTy =
-          llvm::cast<llvm::StructType>(getLLVMType(varNode->parentType));
-      uint64_t offset =
-          mod.getDataLayout().getStructLayout(llBaseTy)->getElementOffset(
-              varNode->fieldIndex);
-      return getTBAAStructAccessTag(varNode->parentType, varNode->exprType,
-                                    offset);
-    }
-  }
-
-  /* Fallback to strict scalar TBAA for arrays, pointers, and direct variables
-   */
-  return getTBAAAccessTag(node->exprType);
-}
-
 llvm::LoadInst *CodeGen::createTBAALoad(llvm::Type *llTy, llvm::Value *ptr,
                                         llvm::MDNode *tbaaTag,
                                         const llvm::Twine &name) {
@@ -3180,7 +3370,8 @@ llvm::LoadInst *CodeGen::createTBAALoad(llvm::Type *llTy, llvm::Value *ptr,
 llvm::LoadInst *CodeGen::createTBAALoad(llvm::Type *llTy, llvm::Value *ptr,
                                         const Type *utopiaTy,
                                         const llvm::Twine &name) {
-  return createTBAALoad(llTy, ptr, getTBAAAccessTag(utopiaTy), name);
+  return createTBAALoad(llTy, ptr,
+                        tbaaManager.getTBAAAccessTag(*this, utopiaTy), name);
 }
 
 llvm::StoreInst *CodeGen::createTBAAStore(llvm::Value *val, llvm::Value *ptr,
@@ -3194,7 +3385,8 @@ llvm::StoreInst *CodeGen::createTBAAStore(llvm::Value *val, llvm::Value *ptr,
 
 llvm::StoreInst *CodeGen::createTBAAStore(llvm::Value *val, llvm::Value *ptr,
                                           const Type *utopiaTy) {
-  return createTBAAStore(val, ptr, getTBAAAccessTag(utopiaTy));
+  return createTBAAStore(val, ptr,
+                         tbaaManager.getTBAAAccessTag(*this, utopiaTy));
 }
 
 void CodeGen::emitLifetimeStart(llvm::AllocaInst *allocaInst, uint64_t size) {
@@ -3235,7 +3427,7 @@ void CodeGen::emitDefaultInitialization(llvm::Value *ptr, const Type *type) {
                   "Massive memory allocation detected (" +
                       std::to_string(size) +
                       " bytes). This may cause a stack overflow at runtime.",
-                  ""});
+                  currentFilePath});
   }
 
   if (size > 0) {
@@ -3245,7 +3437,8 @@ void CodeGen::emitDefaultInitialization(llvm::Value *ptr, const Type *type) {
 
   const auto *unqual = type->getUnqualifiedType();
   if (unqual->getKind() == TypeKind::Struct ||
-      unqual->getKind() == TypeKind::Class) {
+      unqual->getKind() == TypeKind::Class ||
+      unqual->getKind() == TypeKind::Union) {
     auto *recTy = static_cast<const RecordType *>(unqual);
     auto *decl = recTy->getDeclaration();
     if (!decl)
@@ -3256,30 +3449,47 @@ void CodeGen::emitDefaultInitialization(llvm::Value *ptr, const Type *type) {
       fields = static_cast<const StructDeclNode *>(decl)->fields;
     } else if (decl->kind == NodeKind::ClassDecl) {
       fields = static_cast<const ClassDeclNode *>(decl)->fields;
+    } else if (decl->kind == NodeKind::UnionDecl) {
+      fields = static_cast<const UnionDeclNode *>(decl)->fields;
     }
 
     llvm::StructType *llRecTy = llvm::cast<llvm::StructType>(llTy);
-    const llvm::StructLayout *layout =
-        mod.getDataLayout().getStructLayout(llRecTy);
+    const llvm::StructLayout *layout = nullptr;
+    if (type->getKind() != TypeKind::Union) {
+      layout = mod.getDataLayout().getStructLayout(llRecTy);
+    }
 
+    unsigned instanceIdx = 0;
     for (size_t i = 0; i < fields.size(); ++i) {
       auto *fieldDecl = fields[i];
+
+      if (fieldDecl->isStatic) {
+        continue;
+      }
+
       if (fieldDecl->initializer) {
         llvm::Value *initVal = dispatch(fieldDecl->initializer);
         if (initVal) {
           llvm::Type *destTy = getLLVMType(fieldDecl->type);
           initVal = createImplicitCast(initVal, destTy);
 
-          llvm::Value *gep = builder.CreateStructGEP(
-              llTy, ptr, i, std::string(fieldDecl->varName));
+          llvm::Value *gep = ptr;
+          uint64_t offset = 0;
 
-          uint64_t offset = layout->getElementOffset(i);
-          llvm::MDNode *tbaaTag =
-              getTBAAStructAccessTag(type, fieldDecl->type, offset);
+          if (type->getKind() != TypeKind::Union) {
+            gep = builder.CreateStructGEP(llTy, ptr, instanceIdx,
+                                          std::string(fieldDecl->varName));
+            offset = layout->getElementOffset(instanceIdx);
+          }
+
+          llvm::MDNode *tbaaTag = tbaaManager.getTBAAStructAccessTag(
+              *this, type, fieldDecl->type, offset);
 
           createTBAAStore(initVal, gep, tbaaTag);
         }
       }
+
+      instanceIdx++;
     }
   }
 }

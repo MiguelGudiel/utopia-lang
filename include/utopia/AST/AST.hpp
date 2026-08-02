@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <llvm/ADT/ArrayRef.h>
 #include <string_view>
+#include <unordered_set>
 
 namespace utopia {
 
@@ -36,6 +37,7 @@ enum class NodeKind : uint8_t {
   Cast,
   ParamDecl,
   StructDecl,
+  UnionDecl,
   ClassDecl,
   MemberAccess,
   ArraySubscript,
@@ -45,7 +47,8 @@ enum class NodeKind : uint8_t {
   Null,
   EnumDecl,
   EnumMember,
-  ImplicitCast
+  ImplicitCast,
+  TypeLiteral
 };
 
 struct ASTNode {
@@ -53,10 +56,12 @@ struct ASTNode {
   int line;
   int column;
   int length;
+  int endLine;
   std::string_view docString;
+  std::string_view trailingComment;
 
   explicit ASTNode(NodeKind k, int l = 0, int c = 0, int len = 0)
-      : kind(k), line(l), column(c), length(len) {}
+      : kind(k), line(l), column(c), length(len), endLine(l) {}
 };
 
 struct StmtNode : public ASTNode {
@@ -66,10 +71,19 @@ struct StmtNode : public ASTNode {
 
 struct ExprNode : public ASTNode {
   mutable const Type *exprType = nullptr;
-  mutable bool isLValue =
-      false; // Tracks if the expression represents a persistent memory location
+  mutable bool isLValue = false;
+  bool hasParens = false;
+  mutable const Type *representedType = nullptr;
+
   explicit ExprNode(NodeKind k, int l = 0, int c = 0, int len = 0)
       : ASTNode(k, l, c, len) {}
+};
+
+struct TypeLiteralNode : public ExprNode {
+  TypeLiteralNode(const Type *t, int l, int c, int len)
+      : ExprNode(NodeKind::TypeLiteral, l, c, len) {
+    representedType = t;
+  }
 };
 
 struct AnnotationNode : public ASTNode {
@@ -179,6 +193,7 @@ struct TypedefDeclNode : public DeclNode {
   mutable const Type *targetType;
   std::string_view targetEntityName;
   const AliasType *aliasType;
+  std::string_view rawTargetTypeStr;
 
   TypedefDeclNode(std::string_view name, const Type *target, int l, int c,
                   int len)
@@ -223,6 +238,8 @@ struct VarDeclNode : public DeclNode {
   ExprNode *initializer;
   bool isGlobal = false;
   bool isStatic = false;
+  bool isWeak = false;
+  std::string_view rawTypeStr;
 
   /* Reference to the resolved copy constructor for aggregate initialization */
   mutable const FunctionDeclNode *copyCtor = nullptr;
@@ -246,6 +263,8 @@ struct AssignNode : public ExprNode {
 
 struct BlockNode : public StmtNode {
   llvm::ArrayRef<ASTNode *> statements;
+  bool isExpressionBody = false;
+
   BlockNode(int l, int c) : StmtNode(NodeKind::Block, l, c, 1) {}
   void finalize(int endCol) { this->length = endCol - this->column; }
 };
@@ -262,6 +281,7 @@ struct ParamDeclNode : public DeclNode {
   ExprNode *defaultValue;
   bool isNamed;
   bool isRequired;
+  std::string_view rawTypeStr;
 
   ParamDeclNode(const Type *t, std::string_view n, ExprNode *defVal, bool isN,
                 bool isReq, int l, int c, int len)
@@ -281,8 +301,13 @@ struct FunctionDeclNode : public DeclNode {
   bool isVariadic;
   bool isImplicit;
   bool isStatic = false;
+  bool isWeak = false;
+  bool isIntrinsic = false;
+  std::string_view intrinsicName;
   mutable std::string_view externAlias;
+  std::string_view callingConv = "cdecl";
   const RecordType *parentRecord = nullptr;
+  std::string_view rawReturnTypeStr;
 
   /* Intrinsic function attributes inferred during semantic analysis */
   mutable bool isReadNone = false;
@@ -305,6 +330,9 @@ struct FunctionCallNode : public ExprNode {
   llvm::ArrayRef<ExprNode *> args;
   llvm::ArrayRef<std::string_view> argNames;
   const FunctionDeclNode *resolvedFunc = nullptr;
+  llvm::ArrayRef<ExprNode *> rawArgs;
+  llvm::ArrayRef<std::string_view> rawArgNames;
+  bool hasRawArgs = false;
 
   FunctionCallNode(ExprNode *t, llvm::ArrayRef<ExprNode *> a,
                    llvm::ArrayRef<std::string_view> n, int l, int c, int len)
@@ -315,6 +343,11 @@ struct FunctionCallNode : public ExprNode {
 struct CastNode : public ExprNode {
   ExprNode *expr;
   const Type *targetType;
+  std::string_view rawTargetTypeStr;
+
+  /* Resolves to a valid single-argument constructor if the cast
+   * requires a user-defined conversion. */
+  const FunctionDeclNode *conversionConstructor = nullptr;
 
   CastNode(ExprNode *e, const Type *target, int l, int c, int len)
       : ExprNode(NodeKind::Cast, l, c, len), expr(e), targetType(target) {}
@@ -382,11 +415,19 @@ struct ModuleNode : public ASTNode {
   std::string_view filePath;
   llvm::ArrayRef<std::string_view> rawImports;
   llvm::ArrayRef<ModuleNode *> importedModules;
+
+  llvm::ArrayRef<std::string_view> rawExports;
+  llvm::ArrayRef<ModuleNode *> exportedModules;
+
   llvm::ArrayRef<ASTNode *> statements;
   std::vector<ASTNode *> instantiatedTemplates;
 
   explicit ModuleNode(std::string_view path)
       : ASTNode(NodeKind::Module), filePath(path) {}
+
+  bool canSee(std::string_view targetFilePath) const;
+  bool exports(std::string_view targetFilePath,
+               std::unordered_set<const ModuleNode *> &visited) const;
 };
 
 struct AnnotationDeclNode : public DeclNode {
@@ -399,6 +440,21 @@ struct AnnotationDeclNode : public DeclNode {
   AnnotationDeclNode(std::string_view n, int l, int c, int len)
       : DeclNode(NodeKind::AnnotationDecl, l, c, len), name(n),
         constructor(nullptr) {}
+};
+
+struct UnionDeclNode : public DeclNode {
+  std::string_view name;
+  llvm::ArrayRef<VarDeclNode *> fields;
+  llvm::ArrayRef<FunctionDeclNode *> methods;
+  llvm::ArrayRef<FunctionDeclNode *> constructors;
+  FunctionDeclNode *destructor;
+
+  mutable const RecordType *recordType = nullptr;
+  bool isOpaque = false;
+
+  UnionDeclNode(std::string_view n, int l, int c, int len)
+      : DeclNode(NodeKind::UnionDecl, l, c, len), name(n), destructor(nullptr) {
+  }
 };
 
 struct StructDeclNode : public DeclNode {
@@ -474,6 +530,10 @@ struct NewExprNode : public ExprNode {
   llvm::ArrayRef<std::string_view> argNames;
   bool hasParens;
   const FunctionDeclNode *resolvedConstructor = nullptr;
+  std::string_view rawAllocatedTypeStr;
+  llvm::ArrayRef<ExprNode *> rawArgs;
+  llvm::ArrayRef<std::string_view> rawArgNames;
+  bool hasRawArgs = false;
 
   NewExprNode(const Type *allocTy, ExprNode *arrSize,
               llvm::ArrayRef<ExprNode *> a, llvm::ArrayRef<std::string_view> n,

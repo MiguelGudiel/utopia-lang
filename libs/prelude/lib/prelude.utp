@@ -1,5 +1,5 @@
-import "String.utp";
-import "Math/Limits.utp";
-import "Memory/Core.utp";
-import "System/OS.utp";
-import "IO/Console.utp";
+export "String.utp";
+export "Math/Limits.utp";
+export "Memory/Core.utp";
+export "System/OS.utp";
+export "IO/Console.utp";

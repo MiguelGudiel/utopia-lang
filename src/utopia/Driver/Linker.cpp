@@ -10,26 +10,42 @@ namespace utopia {
 
 bool Linker::link(const std::vector<std::string> &objPaths,
                   const std::string &outPath, bool debug,
-                  const std::vector<std::string> &linkerFlags) {
-  std::string cmd = "clang ";
-  if (debug)
-    cmd += "-g ";
+                  const std::vector<std::string> &linkerFlags,
+                  const std::string &targetType) {
+  std::string cmd;
 
-  for (const auto &flag : linkerFlags) {
-    cmd += flag + " ";
-  }
+  if (targetType == "static_library") {
+    cmd = "ar rcs " + outPath + " ";
+    for (const auto &obj : objPaths) {
+      cmd += obj + " ";
+    }
+  } else {
+    cmd = "clang ";
+    if (debug)
+      cmd += "-g ";
 
-  for (const auto &obj : objPaths) {
-    cmd += obj + " ";
+    if (targetType == "shared_library" || targetType == "library") {
+      cmd += "-shared ";
+    }
+
+    /* Object files must precede linker flags and static libraries
+     * to guarantee proper symbol resolution in single-pass linkers. */
+    for (const auto &obj : objPaths) {
+      cmd += obj + " ";
+    }
+
+    for (const auto &flag : linkerFlags) {
+      cmd += flag + " ";
+    }
+    cmd += "-o " + outPath;
   }
-  cmd += "-o " + outPath;
 
   std::array<char, 128> buffer;
   std::string output;
 
   FILE *pipe = popen((cmd + " 2>&1").c_str(), "r");
   if (!pipe) {
-    std::cerr << "[Linker Error] Failed to invoke clang.\n";
+    std::cerr << "[Linker Error] Failed to invoke linker process.\n";
     return false;
   }
 

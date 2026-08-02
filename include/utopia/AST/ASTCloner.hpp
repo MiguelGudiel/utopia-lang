@@ -47,6 +47,7 @@ public:
   ASTNode *visit(const CastNode *n);
   ASTNode *visit(const NewExprNode *n);
   ASTNode *visit(const DeleteExprNode *n);
+  ASTNode *visit(const TypeLiteralNode *n);
   ASTNode *visit(const BlockNode *n);
   ASTNode *visit(const IfNode *n);
   ASTNode *visit(const ForNode *n);
@@ -59,6 +60,7 @@ public:
   ASTNode *visit(const VarDeclNode *n);
   ASTNode *visit(const ParamDeclNode *n);
   ASTNode *visit(const FunctionDeclNode *n);
+  ASTNode *visit(const UnionDeclNode *n);
   ASTNode *visit(const ClassDeclNode *n);
   ASTNode *visit(const StructDeclNode *n);
   ASTNode *visit(const ModuleNode *n);

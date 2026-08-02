@@ -3,7 +3,10 @@ set(CORE_SOURCES
     utopia/AST/ASTCloner.cpp
     utopia/CodeGen/CodeGen.cpp
     utopia/CodeGen/BackendContext.cpp
+    utopia/CodeGen/DebugInfoEmitter.cpp
+    utopia/CodeGen/TBAAManager.cpp
     utopia/CodeGen/Mangler.cpp
+    utopia/CodeGen/Intrinsics.cpp
     utopia/Common/Logger.cpp
     utopia/Driver/Backend.cpp
     utopia/Driver/CompilerDriver.cpp
@@ -11,9 +14,16 @@ set(CORE_SOURCES
     utopia/Driver/BuildCache.cpp
     utopia/Driver/Compiler.cpp
     utopia/Driver/Linker.cpp
+    utopia/Format/PieceFactory.cpp
+    utopia/Format/CodeWriter.cpp
     utopia/Lexer/Lexer.cpp
+    utopia/Lexer/Preprocessor.cpp
     utopia/Parser/Parser.cpp
     utopia/Sema/Sema.cpp
+    utopia/Sema/DeclCollector.cpp
+    utopia/Sema/TypeChecker.cpp
+    utopia/Sema/TypeConversion.cpp
+    utopia/Sema/OverloadResolution.cpp
     utopia/Sema/EffectAnalyzer.cpp
 )
 

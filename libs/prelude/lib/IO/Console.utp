@@ -7,9 +7,6 @@ class Console {
   @extern("getchar")
   private static int32 c_getchar();
 
-  @extern("system")
-  private static int32 c_system(const uint8* command);
-
   public static void print(const String& text) {
     Console.c_printf("%s", text.c_str());
   }
@@ -37,11 +34,7 @@ class Console {
   }
 
   public static void clear() {
-    #if _WIN32
-    Console.c_system("cls");
-    #else
-    Console.c_system("clear");
-    #endif
+    Console.print("\x1B[H\x1B[2J\x1B[3J");
   }
 }
 

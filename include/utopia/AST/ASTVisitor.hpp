@@ -1,6 +1,5 @@
 #pragma once
 #include "utopia/AST/AST.hpp"
-#include <cstdlib>
 #include <iostream>
 
 namespace utopia {
@@ -12,7 +11,8 @@ public:
      * propagation of unhandled expected types across the pipeline */
     if (!node) [[unlikely]] {
       std::cerr << "[Fatal] ASTVisitor dispatch encountered a null AST node.\n";
-      std::abort();
+      throw std::runtime_error(
+          "ASTVisitor: ASTVisitor dispatch encountered a null AST node.");
     }
 
     switch (node->kind) {
@@ -103,6 +103,9 @@ public:
     case NodeKind::ParamDecl:
       return static_cast<Derived *>(this)->visit(
           static_cast<const ParamDeclNode *>(node));
+    case NodeKind::UnionDecl:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const UnionDeclNode *>(node));
     case NodeKind::StructDecl:
       return static_cast<Derived *>(this)->visit(
           static_cast<const StructDeclNode *>(node));
@@ -124,6 +127,9 @@ public:
     case NodeKind::Delete:
       return static_cast<Derived *>(this)->visit(
           static_cast<const DeleteExprNode *>(node));
+    case NodeKind::TypeLiteral:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const TypeLiteralNode *>(node));
     case NodeKind::Null:
       return static_cast<Derived *>(this)->visit(
           static_cast<const NullNode *>(node));
@@ -135,7 +141,8 @@ public:
        */
       std::cerr << "[Fatal] ASTVisitor dispatch failure. Unhandled NodeKind: "
                 << static_cast<int>(node->kind) << '\n';
-      std::abort();
+      throw std::runtime_error("ASTVisitor: Unhandled NodeKind: " +
+                               std::to_string(static_cast<int>(node->kind)));
     }
   }
 };

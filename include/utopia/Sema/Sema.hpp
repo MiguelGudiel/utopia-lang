@@ -12,125 +12,8 @@ namespace utopia {
  * Strips indirection to evaluate core type compatibility, now safely stripping
  * both LValue and RValue references.
  */
-static bool canImplicitlyCast(const Type *from, const Type *to,
-                              bool allowUserDefined = true) {
-  if (!from || !to)
-    return false;
-
-  if (from == to)
-    return true;
-
-  const Type *baseFrom = from;
-  if (from->isReferenceType()) {
-    baseFrom = static_cast<const ReferenceType *>(from)->getPointeeType();
-  } else if (from->getKind() == TypeKind::RValueReference) {
-    baseFrom = static_cast<const RValueReferenceType *>(from)->getPointeeType();
-  }
-
-  const Type *baseTo = to;
-  if (to->isReferenceType()) {
-    baseTo = static_cast<const ReferenceType *>(to)->getPointeeType();
-  } else if (to->getKind() == TypeKind::RValueReference) {
-    baseTo = static_cast<const RValueReferenceType *>(to)->getPointeeType();
-  }
-
-  if (baseFrom == baseTo)
-    return true;
-
-  /* Resolve underlying entity traits to bypass opaque typedefs and const
-   * qualifiers */
-  const Type *unqualFrom = baseFrom->getUnqualifiedType();
-  const Type *unqualTo = baseTo->getUnqualifiedType();
-
-  /* Process user-defined single-argument conversion constructors */
-  if (allowUserDefined && (unqualTo->getKind() == TypeKind::Class ||
-                           unqualTo->getKind() == TypeKind::Struct)) {
-    auto *recTy = static_cast<const RecordType *>(unqualTo);
-    if (auto *decl = recTy->getDeclaration()) {
-      llvm::ArrayRef<FunctionDeclNode *> ctors;
-      if (decl->kind == NodeKind::ClassDecl)
-        ctors = static_cast<const ClassDeclNode *>(decl)->constructors;
-      else if (decl->kind == NodeKind::StructDecl)
-        ctors = static_cast<const StructDeclNode *>(decl)->constructors;
-
-      for (auto *ctor : ctors) {
-        if (ctor->params.size() == 1) {
-          if (canImplicitlyCast(from, ctor->params[0]->type, false))
-            return true;
-        }
-      }
-    }
-  }
-
-  if (unqualFrom->getKind() == TypeKind::Enum &&
-      unqualTo->getKind() == TypeKind::Enum) {
-    return unqualFrom == unqualTo;
-  }
-
-  if (unqualFrom->getKind() == TypeKind::Array &&
-      unqualTo->getKind() == TypeKind::Array) {
-    auto *arrFrom = static_cast<const ArrayType *>(unqualFrom);
-    auto *arrTo = static_cast<const ArrayType *>(unqualTo);
-
-    /* Allow empty or un-typed array literals to bind to expected target array
-     * type */
-    if (arrFrom->getSize() == 0 || arrFrom->getElementType()->isVoid())
-      return true;
-
-    if (arrFrom->getSize() == arrTo->getSize())
-      return canImplicitlyCast(arrFrom->getElementType(),
-                               arrTo->getElementType(), allowUserDefined);
-  }
-
-  if (unqualFrom == unqualTo) {
-    if (!baseFrom->isConstQualified() || baseTo->isConstQualified())
-      return true;
-  }
-
-  if (unqualFrom->getKind() == TypeKind::Array && unqualTo->isPointerType()) {
-    const Type *elemTy =
-        static_cast<const ArrayType *>(unqualFrom)->getElementType();
-    const Type *toPointee =
-        static_cast<const PointerType *>(unqualTo)->getPointeeType();
-    if (toPointee->isVoid() ||
-        elemTy->getUnqualifiedType() == toPointee->getUnqualifiedType())
-      return true;
-  }
-
-  if (unqualFrom->isPointerType() && unqualTo->isPointerType()) {
-    const Type *fromPointee =
-        static_cast<const PointerType *>(unqualFrom)->getPointeeType();
-    const Type *toPointee =
-        static_cast<const PointerType *>(unqualTo)->getPointeeType();
-
-    /* Universal null pointer interoperability */
-    if (toPointee->isVoid() || fromPointee->isVoid())
-      return true;
-
-    /* Enforce strict parameter structural equality for function pointer
-     * assignments */
-    if (fromPointee->getKind() == TypeKind::Function &&
-        toPointee->getKind() == TypeKind::Function) {
-      auto fF = static_cast<const FunctionType *>(fromPointee);
-      auto fT = static_cast<const FunctionType *>(toPointee);
-      if (fF->getReturnType()->getUnqualifiedType() !=
-          fT->getReturnType()->getUnqualifiedType())
-        return false;
-      if (fF->getParamTypes().size() != fT->getParamTypes().size())
-        return false;
-      for (size_t i = 0; i < fF->getParamTypes().size(); i++) {
-        if (fF->getParamTypes()[i]->getUnqualifiedType() !=
-            fT->getParamTypes()[i]->getUnqualifiedType())
-          return false;
-      }
-      return true;
-    }
-
-    return fromPointee->getUnqualifiedType() == toPointee->getUnqualifiedType();
-  }
-
-  return unqualFrom->isNumeric() && unqualTo->isNumeric();
-}
+bool canImplicitlyCast(const Type *from, const Type *to,
+                              bool allowUserDefined = true);
 
 class SemaPass {
 public:
@@ -151,6 +34,7 @@ public:
   void visit(const ModuleNode *node);
   void visit(const FunctionDeclNode *node);
   void visit(const VarDeclNode *node);
+  void visit(const UnionDeclNode *node);
   void visit(const StructDeclNode *node);
   void visit(const ClassDeclNode *node);
   void visit(const TypedefDeclNode *node);
@@ -185,6 +69,7 @@ public:
   void visit(const ArrayLiteralNode *) {}
   void visit(const NewExprNode *) {}
   void visit(const DeleteExprNode *) {}
+  void visit(const TypeLiteralNode *) {}
   void visit(const NullNode *) {}
   void visit(const ImplicitCastNode *node) {}
 };
@@ -210,6 +95,10 @@ public:
                                 const ASTNode *node);
   ExprNode *performImplicitConversion(ExprNode *expr, const Type *to);
 
+  /* Analyzes an AST node to emit warnings if a nodiscard value is ignored */
+  void checkNodiscard(const ASTNode *node);
+  void checkDeprecated(const DeclNode *decl, const ASTNode *node);
+
   SemaResult visit(const NumberNode *node);
   SemaResult visit(const BoolNode *node);
   SemaResult visit(const CharNode *node);
@@ -234,6 +123,7 @@ public:
   SemaResult visit(const CastNode *node);
   SemaResult visit(const ParamDeclNode *node);
   SemaResult visit(const ModuleNode *node);
+  SemaResult visit(const UnionDeclNode *node);
   SemaResult visit(const StructDeclNode *node);
   SemaResult visit(const ClassDeclNode *node);
   SemaResult visit(const MemberAccessNode *node);
@@ -244,6 +134,7 @@ public:
   SemaResult visit(const ArrayLiteralNode *node);
   SemaResult visit(const NewExprNode *node);
   SemaResult visit(const DeleteExprNode *node);
+  SemaResult visit(const TypeLiteralNode *node);
   SemaResult visit(const NullNode *node);
   SemaResult visit(const EnumDeclNode *node);
   SemaResult visit(const EnumMemberNode *node);

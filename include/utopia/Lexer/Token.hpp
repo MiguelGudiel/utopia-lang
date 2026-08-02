@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <string_view>
+#include <vector>
 
 namespace utopia {
 
@@ -14,7 +15,6 @@ enum class TokenType : uint8_t {
   TYPE_KW,
   CONST_KW,
   ANNOTATION_KW,
-  EXTERN_KW,
   STATIC_KW,
   REQUIRED_KW,
   PUBLIC_KW,  /* public */
@@ -23,11 +23,11 @@ enum class TokenType : uint8_t {
   WHILE_KW,
   IF_KW,
   ELSE_KW,
-  SWITCH_KW,  /*switch*/
-  CASE_KW,    /*case:*/
-  DEFAULT_KW, /*default:*/
-  BREAK_KW,   /*break*/
-  CONTINUE_KW,/*continue*/
+  SWITCH_KW,   /*switch*/
+  CASE_KW,     /*case:*/
+  DEFAULT_KW,  /*default:*/
+  BREAK_KW,    /*break*/
+  CONTINUE_KW, /*continue*/
   ELLIPSIS,
   AS,
   PLUS,
@@ -51,6 +51,7 @@ enum class TokenType : uint8_t {
   BANG,
   AT,
   STRUCT_KW,
+  UNION_KW, /* union */
   CLASS_KW,
   THIS_KW,
   DOT,
@@ -100,6 +101,8 @@ struct Token {
   std::string_view value;
   int line;
   int column;
+  std::vector<std::string_view> leadingComments;
+  std::string_view trailingComment;
 };
 
 } // namespace utopia

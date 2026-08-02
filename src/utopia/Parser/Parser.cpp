@@ -56,118 +56,60 @@ void Parser::expect(TokenType type, std::string_view errorMessage) {
 }
 
 std::string_view Parser::parseOperatorName() {
-  std::string_view opStr;
-  switch (currentToken().type) {
-  case TokenType::LBRACKET:
-    advance();
-    if (currentToken().type == TokenType::RBRACKET) {
-      opStr = "[]";
-    } else {
-      reportError(currentToken().line, currentToken().column,
-                  currentToken().value.length(),
-                  "Expected ']' after '[' for operator[]");
-      throw ParseException();
-    }
-    break;
-  case TokenType::PLUS:
-    opStr = "+";
-    break;
-  case TokenType::MINUS:
-    opStr = "-";
-    break;
-  case TokenType::STAR:
-    opStr = "*";
-    break;
-  case TokenType::SLASH:
-    opStr = "/";
-    break;
-  case TokenType::PERCENT:
-    opStr = "%";
-    break;
-  case TokenType::EQ:
-    opStr = "==";
-    break;
-  case TokenType::NEQ:
-    opStr = "!=";
-    break;
-  case TokenType::LT:
-    opStr = "<";
-    break;
-  case TokenType::GT:
-    opStr = ">";
-    break;
-  case TokenType::LE:
-    opStr = "<=";
-    break;
-  case TokenType::GE:
-    opStr = ">=";
-    break;
-  case TokenType::ASSIGN:
-    opStr = "=";
-    break;
-  case TokenType::PLUS_EQ:
-    opStr = "+=";
-    break;
-  case TokenType::MINUS_EQ:
-    opStr = "-=";
-    break;
-  case TokenType::STAR_EQ:
-    opStr = "*=";
-    break;
-  case TokenType::SLASH_EQ:
-    opStr = "/=";
-    break;
-  case TokenType::PERCENT_EQ:
-    opStr = "%=";
-    break;
-  case TokenType::PLUS_PLUS:
-    opStr = "++";
-    break;
-  case TokenType::MINUS_MINUS:
-    opStr = "--";
-    break;
-  case TokenType::PIPE:
-    opStr = "|";
-    break;
-  case TokenType::AMPERSAND:
-    opStr = "&";
-    break;
-  case TokenType::CARET:
-    opStr = "^";
-    break;
-  case TokenType::LSHIFT:
-    opStr = "<<";
-    break;
-  case TokenType::RSHIFT:
-    opStr = ">>";
-    break;
-  case TokenType::PIPE_EQ:
-    opStr = "|=";
-    break;
-  case TokenType::AMPERSAND_EQ:
-    opStr = "&=";
-    break;
-  case TokenType::CARET_EQ:
-    opStr = "^=";
-    break;
-  case TokenType::LSHIFT_EQ:
-    opStr = "<<=";
-    break;
-  case TokenType::RSHIFT_EQ:
-    opStr = ">>=";
-    break;
-  case TokenType::BANG:
-    opStr = "!";
-    break;
-  case TokenType::TILDE:
-    opStr = "~";
-    break;
-  default:
+  static const std::unordered_map<TokenType, std::string_view> opMap = {
+      {TokenType::LBRACKET, "[]"},
+      {TokenType::PLUS, "+"},
+      {TokenType::MINUS, "-"},
+      {TokenType::STAR, "*"},
+      {TokenType::SLASH, "/"},
+      {TokenType::PERCENT, "%"},
+      {TokenType::EQ, "=="},
+      {TokenType::NEQ, "!="},
+      {TokenType::LT, "<"},
+      {TokenType::GT, ">"},
+      {TokenType::LE, "<="},
+      {TokenType::GE, ">="},
+      {TokenType::ASSIGN, "="},
+      {TokenType::PLUS_EQ, "+="},
+      {TokenType::MINUS_EQ, "-="},
+      {TokenType::STAR_EQ, "*="},
+      {TokenType::SLASH_EQ, "/="},
+      {TokenType::PERCENT_EQ, "%="},
+      {TokenType::PLUS_PLUS, "++"},
+      {TokenType::MINUS_MINUS, "--"},
+      {TokenType::PIPE, "|"},
+      {TokenType::AMPERSAND, "&"},
+      {TokenType::CARET, "^"},
+      {TokenType::LSHIFT, "<<"},
+      {TokenType::RSHIFT, ">>"},
+      {TokenType::PIPE_EQ, "|="},
+      {TokenType::AMPERSAND_EQ, "&="},
+      {TokenType::CARET_EQ, "^="},
+      {TokenType::LSHIFT_EQ, "<<="},
+      {TokenType::RSHIFT_EQ, ">>="},
+      {TokenType::BANG, "!"},
+      {TokenType::TILDE, "~"}};
+
+  auto it = opMap.find(currentToken().type);
+  if (it == opMap.end()) {
     reportError(currentToken().line, currentToken().column,
                 currentToken().value.length(),
                 "Invalid operator for overloading");
     throw ParseException();
   }
+
+  std::string_view opStr = it->second;
+
+  if (it->first == TokenType::LBRACKET) {
+    advance();
+    if (currentToken().type != TokenType::RBRACKET) {
+      reportError(currentToken().line, currentToken().column,
+                  currentToken().value.length(),
+                  "Expected ']' after '[' for operator[]");
+      throw ParseException();
+    }
+  }
+
   advance();
   std::string name = "operator" + std::string(opStr);
   return astCtx.copyString(name);
@@ -227,29 +169,6 @@ const Type *Parser::parseType(bool inNewExpr) {
     ty = astCtx.getConstType(ty);
   }
 
-  /* Parse function type definitions (e.g., int Function(int, float))
-   */
-  if (match(TokenType::FUNCTION_KW)) {
-    expect(TokenType::LPAREN, "Expected '(' after 'Function'");
-    std::vector<const Type *> paramTypes;
-    if (currentToken().type != TokenType::RPAREN &&
-        currentToken().type != TokenType::EOF_TOK) {
-      do {
-        paramTypes.push_back(parseType());
-      } while (match(TokenType::COMMA));
-    }
-    expect(TokenType::RPAREN, "Expected ')' after function parameters");
-
-    ty = astCtx.getFunctionType(ty, astCtx.copyArray<const Type *>(paramTypes));
-    /* Function variables inherently decay to pointers to support C-ABI and
-     * dynamic dispatch */
-    ty = astCtx.getPointerType(ty);
-  }
-
-  /*
-   * Process array brackets, pointers, references, and r-value references.
-   * TokenType::LOGICAL_AND is naturally emitted by the lexer for '&&'
-   */
   while (currentToken().type == TokenType::STAR ||
          currentToken().type == TokenType::AMPERSAND ||
          currentToken().type == TokenType::LOGICAL_AND ||
@@ -272,60 +191,149 @@ const Type *Parser::parseType(bool inNewExpr) {
     }
   }
 
+  if (match(TokenType::FUNCTION_KW)) {
+    expect(TokenType::LPAREN, "Expected '(' after 'Function'");
+    std::vector<const Type *> paramTypes;
+    if (currentToken().type != TokenType::RPAREN &&
+        currentToken().type != TokenType::EOF_TOK) {
+      do {
+        paramTypes.push_back(parseType());
+      } while (match(TokenType::COMMA));
+    }
+    expect(TokenType::RPAREN, "Expected ')' after function parameters");
+
+    ty = astCtx.getFunctionType(ty, astCtx.copyArray<const Type *>(paramTypes));
+
+    ty = astCtx.getPointerType(ty);
+
+    while (currentToken().type == TokenType::STAR ||
+           currentToken().type == TokenType::AMPERSAND ||
+           currentToken().type == TokenType::LOGICAL_AND ||
+           currentToken().type == TokenType::CONST_KW ||
+           (!inNewExpr && currentToken().type == TokenType::LBRACKET)) {
+      if (currentToken().type == TokenType::CONST_KW) {
+        ty = astCtx.getConstType(ty);
+        advance();
+      } else if (currentToken().type == TokenType::STAR) {
+        ty = astCtx.getPointerType(ty);
+        advance();
+      } else if (currentToken().type == TokenType::AMPERSAND) {
+        ty = astCtx.getReferenceType(ty);
+        advance();
+      } else if (currentToken().type == TokenType::LOGICAL_AND) {
+        ty = astCtx.getRValueReferenceType(ty);
+        advance();
+      } else if (!inNewExpr && currentToken().type == TokenType::LBRACKET) {
+        ty = applyArrayDeclarator(ty);
+      }
+    }
+  }
+
   return ty;
 }
 
 std::string Parser::consumeComments() {
   std::string doc;
-  while (currentToken().type == TokenType::COMMENT) {
-    if (!doc.empty())
-      doc += "\n";
-    doc += currentToken().value;
-    advance();
+  for (size_t i = 0; i < currentToken().leadingComments.size(); ++i) {
+    auto c = currentToken().leadingComments[i];
+    if (i > 0) {
+      auto prev = currentToken().leadingComments[i - 1];
+      const char *gapStart = prev.data() + prev.length();
+      const char *gapEnd = c.data();
+      if (gapEnd != nullptr && gapStart <= gapEnd) {
+        int newlines = 0;
+        for (const char *p = gapStart; p < gapEnd; ++p) {
+          if (*p == '\n')
+            newlines++;
+        }
+        if (newlines == 0)
+          newlines = 1;
+        doc += std::string(newlines, '\n');
+      } else {
+        doc += "\n";
+      }
+    }
+    doc += c;
   }
+
+  if (!currentToken().leadingComments.empty()) {
+    auto last = currentToken().leadingComments.back();
+    const char *gapStart = last.data() + last.length();
+    const char *gapEnd = currentToken().value.data();
+    if (gapEnd != nullptr && gapStart <= gapEnd) {
+      int newlines = 0;
+      for (const char *p = gapStart; p < gapEnd; ++p) {
+        if (*p == '\n')
+          newlines++;
+      }
+      if (newlines > 1) {
+        doc += std::string(newlines - 1, '\n');
+      }
+    }
+  }
+
+  const_cast<Token &>(currentToken()).leadingComments.clear();
   return doc;
 }
 
 ModuleNode *Parser::parseModule(std::string_view filePath) {
   auto module = astCtx.create<ModuleNode>(filePath);
   std::vector<std::string_view> imports;
+  std::vector<std::string_view> exports;
   std::vector<ASTNode *> statements;
 
   while (currentToken().type != TokenType::EOF_TOK) {
     try {
-      if (currentToken().type == TokenType::COMMENT &&
-          peekToken().value == "import") {
-        consumeComments();
-      }
-
       if (currentToken().type == TokenType::IDENTIFIER &&
-          currentToken().value == "import") {
+          (currentToken().value == "import" ||
+           currentToken().value == "export")) {
+
+        bool isExport = (currentToken().value == "export");
         advance();
 
         if (currentToken().type != TokenType::STRING_LITERAL) {
-          reportError(currentToken().line, currentToken().column,
-                      (int)currentToken().value.length(),
-                      "Expected string literal for module path after 'import'");
+          reportError(
+              currentToken().line, currentToken().column,
+              (int)currentToken().value.length(),
+              isExport
+                  ? "Expected string literal for module path after 'export'"
+                  : "Expected string literal for module path after 'import'");
           throw ParseException();
         }
 
+        int pathLine = currentToken().line;
+        int pathCol = currentToken().column;
         std::string_view path = currentToken().value;
+        int pathLen = path.length();
+
         advance();
+        expect(TokenType::SEMICOLON, "Expected ';' after statement");
 
-        expect(TokenType::SEMICOLON, "Expected ';' after import statement");
-        imports.push_back(path);
+        if (isExport) {
+          exports.push_back(path);
+        } else {
+          imports.push_back(path);
+        }
 
-        /* Synchronously invoke the module loader upon evaluating an import
-         * directive. This pre-populates the ASTContext with available
-         * foreign types and guarantees downstream identifier resolution.
+        /* Synchronously invoke the module loader upon evaluating an
+         * import/export directive. This pre-populates the ASTContext with
+         * available foreign types and guarantees downstream identifier
+         * resolution.
          */
         if (moduleLoader) {
           std::filesystem::path currentDir =
               std::filesystem::path(filePath).parent_path();
-          moduleLoader->loadModule(std::string(path), currentDir);
+          moduleLoader->loadModule(std::string(path), currentDir, pathLine,
+                                   pathCol, pathLen, filePath);
         }
 
       } else if (currentToken().type != TokenType::EOF_TOK) {
+        if (currentToken().type == TokenType::RBRACE) {
+          reportError(currentToken().line, currentToken().column, 1,
+                      "Stray '}' in module scope");
+          advance();
+          continue;
+        }
         auto stmt = parseStatement();
         if (stmt)
           statements.push_back(stmt);
@@ -336,6 +344,7 @@ ModuleNode *Parser::parseModule(std::string_view filePath) {
   }
 
   module->rawImports = astCtx.copyArray<std::string_view>(imports);
+  module->rawExports = astCtx.copyArray<std::string_view>(exports);
   module->statements = astCtx.copyArray<ASTNode *>(statements);
   return module;
 }
@@ -355,7 +364,6 @@ AnnotationNode *Parser::parseAnnotation() {
 
   std::string_view name = currentToken().value;
   if (currentToken().type == TokenType::IDENTIFIER ||
-      currentToken().type == TokenType::EXTERN_KW ||
       currentToken().type == TokenType::TYPE_KW ||
       currentToken().type == TokenType::CONST_KW ||
       currentToken().type == TokenType::ANNOTATION_KW) {
@@ -390,8 +398,8 @@ const Type *Parser::applyArrayDeclarator(const Type *baseType) {
       expect(TokenType::RBRACKET, "Expected ']'");
       if (sizeExpr->kind == NodeKind::Number &&
           !static_cast<NumberNode *>(sizeExpr)->isFloat) {
-        sizes.push_back(
-            std::stoull(std::string(static_cast<NumberNode *>(sizeExpr)->raw)));
+        sizes.push_back(std::stoull(
+            std::string(static_cast<NumberNode *>(sizeExpr)->raw), nullptr, 0));
       } else {
         reportError(sizeExpr->line, sizeExpr->column, sizeExpr->length,
                     "Array size must be a constant integer literal");
@@ -413,16 +421,8 @@ std::vector<ParamDeclNode *> Parser::parseParameterList(bool &isVariadic) {
   bool inNamedBlock = false;
   bool optionalPositionalStarted = false;
 
-  while (currentToken().type == TokenType::COMMENT)
-    advance();
-
   while (currentToken().type != TokenType::RPAREN &&
          currentToken().type != TokenType::EOF_TOK) {
-
-    while (currentToken().type == TokenType::COMMENT)
-      advance();
-    if (currentToken().type == TokenType::RPAREN)
-      break;
 
     if (match(TokenType::ELLIPSIS)) {
       isVariadic = true;
@@ -431,8 +431,6 @@ std::vector<ParamDeclNode *> Parser::parseParameterList(bool &isVariadic) {
 
     if (!inNamedBlock && match(TokenType::LBRACE)) {
       inNamedBlock = true;
-      while (currentToken().type == TokenType::COMMENT)
-        advance();
       if (currentToken().type == TokenType::RBRACE) {
         // Empty named block permitted
       }
@@ -442,6 +440,8 @@ std::vector<ParamDeclNode *> Parser::parseParameterList(bool &isVariadic) {
       advance();
       break;
     }
+
+    std::string doc = consumeComments();
 
     int pLine = currentToken().line;
     int pCol = currentToken().column;
@@ -454,7 +454,12 @@ std::vector<ParamDeclNode *> Parser::parseParameterList(bool &isVariadic) {
       throw ParseException();
     }
 
+    const char *typeStart = currentToken().value.data();
     const Type *pType = parseType();
+    const char *typeEnd =
+        tokens[cursor - 1].value.data() + tokens[cursor - 1].value.length();
+    std::string_view rawTypeStr(typeStart, typeEnd - typeStart);
+
     std::string_view pName = currentToken().value;
     int pLen = (int)pName.length();
     expect(TokenType::IDENTIFIER, "Expected parameter name.");
@@ -490,11 +495,15 @@ std::vector<ParamDeclNode *> Parser::parseParameterList(bool &isVariadic) {
       }
     }
 
-    params.push_back(astCtx.create<ParamDeclNode>(
-        pType, pName, defVal, inNamedBlock, isRequired, pLine, pCol, pLen));
-
-    while (currentToken().type == TokenType::COMMENT)
-      advance();
+    auto paramNode = astCtx.create<ParamDeclNode>(
+        pType, pName, defVal, inNamedBlock, isRequired, pLine, pCol, pLen);
+    paramNode->rawTypeStr = rawTypeStr;
+    if (!doc.empty())
+      paramNode->docString = astCtx.copyString(doc);
+    if (cursor > 0 && !tokens[cursor - 1].trailingComment.empty()) {
+      paramNode->trailingComment = tokens[cursor - 1].trailingComment;
+    }
+    params.push_back(paramNode);
 
     if (!match(TokenType::COMMA)) {
       if (inNamedBlock) {
@@ -503,8 +512,6 @@ std::vector<ParamDeclNode *> Parser::parseParameterList(bool &isVariadic) {
       }
       break;
     } else {
-      while (currentToken().type == TokenType::COMMENT)
-        advance();
       if (inNamedBlock && currentToken().type == TokenType::RBRACE) {
         advance();
         break;
@@ -525,10 +532,12 @@ BlockNode *Parser::parseFunctionBody(const Type *returnType) {
 
     auto expr = parseExpression();
 
+    int endLine = currentToken().line;
     int endCol = currentToken().column + currentToken().value.length();
     expect(TokenType::SEMICOLON, "Expected ';' after '=>' expression");
 
     auto block = astCtx.create<BlockNode>(line, col);
+    block->isExpressionBody = true;
     ASTNode *stmt = expr;
 
     /* Transparently inject a ReturnNode if the function intrinsically expects a
@@ -539,11 +548,89 @@ BlockNode *Parser::parseFunctionBody(const Type *returnType) {
 
     block->statements = astCtx.copyArray<ASTNode *>(stmt);
     block->finalize(endCol);
+    block->endLine = endLine;
 
     return block;
   }
 
   return parseBlock();
+}
+
+void Parser::checkRecordMemberRedefinition(
+    std::string_view name, const std::vector<VarDeclNode *> &fields,
+    const std::vector<FunctionDeclNode *> &methods,
+    const FunctionDeclNode *newMethod, int line, int col, int len) {
+  for (auto *f : fields) {
+    if (f->varName == name) {
+      reportError(line, col, len,
+                  "Redefinition of field '" + std::string(name) + "'.");
+      throw ParseException();
+    }
+  }
+  if (newMethod) {
+    for (auto *m : methods) {
+      if (m->name == name) {
+        bool sameSignature = true;
+        if (m->params.size() != newMethod->params.size()) {
+          sameSignature = false;
+        } else {
+          for (size_t i = 0; i < m->params.size(); ++i) {
+            if (m->params[i]->type->toString() !=
+                newMethod->params[i]->type->toString()) {
+              sameSignature = false;
+              break;
+            }
+          }
+        }
+
+        /* Method const qualifier evaluates into the overload resolution
+         * signature */
+        if (sameSignature && m->isConst != newMethod->isConst) {
+          sameSignature = false;
+        }
+
+        if (sameSignature) {
+          reportError(line, col, len,
+                      "Redefinition of method '" + std::string(name) +
+                          "' with the same signature.");
+          throw ParseException();
+        }
+      }
+    }
+  } else {
+    for (auto *m : methods) {
+      if (m->name == name) {
+        reportError(line, col, len,
+                    "Redefinition of '" + std::string(name) +
+                        "' as a different kind of symbol.");
+        throw ParseException();
+      }
+    }
+  }
+}
+
+void Parser::checkConstructorRedefinition(
+    const std::vector<FunctionDeclNode *> &constructors,
+    const FunctionDeclNode *newCtor, int line, int col, int len) {
+  for (auto *c : constructors) {
+    bool sameSignature = true;
+    if (c->params.size() != newCtor->params.size()) {
+      sameSignature = false;
+    } else {
+      for (size_t i = 0; i < c->params.size(); ++i) {
+        if (c->params[i]->type->toString() !=
+            newCtor->params[i]->type->toString()) {
+          sameSignature = false;
+          break;
+        }
+      }
+    }
+    if (sameSignature) {
+      reportError(line, col, len,
+                  "Redefinition of constructor with the same signature.");
+      throw ParseException();
+    }
+  }
 }
 
 DeclNode *
@@ -614,6 +701,12 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
       }
       expect(TokenType::RPAREN, "Expected ')'");
 
+      if (constructor != nullptr) {
+        reportError(cLine, cCol, name.length(),
+                    "Redefinition of annotation constructor.");
+        throw ParseException();
+      }
+
       constructor = astCtx.create<FunctionDeclNode>(astCtx.VoidTy, name, cLine,
                                                     cCol, true, true);
       constructor->parentRecord = classTy;
@@ -621,8 +714,12 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
       constructor->annotations = memberAnnotations;
       constructor->hasPublicMod = isPub;
       constructor->hasPrivateMod = isPriv;
+
       if (!doc.empty())
         constructor->docString = astCtx.copyString(doc);
+      if (cursor > 0 && !tokens[cursor - 1].trailingComment.empty()) {
+        constructor->trailingComment = tokens[cursor - 1].trailingComment;
+      }
 
       constructor->body = parseFunctionBody(astCtx.VoidTy);
       continue;
@@ -630,23 +727,38 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
 
     int mLine = currentToken().line;
     int mCol = currentToken().column;
+
+    const char *typeStart = currentToken().value.data();
     const Type *memType = parseType();
+    const char *typeEnd =
+        tokens[cursor - 1].value.data() + tokens[cursor - 1].value.length();
+    std::string_view rawTypeStr(typeStart, typeEnd - typeStart);
+
     std::string_view memName = currentToken().value;
 
     expect(TokenType::IDENTIFIER, "Expected member name");
     expect(TokenType::SEMICOLON, "Expected ';'");
+
+    checkRecordMemberRedefinition(memName, fields, {}, nullptr, mLine, mCol,
+                                  memName.length());
 
     auto field = astCtx.create<VarDeclNode>(memType, memName, nullptr, mLine,
                                             mCol, memName.length());
     field->annotations = memberAnnotations;
     field->hasPublicMod = isPub;
     field->hasPrivateMod = isPriv;
+    field->rawTypeStr = rawTypeStr;
+
     if (!doc.empty())
       field->docString = astCtx.copyString(doc);
+    if (cursor > 0 && !tokens[cursor - 1].trailingComment.empty()) {
+      field->trailingComment = tokens[cursor - 1].trailingComment;
+    }
 
     fields.push_back(field);
   }
 
+  int endLine = currentToken().line;
   int endCol = currentToken().column + 1;
   expect(TokenType::RBRACE, "Expected '}'");
 
@@ -661,6 +773,7 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
   node->fields = astCtx.copyArray<VarDeclNode *>(fields);
   node->constructor = constructor;
   node->annotations = annotations;
+  node->endLine = endLine;
 
   if (!constructor) {
     reportError(line, col, endCol - col,
@@ -685,8 +798,6 @@ ASTNode *Parser::parseStatement() {
     advance();
   }
 
-  /* Gracefully handle empty blocks or trailing comments mapping directly to
-   * closure */
   if (currentToken().type == TokenType::RBRACE ||
       currentToken().type == TokenType::EOF_TOK) {
     if (!annotations.empty()) {
@@ -711,10 +822,12 @@ ASTNode *Parser::parseStatement() {
     node = parseEnumDecl();
   } else if (currentToken().type == TokenType::ANNOTATION_KW) {
     node = parseAnnotationDecl(annotations);
+  } else if (currentToken().type == TokenType::UNION_KW) {
+    node = parseRecordDecl(TypeKind::Union);
   } else if (currentToken().type == TokenType::STRUCT_KW) {
-    node = parseStructDecl();
+    node = parseRecordDecl(TypeKind::Struct);
   } else if (currentToken().type == TokenType::CLASS_KW) {
-    node = parseClassDecl();
+    node = parseRecordDecl(TypeKind::Class);
   } else if (currentToken().type == TokenType::IF_KW) {
     node = parseIfStatement();
   } else if (currentToken().type == TokenType::FOR_KW) {
@@ -728,11 +841,13 @@ ASTNode *Parser::parseStatement() {
   } else if (currentToken().type == TokenType::CONTINUE_KW) {
     node = parseContinueStatement();
   } else if (currentToken().type == TokenType::CONST_KW ||
-             currentToken().type == TokenType::EXTERN_KW ||
              currentToken().type == TokenType::STATIC_KW ||
              ((currentToken().type == TokenType::TYPE_KW ||
                (currentToken().type == TokenType::IDENTIFIER &&
-                astCtx.getRecordType(currentToken().value) != nullptr)) &&
+                (astCtx.getRecordType(currentToken().value) != nullptr ||
+                 astCtx.getTypeAlias(currentToken().value) != nullptr ||
+                 astCtx.getEnumTypeByName(currentToken().value) != nullptr ||
+                 isTemplateParam(currentToken().value)))) &&
               peekToken().type != TokenType::DOT) ||
              (currentToken().type == TokenType::IDENTIFIER &&
               peekToken().type == TokenType::IDENTIFIER)) {
@@ -745,8 +860,13 @@ ASTNode *Parser::parseStatement() {
     node = parseExpressionStatement();
   }
 
-  if (node && !doc.empty())
-    node->docString = astCtx.copyString(doc);
+  if (node) {
+    if (!doc.empty())
+      node->docString = astCtx.copyString(doc);
+    if (cursor > 0 && !tokens[cursor - 1].trailingComment.empty()) {
+      node->trailingComment = tokens[cursor - 1].trailingComment;
+    }
+  }
 
   if (node && !annotations.empty()) {
     if (node->kind == NodeKind::VarDecl ||
@@ -795,6 +915,7 @@ DeclNode *Parser::parseTypedefDecl() {
 
   expect(TokenType::ASSIGN, "Expected '=' in typedef declaration");
 
+  const char *typeStart = currentToken().value.data();
   const Type *targetType = nullptr;
   std::string_view targetEntity = "";
 
@@ -821,6 +942,11 @@ DeclNode *Parser::parseTypedefDecl() {
     throw ParseException();
   }
 
+  const char *typeEnd =
+      tokens[cursor - 1].value.data() + tokens[cursor - 1].value.length();
+  std::string_view rawTypeStr(typeStart, typeEnd - typeStart);
+
+  int endLine = currentToken().line;
   int endCol = currentToken().column + (int)currentToken().value.length();
   expect(TokenType::SEMICOLON, "Expected ';' after typedef target");
 
@@ -834,6 +960,10 @@ DeclNode *Parser::parseTypedefDecl() {
       astCtx.create<TypedefDeclNode>(name, targetType, line, col, endCol - col);
   decl->targetEntityName = targetEntity;
   decl->aliasType = aliasTy;
+  if (targetType) {
+    decl->rawTargetTypeStr = rawTypeStr;
+  }
+  decl->endLine = endLine;
   return decl;
 }
 
@@ -852,9 +982,11 @@ BlockNode *Parser::parseStatementAsBlock() {
     std::vector<ASTNode *> statements = {stmt};
     block->statements = astCtx.copyArray<ASTNode *>(statements);
     block->length = (stmt->column + stmt->length) - startCol;
+    block->endLine = stmt->endLine;
   } else {
     block->statements = {};
     block->length = 0;
+    block->endLine = startLine;
   }
 
   return block;
@@ -883,7 +1015,9 @@ IfNode *Parser::parseIfStatement() {
   int len = (elseBlock ? (elseBlock->column + elseBlock->length)
                        : (thenBlock->column + thenBlock->length)) -
             col;
-  return astCtx.create<IfNode>(cond, thenBlock, elseBlock, line, col, len);
+  auto node = astCtx.create<IfNode>(cond, thenBlock, elseBlock, line, col, len);
+  node->endLine = elseBlock ? elseBlock->endLine : thenBlock->endLine;
+  return node;
 }
 
 ForNode *Parser::parseForStatement() {
@@ -923,7 +1057,9 @@ ForNode *Parser::parseForStatement() {
   auto body = parseStatementAsBlock();
 
   int len = (body->column + body->length) - col;
-  return astCtx.create<ForNode>(initStmt, cond, inc, body, line, col, len);
+  auto node = astCtx.create<ForNode>(initStmt, cond, inc, body, line, col, len);
+  node->endLine = body->endLine;
+  return node;
 }
 
 WhileNode *Parser::parseWhileStatement() {
@@ -938,7 +1074,9 @@ WhileNode *Parser::parseWhileStatement() {
   auto body = parseStatementAsBlock();
 
   int len = (body->column + body->length) - col;
-  return astCtx.create<WhileNode>(cond, body, line, col, len);
+  auto node = astCtx.create<WhileNode>(cond, body, line, col, len);
+  node->endLine = body->endLine;
+  return node;
 }
 
 SwitchNode *Parser::parseSwitchStatement() {
@@ -958,10 +1096,7 @@ SwitchNode *Parser::parseSwitchStatement() {
   while (currentToken().type != TokenType::RBRACE &&
          currentToken().type != TokenType::EOF_TOK) {
 
-    /* Consume any floating comments before case/default directives */
-    while (currentToken().type == TokenType::COMMENT) {
-      advance();
-    }
+    std::string doc = consumeComments();
 
     if (currentToken().type == TokenType::RBRACE ||
         currentToken().type == TokenType::EOF_TOK) {
@@ -992,13 +1127,7 @@ SwitchNode *Parser::parseSwitchStatement() {
 
     std::vector<ASTNode *> stmts;
     while (true) {
-      /* Peek past comments to check if a case/default closure is approaching */
-      size_t offset = 0;
-      while (peekToken(offset).type == TokenType::COMMENT) {
-        offset++;
-      }
-
-      TokenType nextTy = peekToken(offset).type;
+      TokenType nextTy = currentToken().type;
       if (nextTy == TokenType::CASE_KW || nextTy == TokenType::DEFAULT_KW ||
           nextTy == TokenType::RBRACE || nextTy == TokenType::EOF_TOK) {
         break;
@@ -1010,15 +1139,31 @@ SwitchNode *Parser::parseSwitchStatement() {
     }
 
     int cLen = currentToken().column - cCol;
-    cases.push_back(astCtx.create<CaseNode>(
-        caseVal, astCtx.copyArray<ASTNode *>(stmts), cLine, cCol, cLen));
+    auto caseNode = astCtx.create<CaseNode>(
+        caseVal, astCtx.copyArray<ASTNode *>(stmts), cLine, cCol, cLen);
+
+    /* Track the actual lower bound of the case block for accurate line
+       difference measurement in the formatter */
+    caseNode->endLine = stmts.empty() ? cLine : stmts.back()->endLine;
+
+    if (!doc.empty())
+      caseNode->docString = astCtx.copyString(doc);
+    if (cursor > 0 && !tokens[cursor - 1].trailingComment.empty()) {
+      caseNode->trailingComment = tokens[cursor - 1].trailingComment;
+    }
+
+    cases.push_back(caseNode);
   }
 
+  int endLine = currentToken().line;
   int endCol = currentToken().column + 1;
   expect(TokenType::RBRACE, "Expected '}' at end of switch block");
 
-  return astCtx.create<SwitchNode>(cond, astCtx.copyArray<CaseNode *>(cases),
-                                   hasDefault, line, col, endCol - col);
+  auto node =
+      astCtx.create<SwitchNode>(cond, astCtx.copyArray<CaseNode *>(cases),
+                                hasDefault, line, col, endCol - col);
+  node->endLine = endLine;
+  return node;
 }
 
 BreakNode *Parser::parseBreakStatement() {
@@ -1166,7 +1311,13 @@ ExprNode *Parser::parseUnary() {
   if (match(TokenType::NEW_KW)) {
     int line = currentToken().line;
     int col = currentToken().column;
+
+    const char *typeStart = currentToken().value.data();
     const Type *allocTy = parseType(true);
+    const char *typeEnd =
+        tokens[cursor - 1].value.data() + tokens[cursor - 1].value.length();
+    std::string_view rawTypeStr(typeStart, typeEnd - typeStart);
+
     ExprNode *arraySize = nullptr;
 
     if (match(TokenType::LBRACKET)) {
@@ -1181,13 +1332,9 @@ ExprNode *Parser::parseUnary() {
 
     if (match(TokenType::LPAREN)) {
       hasParens = true;
-      while (currentToken().type == TokenType::COMMENT)
-        advance();
 
       if (currentToken().type != TokenType::RPAREN) {
         do {
-          while (currentToken().type == TokenType::COMMENT)
-            advance();
           if (currentToken().type == TokenType::RPAREN)
             break;
 
@@ -1197,8 +1344,6 @@ ExprNode *Parser::parseUnary() {
             argNames.push_back(currentToken().value);
             advance();
             advance();
-            while (currentToken().type == TokenType::COMMENT)
-              advance();
             args.push_back(parseExpression());
           } else {
             if (namedStarted) {
@@ -1212,19 +1357,21 @@ ExprNode *Parser::parseUnary() {
             args.push_back(parseExpression());
           }
 
-          while (currentToken().type == TokenType::COMMENT)
-            advance();
         } while (match(TokenType::COMMA));
       }
-      while (currentToken().type == TokenType::COMMENT)
-        advance();
       expect(TokenType::RPAREN, "Expected ')'");
     }
 
-    return astCtx.create<NewExprNode>(
-        allocTy, arraySize, astCtx.copyArray<ExprNode *>(args),
-        astCtx.copyArray<std::string_view>(argNames), hasParens, line, col,
-        currentToken().column - col);
+    auto argsRef = astCtx.copyArray<ExprNode *>(args);
+    auto namesRef = astCtx.copyArray<std::string_view>(argNames);
+    auto node = astCtx.create<NewExprNode>(allocTy, arraySize, argsRef,
+                                           namesRef, hasParens, line, col,
+                                           currentToken().column - col);
+    node->rawAllocatedTypeStr = rawTypeStr;
+    node->rawArgs = argsRef;
+    node->rawArgNames = namesRef;
+    node->hasRawArgs = true;
+    return node;
   }
 
   if (match(TokenType::DELETE_KW)) {
@@ -1255,32 +1402,75 @@ ExprNode *Parser::parseUnary() {
     std::string_view op = currentToken().value;
     advance();
     auto expr = parseUnary();
-    return astCtx.create<UnaryOpNode>(op, expr, line, col);
+    return astCtx.create<UnaryOpNode>(op, expr, line, col, false);
   }
 
   return parsePostfix();
 }
 
-DeclNode *Parser::parseStructDecl() {
+DeclNode *Parser::parseRecordDecl(TypeKind kind) {
   int line = currentToken().line;
   int col = currentToken().column;
   advance();
 
   std::string_view name = currentToken().value;
-  expect(TokenType::IDENTIFIER, "Expected struct name");
+  expect(TokenType::IDENTIFIER, "Expected record name");
 
-  RecordType *structTy = astCtx.createRecordType(TypeKind::Struct, name);
+  std::vector<std::string_view> tParams;
+  if (match(TokenType::LT)) {
+    astCtx.registerTemplateName(name);
+    if (currentToken().type != TokenType::GT) {
+      do {
+        for (auto tp : tParams) {
+          if (tp == currentToken().value) {
+            reportError(currentToken().line, currentToken().column,
+                        currentToken().value.length(),
+                        "Redefinition of template parameter '" +
+                            std::string(tp) + "'.");
+            throw ParseException();
+          }
+        }
+        tParams.push_back(currentToken().value);
+        pushTemplateParam(tParams.back());
+        expect(TokenType::IDENTIFIER, "Expected template parameter name");
+      } while (match(TokenType::COMMA));
+    }
+    if (currentToken().type == TokenType::RSHIFT) {
+      const_cast<Token &>(currentToken()).type = TokenType::GT;
+      const_cast<Token &>(currentToken()).value = ">";
+    } else {
+      expect(TokenType::GT, "Expected '>'");
+    }
+  }
+
+  RecordType *recordTy = astCtx.createRecordType(kind, name);
 
   if (match(TokenType::SEMICOLON)) {
-    auto node = astCtx.create<StructDeclNode>(name, line, col,
-                                              currentToken().column - col);
-    node->isOpaque = true;
-    node->recordType = structTy;
+    DeclNode *node = nullptr;
+    int len = currentToken().column - col;
+
+    if (kind == TypeKind::Class) {
+      auto cNode = astCtx.create<ClassDeclNode>(name, line, col, len);
+      cNode->isOpaque = true;
+      cNode->recordType = recordTy;
+      node = cNode;
+    } else if (kind == TypeKind::Struct) {
+      auto sNode = astCtx.create<StructDeclNode>(name, line, col, len);
+      sNode->isOpaque = true;
+      sNode->recordType = recordTy;
+      node = sNode;
+    } else {
+      auto uNode = astCtx.create<UnionDeclNode>(name, line, col, len);
+      uNode->isOpaque = true;
+      uNode->recordType = recordTy;
+      node = uNode;
+    }
+
+    popTemplateParams(tParams.size());
     return node;
   }
 
-  structTy->setOpaque(false);
-
+  recordTy->setOpaque(false);
   expect(TokenType::LBRACE, "Expected '{'");
 
   std::vector<VarDeclNode *> fields;
@@ -1321,25 +1511,35 @@ DeclNode *Parser::parseStructDecl() {
       advance();
 
       std::string_view dtorName = currentToken().value;
-      expect(TokenType::IDENTIFIER, "Expected struct name after '~'");
+      expect(TokenType::IDENTIFIER, "Expected record name after '~'");
 
       if (dtorName != name) {
         reportError(dLine, dCol, dtorName.length(),
-                    "Destructor name must match the struct name.");
+                    "Destructor name must match the record name.");
         throw ParseException();
       }
 
       expect(TokenType::LPAREN, "Expected '('");
       expect(TokenType::RPAREN, "Expected ')'");
 
+      if (destructor != nullptr) {
+        reportError(dLine, dCol, dtorName.length(),
+                    "Redefinition of destructor.");
+        throw ParseException();
+      }
+
       destructor = astCtx.create<FunctionDeclNode>(astCtx.VoidTy, "~", dLine,
                                                    dCol, false, true);
-      destructor->parentRecord = structTy;
+      destructor->parentRecord = recordTy;
       destructor->annotations = memberAnnotations;
       destructor->hasPublicMod = isPub;
       destructor->hasPrivateMod = isPriv;
+
       if (!doc.empty())
         destructor->docString = astCtx.copyString(doc);
+      if (cursor > 0 && !tokens[cursor - 1].trailingComment.empty()) {
+        destructor->trailingComment = tokens[cursor - 1].trailingComment;
+      }
 
       destructor->body = parseFunctionBody(astCtx.VoidTy);
       continue;
@@ -1370,43 +1570,50 @@ DeclNode *Parser::parseStructDecl() {
       auto constructor =
           astCtx.create<FunctionDeclNode>(astCtx.VoidTy, name, cLine, cCol,
                                           isConstCtor, true, false, isVariadic);
-      constructor->parentRecord = structTy;
+      constructor->parentRecord = recordTy;
       constructor->params = astCtx.copyArray<ParamDeclNode *>(params);
       constructor->annotations = memberAnnotations;
       constructor->hasPublicMod = isPub;
       constructor->hasPrivateMod = isPriv;
+
       if (!doc.empty())
         constructor->docString = astCtx.copyString(doc);
+      if (cursor > 0 && !tokens[cursor - 1].trailingComment.empty()) {
+        constructor->trailingComment = tokens[cursor - 1].trailingComment;
+      }
 
       constructor->body = parseFunctionBody(astCtx.VoidTy);
+      checkConstructorRedefinition(constructors, constructor, cLine, cCol,
+                                   name.length());
       constructors.push_back(constructor);
       continue;
     }
 
     bool isStatic = false;
     bool isExtern = false;
+    bool isIntrinsic = false;
 
-    while (currentToken().type == TokenType::STATIC_KW ||
-           currentToken().type == TokenType::EXTERN_KW) {
-      if (currentToken().type == TokenType::STATIC_KW)
-        isStatic = true;
-      if (currentToken().type == TokenType::EXTERN_KW)
-        isExtern = true;
+    while (currentToken().type == TokenType::STATIC_KW) {
+      isStatic = true;
       advance();
     }
 
-    if (!isExtern) {
-      for (const auto *ann : memberAnnotations) {
-        if (ann->name == "extern") {
-          isExtern = true;
-          break;
-        }
+    for (const auto *ann : memberAnnotations) {
+      if (ann->name == "extern") {
+        isExtern = true;
+      } else if (ann->name == "intrinsic") {
+        isIntrinsic = true;
       }
     }
 
     int mLine = currentToken().line;
     int mCol = currentToken().column;
+
+    const char *typeStart = currentToken().value.data();
     const Type *memType = parseType();
+    const char *typeEnd =
+        tokens[cursor - 1].value.data() + tokens[cursor - 1].value.length();
+    std::string_view rawTypeStr(typeStart, typeEnd - typeStart);
 
     std::string_view memName;
     if (match(TokenType::OPERATOR_KW)) {
@@ -1421,6 +1628,15 @@ DeclNode *Parser::parseStructDecl() {
       astCtx.registerTemplateName(memName);
       if (currentToken().type != TokenType::GT) {
         do {
+          for (auto tp : methodTParams) {
+            if (tp == currentToken().value) {
+              reportError(currentToken().line, currentToken().column,
+                          currentToken().value.length(),
+                          "Redefinition of template parameter '" +
+                              std::string(tp) + "'.");
+              throw ParseException();
+            }
+          }
           methodTParams.push_back(currentToken().value);
           pushTemplateParam(methodTParams.back());
           expect(TokenType::IDENTIFIER, "Expected template parameter name");
@@ -1441,20 +1657,26 @@ DeclNode *Parser::parseStructDecl() {
 
       auto method = astCtx.create<FunctionDeclNode>(
           memType, memName, mLine, mCol, false, true, isExtern, isVariadic);
-      method->parentRecord = structTy;
+      method->parentRecord = recordTy;
       method->isStatic = isStatic;
       method->params = astCtx.copyArray<ParamDeclNode *>(params);
       method->annotations = memberAnnotations;
       method->hasPublicMod = isPub;
       method->hasPrivateMod = isPriv;
+      method->rawReturnTypeStr = rawTypeStr;
+
       if (!doc.empty())
         method->docString = astCtx.copyString(doc);
 
-      if (isExtern) {
+      if (isExtern || isIntrinsic) {
         expect(TokenType::SEMICOLON,
-               "Expected ';' after extern method declaration");
+               "Expected ';' after extern or intrinsic method declaration");
       } else {
         method->body = parseFunctionBody(memType);
+      }
+
+      if (cursor > 0 && !tokens[cursor - 1].trailingComment.empty()) {
+        method->trailingComment = tokens[cursor - 1].trailingComment;
       }
 
       if (!methodTParams.empty()) {
@@ -1464,6 +1686,8 @@ DeclNode *Parser::parseStructDecl() {
         popTemplateParams(methodTParams.size());
       }
 
+      checkRecordMemberRedefinition(memName, fields, methods, method, mLine,
+                                    mCol, memName.length());
       methods.push_back(method);
     } else {
       if (!methodTParams.empty()) {
@@ -1476,6 +1700,11 @@ DeclNode *Parser::parseStructDecl() {
                     "Variables cannot be declared as extern.");
         throw ParseException();
       }
+      if (isIntrinsic) {
+        reportError(mLine, mCol, memName.length(),
+                    "Variables cannot be declared as intrinsic.");
+        throw ParseException();
+      }
 
       ExprNode *init = nullptr;
       if (match(TokenType::ASSIGN)) {
@@ -1483,14 +1712,22 @@ DeclNode *Parser::parseStructDecl() {
       }
       expect(TokenType::SEMICOLON, "Expected ';'");
 
+      checkRecordMemberRedefinition(memName, fields, methods, nullptr, mLine,
+                                    mCol, memName.length());
+
       auto field = astCtx.create<VarDeclNode>(memType, memName, init, mLine,
                                               mCol, memName.length());
       field->isStatic = isStatic;
       field->annotations = memberAnnotations;
       field->hasPublicMod = isPub;
       field->hasPrivateMod = isPriv;
+      field->rawTypeStr = rawTypeStr;
+
       if (!doc.empty())
         field->docString = astCtx.copyString(doc);
+      if (cursor > 0 && !tokens[cursor - 1].trailingComment.empty()) {
+        field->trailingComment = tokens[cursor - 1].trailingComment;
+      }
 
       fields.push_back(field);
     }
@@ -1499,7 +1736,7 @@ DeclNode *Parser::parseStructDecl() {
   if (constructors.empty()) {
     auto defaultCtor = astCtx.create<FunctionDeclNode>(
         astCtx.VoidTy, name, line, col, false, true, false, false, true);
-    defaultCtor->parentRecord = structTy;
+    defaultCtor->parentRecord = recordTy;
 
     auto emptyBody = astCtx.create<BlockNode>(line, col);
     emptyBody->statements = {};
@@ -1512,7 +1749,7 @@ DeclNode *Parser::parseStructDecl() {
   if (!destructor) {
     destructor = astCtx.create<FunctionDeclNode>(
         astCtx.VoidTy, "~", line, col, false, true, false, false, true);
-    destructor->parentRecord = structTy;
+    destructor->parentRecord = recordTy;
 
     auto emptyBody = astCtx.create<BlockNode>(line, col);
     emptyBody->statements = {};
@@ -1520,6 +1757,7 @@ DeclNode *Parser::parseStructDecl() {
     destructor->body = emptyBody;
   }
 
+  int endLine = currentToken().line;
   int endCol = currentToken().column + 1;
   expect(TokenType::RBRACE, "Expected '}'");
 
@@ -1531,325 +1769,53 @@ DeclNode *Parser::parseStructDecl() {
     fInfos.push_back({fields[i]->varName, fields[i]->type, instanceFieldIndex++,
                       fields[i]->isPublic(fields[i]->varName)});
   }
-  structTy->setFields(astCtx.copyArray<FieldInfo>(fInfos));
+  recordTy->setFields(astCtx.copyArray<FieldInfo>(fInfos));
 
-  auto node = astCtx.create<StructDeclNode>(name, line, col, endCol - col);
-  node->fields = astCtx.copyArray<VarDeclNode *>(fields);
-  node->methods = astCtx.copyArray<FunctionDeclNode *>(methods);
-  node->constructors = astCtx.copyArray<FunctionDeclNode *>(constructors);
-  node->destructor = destructor;
+  DeclNode *node = nullptr;
+  int len = endCol - col;
 
-  return node;
-}
-
-DeclNode *Parser::parseClassDecl() {
-  int line = currentToken().line;
-  int col = currentToken().column;
-  advance();
-
-  std::string_view name = currentToken().value;
-  expect(TokenType::IDENTIFIER, "Expected class name");
-
-  std::vector<std::string_view> tParams;
-  if (match(TokenType::LT)) {
-    astCtx.registerTemplateName(name); // Register class template
-    if (currentToken().type != TokenType::GT) {
-      do {
-        tParams.push_back(currentToken().value);
-        pushTemplateParam(tParams.back());
-        expect(TokenType::IDENTIFIER, "Expected template parameter name");
-      } while (match(TokenType::COMMA));
+  if (kind == TypeKind::Class) {
+    auto cNode = astCtx.create<ClassDeclNode>(name, line, col, len);
+    cNode->fields = astCtx.copyArray<VarDeclNode *>(fields);
+    cNode->methods = astCtx.copyArray<FunctionDeclNode *>(methods);
+    cNode->constructors = astCtx.copyArray<FunctionDeclNode *>(constructors);
+    cNode->destructor = destructor;
+    cNode->endLine = endLine;
+    cNode->recordType = recordTy;
+    if (!tParams.empty()) {
+      cNode->isTemplate = true;
+      cNode->templateParams = astCtx.copyArray<std::string_view>(tParams);
     }
-    if (currentToken().type == TokenType::RSHIFT) {
-      const_cast<Token &>(currentToken()).type = TokenType::GT;
-      const_cast<Token &>(currentToken()).value = ">";
-    } else {
-      expect(TokenType::GT, "Expected '>'");
+    node = cNode;
+  } else if (kind == TypeKind::Struct) {
+    auto sNode = astCtx.create<StructDeclNode>(name, line, col, len);
+    sNode->fields = astCtx.copyArray<VarDeclNode *>(fields);
+    sNode->methods = astCtx.copyArray<FunctionDeclNode *>(methods);
+    sNode->constructors = astCtx.copyArray<FunctionDeclNode *>(constructors);
+    sNode->destructor = destructor;
+    sNode->endLine = endLine;
+    sNode->recordType = recordTy;
+    if (!tParams.empty()) {
+      sNode->isTemplate = true;
+      sNode->templateParams = astCtx.copyArray<std::string_view>(tParams);
     }
+    node = sNode;
+  } else {
+    auto uNode = astCtx.create<UnionDeclNode>(name, line, col, len);
+    uNode->fields = astCtx.copyArray<VarDeclNode *>(fields);
+    uNode->methods = astCtx.copyArray<FunctionDeclNode *>(methods);
+    uNode->constructors = astCtx.copyArray<FunctionDeclNode *>(constructors);
+    uNode->destructor = destructor;
+    uNode->endLine = endLine;
+    uNode->recordType = recordTy;
+    if (!tParams.empty()) {
+      uNode->isTemplate = true;
+      uNode->templateParams = astCtx.copyArray<std::string_view>(tParams);
+    }
+    node = uNode;
   }
-
-  RecordType *classTy = astCtx.createRecordType(TypeKind::Class, name);
-
-  if (match(TokenType::SEMICOLON)) {
-    auto node = astCtx.create<ClassDeclNode>(name, line, col,
-                                             currentToken().column - col);
-    node->isOpaque = true;
-    node->recordType = classTy;
-    popTemplateParams(tParams.size());
-    return node;
-  }
-
-  classTy->setOpaque(false);
-  expect(TokenType::LBRACE, "Expected '{'");
-
-  std::vector<VarDeclNode *> fields;
-  std::vector<FunctionDeclNode *> methods;
-  std::vector<FunctionDeclNode *> constructors;
-  FunctionDeclNode *destructor = nullptr;
-
-  while (currentToken().type != TokenType::RBRACE &&
-         currentToken().type != TokenType::EOF_TOK) {
-
-    /* Aggressively intercept decorators and documentation bound to internal
-     * declarations */
-    std::string doc = consumeComments();
-    auto memberAnnotations = parseAnnotations();
-
-    bool isPub = false, isPriv = false;
-    while (currentToken().type == TokenType::PUBLIC_KW ||
-           currentToken().type == TokenType::PRIVATE_KW) {
-      if (currentToken().type == TokenType::PUBLIC_KW)
-        isPub = true;
-      if (currentToken().type == TokenType::PRIVATE_KW)
-        isPriv = true;
-      advance();
-    }
-
-    /* Intercept floating metadata and comments guarding the scope closure */
-    if (currentToken().type == TokenType::RBRACE ||
-        currentToken().type == TokenType::EOF_TOK) {
-      if (!memberAnnotations.empty()) {
-        reportError(currentToken().line, currentToken().column,
-                    (int)currentToken().value.length(),
-                    "Annotations must be attached to a declaration.");
-      }
-      break;
-    }
-
-    if (currentToken().type == TokenType::TILDE) {
-      int dLine = currentToken().line;
-      int dCol = currentToken().column;
-
-      advance();
-
-      std::string_view dtorName = currentToken().value;
-      expect(TokenType::IDENTIFIER, "Expected class name after '~'");
-
-      if (dtorName != name) {
-        reportError(dLine, dCol, dtorName.length(),
-                    "Destructor name must match the class name.");
-        throw ParseException();
-      }
-
-      expect(TokenType::LPAREN, "Expected '('");
-      expect(TokenType::RPAREN, "Expected ')'");
-
-      destructor = astCtx.create<FunctionDeclNode>(astCtx.VoidTy, "~", dLine,
-                                                   dCol, false, true);
-      destructor->parentRecord = classTy;
-      destructor->annotations = memberAnnotations;
-      destructor->hasPublicMod = isPub;
-      destructor->hasPrivateMod = isPriv;
-      if (!doc.empty())
-        destructor->docString = astCtx.copyString(doc);
-
-      destructor->body = parseFunctionBody(astCtx.VoidTy);
-      continue;
-    }
-
-    /* Constructor pattern matching */
-    bool isConstCtor = false;
-    if (currentToken().type == TokenType::CONST_KW &&
-        peekToken().type == TokenType::IDENTIFIER &&
-        peekToken().value == name && peekToken(2).type == TokenType::LPAREN) {
-      isConstCtor = true;
-    }
-
-    if (isConstCtor || (currentToken().type == TokenType::IDENTIFIER &&
-                        currentToken().value == name &&
-                        peekToken().type == TokenType::LPAREN)) {
-      int cLine = currentToken().line;
-      int cCol = currentToken().column;
-
-      if (isConstCtor)
-        advance();
-      advance();
-      advance();
-
-      bool isVariadic = false;
-      auto params = parseParameterList(isVariadic);
-      expect(TokenType::RPAREN, "Expected ')'");
-
-      auto constructor =
-          astCtx.create<FunctionDeclNode>(astCtx.VoidTy, name, cLine, cCol,
-                                          isConstCtor, true, false, isVariadic);
-      constructor->parentRecord = classTy;
-      constructor->params = astCtx.copyArray<ParamDeclNode *>(params);
-      constructor->annotations = memberAnnotations;
-      constructor->hasPublicMod = isPub;
-      constructor->hasPrivateMod = isPriv;
-      if (!doc.empty())
-        constructor->docString = astCtx.copyString(doc);
-
-      constructor->body = parseFunctionBody(astCtx.VoidTy);
-      constructors.push_back(constructor);
-      continue;
-    }
-
-    bool isStatic = false;
-    bool isExtern = false;
-
-    while (currentToken().type == TokenType::STATIC_KW ||
-           currentToken().type == TokenType::EXTERN_KW) {
-      if (currentToken().type == TokenType::STATIC_KW)
-        isStatic = true;
-      if (currentToken().type == TokenType::EXTERN_KW)
-        isExtern = true;
-      advance();
-    }
-
-    if (!isExtern) {
-      for (const auto *ann : memberAnnotations) {
-        if (ann->name == "extern") {
-          isExtern = true;
-          break;
-        }
-      }
-    }
-
-    int mLine = currentToken().line;
-    int mCol = currentToken().column;
-    const Type *memType = parseType();
-
-    std::string_view memName;
-    if (match(TokenType::OPERATOR_KW)) {
-      memName = parseOperatorName();
-    } else {
-      memName = currentToken().value;
-      expect(TokenType::IDENTIFIER, "Expected member name");
-    }
-
-    std::vector<std::string_view> methodTParams;
-    if (match(TokenType::LT)) {
-      astCtx.registerTemplateName(memName); // Register method template
-      if (currentToken().type != TokenType::GT) {
-        do {
-          methodTParams.push_back(currentToken().value);
-          pushTemplateParam(methodTParams.back());
-          expect(TokenType::IDENTIFIER, "Expected template parameter name");
-        } while (match(TokenType::COMMA));
-      }
-      if (currentToken().type == TokenType::RSHIFT) {
-        const_cast<Token &>(currentToken()).type = TokenType::GT;
-        const_cast<Token &>(currentToken()).value = ">";
-      } else {
-        expect(TokenType::GT, "Expected '>'");
-      }
-    }
-
-    if (match(TokenType::LPAREN)) {
-      bool isVariadic = false;
-      auto params = parseParameterList(isVariadic);
-      expect(TokenType::RPAREN, "Expected ')'");
-
-      auto method = astCtx.create<FunctionDeclNode>(
-          memType, memName, mLine, mCol, false, true, isExtern, isVariadic);
-      method->parentRecord = classTy;
-      method->isStatic = isStatic;
-      method->params = astCtx.copyArray<ParamDeclNode *>(params);
-      method->annotations = memberAnnotations;
-      method->hasPublicMod = isPub;
-      method->hasPrivateMod = isPriv;
-
-      if (!doc.empty())
-        method->docString = astCtx.copyString(doc);
-
-      if (isExtern) {
-        expect(TokenType::SEMICOLON,
-               "Expected ';' after extern method declaration");
-      } else {
-        method->body = parseFunctionBody(memType);
-      }
-
-      if (!methodTParams.empty()) {
-        method->isTemplate = true;
-        method->templateParams =
-            astCtx.copyArray<std::string_view>(methodTParams);
-        popTemplateParams(methodTParams.size());
-      }
-
-      methods.push_back(method);
-    } else {
-      if (!methodTParams.empty()) {
-        reportError(mLine, mCol, memName.length(),
-                    "Variables cannot have template parameters.");
-        throw ParseException();
-      }
-      if (isExtern) {
-        reportError(mLine, mCol, memName.length(),
-                    "Variables cannot be declared as extern.");
-        throw ParseException();
-      }
-
-      ExprNode *init = nullptr;
-      if (match(TokenType::ASSIGN)) {
-        init = parseExpression();
-      }
-      expect(TokenType::SEMICOLON, "Expected ';'");
-
-      auto field = astCtx.create<VarDeclNode>(memType, memName, init, mLine,
-                                              mCol, memName.length());
-      field->isStatic = isStatic;
-      field->annotations = memberAnnotations;
-      field->hasPublicMod = isPub;
-      field->hasPrivateMod = isPriv;
-      if (!doc.empty())
-        field->docString = astCtx.copyString(doc);
-
-      fields.push_back(field);
-    }
-  }
-
-  if (constructors.empty()) {
-    auto defaultCtor = astCtx.create<FunctionDeclNode>(
-        astCtx.VoidTy, name, line, col, false, true, false, false, true);
-    defaultCtor->parentRecord = classTy;
-
-    auto emptyBody = astCtx.create<BlockNode>(line, col);
-    emptyBody->statements = {};
-    emptyBody->length = 0;
-    defaultCtor->body = emptyBody;
-
-    constructors.push_back(defaultCtor);
-  }
-
-  if (!destructor) {
-    destructor = astCtx.create<FunctionDeclNode>(
-        astCtx.VoidTy, "~", line, col, false, true, false, false, true);
-    destructor->parentRecord = classTy;
-
-    auto emptyBody = astCtx.create<BlockNode>(line, col);
-    emptyBody->statements = {};
-    emptyBody->length = 0;
-    destructor->body = emptyBody;
-  }
-
-  int endCol = currentToken().column + 1;
-  expect(TokenType::RBRACE, "Expected '}'");
-
-  std::vector<FieldInfo> fInfos;
-  uint32_t instanceFieldIndex = 0;
-  for (size_t i = 0; i < fields.size(); ++i) {
-    if (fields[i]->isStatic)
-      continue;
-    fInfos.push_back({fields[i]->varName, fields[i]->type, instanceFieldIndex++,
-                      fields[i]->isPublic(fields[i]->varName)});
-  }
-  classTy->setFields(astCtx.copyArray<FieldInfo>(fInfos));
-
-  auto node = astCtx.create<ClassDeclNode>(name, line, col, endCol - col);
-  node->fields = astCtx.copyArray<VarDeclNode *>(fields);
-  node->methods = astCtx.copyArray<FunctionDeclNode *>(methods);
-  node->constructors = astCtx.copyArray<FunctionDeclNode *>(constructors);
-  node->destructor = destructor;
 
   popTemplateParams(tParams.size());
-
-  if (!tParams.empty()) {
-    node->isTemplate = true;
-    node->templateParams = astCtx.copyArray<std::string_view>(tParams);
-  }
-
   return node;
 }
 
@@ -1880,8 +1846,7 @@ DeclNode *Parser::parseEnumDecl() {
   std::vector<EnumMemberNode *> members;
   while (currentToken().type != TokenType::RBRACE &&
          currentToken().type != TokenType::EOF_TOK) {
-    while (currentToken().type == TokenType::COMMENT)
-      advance();
+
     if (currentToken().type == TokenType::RBRACE)
       break;
 
@@ -1895,10 +1860,21 @@ DeclNode *Parser::parseEnumDecl() {
       advance();
     }
 
+    std::string doc = consumeComments();
+
     int mLine = currentToken().line;
     int mCol = currentToken().column;
     std::string_view mName = currentToken().value;
     expect(TokenType::IDENTIFIER, "Expected enum member name");
+
+    for (auto *existing : members) {
+      if (existing->name == mName) {
+        reportError(mLine, mCol, currentToken().column - mCol,
+                    "Redefinition of enum member '" + std::string(mName) +
+                        "'.");
+        throw ParseException();
+      }
+    }
 
     ExprNode *init = nullptr;
     if (match(TokenType::ASSIGN)) {
@@ -1909,6 +1885,13 @@ DeclNode *Parser::parseEnumDecl() {
         mName, init, mLine, mCol, currentToken().column - mCol);
     memberNode->hasPublicMod = isPub;
     memberNode->hasPrivateMod = isPriv;
+
+    if (!doc.empty())
+      memberNode->docString = astCtx.copyString(doc);
+    if (cursor > 0 && !tokens[cursor - 1].trailingComment.empty()) {
+      memberNode->trailingComment = tokens[cursor - 1].trailingComment;
+    }
+
     members.push_back(memberNode);
 
     if (!match(TokenType::COMMA)) {
@@ -1916,6 +1899,7 @@ DeclNode *Parser::parseEnumDecl() {
     }
   }
 
+  int endLine = currentToken().line;
   int endCol = currentToken().column + 1;
   expect(TokenType::RBRACE, "Expected '}'");
 
@@ -1923,6 +1907,7 @@ DeclNode *Parser::parseEnumDecl() {
                                           endCol - col);
   node->members = astCtx.copyArray<EnumMemberNode *>(members);
   node->enumType = astCtx.getEnumType(name, underlyingType);
+  node->endLine = endLine;
   return node;
 }
 
@@ -1933,27 +1918,27 @@ DeclNode *Parser::parseDeclarationOrFunction(
 
   bool isExtern = false;
   bool isStatic = false;
+  bool isIntrinsic = false;
 
-  while (currentToken().type == TokenType::EXTERN_KW ||
-         currentToken().type == TokenType::STATIC_KW) {
-    if (currentToken().type == TokenType::EXTERN_KW)
-      isExtern = true;
+  while (currentToken().type == TokenType::STATIC_KW) {
     if (currentToken().type == TokenType::STATIC_KW)
       isStatic = true;
     advance();
   }
 
-  /* Fallback to checking the presence of the @extern annotation */
-  if (!isExtern) {
-    for (const auto *ann : annotations) {
-      if (ann->name == "extern") {
-        isExtern = true;
-        break;
-      }
+  for (const auto *ann : annotations) {
+    if (ann->name == "extern") {
+      isExtern = true;
+    } else if (ann->name == "intrinsic") {
+      isIntrinsic = true;
     }
   }
 
+  const char *typeStart = currentToken().value.data();
   const Type *nodeType = parseType();
+  const char *typeEnd =
+      tokens[cursor - 1].value.data() + tokens[cursor - 1].value.length();
+  std::string_view rawTypeStr(typeStart, typeEnd - typeStart);
 
   std::string_view id;
   if (match(TokenType::OPERATOR_KW)) {
@@ -1967,9 +1952,18 @@ DeclNode *Parser::parseDeclarationOrFunction(
 
   std::vector<std::string_view> tParams;
   if (match(TokenType::LT)) {
-    astCtx.registerTemplateName(id); // Register function template
+    astCtx.registerTemplateName(id);
     if (currentToken().type != TokenType::GT) {
       do {
+        for (auto tp : tParams) {
+          if (tp == currentToken().value) {
+            reportError(currentToken().line, currentToken().column,
+                        currentToken().value.length(),
+                        "Redefinition of template parameter '" +
+                            std::string(tp) + "'.");
+            throw ParseException();
+          }
+        }
         tParams.push_back(currentToken().value);
         pushTemplateParam(tParams.back());
         expect(TokenType::IDENTIFIER, "Expected template parameter name");
@@ -1994,15 +1988,19 @@ DeclNode *Parser::parseDeclarationOrFunction(
         nodeType, id, line, col, isFuncConst, false, isExtern, isVariadic);
     funcDecl->isStatic = isStatic;
     funcDecl->params = astCtx.copyArray<ParamDeclNode *>(params);
+    funcDecl->rawReturnTypeStr = rawTypeStr;
 
-    if (isExtern) {
+    if (isExtern || isIntrinsic) {
+      int endLine = currentToken().line;
       int endCol = currentToken().column + currentToken().value.length();
       expect(TokenType::SEMICOLON,
-             "Expected ';' after extern function declaration");
+             "Expected ';' after extern or intrinsic function declaration");
       funcDecl->length = endCol - col;
+      funcDecl->endLine = endLine;
     } else {
       funcDecl->body = parseFunctionBody(nodeType);
       funcDecl->length = funcDecl->body->column + funcDecl->body->length - col;
+      funcDecl->endLine = funcDecl->body->endLine;
     }
 
     popTemplateParams(tParams.size());
@@ -2019,6 +2017,11 @@ DeclNode *Parser::parseDeclarationOrFunction(
     throw ParseException();
   }
 
+  if (isIntrinsic) {
+    reportError(line, col, idLen, "Variables cannot be declared as intrinsic.");
+    throw ParseException();
+  }
+
   if (isStatic) {
     reportError(line, col, idLen, "Variables cannot be declared as static.");
     throw ParseException();
@@ -2028,11 +2031,15 @@ DeclNode *Parser::parseDeclarationOrFunction(
   if (match(TokenType::ASSIGN)) {
     init = parseExpression();
   }
+  int endLine = currentToken().line;
   int endCol = currentToken().column + (int)currentToken().value.length();
   expect(TokenType::SEMICOLON, "Expected ';' after variable declaration");
 
-  return astCtx.create<VarDeclNode>(nodeType, id, init, line, col,
-                                    endCol - col);
+  auto varDecl =
+      astCtx.create<VarDeclNode>(nodeType, id, init, line, col, endCol - col);
+  varDecl->rawTypeStr = rawTypeStr;
+  varDecl->endLine = endLine;
+  return varDecl;
 }
 
 BlockNode *Parser::parseBlock() {
@@ -2050,10 +2057,12 @@ BlockNode *Parser::parseBlock() {
     }
   }
 
+  int endLine = currentToken().line;
   int endCol = currentToken().column + 1;
   expect(TokenType::RBRACE, "Expected '}'");
   block->statements = astCtx.copyArray<ASTNode *>(statements);
   block->finalize(endCol);
+  block->endLine = endLine;
   return block;
 }
 
@@ -2065,14 +2074,19 @@ ReturnNode *Parser::parseReturn() {
   if (currentToken().type != TokenType::SEMICOLON) {
     val = parseExpression();
   }
+  int endLine = currentToken().line;
   int endCol = currentToken().column + (int)currentToken().value.length();
   expect(TokenType::SEMICOLON, "Expected ';'");
-  return astCtx.create<ReturnNode>(val, line, col, endCol - col);
+  auto ret = astCtx.create<ReturnNode>(val, line, col, endCol - col);
+  ret->endLine = endLine;
+  return ret;
 }
 
 ExprNode *Parser::parseExpressionStatement() {
   auto expr = parseExpression();
+  int endLine = currentToken().line;
   expect(TokenType::SEMICOLON, "Expected ';'");
+  expr->endLine = endLine;
   return expr;
 }
 
@@ -2151,11 +2165,17 @@ ExprNode *Parser::parseCast() {
     int col = left->column;
     advance();
 
+    const char *typeStart = currentToken().value.data();
     const Type *targetType = parseType();
+    const char *typeEnd =
+        tokens[cursor - 1].value.data() + tokens[cursor - 1].value.length();
+    std::string_view rawTypeStr(typeStart, typeEnd - typeStart);
 
-    left = astCtx.create<CastNode>(
-        left, targetType, line, col,
-        (currentToken().column + currentToken().value.length()) - col);
+    /* Securely calculate the end column using the parsed type's last token */
+    int endCol = tokens[cursor - 1].column + tokens[cursor - 1].value.length();
+
+    left = astCtx.create<CastNode>(left, targetType, line, col, endCol - col);
+    static_cast<CastNode *>(left)->rawTargetTypeStr = rawTypeStr;
   }
   return left;
 }
@@ -2163,14 +2183,15 @@ ExprNode *Parser::parseCast() {
 ExprNode *Parser::parsePostfix() {
   auto expr = parsePrimary();
   while (true) {
-    while (currentToken().type == TokenType::COMMENT)
-      advance();
-
     if (match(TokenType::DOT)) {
       int line = expr->line;
       int col = expr->column;
       std::string_view memberName = currentToken().value;
       int memLen = memberName.length();
+
+      /* Capture the exact column of the identifier before advancing the token
+       * stream */
+      int memCol = currentToken().column;
       expect(TokenType::IDENTIFIER, "Expected member name after '.'");
 
       /* Check for template invocation using semantic awareness rather than
@@ -2181,8 +2202,8 @@ ExprNode *Parser::parsePostfix() {
         isTemplateCall = true;
       }
 
-      auto maNode = astCtx.create<MemberAccessNode>(
-          expr, memberName, line, col, (currentToken().column + memLen) - col);
+      auto maNode = astCtx.create<MemberAccessNode>(expr, memberName, line, col,
+                                                    (memCol + memLen) - col);
 
       if (isTemplateCall) {
         advance(); /* Consume '<' */
@@ -2217,13 +2238,8 @@ ExprNode *Parser::parsePostfix() {
       std::vector<std::string_view> argNames;
       bool namedStarted = false;
 
-      while (currentToken().type == TokenType::COMMENT)
-        advance();
-
       if (currentToken().type != TokenType::RPAREN) {
         do {
-          while (currentToken().type == TokenType::COMMENT)
-            advance();
           if (currentToken().type == TokenType::RPAREN)
             break;
 
@@ -2233,8 +2249,6 @@ ExprNode *Parser::parsePostfix() {
             argNames.push_back(currentToken().value);
             advance();
             advance();
-            while (currentToken().type == TokenType::COMMENT)
-              advance();
             args.push_back(parseExpression());
           } else {
             if (namedStarted) {
@@ -2248,12 +2262,10 @@ ExprNode *Parser::parsePostfix() {
             args.push_back(parseExpression());
           }
 
-          while (currentToken().type == TokenType::COMMENT)
-            advance();
         } while (match(TokenType::COMMA));
       }
-      while (currentToken().type == TokenType::COMMENT)
-        advance();
+
+      int endLine = currentToken().line;
       int endCol = currentToken().column + (int)currentToken().value.length();
       expect(TokenType::RPAREN, "Expected ')'");
 
@@ -2261,6 +2273,10 @@ ExprNode *Parser::parsePostfix() {
       auto namesRef = astCtx.copyArray<std::string_view>(argNames);
       expr = astCtx.create<FunctionCallNode>(expr, argsRef, namesRef, line, col,
                                              endCol - col);
+      expr->endLine = endLine;
+      static_cast<FunctionCallNode *>(expr)->rawArgs = argsRef;
+      static_cast<FunctionCallNode *>(expr)->rawArgNames = namesRef;
+      static_cast<FunctionCallNode *>(expr)->hasRawArgs = true;
     } else if (currentToken().type == TokenType::PLUS_PLUS ||
                currentToken().type == TokenType::MINUS_MINUS) {
       int line = expr->line;
@@ -2279,6 +2295,13 @@ ExprNode *Parser::parsePrimary() {
   int line = currentToken().line;
   int col = currentToken().column;
 
+  if (currentToken().type == TokenType::TYPE_KW) {
+    const Type *t = parseType();
+    int len = currentToken().column - col;
+    auto node = astCtx.create<TypeLiteralNode>(t, line, col, len);
+    return node;
+  }
+
   if (currentToken().type == TokenType::NULL_KW) {
     int len = currentToken().value.length();
     advance();
@@ -2292,6 +2315,7 @@ ExprNode *Parser::parsePrimary() {
   if (match(TokenType::LPAREN)) {
     auto expr = parseExpression();
     expect(TokenType::RPAREN, "Expected ')'");
+    expr->hasParens = true;
     return expr;
   }
 
@@ -2315,11 +2339,17 @@ ExprNode *Parser::parsePrimary() {
     int len = (int)raw.length();
     advance();
 
-    bool isFloat = raw.find('.') != std::string_view::npos ||
-                   raw.find('e') != std::string_view::npos ||
-                   raw.find('E') != std::string_view::npos ||
-                   raw.find('f') != std::string_view::npos ||
-                   raw.find('F') != std::string_view::npos;
+    bool isHex =
+        raw.length() > 2 && raw[0] == '0' && (raw[1] == 'x' || raw[1] == 'X');
+
+    bool isFloat = false;
+    if (!isHex) {
+      isFloat = raw.find('.') != std::string_view::npos ||
+                raw.find('e') != std::string_view::npos ||
+                raw.find('E') != std::string_view::npos ||
+                raw.find('f') != std::string_view::npos ||
+                raw.find('F') != std::string_view::npos;
+    }
 
     return astCtx.create<NumberNode>(raw, isFloat, line, col, len);
   }
@@ -2329,28 +2359,58 @@ ExprNode *Parser::parsePrimary() {
     uint8_t val = 0;
     if (raw.length() >= 3) {
       if (raw[1] == '\\') {
-        switch (raw[2]) {
-        case 'n':
-          val = '\n';
-          break;
-        case 't':
-          val = '\t';
-          break;
-        case 'r':
-          val = '\r';
-          break;
-        case '0':
-          val = '\0';
-          break;
-        case '\\':
-          val = '\\';
-          break;
-        case '\'':
-          val = '\'';
-          break;
-        default:
-          val = raw[2];
-          break;
+        if (raw.length() > 3 && (raw[2] == 'x' || raw[2] == 'X')) {
+          /* Parse hexadecimal character escape */
+          for (size_t i = 3; i < raw.length() - 1; ++i) {
+            char hc = raw[i];
+            bool isHexDigit = (hc >= '0' && hc <= '9') ||
+                              (hc >= 'a' && hc <= 'f') ||
+                              (hc >= 'A' && hc <= 'F');
+            if (isHexDigit) {
+              uint8_t nibble = (hc >= '0' && hc <= '9')   ? (hc - '0')
+                               : (hc >= 'a' && hc <= 'f') ? (hc - 'a' + 10)
+                               : (hc >= 'A' && hc <= 'F') ? (hc - 'A' + 10)
+                                                          : 0;
+              val = (val << 4) | nibble;
+            } else {
+              break;
+            }
+          }
+        } else if (raw.length() > 2 && raw[2] >= '0' && raw[2] <= '7') {
+          /* Parse octal character escape */
+          for (size_t i = 2; i < raw.length() - 1; ++i) {
+            char oc = raw[i];
+            if (oc >= '0' && oc <= '7') {
+              val = (val << 3) | (oc - '0');
+            } else {
+              break;
+            }
+          }
+        } else {
+          /* Parse standard character escapes */
+          switch (raw[2]) {
+          case 'n':
+            val = '\n';
+            break;
+          case 't':
+            val = '\t';
+            break;
+          case 'r':
+            val = '\r';
+            break;
+          case '0':
+            val = '\0';
+            break;
+          case '\\':
+            val = '\\';
+            break;
+          case '\'':
+            val = '\'';
+            break;
+          default:
+            val = raw[2];
+            break;
+          }
         }
       } else {
         val = raw[1];
@@ -2367,17 +2427,74 @@ ExprNode *Parser::parsePrimary() {
     if (raw.length() >= 4) {
       std::string_view inner = raw.substr(2, raw.length() - 3);
       if (!inner.empty()) {
-        unsigned char c = inner[0];
-        if (c < 0x80) {
-          val = c;
-        } else if ((c & 0xE0) == 0xC0) {
-          val = ((c & 0x1F) << 6) | (inner[1] & 0x3F);
-        } else if ((c & 0xF0) == 0xE0) {
-          val =
-              ((c & 0x0F) << 12) | ((inner[1] & 0x3F) << 6) | (inner[2] & 0x3F);
-        } else if ((c & 0xF8) == 0xF0) {
-          val = ((c & 0x07) << 18) | ((inner[1] & 0x3F) << 12) |
-                ((inner[2] & 0x3F) << 6) | (inner[3] & 0x3F);
+        if (inner[0] == '\\') {
+          if (inner.length() > 1 && (inner[1] == 'x' || inner[1] == 'X')) {
+            /* Parse hexadecimal rune escape */
+            for (size_t i = 2; i < inner.length(); ++i) {
+              char hc = inner[i];
+              bool isHexDigit = (hc >= '0' && hc <= '9') ||
+                                (hc >= 'a' && hc <= 'f') ||
+                                (hc >= 'A' && hc <= 'F');
+              if (isHexDigit) {
+                uint32_t nibble = (hc >= '0' && hc <= '9')   ? (hc - '0')
+                                  : (hc >= 'a' && hc <= 'f') ? (hc - 'a' + 10)
+                                  : (hc >= 'A' && hc <= 'F') ? (hc - 'A' + 10)
+                                                             : 0;
+                val = (val << 4) | nibble;
+              } else {
+                break;
+              }
+            }
+          } else if (inner.length() > 1 && inner[1] >= '0' && inner[1] <= '7') {
+            /* Parse octal rune escape */
+            for (size_t i = 1; i < inner.length(); ++i) {
+              char oc = inner[i];
+              if (oc >= '0' && oc <= '7') {
+                val = (val << 3) | (oc - '0');
+              } else {
+                break;
+              }
+            }
+          } else if (inner.length() > 1) {
+            /* Parse standard rune escapes */
+            switch (inner[1]) {
+            case 'n':
+              val = '\n';
+              break;
+            case 't':
+              val = '\t';
+              break;
+            case 'r':
+              val = '\r';
+              break;
+            case '0':
+              val = '\0';
+              break;
+            case '\\':
+              val = '\\';
+              break;
+            case '\'':
+              val = '\'';
+              break;
+            default:
+              val = inner[1];
+              break;
+            }
+          }
+        } else {
+          /* Fallback to UTF-8 decoding */
+          unsigned char c = inner[0];
+          if (c < 0x80) {
+            val = c;
+          } else if ((c & 0xE0) == 0xC0) {
+            val = ((c & 0x1F) << 6) | (inner[1] & 0x3F);
+          } else if ((c & 0xF0) == 0xE0) {
+            val = ((c & 0x0F) << 12) | ((inner[1] & 0x3F) << 6) |
+                  (inner[2] & 0x3F);
+          } else if ((c & 0xF8) == 0xF0) {
+            val = ((c & 0x07) << 18) | ((inner[1] & 0x3F) << 12) |
+                  ((inner[2] & 0x3F) << 6) | (inner[3] & 0x3F);
+          }
         }
       }
     }
@@ -2396,28 +2513,67 @@ ExprNode *Parser::parsePrimary() {
     for (size_t i = 0; i < inner.length(); ++i) {
       if (inner[i] == '\\' && i + 1 < inner.length()) {
         ++i;
-        switch (inner[i]) {
-        case 'n':
-          unescaped += '\n';
-          break;
-        case 't':
-          unescaped += '\t';
-          break;
-        case 'r':
-          unescaped += '\r';
-          break;
-        case '0':
-          unescaped += '\0';
-          break;
-        case '\\':
-          unescaped += '\\';
-          break;
-        case '"':
-          unescaped += '"';
-          break;
-        default:
-          unescaped += inner[i];
-          break;
+        if (inner[i] == 'x' || inner[i] == 'X') {
+          /* Evaluate hex sequences bound to a maximum of 2 bytes */
+          uint8_t hexVal = 0;
+          size_t hexCount = 0;
+          while (i + 1 < inner.length() && hexCount < 2) {
+            char hc = inner[i + 1];
+            bool isHexDigit = (hc >= '0' && hc <= '9') ||
+                              (hc >= 'a' && hc <= 'f') ||
+                              (hc >= 'A' && hc <= 'F');
+            if (!isHexDigit)
+              break;
+
+            ++i;
+            ++hexCount;
+            uint8_t nibble = (hc >= '0' && hc <= '9')   ? (hc - '0')
+                             : (hc >= 'a' && hc <= 'f') ? (hc - 'a' + 10)
+                             : (hc >= 'A' && hc <= 'F') ? (hc - 'A' + 10)
+                                                        : 0;
+            hexVal = (hexVal << 4) | nibble;
+          }
+          if (hexCount > 0) {
+            unescaped += static_cast<char>(hexVal);
+          } else {
+            unescaped += 'x';
+          }
+        } else if (inner[i] >= '0' && inner[i] <= '7') {
+          /* Evaluate octal sequences bound to a maximum of 3 bytes */
+          uint8_t octVal = inner[i] - '0';
+          size_t octCount = 1;
+          while (i + 1 < inner.length() && octCount < 3 &&
+                 inner[i + 1] >= '0' && inner[i + 1] <= '7') {
+            ++i;
+            ++octCount;
+            octVal = (octVal << 3) | (inner[i] - '0');
+          }
+          unescaped += static_cast<char>(octVal);
+        } else {
+          /* Evaluate standard structural escapes */
+          switch (inner[i]) {
+          case 'n':
+            unescaped += '\n';
+            break;
+          case 't':
+            unescaped += '\t';
+            break;
+          case 'r':
+            unescaped += '\r';
+            break;
+          case '0':
+            unescaped += '\0';
+            break;
+          case '\\':
+            unescaped += '\\';
+            break;
+          case '"':
+            unescaped += '"';
+            break;
+          default:
+            unescaped += inner[i];
+            break;
+          }
         }
       } else {
         unescaped += inner[i];
@@ -2441,7 +2597,7 @@ ExprNode *Parser::parsePrimary() {
     auto varNode = astCtx.create<VariableNode>(name, line, col, len);
 
     if (isTemplateCall) {
-      advance(); // '<'
+      advance();
       std::vector<const Type *> tArgs;
       if (currentToken().type != TokenType::GT) {
         do {

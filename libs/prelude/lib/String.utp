@@ -27,6 +27,9 @@ class String {
 
   @extern("atof")
   private static float64 c_atof(const uint8* str);
+  
+  @extern("snprintf")
+  private static int32 c_snprintf(uint8* str, uint64 size, const uint8* format, ...);
 
   public String() {
     this.len = 0;
@@ -47,6 +50,81 @@ class String {
     this.cap = this.len + 15;
     this.data = new uint8[this.cap + 1];
     String.c_strcpy(this.data, str, this.len);
+  }
+
+  public String(int8 v) {
+    this.cap = 15;
+    this.data = new uint8[16];
+    this.len = String.c_snprintf(this.data, 16, "%d", v) as uint64;
+  }
+
+  public String(uint8 v) {
+    this.cap = 15;
+    this.data = new uint8[16];
+    this.len = String.c_snprintf(this.data, 16, "%u", v) as uint64;
+  }
+
+  public String(int16 v) {
+    this.cap = 15;
+    this.data = new uint8[16];
+    this.len = String.c_snprintf(this.data, 16, "%d", v) as uint64;
+  }
+
+  public String(uint16 v) {
+    this.cap = 15;
+    this.data = new uint8[16];
+    this.len = String.c_snprintf(this.data, 16, "%u", v) as uint64;
+  }
+
+  public String(int32 v) {
+    this.cap = 15;
+    this.data = new uint8[16];
+    this.len = String.c_snprintf(this.data, 16, "%d", v) as uint64;
+  }
+
+  public String(uint32 v) {
+    this.cap = 15;
+    this.data = new uint8[16];
+    this.len = String.c_snprintf(this.data, 16, "%u", v) as uint64;
+  }
+
+  public String(int64 v) {
+    this.cap = 31;
+    this.data = new uint8[32];
+    /* Standard format specifier for 64-bit integer */
+    this.len = String.c_snprintf(this.data, 32, "%lld", v) as uint64;
+  }
+
+  public String(uint64 v) {
+    this.cap = 31;
+    this.data = new uint8[32];
+    this.len = String.c_snprintf(this.data, 32, "%llu", v) as uint64;
+  }
+
+  public String(float32 v) {
+    this.cap = 31;
+    this.data = new uint8[32];
+    /* CodeGen automatically promotes variadic float32 to float64, 
+     * making "%g" completely safe. */
+    this.len = String.c_snprintf(this.data, 32, "%g", v) as uint64;
+  }
+
+  public String(float64 v) {
+    this.cap = 31;
+    this.data = new uint8[32];
+    this.len = String.c_snprintf(this.data, 32, "%g", v) as uint64;
+  }
+
+  public String(bool v) {
+    this.cap = 15;
+    this.data = new uint8[16];
+    if (v) {
+      this.len = 4;
+      String.c_strcpy(this.data, "true", 4);
+    } else {
+      this.len = 5;
+      String.c_strcpy(this.data, "false", 5);
+    }
   }
 
   public String(const String& other) {
@@ -114,20 +192,20 @@ class String {
   }
 
   public String operator+(const String& other) {
-      String result;
-      result.len = this.len + other.len;
-      result.cap = result.len + 15;
-        
-      delete[] result.data; 
-      result.data = new uint8[result.cap + 1];
+    String result;
+    result.len = this.len + other.len;
+    result.cap = result.len + 15;
+      
+    delete[] result.data; 
+    result.data = new uint8[result.cap + 1];
 
-      String.c_strcpy(result.data, this.data, this.len);
-      for (uint64 i = 0; i < other.len; i++) {
-          result.data[this.len + i] = other.data[i];
-      }
-      result.data[result.len] = 0;
+    String.c_strcpy(result.data, this.data, this.len);
+    for (uint64 i = 0; i < other.len; i++) {
+      result.data[this.len + i] = other.data[i];
+    }
+    result.data[result.len] = 0;
 
-      return result;
+    return result;
   }
 
   public String operator+(const uint8* str) {
@@ -159,18 +237,22 @@ class String {
     return result;
   }
 
+  @inline
   public uint8& operator[](uint64 index) {
     return this.data[index];
   }
 
+  @inline
   public uint64 length() {
     return this.len;
   }
 
+  @inline
   public uint64 capacity() {
     return this.cap;
   }
 
+  @inline
   public const uint8* c_str() {
     return this.data;
   }
@@ -218,11 +300,13 @@ String operator+(uint8 lhs, const String& rhs) {
   return res + rhs;
 }
 
+@inline
 bool operator==(const uint8* lhs, const String& rhs) {
   /* Reverse the operands to reuse the internal class logic */
   return rhs == lhs;
 }
 
+@inline
 bool operator!=(const uint8* lhs, const String& rhs) {
   return rhs != lhs;
 }

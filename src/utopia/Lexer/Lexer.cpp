@@ -1,18 +1,43 @@
 #include "utopia/Lexer/Lexer.hpp"
-#include "utopia/Common/Logger.hpp"
 #include <cctype>
-#include <stdexcept>
 
 namespace utopia {
 
 std::vector<Token> Lexer::tokenize() {
   std::vector<Token> tokens;
-  Token tok = nextToken();
-  while (tok.type != TokenType::EOF_TOK) {
+  std::vector<std::string_view> pendingLeading;
+
+  while (true) {
+    Token tok = nextToken();
+
+    if (tok.type == TokenType::COMMENT) {
+      if (!tokens.empty() && tokens.back().line == tok.line &&
+          tokens.back().trailingComment.empty()) {
+
+        /* Expand the string_view backwards to capture exact whitespace
+           preceding the trailing comment for accurate formatting retention. */
+        const char *start = tok.value.data();
+        size_t len = tok.value.length();
+        while (start > source.data() &&
+               (*(start - 1) == ' ' || *(start - 1) == '\t')) {
+          start--;
+          len++;
+        }
+        tokens.back().trailingComment = std::string_view(start, len);
+      } else {
+        pendingLeading.push_back(tok.value);
+      }
+      continue;
+    }
+
+    tok.leadingComments = pendingLeading;
+    pendingLeading.clear();
+
     tokens.push_back(tok);
-    tok = nextToken();
+    if (tok.type == TokenType::EOF_TOK) {
+      break;
+    }
   }
-  tokens.push_back(tok);
   return tokens;
 }
 
@@ -49,36 +74,7 @@ void Lexer::advance() {
 }
 
 Lexer::Lexer(std::string_view sourceCode)
-    : source(sourceCode), cursor(0), line(1), col(1) {
-
-  // Register default target platform macros
-#if defined(_WIN32)
-  definedMacros.insert("_WIN32");
-#elif defined(__APPLE__)
-  definedMacros.insert("__APPLE__");
-#elif defined(__ANDROID__)
-  definedMacros.insert("__ANDROID__");
-#elif defined(__linux__) || defined(__gnu_linux__)
-  definedMacros.insert("__gnu_linux__");
-#elif defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
-  definedMacros.insert("__BSD__");
-  definedMacros.insert("__FreeBSD__");
-  definedMacros.insert("__NetBSD__");
-  definedMacros.insert("__OpenBSD__");
-#endif
-
-  // Register default target architecture macros
-#if defined(__x86_64__) || defined(_M_X64)
-  definedMacros.insert("x64");
-  definedMacros.insert("x86_64");
-#elif defined(__i386) || defined(_M_IX86)
-  definedMacros.insert("x86");
-#elif defined(__aarch64__) || defined(_M_ARM64)
-  definedMacros.insert("arm64");
-#elif defined(__arm__) || defined(_M_ARM)
-  definedMacros.insert("arm");
-#endif
-}
+    : source(sourceCode), cursor(0), line(1), col(1) {}
 
 static bool isTypeKeyword(std::string_view id) {
   return id == "int" || id == "int32" || id == "int64" || id == "int16" ||
@@ -93,28 +89,10 @@ Token Lexer::nextToken() {
     skipWhitespace();
 
     if (cursor >= source.length()) {
-      if (!condStack.empty()) {
-        Logger::error("Preprocessor error: Unclosed #if block at end of file");
-      }
       return {TokenType::EOF_TOK, {}, line, col};
     }
 
-    if (source[cursor] == '#') {
-      processDirective();
-      continue;
-    }
-
     Token tok = parseToken();
-
-    if (skipMode()) {
-      if (tok.type == TokenType::EOF_TOK) {
-        return tok;
-      }
-      // Silently consume the token and read the next one if the block is
-      // disabled
-      continue;
-    }
-
     return tok;
   }
 }
@@ -127,11 +105,9 @@ Token Lexer::parseToken() {
 
   if (c == '/') {
     if (cursor + 1 < source.length() && source[cursor + 1] == '/') {
+      size_t startStr = cursor; // Comenzar a capturar incluyendo el '//'
       advance();
       advance();
-      while (cursor < source.length() && source[cursor] == ' ')
-        advance();
-      size_t startStr = cursor;
       while (cursor < source.length() && source[cursor] != '\n')
         advance();
       return {TokenType::COMMENT,
@@ -139,23 +115,19 @@ Token Lexer::parseToken() {
               startLine, startCol};
     }
     if (cursor + 1 < source.length() && source[cursor + 1] == '*') {
+      size_t startStr = cursor; // Comenzar a capturar incluyendo el '/*'
       advance();
       advance();
-      while (cursor < source.length() && source[cursor] == ' ')
-        advance();
-      size_t startStr = cursor;
       while (cursor + 1 < source.length() &&
              !(source[cursor] == '*' && source[cursor + 1] == '/')) {
         advance();
       }
-      size_t endStr = cursor;
       if (cursor + 1 < source.length()) {
         advance();
         advance();
       }
+      size_t endStr = cursor;
       std::string_view val(source.data() + startStr, endStr - startStr);
-      if (!val.empty() && val.back() == ' ')
-        val.remove_suffix(1);
       return {TokenType::COMMENT, val, startLine, startCol};
     }
   }
@@ -250,8 +222,6 @@ Token Lexer::parseToken() {
       return {TokenType::CONST_KW, id, startLine, startCol};
     if (id == "annotation")
       return {TokenType::ANNOTATION_KW, id, startLine, startCol};
-    if (id == "extern")
-      return {TokenType::EXTERN_KW, id, startLine, startCol};
     if (id == "static")
       return {TokenType::STATIC_KW, id, startLine, startCol};
     if (id == "required")
@@ -266,6 +236,8 @@ Token Lexer::parseToken() {
       return {TokenType::FALSE_KW, id, startLine, startCol};
     if (id == "struct")
       return {TokenType::STRUCT_KW, id, startLine, startCol};
+    if (id == "union")
+      return {TokenType::UNION_KW, id, startLine, startCol};
     if (id == "class")
       return {TokenType::CLASS_KW, id, startLine, startCol};
     if (id == "this")
@@ -287,27 +259,39 @@ Token Lexer::parseToken() {
 
   if (std::isdigit(c)) {
     size_t startCursor = cursor;
+    bool isHex = false;
 
-    while (cursor < source.length() && std::isdigit(source[cursor])) {
+    if (c == '0' && cursor + 1 < source.length() &&
+        (source[cursor + 1] == 'x' || source[cursor + 1] == 'X')) {
+      isHex = true;
       advance();
-    }
-
-    if (cursor < source.length() && source[cursor] == '.') {
       advance();
+      while (cursor < source.length() &&
+             std::isxdigit(static_cast<unsigned char>(source[cursor]))) {
+        advance();
+      }
+    } else {
       while (cursor < source.length() && std::isdigit(source[cursor])) {
         advance();
       }
-    }
 
-    if (cursor < source.length() &&
-        (source[cursor] == 'e' || source[cursor] == 'E')) {
-      advance();
+      if (cursor < source.length() && source[cursor] == '.') {
+        advance();
+        while (cursor < source.length() && std::isdigit(source[cursor])) {
+          advance();
+        }
+      }
+
       if (cursor < source.length() &&
-          (source[cursor] == '+' || source[cursor] == '-')) {
+          (source[cursor] == 'e' || source[cursor] == 'E')) {
         advance();
-      }
-      while (cursor < source.length() && std::isdigit(source[cursor])) {
-        advance();
+        if (cursor < source.length() &&
+            (source[cursor] == '+' || source[cursor] == '-')) {
+          advance();
+        }
+        while (cursor < source.length() && std::isdigit(source[cursor])) {
+          advance();
+        }
       }
     }
 
@@ -492,201 +476,6 @@ Token Lexer::parseToken() {
   default:
     return {TokenType::UNKNOWN, std::string_view(start, 1), startLine,
             startCol};
-  }
-}
-
-class PPExprParser {
-  std::string_view str;
-  size_t pos = 0;
-  const std::unordered_set<std::string> &macros;
-
-  void skipWhitespace() {
-    while (pos < str.length() && std::isspace(str[pos])) {
-      pos++;
-    }
-  }
-
-  bool match(std::string_view tok) {
-    skipWhitespace();
-    if (pos + tok.length() <= str.length() &&
-        str.substr(pos, tok.length()) == tok) {
-      pos += tok.length();
-      return true;
-    }
-    return false;
-  }
-
-  std::string_view matchId() {
-    skipWhitespace();
-    size_t start = pos;
-    while (pos < str.length() && (std::isalnum(str[pos]) || str[pos] == '_')) {
-      pos++;
-    }
-    return str.substr(start, pos - start);
-  }
-
-  bool parsePrimary() {
-    skipWhitespace();
-    if (match("!")) {
-      return !parsePrimary();
-    }
-    if (match("(")) {
-      bool val = parseOrExpr();
-      match(")");
-      return val;
-    }
-    std::string_view id = matchId();
-    if (!id.empty()) {
-      if (id == "true")
-        return true;
-      if (id == "false")
-        return false;
-      return macros.count(std::string(id)) > 0;
-    }
-    return false;
-  }
-
-  bool parseEquality() {
-    bool left = parsePrimary();
-    while (true) {
-      if (match("==")) {
-        left = (left == parsePrimary());
-      } else if (match("!=")) {
-        left = (left != parsePrimary());
-      } else {
-        break;
-      }
-    }
-    return left;
-  }
-
-  bool parseAndExpr() {
-    bool left = parseEquality();
-    while (match("&&")) {
-      bool right = parseEquality();
-      left = left && right;
-    }
-    return left;
-  }
-
-  bool parseOrExpr() {
-    bool left = parseAndExpr();
-    while (match("||")) {
-      bool right = parseAndExpr();
-      left = left || right;
-    }
-    return left;
-  }
-
-public:
-  PPExprParser(std::string_view s, const std::unordered_set<std::string> &m)
-      : str(s), macros(m) {}
-
-  bool eval() { return parseOrExpr(); }
-};
-
-bool Lexer::evaluateCondition(std::string_view expr) {
-  PPExprParser parser(expr, definedMacros);
-  return parser.eval();
-}
-
-void Lexer::processDirective() {
-  advance(); // Consume '#'
-
-  auto skipSpaces = [&]() {
-    while (cursor < source.length() &&
-           (source[cursor] == ' ' || source[cursor] == '\t')) {
-      advance();
-    }
-  };
-
-  skipSpaces();
-
-  size_t kwStart = cursor;
-  while (cursor < source.length() && std::isalpha(source[cursor])) {
-    advance();
-  }
-  std::string_view kw(source.data() + kwStart, cursor - kwStart);
-
-  skipSpaces();
-  size_t argStart = cursor;
-  while (cursor < source.length() && source[cursor] != '\n') {
-    advance();
-  }
-  std::string_view args(source.data() + argStart, cursor - argStart);
-
-  // Strip single-line comments from arguments, keeping C# inline compatibility
-  size_t commentPos = args.find("//");
-  if (commentPos != std::string_view::npos) {
-    args = args.substr(0, commentPos);
-  }
-
-  // Trim trailing whitespaces / carriage returns
-  while (!args.empty() &&
-         (args.back() == ' ' || args.back() == '\r' || args.back() == '\t')) {
-    args.remove_suffix(1);
-  }
-
-  if (kw == "if") {
-    bool pActive = condStack.empty() ? true : condStack.back().currentlyActive;
-    bool cond = pActive && evaluateCondition(args);
-    condStack.push_back({pActive, cond, cond});
-  } else if (kw == "elif") {
-    if (condStack.empty()) {
-      Logger::error("Preprocessor error: #elif without #if");
-      return;
-    }
-    auto &state = condStack.back();
-    if (state.parentActive && !state.conditionMet) {
-      bool cond = evaluateCondition(args);
-      if (cond) {
-        state.conditionMet = true;
-        state.currentlyActive = true;
-      } else {
-        state.currentlyActive = false;
-      }
-    } else {
-      state.currentlyActive = false;
-    }
-  } else if (kw == "else") {
-    if (condStack.empty()) {
-      Logger::error("Preprocessor error: #else without #if");
-      return;
-    }
-    auto &state = condStack.back();
-    if (state.parentActive && !state.conditionMet) {
-      state.conditionMet = true;
-      state.currentlyActive = true;
-    } else {
-      state.currentlyActive = false;
-    }
-  } else if (kw == "endif") {
-    if (condStack.empty()) {
-      Logger::error("Preprocessor error: #endif without #if");
-      return;
-    }
-    condStack.pop_back();
-  } else if (kw == "define") {
-    if (!skipMode() && !args.empty()) {
-      definedMacros.insert(std::string(args));
-    }
-  } else if (kw == "undef") {
-    if (!skipMode() && !args.empty()) {
-      definedMacros.erase(std::string(args));
-    }
-  } else if (kw == "error") {
-    if (!skipMode()) {
-      Logger::error(std::string(args));
-      throw std::runtime_error("Preprocessor #error: " + std::string(args));
-    }
-  } else if (kw == "warning") {
-    if (!skipMode()) {
-      Logger::warning(std::string(args));
-    }
-  } else {
-    if (!skipMode()) {
-      Logger::warning("Unknown preprocessor directive: " + std::string(kw));
-    }
   }
 }
 

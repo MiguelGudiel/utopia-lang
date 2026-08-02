@@ -2,10 +2,22 @@
 // Exposes the JIT-callable interface for build.utp scripts
 
 @extern("UtopiaBuild_addLinkerFlag")
-extern void addLinkerFlag(const uint8* flag);
+void addLinkerFlag(const uint8* flag);
 
 @extern("UtopiaBuild_addIncludeDir")
-extern void addIncludeDir(const uint8* dir);
+void addIncludeDir(const uint8* dir);
 
 @extern("UtopiaBuild_setOptLevel")
-extern void setOptLevel(int32 level);
+void setOptLevel(int32 level);
+
+@extern("UtopiaBuild_addDefine")
+void addDefine({const uint8* name, bool isPublic = true});
+
+@extern("UtopiaBuild_removeDefine")
+void removeDefine(const uint8* name);
+
+@extern("UtopiaBuild_isDefined")
+bool isDefined(const uint8* name);
+
+@extern("UtopiaBuild_addCacheDefine")
+void addCacheDefine({const uint8* name, bool defaultValue = false, bool isPublic = true});

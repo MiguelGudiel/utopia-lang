@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <iostream>
 #include <nlohmann/json.hpp>
 #include <string>
@@ -15,13 +16,21 @@ struct Diagnostic {
   int length;
   std::string message;
   std::string filePath;
+  int endLine = 0;
 };
 
 class DiagnosticsEngine {
 public:
+  bool printToConsole = true;
+
   void report(const Diagnostic &diag) {
+    if (diag.level == DiagLevel::Error) {
+      errorCount++;
+    }
     diagnostics.push_back(diag);
-    renderToConsole(diag);
+    if (printToConsole) {
+      renderToConsole(diag);
+    }
   }
 
   bool hasErrors() const { return errorCount > 0; }
@@ -33,11 +42,22 @@ public:
     for (const auto &d : diagnostics) {
       int lspLine = d.line > 0 ? d.line - 1 : 0;
       int lspCol = d.column > 0 ? d.column - 1 : 0;
+      int lspEndLine = (d.endLine > 0) ? d.endLine - 1 : lspLine;
+
+      int lspEndCol;
+      if (lspEndLine > lspLine) {
+        lspEndCol = std::max(0, lspCol + d.length);
+      } else {
+        // Prevent negative lengths from multi-line spanning nodes to avoid VS
+        // Code rejecting the payload
+        int safeLen = std::max(1, d.length);
+        lspEndCol = lspCol + safeLen;
+      }
 
       j.push_back(
           {{"range",
             {{"start", {{"line", lspLine}, {"character", lspCol}}},
-             {"end", {{"line", lspLine}, {"character", lspCol + d.length}}}}},
+             {"end", {{"line", lspEndLine}, {"character", lspEndCol}}}}},
            {"severity", d.level == DiagLevel::Error ? 1 : 2},
            {"message", d.message},
            {"source", "utopia"}});
@@ -55,9 +75,6 @@ private:
   int errorCount = 0;
 
   void renderToConsole(const Diagnostic &diag) {
-    if (diag.level == DiagLevel::Error)
-      errorCount++;
-
     const char *color = "";
     const char *label = "";
 

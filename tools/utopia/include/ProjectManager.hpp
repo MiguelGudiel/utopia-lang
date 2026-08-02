@@ -12,6 +12,11 @@ struct SourceInfo {
   uint64_t lastWriteTime;
 };
 
+struct SubprojectConfig {
+  std::string path;
+  std::string linkType; // "static" or "shared"
+};
+
 struct ProjectConfig {
   std::string name;
   std::string target;
@@ -20,7 +25,8 @@ struct ProjectConfig {
   std::vector<SourceInfo> resolvedSources;
   std::vector<std::string> includeDirs;
   std::vector<std::string> linkerFlags;
-  int optLevel = 0;
+  std::optional<int> optLevel;
+  std::vector<SubprojectConfig> dependencies;
 };
 
 fs::path findProjectRoot(fs::path startPath);

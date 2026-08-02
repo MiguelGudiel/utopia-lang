@@ -23,6 +23,7 @@ enum class TypeKind {
   Const,
   Struct,
   Class,
+  Union,
   Array,
   Function,
   Alias,
@@ -43,7 +44,8 @@ enum class BuiltinKind {
   Float32,
   Float64,
   Bool,
-  Void
+  Void,
+  TypeVal
 };
 
 class Type {
@@ -159,6 +161,11 @@ public:
   }
 };
 
+class UnionType : public RecordType {
+public:
+  explicit UnionType(std::string_view n) : RecordType(TypeKind::Union, n) {}
+};
+
 class StructType : public RecordType {
 public:
   explicit StructType(std::string_view n) : RecordType(TypeKind::Struct, n) {}
@@ -208,6 +215,7 @@ public:
 class AliasType : public Type {
   std::string_view aliasName;
   mutable const Type *target;
+  mutable const DeclNode *declaration = nullptr;
 
 public:
   explicit AliasType(std::string_view n)
@@ -215,6 +223,8 @@ public:
   std::string_view getName() const { return aliasName; }
   const Type *getTarget() const { return target; }
   void setTarget(const Type *t) const { target = t; }
+  const DeclNode *getDeclaration() const { return declaration; }
+  void setDeclaration(const DeclNode *decl) const { declaration = decl; }
 };
 
 class EnumType : public Type {
@@ -364,7 +374,8 @@ inline std::string Type::toString() const {
                ->getPointeeType()
                ->toString() +
            "&&";
-  } else if (kind == TypeKind::Struct || kind == TypeKind::Class) {
+  } else if (kind == TypeKind::Struct || kind == TypeKind::Class ||
+             kind == TypeKind::Union) {
     return std::string(static_cast<const RecordType *>(this)->getName());
   }
   return "unknown";

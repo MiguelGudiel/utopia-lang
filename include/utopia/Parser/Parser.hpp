@@ -28,7 +28,6 @@ public:
 
   ModuleNode *parseModule(std::string_view filePath);
 
-  DeclNode *parseClassDecl();
   DeclNode *
   parseDeclarationOrFunction(llvm::ArrayRef<AnnotationNode *> annotations = {});
   std::vector<ParamDeclNode *> parseParameterList(bool &isVariadic);
@@ -71,6 +70,15 @@ private:
                      name) != currentTemplateParams.end();
   }
 
+  void checkRecordMemberRedefinition(
+      std::string_view name, const std::vector<VarDeclNode *> &fields,
+      const std::vector<FunctionDeclNode *> &methods,
+      const FunctionDeclNode *newMethod, int line, int col, int len);
+
+  void checkConstructorRedefinition(
+      const std::vector<FunctionDeclNode *> &constructors,
+      const FunctionDeclNode *newCtor, int line, int col, int len);
+
   std::string_view parseOperatorName();
 
   const Type *parseType(bool inNewExpr = false);
@@ -84,8 +92,8 @@ private:
   DeclNode *parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations);
   DeclNode *parseTypedefDecl();
 
+  DeclNode *parseRecordDecl(TypeKind kind);
   DeclNode *parseEnumDecl();
-  DeclNode *parseStructDecl();
   BlockNode *parseBlock();
   BlockNode *parseStatementAsBlock();
   BlockNode *parseFunctionBody(const Type *returnType);

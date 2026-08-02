@@ -99,6 +99,8 @@ void EffectAnalyzer::visit(const UnaryOpNode *n) {
   dispatch(n->expr);
 }
 
+void EffectAnalyzer::visit(const UnionDeclNode *n) {}
+
 void EffectAnalyzer::visit(const ArraySubscriptNode *n) {
   if (n->overloadedOperator) {
     if (n->overloadedOperator->isExtern) {
@@ -132,6 +134,8 @@ void EffectAnalyzer::visit(const MemberAccessNode *n) {
   dispatch(n->object);
 }
 
+void EffectAnalyzer::visit(const TypeLiteralNode *n) {}
+
 void EffectAnalyzer::visit(const VariableNode *n) {
   if (n->resolvedDecl && n->resolvedDecl->kind == NodeKind::VarDecl) {
     if (static_cast<const VarDeclNode *>(n->resolvedDecl)->isGlobal)
@@ -156,7 +160,14 @@ void EffectAnalyzer::visit(const IfNode *n) {
     dispatch(n->elseBlock);
 }
 
-void EffectAnalyzer::visit(const CastNode *n) { dispatch(n->expr); }
+void EffectAnalyzer::visit(const CastNode *n) {
+  if (n->conversionConstructor) {
+    writesMem = true;
+    readsMem = true;
+    potentiallyInfinite = true;
+  }
+  dispatch(n->expr);
+}
 
 void EffectAnalyzer::visit(const BinaryOpNode *n) {
   dispatch(n->left);
