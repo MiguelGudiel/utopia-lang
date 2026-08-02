@@ -56,118 +56,60 @@ void Parser::expect(TokenType type, std::string_view errorMessage) {
 }
 
 std::string_view Parser::parseOperatorName() {
-  std::string_view opStr;
-  switch (currentToken().type) {
-  case TokenType::LBRACKET:
-    advance();
-    if (currentToken().type == TokenType::RBRACKET) {
-      opStr = "[]";
-    } else {
-      reportError(currentToken().line, currentToken().column,
-                  currentToken().value.length(),
-                  "Expected ']' after '[' for operator[]");
-      throw ParseException();
-    }
-    break;
-  case TokenType::PLUS:
-    opStr = "+";
-    break;
-  case TokenType::MINUS:
-    opStr = "-";
-    break;
-  case TokenType::STAR:
-    opStr = "*";
-    break;
-  case TokenType::SLASH:
-    opStr = "/";
-    break;
-  case TokenType::PERCENT:
-    opStr = "%";
-    break;
-  case TokenType::EQ:
-    opStr = "==";
-    break;
-  case TokenType::NEQ:
-    opStr = "!=";
-    break;
-  case TokenType::LT:
-    opStr = "<";
-    break;
-  case TokenType::GT:
-    opStr = ">";
-    break;
-  case TokenType::LE:
-    opStr = "<=";
-    break;
-  case TokenType::GE:
-    opStr = ">=";
-    break;
-  case TokenType::ASSIGN:
-    opStr = "=";
-    break;
-  case TokenType::PLUS_EQ:
-    opStr = "+=";
-    break;
-  case TokenType::MINUS_EQ:
-    opStr = "-=";
-    break;
-  case TokenType::STAR_EQ:
-    opStr = "*=";
-    break;
-  case TokenType::SLASH_EQ:
-    opStr = "/=";
-    break;
-  case TokenType::PERCENT_EQ:
-    opStr = "%=";
-    break;
-  case TokenType::PLUS_PLUS:
-    opStr = "++";
-    break;
-  case TokenType::MINUS_MINUS:
-    opStr = "--";
-    break;
-  case TokenType::PIPE:
-    opStr = "|";
-    break;
-  case TokenType::AMPERSAND:
-    opStr = "&";
-    break;
-  case TokenType::CARET:
-    opStr = "^";
-    break;
-  case TokenType::LSHIFT:
-    opStr = "<<";
-    break;
-  case TokenType::RSHIFT:
-    opStr = ">>";
-    break;
-  case TokenType::PIPE_EQ:
-    opStr = "|=";
-    break;
-  case TokenType::AMPERSAND_EQ:
-    opStr = "&=";
-    break;
-  case TokenType::CARET_EQ:
-    opStr = "^=";
-    break;
-  case TokenType::LSHIFT_EQ:
-    opStr = "<<=";
-    break;
-  case TokenType::RSHIFT_EQ:
-    opStr = ">>=";
-    break;
-  case TokenType::BANG:
-    opStr = "!";
-    break;
-  case TokenType::TILDE:
-    opStr = "~";
-    break;
-  default:
+  static const std::unordered_map<TokenType, std::string_view> opMap = {
+      {TokenType::LBRACKET, "[]"},
+      {TokenType::PLUS, "+"},
+      {TokenType::MINUS, "-"},
+      {TokenType::STAR, "*"},
+      {TokenType::SLASH, "/"},
+      {TokenType::PERCENT, "%"},
+      {TokenType::EQ, "=="},
+      {TokenType::NEQ, "!="},
+      {TokenType::LT, "<"},
+      {TokenType::GT, ">"},
+      {TokenType::LE, "<="},
+      {TokenType::GE, ">="},
+      {TokenType::ASSIGN, "="},
+      {TokenType::PLUS_EQ, "+="},
+      {TokenType::MINUS_EQ, "-="},
+      {TokenType::STAR_EQ, "*="},
+      {TokenType::SLASH_EQ, "/="},
+      {TokenType::PERCENT_EQ, "%="},
+      {TokenType::PLUS_PLUS, "++"},
+      {TokenType::MINUS_MINUS, "--"},
+      {TokenType::PIPE, "|"},
+      {TokenType::AMPERSAND, "&"},
+      {TokenType::CARET, "^"},
+      {TokenType::LSHIFT, "<<"},
+      {TokenType::RSHIFT, ">>"},
+      {TokenType::PIPE_EQ, "|="},
+      {TokenType::AMPERSAND_EQ, "&="},
+      {TokenType::CARET_EQ, "^="},
+      {TokenType::LSHIFT_EQ, "<<="},
+      {TokenType::RSHIFT_EQ, ">>="},
+      {TokenType::BANG, "!"},
+      {TokenType::TILDE, "~"}};
+
+  auto it = opMap.find(currentToken().type);
+  if (it == opMap.end()) {
     reportError(currentToken().line, currentToken().column,
                 currentToken().value.length(),
                 "Invalid operator for overloading");
     throw ParseException();
   }
+
+  std::string_view opStr = it->second;
+
+  if (it->first == TokenType::LBRACKET) {
+    advance();
+    if (currentToken().type != TokenType::RBRACKET) {
+      reportError(currentToken().line, currentToken().column,
+                  currentToken().value.length(),
+                  "Expected ']' after '[' for operator[]");
+      throw ParseException();
+    }
+  }
+
   advance();
   std::string name = "operator" + std::string(opStr);
   return astCtx.copyString(name);

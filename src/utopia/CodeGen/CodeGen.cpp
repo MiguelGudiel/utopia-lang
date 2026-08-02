@@ -8,6 +8,44 @@
 
 namespace utopia {
 
+namespace {
+enum class BinOpCode {
+  Add,
+  Sub,
+  Mul,
+  Div,
+  Rem,
+  And,
+  Or,
+  Xor,
+  Shl,
+  Shr,
+  Eq,
+  Ne,
+  Lt,
+  Le,
+  Gt,
+  Ge
+};
+
+static const std::unordered_map<std::string_view, BinOpCode> binOpMap = {
+    {"+", BinOpCode::Add},  {"-", BinOpCode::Sub}, {"*", BinOpCode::Mul},
+    {"/", BinOpCode::Div},  {"%", BinOpCode::Rem}, {"&", BinOpCode::And},
+    {"|", BinOpCode::Or},   {"^", BinOpCode::Xor}, {"<<", BinOpCode::Shl},
+    {">>", BinOpCode::Shr}, {"==", BinOpCode::Eq}, {"!=", BinOpCode::Ne},
+    {"<", BinOpCode::Lt},   {"<=", BinOpCode::Le}, {">", BinOpCode::Gt},
+    {">=", BinOpCode::Ge}};
+
+enum class AssignOpCode { Add, Sub, Mul, Div, Rem, And, Or, Xor, Shl, Shr };
+
+static const std::unordered_map<std::string_view, AssignOpCode> assignOpMap = {
+    {"+", AssignOpCode::Add},  {"-", AssignOpCode::Sub},
+    {"*", AssignOpCode::Mul},  {"/", AssignOpCode::Div},
+    {"%", AssignOpCode::Rem},  {"&", AssignOpCode::And},
+    {"|", AssignOpCode::Or},   {"^", AssignOpCode::Xor},
+    {"<<", AssignOpCode::Shl}, {">>", AssignOpCode::Shr}};
+} // namespace
+
 CodeGen::CodeGen(BackendContext &bCtx, llvm::Module &llvmMod,
                  DiagnosticsEngine &diags, bool emitDebugInfo,
                  std::string filePath)
@@ -821,106 +859,115 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
                  bKind == BuiltinKind::UInt32 || bKind == BuiltinKind::UInt64);
           }
 
-          if (binNode->op == "+")
-            return llvm::ConstantInt::get(ctx, vL + vR);
-          if (binNode->op == "-")
-            return llvm::ConstantInt::get(ctx, vL - vR);
-          if (binNode->op == "*")
-            return llvm::ConstantInt::get(ctx, vL * vR);
-          if (binNode->op == "/") {
-            if (vR.isZero())
-              return nullptr;
-            return llvm::ConstantInt::get(ctx, isUnsigned ? vL.udiv(vR)
-                                                          : vL.sdiv(vR));
-          }
-          if (binNode->op == "%") {
-            if (vR.isZero())
-              return nullptr;
-            return llvm::ConstantInt::get(ctx, isUnsigned ? vL.urem(vR)
-                                                          : vL.srem(vR));
-          }
-          if (binNode->op == "&")
-            return llvm::ConstantInt::get(ctx, vL & vR);
-          if (binNode->op == "|")
-            return llvm::ConstantInt::get(ctx, vL | vR);
-          if (binNode->op == "^")
-            return llvm::ConstantInt::get(ctx, vL ^ vR);
-          if (binNode->op == "<<")
-            return llvm::ConstantInt::get(ctx, vL.shl(vR));
-          if (binNode->op == ">>")
-            return llvm::ConstantInt::get(ctx, isUnsigned ? vL.lshr(vR)
-                                                          : vL.ashr(vR));
-
           if (binNode->op == "&&")
             return llvm::ConstantInt::get(builder.getInt1Ty(),
                                           (vL != 0) && (vR != 0));
           if (binNode->op == "||")
             return llvm::ConstantInt::get(builder.getInt1Ty(),
                                           (vL != 0) || (vR != 0));
-          if (binNode->op == "==")
-            return llvm::ConstantInt::get(builder.getInt1Ty(), vL == vR);
-          if (binNode->op == "!=")
-            return llvm::ConstantInt::get(builder.getInt1Ty(), vL != vR);
-          if (binNode->op == "<")
-            return llvm::ConstantInt::get(builder.getInt1Ty(),
-                                          isUnsigned ? vL.ult(vR) : vL.slt(vR));
-          if (binNode->op == "<=")
-            return llvm::ConstantInt::get(builder.getInt1Ty(),
-                                          isUnsigned ? vL.ule(vR) : vL.sle(vR));
-          if (binNode->op == ">")
-            return llvm::ConstantInt::get(builder.getInt1Ty(),
-                                          isUnsigned ? vL.ugt(vR) : vL.sgt(vR));
-          if (binNode->op == ">=")
-            return llvm::ConstantInt::get(builder.getInt1Ty(),
-                                          isUnsigned ? vL.uge(vR) : vL.sge(vR));
+
+          auto opIt = binOpMap.find(binNode->op);
+          if (opIt != binOpMap.end()) {
+            switch (opIt->second) {
+            case BinOpCode::Add:
+              return llvm::ConstantInt::get(ctx, vL + vR);
+            case BinOpCode::Sub:
+              return llvm::ConstantInt::get(ctx, vL - vR);
+            case BinOpCode::Mul:
+              return llvm::ConstantInt::get(ctx, vL * vR);
+            case BinOpCode::Div:
+              if (vR.isZero())
+                return nullptr;
+              return llvm::ConstantInt::get(ctx, isUnsigned ? vL.udiv(vR)
+                                                            : vL.sdiv(vR));
+            case BinOpCode::Rem:
+              if (vR.isZero())
+                return nullptr;
+              return llvm::ConstantInt::get(ctx, isUnsigned ? vL.urem(vR)
+                                                            : vL.srem(vR));
+            case BinOpCode::And:
+              return llvm::ConstantInt::get(ctx, vL & vR);
+            case BinOpCode::Or:
+              return llvm::ConstantInt::get(ctx, vL | vR);
+            case BinOpCode::Xor:
+              return llvm::ConstantInt::get(ctx, vL ^ vR);
+            case BinOpCode::Shl:
+              return llvm::ConstantInt::get(ctx, vL.shl(vR));
+            case BinOpCode::Shr:
+              return llvm::ConstantInt::get(ctx, isUnsigned ? vL.lshr(vR)
+                                                            : vL.ashr(vR));
+            case BinOpCode::Eq:
+              return llvm::ConstantInt::get(builder.getInt1Ty(), vL == vR);
+            case BinOpCode::Ne:
+              return llvm::ConstantInt::get(builder.getInt1Ty(), vL != vR);
+            case BinOpCode::Lt:
+              return llvm::ConstantInt::get(
+                  builder.getInt1Ty(), isUnsigned ? vL.ult(vR) : vL.slt(vR));
+            case BinOpCode::Le:
+              return llvm::ConstantInt::get(
+                  builder.getInt1Ty(), isUnsigned ? vL.ule(vR) : vL.sle(vR));
+            case BinOpCode::Gt:
+              return llvm::ConstantInt::get(
+                  builder.getInt1Ty(), isUnsigned ? vL.ugt(vR) : vL.sgt(vR));
+            case BinOpCode::Ge:
+              return llvm::ConstantInt::get(
+                  builder.getInt1Ty(), isUnsigned ? vL.uge(vR) : vL.sge(vR));
+            }
+          }
         }
       } else if (auto *cfpL = llvm::dyn_cast<llvm::ConstantFP>(L)) {
         if (auto *cfpR = llvm::dyn_cast<llvm::ConstantFP>(R)) {
           llvm::APFloat vL = cfpL->getValueAPF();
           llvm::APFloat vR = cfpR->getValueAPF();
 
-          if (binNode->op == "+") {
-            vL.add(vR, llvm::APFloat::rmNearestTiesToEven);
-            return llvm::ConstantFP::get(ctx, vL);
+          auto opIt = binOpMap.find(binNode->op);
+          if (opIt != binOpMap.end()) {
+            switch (opIt->second) {
+            case BinOpCode::Add:
+              vL.add(vR, llvm::APFloat::rmNearestTiesToEven);
+              return llvm::ConstantFP::get(ctx, vL);
+            case BinOpCode::Sub:
+              vL.subtract(vR, llvm::APFloat::rmNearestTiesToEven);
+              return llvm::ConstantFP::get(ctx, vL);
+            case BinOpCode::Mul:
+              vL.multiply(vR, llvm::APFloat::rmNearestTiesToEven);
+              return llvm::ConstantFP::get(ctx, vL);
+            case BinOpCode::Div:
+              vL.divide(vR, llvm::APFloat::rmNearestTiesToEven);
+              return llvm::ConstantFP::get(ctx, vL);
+            case BinOpCode::Rem:
+              vL.mod(vR);
+              return llvm::ConstantFP::get(ctx, vL);
+            case BinOpCode::Eq:
+              return llvm::ConstantInt::get(builder.getInt1Ty(),
+                                            vL.compare(vR) ==
+                                                llvm::APFloat::cmpEqual);
+            case BinOpCode::Ne:
+              return llvm::ConstantInt::get(builder.getInt1Ty(),
+                                            vL.compare(vR) !=
+                                                llvm::APFloat::cmpEqual);
+            case BinOpCode::Lt:
+              return llvm::ConstantInt::get(builder.getInt1Ty(),
+                                            vL.compare(vR) ==
+                                                llvm::APFloat::cmpLessThan);
+            case BinOpCode::Le:
+              return llvm::ConstantInt::get(
+                  builder.getInt1Ty(),
+                  vL.compare(vR) == llvm::APFloat::cmpLessThan ||
+                      vL.compare(vR) == llvm::APFloat::cmpEqual);
+            case BinOpCode::Gt:
+              return llvm::ConstantInt::get(builder.getInt1Ty(),
+                                            vL.compare(vR) ==
+                                                llvm::APFloat::cmpGreaterThan);
+            case BinOpCode::Ge:
+              return llvm::ConstantInt::get(
+                  builder.getInt1Ty(),
+                  vL.compare(vR) == llvm::APFloat::cmpGreaterThan ||
+                      vL.compare(vR) == llvm::APFloat::cmpEqual);
+            default:
+              break;
+            }
           }
-          if (binNode->op == "-") {
-            vL.subtract(vR, llvm::APFloat::rmNearestTiesToEven);
-            return llvm::ConstantFP::get(ctx, vL);
-          }
-          if (binNode->op == "*") {
-            vL.multiply(vR, llvm::APFloat::rmNearestTiesToEven);
-            return llvm::ConstantFP::get(ctx, vL);
-          }
-          if (binNode->op == "/") {
-            vL.divide(vR, llvm::APFloat::rmNearestTiesToEven);
-            return llvm::ConstantFP::get(ctx, vL);
-          }
-          if (binNode->op == "%") {
-            vL.mod(vR);
-            return llvm::ConstantFP::get(ctx, vL);
-          }
-
-          auto cmp = vL.compare(vR);
-          if (binNode->op == "==")
-            return llvm::ConstantInt::get(builder.getInt1Ty(),
-                                          cmp == llvm::APFloat::cmpEqual);
-          if (binNode->op == "!=")
-            return llvm::ConstantInt::get(builder.getInt1Ty(),
-                                          cmp != llvm::APFloat::cmpEqual);
-          if (binNode->op == "<")
-            return llvm::ConstantInt::get(builder.getInt1Ty(),
-                                          cmp == llvm::APFloat::cmpLessThan);
-          if (binNode->op == "<=")
-            return llvm::ConstantInt::get(builder.getInt1Ty(),
-                                          cmp == llvm::APFloat::cmpLessThan ||
-                                              cmp == llvm::APFloat::cmpEqual);
-          if (binNode->op == ">")
-            return llvm::ConstantInt::get(builder.getInt1Ty(),
-                                          cmp == llvm::APFloat::cmpGreaterThan);
-          if (binNode->op == ">=")
-            return llvm::ConstantInt::get(
-                builder.getInt1Ty(), cmp == llvm::APFloat::cmpGreaterThan ||
-                                         cmp == llvm::APFloat::cmpEqual);
         }
       }
     }
@@ -1961,51 +2008,55 @@ llvm::Value *CodeGen::visit(const BinaryOpNode *node) {
                   bKind == BuiltinKind::UInt32 || bKind == BuiltinKind::UInt64);
   }
 
-  if (node->op == "+")
-    return isFloat ? builder.CreateFAdd(L, R) : builder.CreateAdd(L, R);
-  if (node->op == "-")
-    return isFloat ? builder.CreateFSub(L, R) : builder.CreateSub(L, R);
-  if (node->op == "*")
-    return isFloat ? builder.CreateFMul(L, R) : builder.CreateMul(L, R);
-  if (node->op == "/")
-    return isFloat ? builder.CreateFDiv(L, R)
-                   : (isUnsigned ? builder.CreateUDiv(L, R)
-                                 : builder.CreateSDiv(L, R));
-  if (node->op == "%")
-    return isFloat ? builder.CreateFRem(L, R)
-                   : (isUnsigned ? builder.CreateURem(L, R)
-                                 : builder.CreateSRem(L, R));
-  if (node->op == "&")
-    return builder.CreateAnd(L, R);
-  if (node->op == "|")
-    return builder.CreateOr(L, R);
-  if (node->op == "^")
-    return builder.CreateXor(L, R);
-  if (node->op == "<<")
-    return builder.CreateShl(L, R);
-  if (node->op == ">>")
-    return isUnsigned ? builder.CreateLShr(L, R) : builder.CreateAShr(L, R);
-
-  if (node->op == "==")
-    return isFloat ? builder.CreateFCmpOEQ(L, R) : builder.CreateICmpEQ(L, R);
-  if (node->op == "!=")
-    return isFloat ? builder.CreateFCmpONE(L, R) : builder.CreateICmpNE(L, R);
-  if (node->op == "<")
-    return isFloat ? builder.CreateFCmpOLT(L, R)
-                   : (isUnsigned ? builder.CreateICmpULT(L, R)
-                                 : builder.CreateICmpSLT(L, R));
-  if (node->op == "<=")
-    return isFloat ? builder.CreateFCmpOLE(L, R)
-                   : (isUnsigned ? builder.CreateICmpULE(L, R)
-                                 : builder.CreateICmpSLE(L, R));
-  if (node->op == ">")
-    return isFloat ? builder.CreateFCmpOGT(L, R)
-                   : (isUnsigned ? builder.CreateICmpUGT(L, R)
-                                 : builder.CreateICmpSGT(L, R));
-  if (node->op == ">=")
-    return isFloat ? builder.CreateFCmpOGE(L, R)
-                   : (isUnsigned ? builder.CreateICmpUGE(L, R)
-                                 : builder.CreateICmpSGE(L, R));
+  auto opIt = binOpMap.find(node->op);
+  if (opIt != binOpMap.end()) {
+    switch (opIt->second) {
+    case BinOpCode::Add:
+      return isFloat ? builder.CreateFAdd(L, R) : builder.CreateAdd(L, R);
+    case BinOpCode::Sub:
+      return isFloat ? builder.CreateFSub(L, R) : builder.CreateSub(L, R);
+    case BinOpCode::Mul:
+      return isFloat ? builder.CreateFMul(L, R) : builder.CreateMul(L, R);
+    case BinOpCode::Div:
+      return isFloat ? builder.CreateFDiv(L, R)
+                     : (isUnsigned ? builder.CreateUDiv(L, R)
+                                   : builder.CreateSDiv(L, R));
+    case BinOpCode::Rem:
+      return isFloat ? builder.CreateFRem(L, R)
+                     : (isUnsigned ? builder.CreateURem(L, R)
+                                   : builder.CreateSRem(L, R));
+    case BinOpCode::And:
+      return builder.CreateAnd(L, R);
+    case BinOpCode::Or:
+      return builder.CreateOr(L, R);
+    case BinOpCode::Xor:
+      return builder.CreateXor(L, R);
+    case BinOpCode::Shl:
+      return builder.CreateShl(L, R);
+    case BinOpCode::Shr:
+      return isUnsigned ? builder.CreateLShr(L, R) : builder.CreateAShr(L, R);
+    case BinOpCode::Eq:
+      return isFloat ? builder.CreateFCmpOEQ(L, R) : builder.CreateICmpEQ(L, R);
+    case BinOpCode::Ne:
+      return isFloat ? builder.CreateFCmpONE(L, R) : builder.CreateICmpNE(L, R);
+    case BinOpCode::Lt:
+      return isFloat ? builder.CreateFCmpOLT(L, R)
+                     : (isUnsigned ? builder.CreateICmpULT(L, R)
+                                   : builder.CreateICmpSLT(L, R));
+    case BinOpCode::Le:
+      return isFloat ? builder.CreateFCmpOLE(L, R)
+                     : (isUnsigned ? builder.CreateICmpULE(L, R)
+                                   : builder.CreateICmpSLE(L, R));
+    case BinOpCode::Gt:
+      return isFloat ? builder.CreateFCmpOGT(L, R)
+                     : (isUnsigned ? builder.CreateICmpUGT(L, R)
+                                   : builder.CreateICmpSGT(L, R));
+    case BinOpCode::Ge:
+      return isFloat ? builder.CreateFCmpOGE(L, R)
+                     : (isUnsigned ? builder.CreateICmpUGE(L, R)
+                                   : builder.CreateICmpSGE(L, R));
+    }
+  }
 
   return nullptr;
 }
@@ -2445,34 +2496,49 @@ llvm::Value *CodeGen::visit(const AssignNode *node) {
            bKind == BuiltinKind::UInt32 || bKind == BuiltinKind::UInt64);
     }
 
-    if (binOp == "+")
-      rval = isFloat ? builder.CreateFAdd(oldVal, castedRval)
-                     : builder.CreateAdd(oldVal, castedRval);
-    else if (binOp == "-")
-      rval = isFloat ? builder.CreateFSub(oldVal, castedRval)
-                     : builder.CreateSub(oldVal, castedRval);
-    else if (binOp == "*")
-      rval = isFloat ? builder.CreateFMul(oldVal, castedRval)
-                     : builder.CreateMul(oldVal, castedRval);
-    else if (binOp == "/")
-      rval = isFloat ? builder.CreateFDiv(oldVal, castedRval)
-                     : (isUnsigned ? builder.CreateUDiv(oldVal, castedRval)
-                                   : builder.CreateSDiv(oldVal, castedRval));
-    else if (binOp == "%")
-      rval = isFloat ? builder.CreateFRem(oldVal, castedRval)
-                     : (isUnsigned ? builder.CreateURem(oldVal, castedRval)
-                                   : builder.CreateSRem(oldVal, castedRval));
-    else if (binOp == "&")
-      rval = builder.CreateAnd(oldVal, castedRval);
-    else if (binOp == "|")
-      rval = builder.CreateOr(oldVal, castedRval);
-    else if (binOp == "^")
-      rval = builder.CreateXor(oldVal, castedRval);
-    else if (binOp == "<<")
-      rval = builder.CreateShl(oldVal, castedRval);
-    else if (binOp == ">>")
-      rval = isUnsigned ? builder.CreateLShr(oldVal, castedRval)
-                        : builder.CreateAShr(oldVal, castedRval);
+    auto opIt = assignOpMap.find(binOp);
+    if (opIt != assignOpMap.end()) {
+      switch (opIt->second) {
+      case AssignOpCode::Add:
+        rval = isFloat ? builder.CreateFAdd(oldVal, castedRval)
+                       : builder.CreateAdd(oldVal, castedRval);
+        break;
+      case AssignOpCode::Sub:
+        rval = isFloat ? builder.CreateFSub(oldVal, castedRval)
+                       : builder.CreateSub(oldVal, castedRval);
+        break;
+      case AssignOpCode::Mul:
+        rval = isFloat ? builder.CreateFMul(oldVal, castedRval)
+                       : builder.CreateMul(oldVal, castedRval);
+        break;
+      case AssignOpCode::Div:
+        rval = isFloat ? builder.CreateFDiv(oldVal, castedRval)
+                       : (isUnsigned ? builder.CreateUDiv(oldVal, castedRval)
+                                     : builder.CreateSDiv(oldVal, castedRval));
+        break;
+      case AssignOpCode::Rem:
+        rval = isFloat ? builder.CreateFRem(oldVal, castedRval)
+                       : (isUnsigned ? builder.CreateURem(oldVal, castedRval)
+                                     : builder.CreateSRem(oldVal, castedRval));
+        break;
+      case AssignOpCode::And:
+        rval = builder.CreateAnd(oldVal, castedRval);
+        break;
+      case AssignOpCode::Or:
+        rval = builder.CreateOr(oldVal, castedRval);
+        break;
+      case AssignOpCode::Xor:
+        rval = builder.CreateXor(oldVal, castedRval);
+        break;
+      case AssignOpCode::Shl:
+        rval = builder.CreateShl(oldVal, castedRval);
+        break;
+      case AssignOpCode::Shr:
+        rval = isUnsigned ? builder.CreateLShr(oldVal, castedRval)
+                          : builder.CreateAShr(oldVal, castedRval);
+        break;
+      }
+    }
   } else {
     llvm::Type *destTy = getLLVMType(node->target->exprType);
     rval = createImplicitCast(rval, destTy);

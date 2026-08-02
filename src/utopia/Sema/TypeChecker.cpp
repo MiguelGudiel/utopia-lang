@@ -7,6 +7,43 @@
 
 namespace utopia {
 
+namespace {
+/* Operator categorization limits large evaluation chains during semantic passes
+ */
+enum class OpCategory {
+  Logical,
+  Relational,
+  BitwiseOrModulo,
+  Arithmetic,
+  Unknown
+};
+
+static const std::unordered_map<std::string_view, OpCategory> opCategoryMap = {
+    {"&&", OpCategory::Logical},         {"||", OpCategory::Logical},
+    {"==", OpCategory::Relational},      {"!=", OpCategory::Relational},
+    {"<", OpCategory::Relational},       {">", OpCategory::Relational},
+    {"<=", OpCategory::Relational},      {">=", OpCategory::Relational},
+    {"<<", OpCategory::BitwiseOrModulo}, {">>", OpCategory::BitwiseOrModulo},
+    {"&", OpCategory::BitwiseOrModulo},  {"|", OpCategory::BitwiseOrModulo},
+    {"^", OpCategory::BitwiseOrModulo},  {"%", OpCategory::BitwiseOrModulo},
+    {"+", OpCategory::Arithmetic},       {"-", OpCategory::Arithmetic},
+    {"*", OpCategory::Arithmetic},       {"/", OpCategory::Arithmetic}};
+
+enum class AssignCategory { BitwiseOrModulo, Arithmetic, Unknown };
+
+static const std::unordered_map<std::string_view, AssignCategory> assignCatMap =
+    {{"%", AssignCategory::BitwiseOrModulo},
+     {"&", AssignCategory::BitwiseOrModulo},
+     {"|", AssignCategory::BitwiseOrModulo},
+     {"^", AssignCategory::BitwiseOrModulo},
+     {"<<", AssignCategory::BitwiseOrModulo},
+     {">>", AssignCategory::BitwiseOrModulo},
+     {"+", AssignCategory::Arithmetic},
+     {"-", AssignCategory::Arithmetic},
+     {"*", AssignCategory::Arithmetic},
+     {"/", AssignCategory::Arithmetic}};
+} // namespace
+
 bool TypeCheckPass::run(const ModuleNode *module, SemaContext &context) {
   ctx = &context;
   auto result = dispatch(module);
@@ -1387,7 +1424,12 @@ SemaResult TypeCheckPass::visit(const BinaryOpNode *node) {
     return opDecl->returnType;
   }
 
-  if (node->op == "&&" || node->op == "||") {
+  OpCategory cat = OpCategory::Unknown;
+  if (auto it = opCategoryMap.find(node->op); it != opCategoryMap.end()) {
+    cat = it->second;
+  }
+
+  if (cat == OpCategory::Logical) {
     if (!canImplicitlyCast(*lhs, ctx->astCtx.BoolTy) ||
         !canImplicitlyCast(*rhs, ctx->astCtx.BoolTy)) {
       return ctx->reportError(node->line, node->column, node->length,
@@ -1397,8 +1439,7 @@ SemaResult TypeCheckPass::visit(const BinaryOpNode *node) {
     return ctx->astCtx.BoolTy;
   }
 
-  if (node->op == "==" || node->op == "!=" || node->op == "<" ||
-      node->op == ">" || node->op == "<=" || node->op == ">=") {
+  if (cat == OpCategory::Relational) {
     if (!canImplicitlyCast(*lhs, *rhs)) {
       return ctx->reportError(node->line, node->column, node->length,
                               "Type mismatch in relational operation.");
@@ -1426,17 +1467,21 @@ SemaResult TypeCheckPass::visit(const BinaryOpNode *node) {
     return ctx->astCtx.BoolTy;
   }
 
-  if (node->op == "<<" || node->op == ">>" || node->op == "&" ||
-      node->op == "|" || node->op == "^" || node->op == "%") {
+  if (cat == OpCategory::BitwiseOrModulo) {
     if (!(*lhs)->isInteger() || !(*rhs)->isInteger()) {
       return ctx->reportError(
           node->line, node->column, node->length,
           "Bitwise and modulo operations require integer operands.");
     }
-  } else if (!(*lhs)->isNumeric() || !(*rhs)->isNumeric()) {
+  } else if (cat == OpCategory::Arithmetic) {
+    if (!(*lhs)->isNumeric() || !(*rhs)->isNumeric()) {
+      return ctx->reportError(node->line, node->column, node->length,
+                              "Binary arithmetic operations are currently "
+                              "restricted to numeric types.");
+    }
+  } else {
     return ctx->reportError(node->line, node->column, node->length,
-                            "Binary arithmetic operations are currently "
-                            "restricted to numeric types.");
+                            "Unknown binary operator.");
   }
 
   if (!canImplicitlyCast(*lhs, *rhs)) {
@@ -1740,19 +1785,27 @@ SemaResult TypeCheckPass::visit(const AssignNode *node) {
 
   if (node->op != "=") {
     std::string_view binOp = node->op.substr(0, node->op.length() - 1);
-    if (binOp == "%" || binOp == "&" || binOp == "|" || binOp == "^" ||
-        binOp == "<<" || binOp == ">>") {
+
+    AssignCategory cat = AssignCategory::Unknown;
+    if (auto it = assignCatMap.find(binOp); it != assignCatMap.end()) {
+      cat = it->second;
+    }
+
+    if (cat == AssignCategory::BitwiseOrModulo) {
       if (!(*lhsType)->isInteger() || !(*rhsType)->isInteger()) {
         return ctx->reportError(
             node->line, node->column, node->length,
             "Bitwise and modulo assignments require integer operands.");
       }
-    } else {
+    } else if (cat == AssignCategory::Arithmetic) {
       if (!(*lhsType)->isNumeric() || !(*rhsType)->isNumeric()) {
         return ctx->reportError(
             node->line, node->column, node->length,
             "Arithmetic assignments require numeric operands.");
       }
+    } else {
+      return ctx->reportError(node->line, node->column, node->length,
+                              "Unknown assignment operator.");
     }
   }
 
