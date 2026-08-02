@@ -141,6 +141,7 @@ public:
   void visit(const RuneNode *) {}
   void visit(const StringNode *) {}
   void visit(const NullNode *) {}
+  void visit(const TypeLiteralNode *) {}
   void visit(const VariableNode *) {}
   void visit(const UnaryOpNode *) {}
   void visit(const BinaryOpNode *) {}
@@ -956,10 +957,10 @@ void handleCompletion(const json &req) {
 
   auto addBuiltInAnnotations = [&]() {
     std::vector<std::string> builtInAnnotations = {
-        "extern",         "export",       "align",     "packed",
-        "nodiscard",      "deprecated",   "inline",    "forceInline",
-        "readnone",       "readonly",     "nosync",    "nofree",
-        "willreturn",     "mustprogress", "nocapture", "nonnull",
+        "extern",          "export",       "align",     "packed",
+        "nodiscard",       "deprecated",   "inline",    "forceInline",
+        "readnone",        "readonly",     "nosync",    "nofree",
+        "willreturn",      "mustprogress", "nocapture", "nonnull",
         "dereferenceable", "weak"};
     for (const auto &ann : builtInAnnotations) {
       addCompletion(ann, 8, "Built-in Annotation");
@@ -1665,6 +1666,19 @@ public:
     if (line < 0 || col < 0 || length <= 0)
       return;
     tokens.push_back({line, col, length, type, modifiers});
+  }
+  
+  void visit(const TypeLiteralNode *n) {
+    if (n->representedType &&
+        !n->representedType->getUnqualifiedType()->isBuiltinType()) {
+      auto typeLoc =
+          getExactNameLocation(docText, getTypeDeclaration(n->representedType));
+      if (typeLoc.length > 0 &&
+          n->representedType->getKind() != TypeKind::Builtin) {
+        addToken(n->line > 0 ? n->line - 1 : 0,
+                 n->column > 0 ? n->column - 1 : 0, typeLoc.length, 3, 0);
+      }
+    }
   }
 
   void visit(const VariableNode *n) {

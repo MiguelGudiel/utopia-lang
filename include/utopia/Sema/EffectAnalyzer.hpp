@@ -34,7 +34,8 @@ public:
   void visit(const BinaryOpNode *n);
   void visit(const VarDeclNode *n);
   void visit(const ArrayLiteralNode *n);
-
+  void visit(const TypeLiteralNode *n);
+  
   void visit(const NumberNode *) {}
   void visit(const BoolNode *) {}
   void visit(const CharNode *) {}

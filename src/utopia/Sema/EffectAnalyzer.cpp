@@ -134,6 +134,8 @@ void EffectAnalyzer::visit(const MemberAccessNode *n) {
   dispatch(n->object);
 }
 
+void EffectAnalyzer::visit(const TypeLiteralNode *n) {}
+
 void EffectAnalyzer::visit(const VariableNode *n) {
   if (n->resolvedDecl && n->resolvedDecl->kind == NodeKind::VarDecl) {
     if (static_cast<const VarDeclNode *>(n->resolvedDecl)->isGlobal)

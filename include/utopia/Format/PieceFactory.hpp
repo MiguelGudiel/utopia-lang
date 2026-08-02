@@ -134,6 +134,7 @@ public:
   Piece *visit(const ArrayLiteralNode *node);
   Piece *visit(const NewExprNode *node);
   Piece *visit(const DeleteExprNode *node);
+  Piece *visit(const TypeLiteralNode *node);
   Piece *visit(const NullNode *node);
   Piece *visit(const ImplicitCastNode *node);
 };

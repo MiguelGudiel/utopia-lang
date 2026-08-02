@@ -1605,6 +1605,7 @@ DeclNode *Parser::parseUnionDecl() {
 
     bool isStatic = false;
     bool isExtern = false;
+    bool isIntrinsic = false;
 
     while (currentToken().type == TokenType::STATIC_KW) {
       isStatic = true;
@@ -1614,7 +1615,8 @@ DeclNode *Parser::parseUnionDecl() {
     for (const auto *ann : memberAnnotations) {
       if (ann->name == "extern") {
         isExtern = true;
-        break;
+      } else if (ann->name == "intrinsic") {
+        isIntrinsic = true;
       }
     }
 
@@ -1680,9 +1682,9 @@ DeclNode *Parser::parseUnionDecl() {
       if (!doc.empty())
         method->docString = astCtx.copyString(doc);
 
-      if (isExtern) {
+      if (isExtern || isIntrinsic) {
         expect(TokenType::SEMICOLON,
-               "Expected ';' after extern method declaration");
+               "Expected ';' after extern or intrinsic method declaration");
       } else {
         method->body = parseFunctionBody(memType);
       }
@@ -1710,6 +1712,11 @@ DeclNode *Parser::parseUnionDecl() {
       if (isExtern) {
         reportError(mLine, mCol, memName.length(),
                     "Variables cannot be declared as extern.");
+        throw ParseException();
+      }
+      if (isIntrinsic) {
+        reportError(mLine, mCol, memName.length(),
+                    "Variables cannot be declared as intrinsic.");
         throw ParseException();
       }
 
@@ -1927,6 +1934,7 @@ DeclNode *Parser::parseStructDecl() {
 
     bool isStatic = false;
     bool isExtern = false;
+    bool isIntrinsic = false;
 
     while (currentToken().type == TokenType::STATIC_KW) {
       isStatic = true;
@@ -1936,7 +1944,8 @@ DeclNode *Parser::parseStructDecl() {
     for (const auto *ann : memberAnnotations) {
       if (ann->name == "extern") {
         isExtern = true;
-        break;
+      } else if (ann->name == "intrinsic") {
+        isIntrinsic = true;
       }
     }
 
@@ -2002,9 +2011,9 @@ DeclNode *Parser::parseStructDecl() {
       if (!doc.empty())
         method->docString = astCtx.copyString(doc);
 
-      if (isExtern) {
+      if (isExtern || isIntrinsic) {
         expect(TokenType::SEMICOLON,
-               "Expected ';' after extern method declaration");
+               "Expected ';' after extern or intrinsic method declaration");
       } else {
         method->body = parseFunctionBody(memType);
       }
@@ -2032,6 +2041,11 @@ DeclNode *Parser::parseStructDecl() {
       if (isExtern) {
         reportError(mLine, mCol, memName.length(),
                     "Variables cannot be declared as extern.");
+        throw ParseException();
+      }
+      if (isIntrinsic) {
+        reportError(mLine, mCol, memName.length(),
+                    "Variables cannot be declared as intrinsic.");
         throw ParseException();
       }
 
@@ -2281,6 +2295,7 @@ DeclNode *Parser::parseClassDecl() {
 
     bool isStatic = false;
     bool isExtern = false;
+    bool isIntrinsic = false;
 
     while (currentToken().type == TokenType::STATIC_KW) {
       isStatic = true;
@@ -2290,7 +2305,8 @@ DeclNode *Parser::parseClassDecl() {
     for (const auto *ann : memberAnnotations) {
       if (ann->name == "extern") {
         isExtern = true;
-        break;
+      } else if (ann->name == "intrinsic") {
+        isIntrinsic = true;
       }
     }
 
@@ -2356,9 +2372,9 @@ DeclNode *Parser::parseClassDecl() {
       if (!doc.empty())
         method->docString = astCtx.copyString(doc);
 
-      if (isExtern) {
+      if (isExtern || isIntrinsic) {
         expect(TokenType::SEMICOLON,
-               "Expected ';' after extern method declaration");
+               "Expected ';' after extern or intrinsic method declaration");
       } else {
         method->body = parseFunctionBody(memType);
       }
@@ -2386,6 +2402,11 @@ DeclNode *Parser::parseClassDecl() {
       if (isExtern) {
         reportError(mLine, mCol, memName.length(),
                     "Variables cannot be declared as extern.");
+        throw ParseException();
+      }
+      if (isIntrinsic) {
+        reportError(mLine, mCol, memName.length(),
+                    "Variables cannot be declared as intrinsic.");
         throw ParseException();
       }
 
@@ -2570,6 +2591,7 @@ DeclNode *Parser::parseDeclarationOrFunction(
 
   bool isExtern = false;
   bool isStatic = false;
+  bool isIntrinsic = false;
 
   while (currentToken().type == TokenType::STATIC_KW) {
     if (currentToken().type == TokenType::STATIC_KW)
@@ -2580,7 +2602,8 @@ DeclNode *Parser::parseDeclarationOrFunction(
   for (const auto *ann : annotations) {
     if (ann->name == "extern") {
       isExtern = true;
-      break;
+    } else if (ann->name == "intrinsic") {
+      isIntrinsic = true;
     }
   }
 
@@ -2640,11 +2663,11 @@ DeclNode *Parser::parseDeclarationOrFunction(
     funcDecl->params = astCtx.copyArray<ParamDeclNode *>(params);
     funcDecl->rawReturnTypeStr = rawTypeStr;
 
-    if (isExtern) {
+    if (isExtern || isIntrinsic) {
       int endLine = currentToken().line;
       int endCol = currentToken().column + currentToken().value.length();
       expect(TokenType::SEMICOLON,
-             "Expected ';' after extern function declaration");
+             "Expected ';' after extern or intrinsic function declaration");
       funcDecl->length = endCol - col;
       funcDecl->endLine = endLine;
     } else {
@@ -2664,6 +2687,11 @@ DeclNode *Parser::parseDeclarationOrFunction(
 
   if (isExtern) {
     reportError(line, col, idLen, "Variables cannot be declared as extern.");
+    throw ParseException();
+  }
+
+  if (isIntrinsic) {
+    reportError(line, col, idLen, "Variables cannot be declared as intrinsic.");
     throw ParseException();
   }
 
@@ -2939,6 +2967,13 @@ ExprNode *Parser::parsePostfix() {
 ExprNode *Parser::parsePrimary() {
   int line = currentToken().line;
   int col = currentToken().column;
+
+  if (currentToken().type == TokenType::TYPE_KW) {
+    const Type *t = parseType();
+    int len = currentToken().column - col;
+    auto node = astCtx.create<TypeLiteralNode>(t, line, col, len);
+    return node;
+  }
 
   if (currentToken().type == TokenType::NULL_KW) {
     int len = currentToken().value.length();

@@ -59,7 +59,8 @@ Piece *PieceFactory::dispatchStmt(const ASTNode *node) {
       node->kind == NodeKind::MemberAccess || node->kind == NodeKind::Cast ||
       node->kind == NodeKind::ImplicitCast || node->kind == NodeKind::Null ||
       node->kind == NodeKind::Boolean || node->kind == NodeKind::Char ||
-      node->kind == NodeKind::Rune || node->kind == NodeKind::ArrayLiteral;
+      node->kind == NodeKind::Rune || node->kind == NodeKind::ArrayLiteral ||
+      node->kind == NodeKind::TypeLiteral;
 
   Piece *p = isExpr ? dispatchExpr(static_cast<const ExprNode *>(node))
                     : dispatch(node);
@@ -304,6 +305,10 @@ Piece *PieceFactory::visit(const RuneNode *node) {
 
 Piece *PieceFactory::visit(const NullNode *node) {
   return create<TextPiece>("null");
+}
+
+Piece *PieceFactory::visit(const TypeLiteralNode *node) {
+  return create<TextPiece>(node->representedType->toString());
 }
 
 Piece *PieceFactory::visit(const BinaryOpNode *node) {

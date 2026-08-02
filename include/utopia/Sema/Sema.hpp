@@ -42,6 +42,20 @@ static bool canImplicitlyCast(const Type *from, const Type *to,
   const Type *unqualFrom = baseFrom->getUnqualifiedType();
   const Type *unqualTo = baseTo->getUnqualifiedType();
 
+  /* Support casting from an internal TypeVal to a user-defined generic 'Type'
+   * class */
+  if (unqualFrom->isBuiltinType() &&
+      static_cast<const BuiltinType *>(unqualFrom)->getBuiltinKind() ==
+          BuiltinKind::TypeVal) {
+    if (unqualTo->getKind() == TypeKind::Class &&
+        static_cast<const RecordType *>(unqualTo)->getName() == "Type")
+      return true;
+    if (unqualTo->isBuiltinType() &&
+        static_cast<const BuiltinType *>(unqualTo)->getBuiltinKind() ==
+            BuiltinKind::TypeVal)
+      return true;
+  }
+
   /* Process user-defined single-argument conversion constructors */
   if (allowUserDefined && (unqualTo->getKind() == TypeKind::Class ||
                            unqualTo->getKind() == TypeKind::Struct ||
@@ -189,6 +203,7 @@ public:
   void visit(const ArrayLiteralNode *) {}
   void visit(const NewExprNode *) {}
   void visit(const DeleteExprNode *) {}
+  void visit(const TypeLiteralNode *) {}
   void visit(const NullNode *) {}
   void visit(const ImplicitCastNode *node) {}
 };
@@ -253,6 +268,7 @@ public:
   SemaResult visit(const ArrayLiteralNode *node);
   SemaResult visit(const NewExprNode *node);
   SemaResult visit(const DeleteExprNode *node);
+  SemaResult visit(const TypeLiteralNode *node);
   SemaResult visit(const NullNode *node);
   SemaResult visit(const EnumDeclNode *node);
   SemaResult visit(const EnumMemberNode *node);

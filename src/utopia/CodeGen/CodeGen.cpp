@@ -54,6 +54,10 @@ llvm::DIType *CodeGen::getDIType(const Type *type) {
   if (type->isBuiltinType()) {
     auto *bTy = static_cast<const BuiltinType *>(type);
     switch (bTy->getBuiltinKind()) {
+    case BuiltinKind::TypeVal:
+      diTy = dBuilder->createBasicType("Type", 8,
+                                       llvm::dwarf::DW_ATE_unsigned_char);
+      break;
     case BuiltinKind::Int8:
       diTy = dBuilder->createBasicType("int8", 8, llvm::dwarf::DW_ATE_signed);
       break;
@@ -225,6 +229,9 @@ llvm::Type *CodeGen::getLLVMType(const Type *type) {
   if (type->isBuiltinType()) {
     auto *bTy = static_cast<const BuiltinType *>(type);
     switch (bTy->getBuiltinKind()) {
+    case BuiltinKind::TypeVal:
+      return builder.getInt8Ty(); /* Dummy representation. Handled internally by
+                                     intrinsics */
     case BuiltinKind::Int8:
     case BuiltinKind::UInt8:
       return builder.getInt8Ty();
@@ -323,6 +330,53 @@ llvm::Type *CodeGen::getLLVMType(const Type *type) {
                     type->toString(),
                 currentFilePath});
   return builder.getInt8Ty();
+}
+
+llvm::Constant *
+CodeGen::createTypeReflectionConstant(const Type *t,
+                                      llvm::StructType *structTy) {
+  if (!t)
+    return llvm::UndefValue::get(structTy);
+
+  auto createStr = [&](const std::string &str) -> llvm::Constant * {
+    llvm::Constant *strConst =
+        llvm::ConstantDataArray::getString(ctx, str, true);
+    auto *gv = new llvm::GlobalVariable(mod, strConst->getType(), true,
+                                        llvm::GlobalValue::PrivateLinkage,
+                                        strConst, ".str.type");
+    gv->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+    llvm::Constant *zero = llvm::ConstantInt::get(builder.getInt32Ty(), 0);
+    return llvm::ConstantExpr::getInBoundsGetElementPtr(
+        strConst->getType(), gv, llvm::ArrayRef<llvm::Constant *>{zero, zero});
+  };
+
+  std::vector<llvm::Constant *> fields;
+  /* uint8* name */
+  fields.push_back(createStr(t->toString()));
+
+  const Type *unqual = t->getUnqualifiedType();
+
+  bool isClass = unqual->getKind() == TypeKind::Class;
+  bool isStruct = unqual->getKind() == TypeKind::Struct;
+  bool isPrimitive = unqual->isBuiltinType();
+  bool isEnum = unqual->getKind() == TypeKind::Enum;
+  bool isArray = unqual->getKind() == TypeKind::Array;
+  bool isPointer = unqual->isPointerType();
+
+  /* Bools in LLVM ABI */
+  fields.push_back(
+      llvm::ConstantInt::get(builder.getInt1Ty(), isClass ? 1 : 0));
+  fields.push_back(
+      llvm::ConstantInt::get(builder.getInt1Ty(), isStruct ? 1 : 0));
+  fields.push_back(
+      llvm::ConstantInt::get(builder.getInt1Ty(), isPrimitive ? 1 : 0));
+  fields.push_back(llvm::ConstantInt::get(builder.getInt1Ty(), isEnum ? 1 : 0));
+  fields.push_back(
+      llvm::ConstantInt::get(builder.getInt1Ty(), isArray ? 1 : 0));
+  fields.push_back(
+      llvm::ConstantInt::get(builder.getInt1Ty(), isPointer ? 1 : 0));
+
+  return llvm::ConstantStruct::get(structTy, fields);
 }
 
 llvm::Value *CodeGen::createImplicitCast(llvm::Value *src, llvm::Type *destTy) {
@@ -656,6 +710,37 @@ void CodeGen::emitConstructorCall(const FunctionCallNode *node,
 llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
   if (!node)
     return nullptr;
+
+  if (node->kind == NodeKind::FunctionCall) {
+    auto *call = static_cast<const FunctionCallNode *>(node);
+    if (call->resolvedFunc && call->resolvedFunc->isIntrinsic) {
+      std::string_view intrinsic = call->resolvedFunc->intrinsicName;
+      if (intrinsic == "sizeof_type" && call->args.size() == 1 &&
+          call->args[0]->representedType) {
+        llvm::Type *llTy = getLLVMType(call->args[0]->representedType);
+        uint64_t size = mod.getDataLayout().getTypeAllocSize(llTy);
+        return builder.getInt64(size);
+      }
+      if (intrinsic == "sizeof_expr" && call->args.size() == 1 &&
+          call->args[0]->exprType) {
+        llvm::Type *llTy = getLLVMType(call->args[0]->exprType);
+        uint64_t size = mod.getDataLayout().getTypeAllocSize(llTy);
+        return builder.getInt64(size);
+      }
+      if (intrinsic == "typeof_type" && call->args.size() == 1 &&
+          call->args[0]->representedType) {
+        return createTypeReflectionConstant(
+            call->args[0]->representedType,
+            llvm::cast<llvm::StructType>(getLLVMType(call->exprType)));
+      }
+      if (intrinsic == "typeof_expr" && call->args.size() == 1 &&
+          call->args[0]->exprType) {
+        return createTypeReflectionConstant(
+            call->args[0]->exprType,
+            llvm::cast<llvm::StructType>(getLLVMType(call->exprType)));
+      }
+    }
+  }
 
   if (node->kind == NodeKind::Null) {
     return llvm::ConstantPointerNull::get(builder.getPtrTy());
@@ -1442,6 +1527,10 @@ llvm::Value *CodeGen::visit(const ClassDeclNode *node) {
 llvm::Value *CodeGen::visit(const EnumDeclNode *node) { return nullptr; }
 
 llvm::Value *CodeGen::visit(const EnumMemberNode *node) { return nullptr; }
+
+llvm::Value *CodeGen::visit(const TypeLiteralNode *node) {
+  return llvm::UndefValue::get(builder.getInt8Ty());
+}
 
 llvm::Value *CodeGen::visit(const VariableNode *node) {
   if (node->isField) {
@@ -2744,6 +2833,42 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
   std::vector<llvm::Value *> argsArgs;
 
   if (node->resolvedFunc) {
+    if (node->resolvedFunc->isIntrinsic) {
+      std::string_view intrinsic = node->resolvedFunc->intrinsicName;
+      if (intrinsic == "sizeof_type") {
+        if (node->args.size() == 1 && node->args[0]->representedType) {
+          llvm::Type *llTy = getLLVMType(node->args[0]->representedType);
+          uint64_t size = mod.getDataLayout().getTypeAllocSize(llTy);
+          return builder.getInt64(size);
+        }
+        return builder.getInt64(0);
+      }
+      if (intrinsic == "sizeof_expr") {
+        if (node->args.size() == 1 && node->args[0]->exprType) {
+          llvm::Type *llTy = getLLVMType(node->args[0]->exprType);
+          uint64_t size = mod.getDataLayout().getTypeAllocSize(llTy);
+          return builder.getInt64(size);
+        }
+        return builder.getInt64(0);
+      }
+      if (intrinsic == "typeof_type") {
+        if (node->args.size() == 1 && node->args[0]->representedType) {
+          return createTypeReflectionConstant(
+              node->args[0]->representedType,
+              llvm::cast<llvm::StructType>(getLLVMType(node->exprType)));
+        }
+        return llvm::UndefValue::get(getLLVMType(node->exprType));
+      }
+      if (intrinsic == "typeof_expr") {
+        if (node->args.size() == 1 && node->args[0]->exprType) {
+          return createTypeReflectionConstant(
+              node->args[0]->exprType,
+              llvm::cast<llvm::StructType>(getLLVMType(node->exprType)));
+        }
+        return llvm::UndefValue::get(getLLVMType(node->exprType));
+      }
+    }
+
     func = getOrCreateFunction(node->resolvedFunc);
 
     if (node->target->kind == NodeKind::MemberAccess) {

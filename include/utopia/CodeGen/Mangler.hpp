@@ -10,8 +10,6 @@ public:
                             const std::string &parentRecord = "");
   static std::string mangle(const VarDeclNode *node,
                             const std::string &parentRecord = "");
-
-private:
   static std::string mangleType(const Type *t);
 };
 
