@@ -293,6 +293,7 @@ struct FunctionDeclNode : public DeclNode {
   bool isImplicit;
   bool isStatic = false;
   mutable std::string_view externAlias;
+  std::string_view callingConv = "cdecl";
   const RecordType *parentRecord = nullptr;
   std::string_view rawReturnTypeStr;
 

@@ -526,16 +526,43 @@ void DeclCollectorPass::visit(const FunctionDeclNode *node) {
     }
 
     if (ann->name == "extern") {
-      if (ann->args.size() == 1 && ann->args[0]->kind == NodeKind::String) {
-        const_cast<FunctionDeclNode *>(node)->externAlias =
-            static_cast<const StringNode *>(ann->args[0])->value;
-      } else if (ann->args.empty()) {
+      if (ann->args.empty()) {
         const_cast<FunctionDeclNode *>(node)->externAlias = node->name;
+        const_cast<FunctionDeclNode *>(node)->callingConv = "cdecl";
+      } else if (ann->args.size() <= 2) {
+        if (ann->args[0]->kind == NodeKind::String) {
+          const_cast<FunctionDeclNode *>(node)->externAlias =
+              static_cast<const StringNode *>(ann->args[0])->value;
+        } else {
+          ctx->reportError(
+              ann->args[0]->line, ann->args[0]->column, ann->args[0]->length,
+              "First argument of @extern must be a string literal.");
+        }
+
+        if (ann->args.size() == 2) {
+          if (ann->args[1]->kind == NodeKind::String) {
+            std::string_view cc =
+                static_cast<const StringNode *>(ann->args[1])->value;
+            if (cc == "cdecl" || cc == "stdcall" || cc == "fastcall") {
+              const_cast<FunctionDeclNode *>(node)->callingConv = cc;
+            } else {
+              ctx->reportError(ann->args[1]->line, ann->args[1]->column,
+                               ann->args[1]->length,
+                               "Calling convention must be 'cdecl', 'stdcall', "
+                               "or 'fastcall'.");
+            }
+          } else {
+            ctx->reportError(
+                ann->args[1]->line, ann->args[1]->column, ann->args[1]->length,
+                "Second argument of @extern must be a string literal.");
+          }
+        } else {
+          const_cast<FunctionDeclNode *>(node)->callingConv = "cdecl";
+        }
       } else {
-        SemaResult err =
-            ctx->reportError(ann->line, ann->column, ann->length,
-                             "The @extern annotation requires either zero or "
-                             "one string literal argument.");
+        ctx->reportError(ann->line, ann->column, ann->length,
+                         "The @extern annotation accepts at most two string "
+                         "literal arguments.");
       }
     }
   }
@@ -666,16 +693,44 @@ void DeclCollectorPass::visit(const UnionDeclNode *node) {
       }
 
       if (ann->name == "extern") {
-        if (ann->args.size() == 1 && ann->args[0]->kind == NodeKind::String) {
-          const_cast<FunctionDeclNode *>(method)->externAlias =
-              static_cast<const StringNode *>(ann->args[0])->value;
-        } else if (ann->args.empty()) {
+        if (ann->args.empty()) {
           const_cast<FunctionDeclNode *>(method)->externAlias = method->name;
+          const_cast<FunctionDeclNode *>(method)->callingConv = "cdecl";
+        } else if (ann->args.size() <= 2) {
+          if (ann->args[0]->kind == NodeKind::String) {
+            const_cast<FunctionDeclNode *>(method)->externAlias =
+                static_cast<const StringNode *>(ann->args[0])->value;
+          } else {
+            ctx->reportError(
+                ann->args[0]->line, ann->args[0]->column, ann->args[0]->length,
+                "First argument of @extern must be a string literal.");
+          }
+
+          if (ann->args.size() == 2) {
+            if (ann->args[1]->kind == NodeKind::String) {
+              std::string_view cc =
+                  static_cast<const StringNode *>(ann->args[1])->value;
+              if (cc == "cdecl" || cc == "stdcall" || cc == "fastcall") {
+                const_cast<FunctionDeclNode *>(method)->callingConv = cc;
+              } else {
+                ctx->reportError(ann->args[1]->line, ann->args[1]->column,
+                                 ann->args[1]->length,
+                                 "Calling convention must be 'cdecl', "
+                                 "'stdcall', or 'fastcall'.");
+              }
+            } else {
+              ctx->reportError(
+                  ann->args[1]->line, ann->args[1]->column,
+                  ann->args[1]->length,
+                  "Second argument of @extern must be a string literal.");
+            }
+          } else {
+            const_cast<FunctionDeclNode *>(method)->callingConv = "cdecl";
+          }
         } else {
-          SemaResult err =
-              ctx->reportError(ann->line, ann->column, ann->length,
-                               "The @extern annotation requires either zero or "
-                               "one string literal argument.");
+          ctx->reportError(ann->line, ann->column, ann->length,
+                           "The @extern annotation accepts at most two string "
+                           "literal arguments.");
         }
       }
     }
@@ -769,16 +824,44 @@ void DeclCollectorPass::visit(const StructDeclNode *node) {
       }
 
       if (ann->name == "extern") {
-        if (ann->args.size() == 1 && ann->args[0]->kind == NodeKind::String) {
-          const_cast<FunctionDeclNode *>(method)->externAlias =
-              static_cast<const StringNode *>(ann->args[0])->value;
-        } else if (ann->args.empty()) {
+        if (ann->args.empty()) {
           const_cast<FunctionDeclNode *>(method)->externAlias = method->name;
+          const_cast<FunctionDeclNode *>(method)->callingConv = "cdecl";
+        } else if (ann->args.size() <= 2) {
+          if (ann->args[0]->kind == NodeKind::String) {
+            const_cast<FunctionDeclNode *>(method)->externAlias =
+                static_cast<const StringNode *>(ann->args[0])->value;
+          } else {
+            ctx->reportError(
+                ann->args[0]->line, ann->args[0]->column, ann->args[0]->length,
+                "First argument of @extern must be a string literal.");
+          }
+
+          if (ann->args.size() == 2) {
+            if (ann->args[1]->kind == NodeKind::String) {
+              std::string_view cc =
+                  static_cast<const StringNode *>(ann->args[1])->value;
+              if (cc == "cdecl" || cc == "stdcall" || cc == "fastcall") {
+                const_cast<FunctionDeclNode *>(method)->callingConv = cc;
+              } else {
+                ctx->reportError(ann->args[1]->line, ann->args[1]->column,
+                                 ann->args[1]->length,
+                                 "Calling convention must be 'cdecl', "
+                                 "'stdcall', or 'fastcall'.");
+              }
+            } else {
+              ctx->reportError(
+                  ann->args[1]->line, ann->args[1]->column,
+                  ann->args[1]->length,
+                  "Second argument of @extern must be a string literal.");
+            }
+          } else {
+            const_cast<FunctionDeclNode *>(method)->callingConv = "cdecl";
+          }
         } else {
-          SemaResult err =
-              ctx->reportError(ann->line, ann->column, ann->length,
-                               "The @extern annotation requires either zero or "
-                               "one string literal argument.");
+          ctx->reportError(ann->line, ann->column, ann->length,
+                           "The @extern annotation accepts at most two string "
+                           "literal arguments.");
         }
       }
     }
@@ -870,16 +953,44 @@ void DeclCollectorPass::visit(const ClassDeclNode *node) {
       }
 
       if (ann->name == "extern") {
-        if (ann->args.size() == 1 && ann->args[0]->kind == NodeKind::String) {
-          const_cast<FunctionDeclNode *>(method)->externAlias =
-              static_cast<const StringNode *>(ann->args[0])->value;
-        } else if (ann->args.empty()) {
+        if (ann->args.empty()) {
           const_cast<FunctionDeclNode *>(method)->externAlias = method->name;
+          const_cast<FunctionDeclNode *>(method)->callingConv = "cdecl";
+        } else if (ann->args.size() <= 2) {
+          if (ann->args[0]->kind == NodeKind::String) {
+            const_cast<FunctionDeclNode *>(method)->externAlias =
+                static_cast<const StringNode *>(ann->args[0])->value;
+          } else {
+            ctx->reportError(
+                ann->args[0]->line, ann->args[0]->column, ann->args[0]->length,
+                "First argument of @extern must be a string literal.");
+          }
+
+          if (ann->args.size() == 2) {
+            if (ann->args[1]->kind == NodeKind::String) {
+              std::string_view cc =
+                  static_cast<const StringNode *>(ann->args[1])->value;
+              if (cc == "cdecl" || cc == "stdcall" || cc == "fastcall") {
+                const_cast<FunctionDeclNode *>(method)->callingConv = cc;
+              } else {
+                ctx->reportError(ann->args[1]->line, ann->args[1]->column,
+                                 ann->args[1]->length,
+                                 "Calling convention must be 'cdecl', "
+                                 "'stdcall', or 'fastcall'.");
+              }
+            } else {
+              ctx->reportError(
+                  ann->args[1]->line, ann->args[1]->column,
+                  ann->args[1]->length,
+                  "Second argument of @extern must be a string literal.");
+            }
+          } else {
+            const_cast<FunctionDeclNode *>(method)->callingConv = "cdecl";
+          }
         } else {
-          SemaResult err =
-              ctx->reportError(ann->line, ann->column, ann->length,
-                               "The @extern annotation requires either zero or "
-                               "one string literal argument.");
+          ctx->reportError(ann->line, ann->column, ann->length,
+                           "The @extern annotation accepts at most two string "
+                           "literal arguments.");
         }
       }
     }

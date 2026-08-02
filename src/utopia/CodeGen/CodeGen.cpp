@@ -398,6 +398,15 @@ llvm::Function *CodeGen::getOrCreateFunction(const FunctionDeclNode *node) {
   func = llvm::Function::Create(funcType, llvm::Function::ExternalLinkage,
                                 irName, mod);
 
+  /* Apply the parsed calling convention before setting other attributes */
+  if (node->callingConv == "stdcall") {
+    func->setCallingConv(llvm::CallingConv::X86_StdCall);
+  } else if (node->callingConv == "fastcall") {
+    func->setCallingConv(llvm::CallingConv::X86_FastCall);
+  } else {
+    func->setCallingConv(llvm::CallingConv::C);
+  }
+
   func->addFnAttr(llvm::Attribute::NoUnwind);
 
   /* Map standard inline to an LLVM hint, and forceInline to AlwaysInline */
