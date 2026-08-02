@@ -1086,6 +1086,31 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
                                   "' from outside its file.");
     }
     ty = static_cast<const VarDeclNode *>(target)->type;
+
+    if (ctx->isAssignTarget) {
+      const_cast<VarDeclNode *>(static_cast<const VarDeclNode *>(target))
+          ->isInitialized = true;
+    } else {
+      auto varDecl = static_cast<const VarDeclNode *>(target);
+      if (!varDecl->isGlobal && !varDecl->isStatic && !varDecl->isInitialized) {
+        const Type *unqual = varDecl->type->getUnqualifiedType();
+        while (unqual->getKind() == TypeKind::Array) {
+          unqual = static_cast<const ArrayType *>(unqual)
+                       ->getElementType()
+                       ->getUnqualifiedType();
+        }
+        if (unqual->isBuiltinType() || unqual->isPointerType() ||
+            unqual->getKind() == TypeKind::Enum) {
+          ctx->diags.report({DiagLevel::Warning, node->line, node->column,
+                             node->length,
+                             "Use of uninitialized variable '" +
+                                 std::string(node->name) + "'.",
+                             std::string(ctx->currentFile), node->endLine});
+          const_cast<VarDeclNode *>(varDecl)->isInitialized = true;
+        }
+      }
+    }
+
   } else if (target->kind == NodeKind::ParamDecl) {
     ty = static_cast<const ParamDeclNode *>(target)->type;
     if (ty->getKind() == TypeKind::Array) {
@@ -1733,7 +1758,13 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
 }
 
 SemaResult TypeCheckPass::visit(const AssignNode *node) {
+  bool prevAssignTarget = ctx->isAssignTarget;
+  if (node->op == "=") {
+    ctx->isAssignTarget = true;
+  }
   auto lhsType = dispatch(node->target);
+  ctx->isAssignTarget = prevAssignTarget;
+
   auto rhsType = dispatch(node->value);
 
   if (!lhsType || !rhsType)

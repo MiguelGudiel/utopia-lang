@@ -265,8 +265,8 @@ void Preprocessor::processDirective() {
   /* Report the inactive block range strictly excluding the directive lines */
   if (wasSkipping && diags && !isFormatting && inactiveStartLine != -1 &&
       directiveLine > inactiveStartLine) {
-    diags->report({DiagLevel::Inactive, inactiveStartLine, 1, 0,
-                   "Inactive preprocessor block", filePath, directiveLine});
+    //diags->report({DiagLevel::Inactive, inactiveStartLine, 1, 0,
+    //               "Inactive preprocessor block", filePath, directiveLine});
   }
 
   if (isSkipping) {
@@ -325,8 +325,8 @@ std::string Preprocessor::process() {
 
   if (skipMode() && diags && !isFormatting && inactiveStartLine != -1 &&
       line >= inactiveStartLine) {
-    diags->report({DiagLevel::Inactive, inactiveStartLine, 1, 0,
-                   "Inactive preprocessor block", filePath, line + 1});
+    //diags->report({DiagLevel::Inactive, inactiveStartLine, 1, 0,
+    //               "Inactive preprocessor block", filePath, line + 1});
   }
 
   if (!condStack.empty()) {

@@ -259,6 +259,7 @@ ASTNode *ASTCloner::visit(const VarDeclNode *n) {
   node->trailingComment = n->trailingComment;
   node->rawTypeStr = n->rawTypeStr;
   node->endLine = n->endLine;
+  node->isInitialized = n->isInitialized;
   return node;
 }
 

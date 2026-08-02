@@ -17,6 +17,7 @@ public:
   const ModuleNode *currentModule = nullptr;
   std::unordered_map<std::string_view, const DeclNode *> templateRegistry;
   DiagnosticsEngine &diags;
+  bool isAssignTarget = false;
 
   explicit SemaContext(ASTContext &ast, DiagnosticsEngine &de,
                        std::string_view path)
@@ -112,7 +113,7 @@ public:
     if (scopes.size() > 1) {
       for (auto it = scopes.rbegin() + 1; it != scopes.rend(); ++it) {
         if (it->kind == ScopeKind::Regular) {
-          break; // Stop at the regular block boundary (allows normal shadowing)
+          break;
         }
         if (it->symbols.find(name) != it->symbols.end()) {
           reportError(decl->line, decl->column, decl->length,

@@ -156,35 +156,62 @@ void TypeCheckPass::checkImplicitCastWarning(const Type *from, const Type *to,
     auto tKind = static_cast<const BuiltinType *>(unqualTo)->getBuiltinKind();
 
     bool loss = false;
+    bool signMismatch = false;
+
+    bool isFromInteger = unqualFrom->isInteger();
+    bool isToInteger = unqualTo->isInteger();
+
+    auto getSize = [](BuiltinKind k) {
+      switch (k) {
+      case BuiltinKind::Int8:
+      case BuiltinKind::UInt8:
+        return 1;
+      case BuiltinKind::Int16:
+      case BuiltinKind::UInt16:
+        return 2;
+      case BuiltinKind::Int32:
+      case BuiltinKind::UInt32:
+        return 4;
+      case BuiltinKind::Int64:
+      case BuiltinKind::UInt64:
+        return 8;
+      default:
+        return 0;
+      }
+    };
+
     if (unqualFrom->isFloat() && unqualTo->isInteger()) {
       loss = true;
     } else if (fKind == BuiltinKind::Float64 && tKind == BuiltinKind::Float32) {
       loss = true;
-    } else if (unqualFrom->isInteger() && unqualTo->isInteger()) {
-      auto getSize = [](BuiltinKind k) {
-        switch (k) {
-        case BuiltinKind::Int8:
-        case BuiltinKind::UInt8:
-          return 1;
-        case BuiltinKind::Int16:
-        case BuiltinKind::UInt16:
-          return 2;
-        case BuiltinKind::Int32:
-        case BuiltinKind::UInt32:
-          return 4;
-        case BuiltinKind::Int64:
-        case BuiltinKind::UInt64:
-          return 8;
-        default:
-          return 0;
-        }
-      };
+    } else if (isFromInteger && isToInteger) {
       if (getSize(fKind) > getSize(tKind)) {
         loss = true;
       }
+
+      bool isFromUnsigned =
+          (fKind == BuiltinKind::UInt8 || fKind == BuiltinKind::UInt16 ||
+           fKind == BuiltinKind::UInt32 || fKind == BuiltinKind::UInt64);
+      bool isToUnsigned =
+          (tKind == BuiltinKind::UInt8 || tKind == BuiltinKind::UInt16 ||
+           tKind == BuiltinKind::UInt32 || tKind == BuiltinKind::UInt64);
+
+      if (isFromUnsigned != isToUnsigned) {
+        if (!isFromUnsigned && isToUnsigned) {
+          // Signed to Unsigned: Always risky (negative values wrap to massive
+          // unsigned ones)
+          signMismatch = true;
+        } else if (isFromUnsigned && !isToUnsigned) {
+          // Unsigned to Signed: Safe only if the destination type is strictly
+          // larger
+          if (getSize(tKind) <= getSize(fKind)) {
+            signMismatch = true;
+          }
+        }
+      }
     }
 
-    if (loss) {
+    if (loss || signMismatch) {
       bool isLiteralFit = false;
       const NumberNode *numNode = nullptr;
       bool isNegative = false;
@@ -210,8 +237,7 @@ void TypeCheckPass::checkImplicitCastWarning(const Type *from, const Type *to,
           } else {
             uint64_t uval = std::stoull(std::string(numNode->raw), nullptr, 0);
             if (unqualTo->isInteger()) {
-              int64_t sval = isNegative ? -static_cast<int64_t>(uval)
-                                        : static_cast<int64_t>(uval);
+              int64_t sval = static_cast<int64_t>(isNegative ? -uval : uval);
               isLiteralFit = true;
               switch (tKind) {
               case BuiltinKind::Int8:
@@ -248,13 +274,22 @@ void TypeCheckPass::checkImplicitCastWarning(const Type *from, const Type *to,
       }
 
       if (!isLiteralFit) {
-        ctx->diags.report(
-            {DiagLevel::Warning, node->line, node->column, node->length,
-             "Implicit conversion from '" + from->toString() + "' to '" +
-                 to->toString() +
-                 "' may lose precision. Use an explicit cast to suppress this "
-                 "warning.",
-             std::string(ctx->currentFile)});
+        if (loss) {
+          ctx->diags.report({DiagLevel::Warning, node->line, node->column,
+                             node->length,
+                             "Implicit conversion from '" + from->toString() +
+                                 "' to '" + to->toString() +
+                                 "' may lose precision. Use an explicit cast "
+                                 "to suppress this warning.",
+                             std::string(ctx->currentFile), node->endLine});
+        } else if (signMismatch) {
+          ctx->diags.report(
+              {DiagLevel::Warning, node->line, node->column, node->length,
+               "Implicit conversion changes signedness from '" +
+                   from->toString() + "' to '" + to->toString() +
+                   "'. Use an explicit cast to suppress this warning.",
+               std::string(ctx->currentFile), node->endLine});
+        }
       }
     }
   }

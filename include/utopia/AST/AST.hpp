@@ -243,11 +243,12 @@ struct VarDeclNode : public DeclNode {
 
   /* Reference to the resolved copy constructor for aggregate initialization */
   mutable const FunctionDeclNode *copyCtor = nullptr;
+  mutable bool isInitialized = false;
 
   VarDeclNode(const Type *t, std::string_view n, ExprNode *init, int l, int c,
               int len)
       : DeclNode(NodeKind::VarDecl, l, c, len), type(t), varName(n),
-        initializer(init) {}
+        initializer(init), isInitialized(init != nullptr) {}
 };
 
 struct AssignNode : public ExprNode {

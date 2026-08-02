@@ -59,7 +59,8 @@ public:
            {{"start", {{"line", lspLine}, {"character", lspCol}}},
             {"end", {{"line", lspEndLine}, {"character", lspEndCol}}}}},
           {"message", d.message},
-          {"source", "utopia"}};
+          {"source", "utopia"},
+          {"file", d.filePath}};
 
       if (d.level == DiagLevel::Error) {
         diagObj["severity"] = 1;
