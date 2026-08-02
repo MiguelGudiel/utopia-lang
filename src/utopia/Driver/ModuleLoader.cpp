@@ -145,7 +145,8 @@ ModuleNode *ModuleLoader::loadModule(const std::string &importURI,
     fileContent = buffer.str();
   }
 
-  Preprocessor pp(fileContent, config.definedMacros);
+  Preprocessor pp(fileContent, config.definedMacros, &diags, key,
+                  config.isFormatting);
   std::string processedContent = pp.process();
 
   std::string_view persistentSource = astCtx.copyString(processedContent);

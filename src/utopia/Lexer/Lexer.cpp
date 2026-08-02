@@ -105,7 +105,7 @@ Token Lexer::parseToken() {
 
   if (c == '/') {
     if (cursor + 1 < source.length() && source[cursor + 1] == '/') {
-      size_t startStr = cursor; // Comenzar a capturar incluyendo el '//'
+      size_t startStr = cursor;
       advance();
       advance();
       while (cursor < source.length() && source[cursor] != '\n')
@@ -115,7 +115,7 @@ Token Lexer::parseToken() {
               startLine, startCol};
     }
     if (cursor + 1 < source.length() && source[cursor + 1] == '*') {
-      size_t startStr = cursor; // Comenzar a capturar incluyendo el '/*'
+      size_t startStr = cursor;
       advance();
       advance();
       while (cursor + 1 < source.length() &&
@@ -130,6 +130,16 @@ Token Lexer::parseToken() {
       std::string_view val(source.data() + startStr, endStr - startStr);
       return {TokenType::COMMENT, val, startLine, startCol};
     }
+  }
+
+  if (c == '#') {
+    size_t startStr = cursor;
+    while (cursor < source.length() && source[cursor] != '\n') {
+      advance();
+    }
+    return {TokenType::COMMENT,
+            std::string_view(source.data() + startStr, cursor - startStr),
+            startLine, startCol};
   }
 
   if (c == 'U' && cursor + 1 < source.length() && source[cursor + 1] == '\'') {

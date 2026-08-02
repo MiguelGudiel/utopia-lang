@@ -95,6 +95,7 @@ bool CompilerDriver::run() {
   modConfig.definedMacros = options.publicMacros;
   modConfig.definedMacros.insert(options.privateMacros.begin(),
                                  options.privateMacros.end());
+  modConfig.isFormatting = options.doFormat;
 
   ModuleLoader loader(astCtx, modConfig, diagEngine);
 

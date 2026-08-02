@@ -7,7 +7,7 @@
 
 namespace utopia {
 
-enum class DiagLevel { Error, Warning, Note };
+enum class DiagLevel { Error, Warning, Note, Inactive };
 
 struct Diagnostic {
   DiagLevel level;
@@ -54,13 +54,26 @@ public:
         lspEndCol = lspCol + safeLen;
       }
 
-      j.push_back(
-          {{"range",
-            {{"start", {{"line", lspLine}, {"character", lspCol}}},
-             {"end", {{"line", lspEndLine}, {"character", lspEndCol}}}}},
-           {"severity", d.level == DiagLevel::Error ? 1 : 2},
-           {"message", d.message},
-           {"source", "utopia"}});
+      auto diagObj = nlohmann::json{
+          {"range",
+           {{"start", {{"line", lspLine}, {"character", lspCol}}},
+            {"end", {{"line", lspEndLine}, {"character", lspEndCol}}}}},
+          {"message", d.message},
+          {"source", "utopia"}};
+
+      if (d.level == DiagLevel::Error) {
+        diagObj["severity"] = 1;
+      } else if (d.level == DiagLevel::Warning) {
+        diagObj["severity"] = 2;
+      } else if (d.level == DiagLevel::Note) {
+        diagObj["severity"] = 3;
+      } else if (d.level == DiagLevel::Inactive) {
+        diagObj["severity"] = 4; // Hint level in LSP
+        diagObj["tags"] = {
+            1}; // 1 = DiagnosticTag::Unnecessary (Greys out code in IDE)
+      }
+
+      j.push_back(diagObj);
     }
     return j;
   }
@@ -90,6 +103,10 @@ private:
     case DiagLevel::Note:
       color = "\033[1;36m";
       label = "note";
+      break;
+    case DiagLevel::Inactive:
+      color = "\033[1;30m"; // Dark grey
+      label = "inactive";
       break;
     }
 

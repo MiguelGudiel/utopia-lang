@@ -96,8 +96,12 @@ public:
 };
 
 Preprocessor::Preprocessor(std::string_view sourceCode,
-                           const std::unordered_set<std::string> &macros)
-    : source(sourceCode), cursor(0), definedMacros(macros) {
+                           const std::unordered_set<std::string> &macros,
+                           DiagnosticsEngine *diags, std::string_view filePath,
+                           bool isFormatting)
+    : source(sourceCode), cursor(0), definedMacros(macros), diags(diags),
+      filePath(std::string(filePath)), isFormatting(isFormatting), line(1),
+      col(1), inactiveStartLine(-1) {
 
 #if defined(_WIN32)
   definedMacros.insert("_WIN32");
@@ -126,9 +130,28 @@ Preprocessor::Preprocessor(std::string_view sourceCode,
 #endif
 }
 
+int Preprocessor::getUTF8CharLength(unsigned char c) {
+  if ((c & 0x80) == 0)
+    return 1;
+  if ((c & 0xE0) == 0xC0)
+    return 2;
+  if ((c & 0xF0) == 0xE0)
+    return 3;
+  if ((c & 0xF8) == 0xF0)
+    return 4;
+  return 1;
+}
+
 void Preprocessor::advance() {
   if (cursor < source.length()) {
-    cursor++;
+    int charLen = getUTF8CharLength(source[cursor]);
+    if (source[cursor] == '\n') {
+      line++;
+      col = 1;
+    } else {
+      col += charLen;
+    }
+    cursor += charLen;
   }
 }
 
@@ -138,6 +161,9 @@ bool Preprocessor::evaluateCondition(std::string_view expr) {
 }
 
 void Preprocessor::processDirective() {
+  int directiveLine = this->line;
+  bool wasSkipping = skipMode();
+
   advance();
 
   auto skipSpaces = [&]() {
@@ -233,6 +259,21 @@ void Preprocessor::processDirective() {
       Logger::warning("Unknown preprocessor directive: " + std::string(kw));
     }
   }
+
+  bool isSkipping = skipMode();
+
+  /* Report the inactive block range strictly excluding the directive lines */
+  if (wasSkipping && diags && !isFormatting && inactiveStartLine != -1 &&
+      directiveLine > inactiveStartLine) {
+    diags->report({DiagLevel::Inactive, inactiveStartLine, 1, 0,
+                   "Inactive preprocessor block", filePath, directiveLine});
+  }
+
+  if (isSkipping) {
+    inactiveStartLine = directiveLine + 1;
+  } else {
+    inactiveStartLine = -1;
+  }
 }
 
 std::string Preprocessor::process() {
@@ -252,7 +293,7 @@ std::string Preprocessor::process() {
     }
 
     if (std::isspace(c)) {
-      output += skipMode() ? ' ' : c;
+      output += (skipMode() && !isFormatting) ? ' ' : c;
       advance();
       continue;
     }
@@ -266,7 +307,7 @@ std::string Preprocessor::process() {
         if (source[i] == '\n') {
           output += '\n';
         } else {
-          output += ' ';
+          output += isFormatting ? source[i] : ' ';
         }
       }
       continue;
@@ -274,12 +315,18 @@ std::string Preprocessor::process() {
 
     isStartOfLine = false;
 
-    if (skipMode()) {
+    if (skipMode() && !isFormatting) {
       output += ' ';
     } else {
       output += c;
     }
     advance();
+  }
+
+  if (skipMode() && diags && !isFormatting && inactiveStartLine != -1 &&
+      line >= inactiveStartLine) {
+    diags->report({DiagLevel::Inactive, inactiveStartLine, 1, 0,
+                   "Inactive preprocessor block", filePath, line + 1});
   }
 
   if (!condStack.empty()) {
