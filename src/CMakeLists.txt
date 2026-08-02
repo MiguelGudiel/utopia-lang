@@ -17,6 +17,10 @@ set(CORE_SOURCES
     utopia/Lexer/Lexer.cpp
     utopia/Parser/Parser.cpp
     utopia/Sema/Sema.cpp
+    utopia/Sema/DeclCollector.cpp
+    utopia/Sema/TypeChecker.cpp
+    utopia/Sema/TypeConversion.cpp
+    utopia/Sema/OverloadResolution.cpp
     utopia/Sema/EffectAnalyzer.cpp
 )
 
