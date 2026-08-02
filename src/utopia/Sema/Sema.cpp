@@ -527,6 +527,77 @@ void TypeCheckPass::checkNodiscard(const ASTNode *node) {
   }
 }
 
+void TypeCheckPass::checkDeprecated(const DeclNode *decl, const ASTNode *node) {
+  if (!decl || !node)
+    return;
+  for (const auto *ann : decl->annotations) {
+    if (ann->name == "deprecated") {
+      std::string declKind = "declaration";
+      std::string declName = "unknown";
+
+      switch (decl->kind) {
+      case NodeKind::VarDecl:
+        declKind = "variable";
+        declName = std::string(static_cast<const VarDeclNode *>(decl)->varName);
+        break;
+      case NodeKind::ParamDecl:
+        declKind = "parameter";
+        declName = std::string(static_cast<const ParamDeclNode *>(decl)->name);
+        break;
+      case NodeKind::FunctionDecl:
+        declKind = static_cast<const FunctionDeclNode *>(decl)->isMethod
+                       ? "method"
+                       : "function";
+        declName =
+            std::string(static_cast<const FunctionDeclNode *>(decl)->name);
+        break;
+      case NodeKind::StructDecl:
+        declKind = "struct";
+        declName = std::string(static_cast<const StructDeclNode *>(decl)->name);
+        break;
+      case NodeKind::ClassDecl:
+        declKind = "class";
+        declName = std::string(static_cast<const ClassDeclNode *>(decl)->name);
+        break;
+      case NodeKind::UnionDecl:
+        declKind = "union";
+        declName = std::string(static_cast<const UnionDeclNode *>(decl)->name);
+        break;
+      case NodeKind::EnumDecl:
+        declKind = "enum";
+        declName = std::string(static_cast<const EnumDeclNode *>(decl)->name);
+        break;
+      case NodeKind::EnumMember:
+        declKind = "enum member";
+        declName = std::string(static_cast<const EnumMemberNode *>(decl)->name);
+        break;
+      case NodeKind::TypedefDecl:
+        declKind = "type alias";
+        declName =
+            std::string(static_cast<const TypedefDeclNode *>(decl)->aliasName);
+        break;
+      case NodeKind::AnnotationDecl:
+        declKind = "annotation";
+        declName =
+            std::string(static_cast<const AnnotationDeclNode *>(decl)->name);
+        break;
+      default:
+        break;
+      }
+
+      std::string msg = "use of deprecated " + declKind + " '" + declName + "'";
+      if (!ann->args.empty() && ann->args[0]->kind == NodeKind::String) {
+        msg += ": " + std::string(
+                          static_cast<const StringNode *>(ann->args[0])->value);
+      }
+
+      ctx->diags.report({DiagLevel::Warning, node->line, node->column,
+                         node->length, msg, std::string(ctx->currentFile),
+                         node->endLine});
+    }
+  }
+}
+
 bool DeclCollectorPass::run(const ModuleNode *module, SemaContext &context) {
   ctx = &context;
   dispatch(module);
@@ -1853,6 +1924,24 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
               const_cast<VariableNode *>(node)->parentType = clsTy;
               node->exprType = field->type;
               node->isLValue = true;
+
+              if (const DeclNode *recDecl = clsTy->getDeclaration()) {
+                llvm::ArrayRef<VarDeclNode *> fields;
+                if (recDecl->kind == NodeKind::ClassDecl)
+                  fields = static_cast<const ClassDeclNode *>(recDecl)->fields;
+                else if (recDecl->kind == NodeKind::StructDecl)
+                  fields = static_cast<const StructDeclNode *>(recDecl)->fields;
+                else if (recDecl->kind == NodeKind::UnionDecl)
+                  fields = static_cast<const UnionDeclNode *>(recDecl)->fields;
+
+                for (const auto *fDecl : fields) {
+                  if (fDecl->varName == node->name) {
+                    checkDeprecated(fDecl, node);
+                    break;
+                  }
+                }
+              }
+
               return field->type;
             }
           }
@@ -1881,6 +1970,7 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
             const_cast<VariableNode *>(node)->resolvedDecl = f;
             node->exprType = f->type;
             node->isLValue = true;
+            checkDeprecated(f, node);
             return f->type;
           }
         }
@@ -1894,6 +1984,7 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
                 m->returnType, ctx->astCtx.copyArray<const Type *>(pTypes));
             node->exprType = ctx->astCtx.getPointerType(funcTy);
             node->isLValue = true;
+            checkDeprecated(m, node);
             return node->exprType;
           }
         }
@@ -1982,6 +2073,7 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
   const_cast<VariableNode *>(node)->resolvedDecl = target;
   node->exprType = ty;
   node->isLValue = true;
+  checkDeprecated(target, node);
   return ty;
 }
 
@@ -2738,6 +2830,7 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
             const_cast<MemberAccessNode *>(node)->isEnumMember = true;
             const_cast<MemberAccessNode *>(node)->enumMember = mem;
             node->exprType = enumDecl->enumType;
+            checkDeprecated(mem, node);
             return node->exprType;
           }
         }
@@ -2800,6 +2893,24 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
       const_cast<MemberAccessNode *>(node)->fieldIndex = field->index;
       node->exprType = field->type;
       node->isLValue = true;
+
+      if (const DeclNode *recDecl = recordTy->getDeclaration()) {
+        llvm::ArrayRef<VarDeclNode *> fields;
+        if (recDecl->kind == NodeKind::ClassDecl)
+          fields = static_cast<const ClassDeclNode *>(recDecl)->fields;
+        else if (recDecl->kind == NodeKind::StructDecl)
+          fields = static_cast<const StructDeclNode *>(recDecl)->fields;
+        else if (recDecl->kind == NodeKind::UnionDecl)
+          fields = static_cast<const UnionDeclNode *>(recDecl)->fields;
+
+        for (const auto *fDecl : fields) {
+          if (fDecl->varName == node->memberName) {
+            checkDeprecated(fDecl, node);
+            break;
+          }
+        }
+      }
+
       return field->type;
     }
   }
@@ -2845,6 +2956,7 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
             const_cast<MemberAccessNode *>(node)->isStaticFieldRef = true;
             const_cast<MemberAccessNode *>(node)->resolvedVar = f;
             node->exprType = f->type;
+            checkDeprecated(f, node);
             return f->type;
           }
         }
@@ -2983,6 +3095,7 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
           const_cast<MemberAccessNode *>(node)->isMethodRef = true;
           const_cast<MemberAccessNode *>(node)->resolvedMethod = method;
           node->exprType = ctx->astCtx.VoidTy;
+          checkDeprecated(method, node);
           return ctx->astCtx.VoidTy;
         }
       }
@@ -3528,6 +3641,9 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
 
           node->exprType = bestMatch->returnType;
           node->isLValue = (node->exprType->isReferenceType());
+
+          checkDeprecated(bestMatch, node);
+
           return node->exprType;
         }
 
@@ -3658,6 +3774,8 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
               static_cast<const VariableNode *>(node->target))
               ->resolvedDecl = bestMatch;
         }
+
+        checkDeprecated(bestMatch, node);
 
         return node->exprType;
       }

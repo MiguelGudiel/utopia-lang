@@ -216,6 +216,7 @@ public:
 
   /* Analyzes an AST node to emit warnings if a nodiscard value is ignored */
   void checkNodiscard(const ASTNode *node);
+  void checkDeprecated(const DeclNode *decl, const ASTNode *node);
 
   SemaResult visit(const NumberNode *node);
   SemaResult visit(const BoolNode *node);
