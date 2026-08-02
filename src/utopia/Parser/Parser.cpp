@@ -422,7 +422,6 @@ AnnotationNode *Parser::parseAnnotation() {
 
   std::string_view name = currentToken().value;
   if (currentToken().type == TokenType::IDENTIFIER ||
-      currentToken().type == TokenType::EXTERN_KW ||
       currentToken().type == TokenType::TYPE_KW ||
       currentToken().type == TokenType::CONST_KW ||
       currentToken().type == TokenType::ANNOTATION_KW) {
@@ -900,7 +899,6 @@ ASTNode *Parser::parseStatement() {
   } else if (currentToken().type == TokenType::CONTINUE_KW) {
     node = parseContinueStatement();
   } else if (currentToken().type == TokenType::CONST_KW ||
-             currentToken().type == TokenType::EXTERN_KW ||
              currentToken().type == TokenType::STATIC_KW ||
              ((currentToken().type == TokenType::TYPE_KW ||
                (currentToken().type == TokenType::IDENTIFIER &&
@@ -1608,21 +1606,15 @@ DeclNode *Parser::parseUnionDecl() {
     bool isStatic = false;
     bool isExtern = false;
 
-    while (currentToken().type == TokenType::STATIC_KW ||
-           currentToken().type == TokenType::EXTERN_KW) {
-      if (currentToken().type == TokenType::STATIC_KW)
-        isStatic = true;
-      if (currentToken().type == TokenType::EXTERN_KW)
-        isExtern = true;
+    while (currentToken().type == TokenType::STATIC_KW) {
+      isStatic = true;
       advance();
     }
 
-    if (!isExtern) {
-      for (const auto *ann : memberAnnotations) {
-        if (ann->name == "extern") {
-          isExtern = true;
-          break;
-        }
+    for (const auto *ann : memberAnnotations) {
+      if (ann->name == "extern") {
+        isExtern = true;
+        break;
       }
     }
 
@@ -1936,21 +1928,15 @@ DeclNode *Parser::parseStructDecl() {
     bool isStatic = false;
     bool isExtern = false;
 
-    while (currentToken().type == TokenType::STATIC_KW ||
-           currentToken().type == TokenType::EXTERN_KW) {
-      if (currentToken().type == TokenType::STATIC_KW)
-        isStatic = true;
-      if (currentToken().type == TokenType::EXTERN_KW)
-        isExtern = true;
+    while (currentToken().type == TokenType::STATIC_KW) {
+      isStatic = true;
       advance();
     }
 
-    if (!isExtern) {
-      for (const auto *ann : memberAnnotations) {
-        if (ann->name == "extern") {
-          isExtern = true;
-          break;
-        }
+    for (const auto *ann : memberAnnotations) {
+      if (ann->name == "extern") {
+        isExtern = true;
+        break;
       }
     }
 
@@ -2296,21 +2282,15 @@ DeclNode *Parser::parseClassDecl() {
     bool isStatic = false;
     bool isExtern = false;
 
-    while (currentToken().type == TokenType::STATIC_KW ||
-           currentToken().type == TokenType::EXTERN_KW) {
-      if (currentToken().type == TokenType::STATIC_KW)
-        isStatic = true;
-      if (currentToken().type == TokenType::EXTERN_KW)
-        isExtern = true;
+    while (currentToken().type == TokenType::STATIC_KW) {
+      isStatic = true;
       advance();
     }
 
-    if (!isExtern) {
-      for (const auto *ann : memberAnnotations) {
-        if (ann->name == "extern") {
-          isExtern = true;
-          break;
-        }
+    for (const auto *ann : memberAnnotations) {
+      if (ann->name == "extern") {
+        isExtern = true;
+        break;
       }
     }
 
@@ -2591,21 +2571,16 @@ DeclNode *Parser::parseDeclarationOrFunction(
   bool isExtern = false;
   bool isStatic = false;
 
-  while (currentToken().type == TokenType::EXTERN_KW ||
-         currentToken().type == TokenType::STATIC_KW) {
-    if (currentToken().type == TokenType::EXTERN_KW)
-      isExtern = true;
+  while (currentToken().type == TokenType::STATIC_KW) {
     if (currentToken().type == TokenType::STATIC_KW)
       isStatic = true;
     advance();
   }
 
-  if (!isExtern) {
-    for (const auto *ann : annotations) {
-      if (ann->name == "extern") {
-        isExtern = true;
-        break;
-      }
+  for (const auto *ann : annotations) {
+    if (ann->name == "extern") {
+      isExtern = true;
+      break;
     }
   }
 

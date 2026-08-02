@@ -272,8 +272,6 @@ Token Lexer::parseToken() {
       return {TokenType::CONST_KW, id, startLine, startCol};
     if (id == "annotation")
       return {TokenType::ANNOTATION_KW, id, startLine, startCol};
-    if (id == "extern")
-      return {TokenType::EXTERN_KW, id, startLine, startCol};
     if (id == "static")
       return {TokenType::STATIC_KW, id, startLine, startCol};
     if (id == "required")
