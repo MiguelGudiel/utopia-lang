@@ -1,6 +1,5 @@
 #pragma once
 #include "utopia/AST/AST.hpp"
-#include <cstdlib>
 #include <iostream>
 
 namespace utopia {
