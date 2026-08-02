@@ -1,13 +1,10 @@
 #include "utopia/CodeGen/CodeGen.hpp"
 #include "utopia/CodeGen/Intrinsics.hpp"
-#include <filesystem>
-#include <iostream>
 #include <llvm/ADT/APSInt.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/Support/ModRef.h>
 #include <optional>
 #include <string>
-namespace fs = std::filesystem;
 
 namespace utopia {
 
@@ -15,17 +12,12 @@ CodeGen::CodeGen(BackendContext &bCtx, llvm::Module &llvmMod,
                  DiagnosticsEngine &diags, bool emitDebugInfo,
                  std::string filePath)
     : backend(bCtx), ctx(bCtx.getLLVMContext()), mod(llvmMod), builder(ctx),
-      diags(diags), mdBuilder(ctx), emitDebugInfo(emitDebugInfo),
-      currentFilePath(std::move(filePath)) {
-  tbaaRoot = mdBuilder.createTBAARoot("Utopia TBAA");
+      diags(diags), currentFilePath(std::move(filePath)),
+      diEmitter(llvmMod, emitDebugInfo), tbaaManager(ctx) {
 
   llvm::FastMathFlags fmf;
   fmf.setFast();
   builder.setFastMathFlags(fmf);
-
-  if (emitDebugInfo) {
-    dBuilder = std::make_unique<llvm::DIBuilder>(mod);
-  }
 }
 
 llvm::Value *CodeGen::dispatch(const ASTNode *node) {
@@ -36,159 +28,7 @@ llvm::Value *CodeGen::dispatch(const ASTNode *node) {
 }
 
 void CodeGen::emitLocation(const ASTNode *node) {
-  if (!emitDebugInfo || !node)
-    return;
-  if (node->line == 0)
-    return;
-  llvm::DIScope *scope = lexicalBlocks.empty() ? diCU : lexicalBlocks.back();
-  builder.SetCurrentDebugLocation(
-      llvm::DILocation::get(ctx, node->line, node->column, scope));
-}
-
-llvm::DIType *CodeGen::getDIType(const Type *type) {
-  if (!type)
-    return nullptr;
-  if (debugTypes.contains(type))
-    return debugTypes[type];
-
-  llvm::DIType *diTy = nullptr;
-  if (type->isBuiltinType()) {
-    auto *bTy = static_cast<const BuiltinType *>(type);
-    switch (bTy->getBuiltinKind()) {
-    case BuiltinKind::TypeVal:
-      diTy = dBuilder->createBasicType("Type", 8,
-                                       llvm::dwarf::DW_ATE_unsigned_char);
-      break;
-    case BuiltinKind::Int8:
-      diTy = dBuilder->createBasicType("int8", 8, llvm::dwarf::DW_ATE_signed);
-      break;
-    case BuiltinKind::UInt8:
-      diTy =
-          dBuilder->createBasicType("uint8", 8, llvm::dwarf::DW_ATE_unsigned);
-      break;
-    case BuiltinKind::Int16:
-      diTy = dBuilder->createBasicType("int16", 16, llvm::dwarf::DW_ATE_signed);
-      break;
-    case BuiltinKind::UInt16:
-      diTy =
-          dBuilder->createBasicType("uint16", 16, llvm::dwarf::DW_ATE_unsigned);
-      break;
-    case BuiltinKind::Int32:
-      diTy = dBuilder->createBasicType("int32", 32, llvm::dwarf::DW_ATE_signed);
-      break;
-    case BuiltinKind::UInt32:
-      diTy =
-          dBuilder->createBasicType("uint32", 32, llvm::dwarf::DW_ATE_unsigned);
-      break;
-    case BuiltinKind::Int64:
-      diTy = dBuilder->createBasicType("int64", 64, llvm::dwarf::DW_ATE_signed);
-      break;
-    case BuiltinKind::UInt64:
-      diTy =
-          dBuilder->createBasicType("uint64", 64, llvm::dwarf::DW_ATE_unsigned);
-      break;
-    case BuiltinKind::Float32:
-      diTy =
-          dBuilder->createBasicType("float32", 32, llvm::dwarf::DW_ATE_float);
-      break;
-    case BuiltinKind::Float64:
-      diTy =
-          dBuilder->createBasicType("float64", 64, llvm::dwarf::DW_ATE_float);
-      break;
-    case BuiltinKind::Bool:
-      diTy = dBuilder->createBasicType("bool", 8, llvm::dwarf::DW_ATE_boolean);
-      break;
-    case BuiltinKind::Void:
-      diTy = nullptr;
-      break;
-    }
-  } else if (type->isPointerType() || type->isReferenceType() ||
-             type->getKind() == TypeKind::RValueReference) {
-    const Type *pointee = nullptr;
-    if (type->isPointerType())
-      pointee = static_cast<const PointerType *>(type)->getPointeeType();
-    else if (type->isReferenceType())
-      pointee = static_cast<const ReferenceType *>(type)->getPointeeType();
-    else
-      pointee =
-          static_cast<const RValueReferenceType *>(type)->getPointeeType();
-
-    diTy = dBuilder->createPointerType(getDIType(pointee), 64);
-  } else if (type->getKind() == TypeKind::Array) {
-    auto *arrTy = static_cast<const ArrayType *>(type);
-    llvm::SmallVector<llvm::Metadata *, 1> subscripts;
-    subscripts.push_back(dBuilder->getOrCreateSubrange(0, arrTy->getSize()));
-    diTy = dBuilder->createArrayType(
-        arrTy->getSize() *
-            mod.getDataLayout().getTypeAllocSize(
-                getLLVMType(arrTy->getElementType())) *
-            8,
-        mod.getDataLayout()
-                .getABITypeAlign(getLLVMType(arrTy->getElementType()))
-                .value() *
-            8,
-        getDIType(arrTy->getElementType()),
-        dBuilder->getOrCreateArray(subscripts));
-  } else if (type->getKind() == TypeKind::Struct ||
-             type->getKind() == TypeKind::Class ||
-             type->getKind() == TypeKind::Union) {
-    auto *recTy = static_cast<const RecordType *>(type);
-    unsigned tag = llvm::dwarf::DW_TAG_structure_type;
-    if (type->getKind() == TypeKind::Union)
-      tag = llvm::dwarf::DW_TAG_union_type;
-    auto *fwdDecl = dBuilder->createReplaceableCompositeType(
-        tag, recTy->getName(), diCU, diFile, 0);
-    debugTypes[type] = fwdDecl;
-
-    std::vector<llvm::Metadata *> elements;
-    llvm::StructType *llStruct =
-        llvm::cast<llvm::StructType>(getLLVMType(type));
-    const llvm::StructLayout *layout = nullptr;
-    if (!llStruct->isOpaque()) {
-      layout = mod.getDataLayout().getStructLayout(llStruct);
-    }
-
-    for (const auto &f : recTy->getFields()) {
-      uint64_t sizeInBits =
-          mod.getDataLayout().getTypeAllocSizeInBits(getLLVMType(f.type));
-      uint32_t alignInBits =
-          mod.getDataLayout().getABITypeAlign(getLLVMType(f.type)).value() * 8;
-      uint64_t offsetInBits = (layout && type->getKind() != TypeKind::Union)
-                                  ? layout->getElementOffsetInBits(f.index)
-                                  : 0;
-      elements.push_back(dBuilder->createMemberType(
-          fwdDecl, f.name, diFile, 0, sizeInBits, alignInBits, offsetInBits,
-          llvm::DINode::FlagZero, getDIType(f.type)));
-    }
-    diTy = dBuilder->createStructType(
-        diCU, recTy->getName(), diFile, 0, layout ? layout->getSizeInBits() : 0,
-        layout ? layout->getAlignment().value() * 8 : 0, llvm::DINode::FlagZero,
-        nullptr, dBuilder->getOrCreateArray(elements));
-    dBuilder->replaceTemporary(llvm::TempDINode(fwdDecl), diTy);
-  } else if (type->getKind() == TypeKind::Alias) {
-    auto *alias = static_cast<const AliasType *>(type);
-    diTy = dBuilder->createTypedef(getDIType(alias->getTarget()),
-                                   alias->getName(), diFile, 0, diCU);
-  } else if (type->getKind() == TypeKind::Enum) {
-    diTy = dBuilder->createBasicType(
-        static_cast<const EnumType *>(type)->getName(), 32,
-        llvm::dwarf::DW_ATE_signed);
-  } else if (type->getKind() == TypeKind::Function) {
-    auto *fTy = static_cast<const FunctionType *>(type);
-    std::vector<llvm::Metadata *> types;
-    types.push_back(getDIType(fTy->getReturnType()));
-    for (auto *p : fTy->getParamTypes())
-      types.push_back(getDIType(p));
-    diTy =
-        dBuilder->createSubroutineType(dBuilder->getOrCreateTypeArray(types));
-  } else if (type->getKind() == TypeKind::Const) {
-    auto *constTy = static_cast<const ConstType *>(type);
-    diTy = dBuilder->createQualifiedType(llvm::dwarf::DW_TAG_const_type,
-                                         getDIType(constTy->getBaseType()));
-  }
-
-  debugTypes[type] = diTy;
-  return diTy;
+  diEmitter.emitLocation(builder, node);
 }
 
 llvm::Type *CodeGen::getLLVMType(const Type *type) {
@@ -1337,11 +1177,7 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
 llvm::Value *CodeGen::visit(const BlockNode *node) {
   CGScopeGuard guard(cgCtx);
 
-  if (emitDebugInfo && !lexicalBlocks.empty()) {
-    llvm::DILexicalBlock *block = dBuilder->createLexicalBlock(
-        lexicalBlocks.back(), diFile, node->line, node->column);
-    lexicalBlocks.push_back(block);
-  }
+  diEmitter.pushLexicalBlock(node, ctx);
 
   for (const auto *stmt : node->statements) {
     dispatch(stmt);
@@ -1354,9 +1190,7 @@ llvm::Value *CodeGen::visit(const BlockNode *node) {
     emitScopeCleanups();
   }
 
-  if (emitDebugInfo) {
-    lexicalBlocks.pop_back();
-  }
+  diEmitter.popLexicalBlock();
 
   return nullptr;
 }
@@ -1528,7 +1362,8 @@ llvm::Value *CodeGen::visit(const VariableNode *node) {
                                     node->name);
     }
     return createTBAALoad(getLLVMType(node->exprType), gep,
-                          getTBAATagForExpr(node), node->name);
+                          tbaaManager.getTBAATagForExpr(*this, node),
+                          node->name);
   }
 
   /* Return direct pointer evaluation if identifier statically targets a
@@ -1577,7 +1412,8 @@ llvm::Value *CodeGen::visit(const MemberAccessNode *node) {
     if (!sym.value)
       return nullptr;
     return createTBAALoad(getLLVMType(node->exprType), sym.value,
-                          getTBAATagForExpr(node), node->memberName);
+                          tbaaManager.getTBAATagForExpr(*this, node),
+                          node->memberName);
   }
 
   llvm::Value *objPtr = nullptr;
@@ -1612,7 +1448,8 @@ llvm::Value *CodeGen::visit(const MemberAccessNode *node) {
   }
 
   return createTBAALoad(getLLVMType(node->exprType), gep,
-                        getTBAATagForExpr(node), node->memberName);
+                        tbaaManager.getTBAATagForExpr(*this, node),
+                        node->memberName);
 }
 
 llvm::Value *CodeGen::visit(const IfNode *node) {
@@ -1942,7 +1779,8 @@ llvm::Value *CodeGen::visit(const UnaryOpNode *node) {
         newVal = builder.CreateSub(oldVal, llvm::ConstantInt::get(valTy, 1));
     }
 
-    createTBAAStore(newVal, lval, getTBAATagForExpr(node->expr));
+    createTBAAStore(newVal, lval,
+                    tbaaManager.getTBAATagForExpr(*this, node->expr));
 
     return node->isPostfix ? oldVal : newVal;
   }
@@ -2252,17 +2090,7 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
     emitLifetimeStart(alloca, allocSize);
     cgCtx.addLifetime(alloca, allocSize);
 
-    if (emitDebugInfo && !lexicalBlocks.empty()) {
-      auto *diTy = getDIType(node->type);
-      llvm::DILocalVariable *dVar = dBuilder->createAutoVariable(
-          lexicalBlocks.back(), std::string(node->varName), diFile, node->line,
-          diTy);
-      dBuilder->insertDeclare(alloca, dVar, dBuilder->createExpression(),
-                              llvm::DILocation::get(ctx, node->line,
-                                                    node->column,
-                                                    lexicalBlocks.back()),
-                              builder.GetInsertBlock());
-    }
+    diEmitter.emitLocalVariable(*this, builder, alloca, node);
 
     createTBAAStore(initAddr, alloca, node->type);
     cgCtx.bind(node->varName, alloca, false);
@@ -2334,12 +2162,7 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
       gvar->setAlignment(llvm::Align(customAlign));
     }
 
-    if (emitDebugInfo) {
-      auto *diTy = getDIType(node->type);
-      auto *gve = dBuilder->createGlobalVariableExpression(
-          diCU, bindName, bindName, diFile, node->line, diTy, false);
-      gvar->addDebugInfo(gve);
-    }
+    diEmitter.emitGlobalVariable(*this, gvar, node, bindName);
 
     cgCtx.bind(bindName, gvar, true);
     return gvar;
@@ -2352,16 +2175,7 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
     alloca->setAlignment(llvm::Align(customAlign));
   }
 
-  if (emitDebugInfo && !lexicalBlocks.empty()) {
-    auto *diTy = getDIType(node->type);
-    llvm::DILocalVariable *dVar = dBuilder->createAutoVariable(
-        lexicalBlocks.back(), std::string(node->varName), diFile, node->line,
-        diTy);
-    dBuilder->insertDeclare(alloca, dVar, dBuilder->createExpression(),
-                            llvm::DILocation::get(ctx, node->line, node->column,
-                                                  lexicalBlocks.back()),
-                            builder.GetInsertBlock());
-  }
+  diEmitter.emitLocalVariable(*this, builder, alloca, node);
 
   cgCtx.bind(node->varName, alloca, true);
 
@@ -2577,8 +2391,9 @@ llvm::Value *CodeGen::visit(const AssignNode *node) {
       if (callNode->resolvedFunc && callNode->resolvedFunc->isMethod &&
           callNode->resolvedFunc->returnType->isVoid()) {
         emitConstructorCall(callNode, lval);
-        return createTBAALoad(getLLVMType(node->exprType), lval,
-                              getTBAATagForExpr(node->target));
+        return createTBAALoad(
+            getLLVMType(node->exprType), lval,
+            tbaaManager.getTBAATagForExpr(*this, node->target));
       }
     }
   }
@@ -2663,7 +2478,8 @@ llvm::Value *CodeGen::visit(const AssignNode *node) {
     rval = createImplicitCast(rval, destTy);
   }
 
-  createTBAAStore(rval, lval, getTBAATagForExpr(node->target));
+  createTBAAStore(rval, lval,
+                  tbaaManager.getTBAATagForExpr(*this, node->target));
 
   return rval;
 }
@@ -2695,28 +2511,7 @@ llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
   const FunctionDeclNode *prevFunc = currentFunc;
   currentFunc = node;
 
-  if (emitDebugInfo && diFile) {
-    std::vector<llvm::Metadata *> paramTys;
-    paramTys.push_back(getDIType(node->returnType));
-    if (node->isMethod && !node->isExtern && !node->isStatic &&
-        node->parentRecord) {
-      paramTys.push_back(
-          dBuilder->createPointerType(getDIType(node->parentRecord), 64));
-    }
-    for (const auto *p : node->params)
-      paramTys.push_back(getDIType(p->type));
-
-    llvm::DISubroutineType *diFuncTy = dBuilder->createSubroutineType(
-        dBuilder->getOrCreateTypeArray(paramTys));
-
-    llvm::DISubprogram *sp = dBuilder->createFunction(
-        diFile, node->name, func->getName(), diFile, node->line, diFuncTy,
-        node->line, llvm::DINode::FlagPrototyped,
-        llvm::DISubprogram::SPFlagDefinition);
-    func->setSubprogram(sp);
-    lexicalBlocks.push_back(sp);
-    emitLocation(node);
-  }
+  diEmitter.emitFunctionStart(*this, func, node);
 
   llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", func);
   builder.SetInsertPoint(entry);
@@ -2734,17 +2529,19 @@ llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
     builder.CreateStore(&*argIt, alloca);
     cgCtx.bind("this", alloca, true);
 
-    if (emitDebugInfo) {
-      auto *diTy =
-          dBuilder->createPointerType(getDIType(node->parentRecord), 64);
-      llvm::DILocalVariable *dVar = dBuilder->createParameterVariable(
-          lexicalBlocks.back(), "this", 1, diFile, node->line, diTy,
-          llvm::DINode::FlagArtificial | llvm::DINode::FlagObjectPointer);
-      dBuilder->insertDeclare(alloca, dVar, dBuilder->createExpression(),
-                              llvm::DILocation::get(ctx, node->line,
-                                                    node->column,
-                                                    lexicalBlocks.back()),
-                              builder.GetInsertBlock());
+    if (diEmitter.isEnabled()) {
+      auto *diTy = diEmitter.getDIType(*this, node->parentRecord);
+      auto *ptrTy = diEmitter.getBuilder()->createPointerType(diTy, 64);
+      llvm::DILocalVariable *dVar =
+          diEmitter.getBuilder()->createParameterVariable(
+              diEmitter.getCurrentScope(), "this", 1, diEmitter.getFile(),
+              node->line, ptrTy,
+              llvm::DINode::FlagArtificial | llvm::DINode::FlagObjectPointer);
+      diEmitter.getBuilder()->insertDeclare(
+          alloca, dVar, diEmitter.getBuilder()->createExpression(),
+          llvm::DILocation::get(ctx, node->line, node->column,
+                                diEmitter.getCurrentScope()),
+          builder.GetInsertBlock());
     }
 
     ++argIt;
@@ -2760,18 +2557,8 @@ llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
         createEntryBlockAlloca(argType, std::string(pName) + ".addr");
     builder.CreateStore(&*argIt, alloca);
 
-    if (emitDebugInfo) {
-      unsigned argNo =
-          astParamIdx + (node->isMethod && !node->isStatic ? 2 : 1);
-      llvm::DILocalVariable *dVar = dBuilder->createParameterVariable(
-          lexicalBlocks.back(), std::string(pName), argNo, diFile,
-          paramDecl->line, getDIType(paramDecl->type));
-      dBuilder->insertDeclare(alloca, dVar, dBuilder->createExpression(),
-                              llvm::DILocation::get(ctx, paramDecl->line,
-                                                    paramDecl->column,
-                                                    lexicalBlocks.back()),
-                              builder.GetInsertBlock());
-    }
+    unsigned argNo = astParamIdx + (node->isMethod && !node->isStatic ? 2 : 1);
+    diEmitter.emitParameterVariable(*this, builder, alloca, paramDecl, argNo);
 
     bool isRef = paramDecl->type->isReferenceType() ||
                  paramDecl->type->getKind() == TypeKind::RValueReference;
@@ -2801,9 +2588,7 @@ llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
   builder.ClearInsertionPoint();
   currentFunc = prevFunc;
 
-  if (emitDebugInfo) {
-    lexicalBlocks.pop_back();
-  }
+  diEmitter.emitFunctionEnd();
 
   return func;
 }
@@ -3124,17 +2909,7 @@ llvm::Value *CodeGen::visit(const ReturnNode *node) {
 }
 
 llvm::Value *CodeGen::visit(const ModuleNode *node) {
-  if (emitDebugInfo) {
-    mod.addModuleFlag(llvm::Module::Warning, "Debug Info Version",
-                      llvm::DEBUG_METADATA_VERSION);
-    mod.addModuleFlag(llvm::Module::Warning, "Dwarf Version", 4);
-    fs::path p(node->filePath);
-    diFile =
-        dBuilder->createFile(p.filename().string(), p.parent_path().string());
-    diCU = dBuilder->createCompileUnit(llvm::dwarf::DW_LANG_C, diFile,
-                                       "Utopia Compiler", false, "", 0);
-    lexicalBlocks.push_back(diCU);
-  }
+  diEmitter.initializeModule(node);
 
   std::unordered_set<const ModuleNode *> visitedDeps;
 
@@ -3213,10 +2988,7 @@ llvm::Value *CodeGen::visit(const ModuleNode *node) {
     dispatch(stmt);
   }
 
-  if (emitDebugInfo) {
-    dBuilder->finalize();
-    lexicalBlocks.pop_back();
-  }
+  diEmitter.finalize();
 
   return nullptr;
 }
@@ -3519,150 +3291,6 @@ llvm::Value *CodeGen::visit(const DeleteExprNode *node) {
   return nullptr;
 }
 
-llvm::MDNode *CodeGen::getTBAATypeNode(const Type *type) {
-  if (!type || type->isVoid())
-    return nullptr;
-
-  const Type *unqual = type->getUnqualifiedType();
-  if (tbaaTypes.contains(unqual))
-    return tbaaTypes[unqual];
-
-  /* Enforce hierarchical scalar derivations to enable aggressive pointer
-   * disjointing */
-  llvm::MDNode *charNode =
-      mdBuilder.createTBAAScalarTypeNode("omnipotent char", tbaaRoot);
-  llvm::MDNode *node = nullptr;
-
-  if (unqual->isPointerType() || unqual->isReferenceType() ||
-      unqual->getKind() == TypeKind::RValueReference) {
-    node = mdBuilder.createTBAAScalarTypeNode("any pointer", charNode);
-  } else if (unqual->isBuiltinType()) {
-    node = mdBuilder.createTBAAScalarTypeNode(unqual->toString(), charNode);
-  } else if (unqual->getKind() == TypeKind::Class ||
-             unqual->getKind() == TypeKind::Struct ||
-             unqual->getKind() == TypeKind::Union) {
-    auto *recTy = static_cast<const RecordType *>(unqual);
-
-    if (unqual->getKind() == TypeKind::Union) {
-      node = mdBuilder.createTBAAScalarTypeNode(recTy->getName(), charNode);
-    } else {
-      llvm::StructType *structTy =
-          llvm::cast<llvm::StructType>(getLLVMType(recTy));
-      const llvm::StructLayout *layout =
-          mod.getDataLayout().getStructLayout(structTy);
-
-      std::vector<std::pair<llvm::MDNode *, uint64_t>> fields;
-      for (const auto &f : recTy->getFields()) {
-        uint64_t offset = layout->getElementOffset(f.index);
-        llvm::MDNode *fieldTypeNode = getTBAATypeNode(f.type);
-        fields.push_back({fieldTypeNode, offset});
-      }
-      node = mdBuilder.createTBAAStructTypeNode(recTy->getName(), fields);
-    }
-  } else {
-    node = charNode;
-  }
-
-  tbaaTypes[unqual] = node;
-  return node;
-}
-
-llvm::MDNode *CodeGen::getTBAAAccessTag(const Type *type) {
-  if (!type || type->isVoid())
-    return nullptr;
-
-  const Type *unqual = type->getUnqualifiedType();
-  if (unqual->getKind() == TypeKind::Struct ||
-      unqual->getKind() == TypeKind::Class ||
-      unqual->getKind() == TypeKind::Array) {
-    return nullptr;
-  }
-
-  llvm::MDNode *typeNode = getTBAATypeNode(type);
-  return mdBuilder.createTBAAStructTagNode(typeNode, typeNode, 0);
-}
-
-llvm::MDNode *CodeGen::getTBAAStructAccessTag(const Type *baseType,
-                                              const Type *accessType,
-                                              uint64_t offset) {
-  if (!baseType || !accessType)
-    return nullptr;
-
-  const Type *unqualAccess = accessType->getUnqualifiedType();
-  if (unqualAccess->getKind() == TypeKind::Struct ||
-      unqualAccess->getKind() == TypeKind::Class ||
-      unqualAccess->getKind() == TypeKind::Array) {
-    return nullptr;
-  }
-
-  llvm::MDNode *baseNode = getTBAATypeNode(baseType);
-  llvm::MDNode *accessNode = getTBAATypeNode(accessType);
-
-  return mdBuilder.createTBAAStructTagNode(baseNode, accessNode, offset);
-}
-
-llvm::MDNode *CodeGen::getTBAATagForExpr(const ExprNode *node) {
-  if (!node || !node->exprType)
-    return nullptr;
-
-  const Type *unqual = node->exprType->getUnqualifiedType();
-  if (unqual->getKind() == TypeKind::Struct ||
-      unqual->getKind() == TypeKind::Class ||
-      unqual->getKind() == TypeKind::Union ||
-      unqual->getKind() == TypeKind::Array) {
-    return nullptr;
-  }
-
-  if (node->kind == NodeKind::MemberAccess) {
-    auto *ma = static_cast<const MemberAccessNode *>(node);
-    if (ma->isMethodRef)
-      return nullptr;
-    if (ma->isStaticFieldRef)
-      return getTBAAAccessTag(node->exprType);
-
-    const Type *baseTy = ma->object->exprType;
-    if (baseTy->isPointerType()) {
-      baseTy = static_cast<const PointerType *>(baseTy)->getPointeeType();
-    } else if (baseTy->isReferenceType() ||
-               baseTy->getKind() == TypeKind::RValueReference) {
-      baseTy = static_cast<const ReferenceType *>(baseTy)->getPointeeType();
-    }
-
-    if (baseTy->getKind() == TypeKind::Union) {
-      return getTBAAAccessTag(node->exprType);
-    }
-
-    llvm::StructType *llBaseTy =
-        llvm::cast<llvm::StructType>(getLLVMType(baseTy));
-    uint64_t offset =
-        mod.getDataLayout().getStructLayout(llBaseTy)->getElementOffset(
-            ma->fieldIndex);
-
-    return getTBAAStructAccessTag(baseTy, ma->exprType, offset);
-  }
-
-  if (node->kind == NodeKind::Variable) {
-    auto *varNode = static_cast<const VariableNode *>(node);
-    if (varNode->isField) {
-      if (varNode->parentType->getKind() == TypeKind::Union) {
-        return getTBAAAccessTag(node->exprType);
-      }
-
-      llvm::StructType *llBaseTy =
-          llvm::cast<llvm::StructType>(getLLVMType(varNode->parentType));
-      uint64_t offset =
-          mod.getDataLayout().getStructLayout(llBaseTy)->getElementOffset(
-              varNode->fieldIndex);
-      return getTBAAStructAccessTag(varNode->parentType, varNode->exprType,
-                                    offset);
-    }
-  }
-
-  /* Fallback to strict scalar TBAA for arrays, pointers, and direct variables
-   */
-  return getTBAAAccessTag(node->exprType);
-}
-
 llvm::LoadInst *CodeGen::createTBAALoad(llvm::Type *llTy, llvm::Value *ptr,
                                         llvm::MDNode *tbaaTag,
                                         const llvm::Twine &name) {
@@ -3676,7 +3304,8 @@ llvm::LoadInst *CodeGen::createTBAALoad(llvm::Type *llTy, llvm::Value *ptr,
 llvm::LoadInst *CodeGen::createTBAALoad(llvm::Type *llTy, llvm::Value *ptr,
                                         const Type *utopiaTy,
                                         const llvm::Twine &name) {
-  return createTBAALoad(llTy, ptr, getTBAAAccessTag(utopiaTy), name);
+  return createTBAALoad(llTy, ptr,
+                        tbaaManager.getTBAAAccessTag(*this, utopiaTy), name);
 }
 
 llvm::StoreInst *CodeGen::createTBAAStore(llvm::Value *val, llvm::Value *ptr,
@@ -3690,7 +3319,8 @@ llvm::StoreInst *CodeGen::createTBAAStore(llvm::Value *val, llvm::Value *ptr,
 
 llvm::StoreInst *CodeGen::createTBAAStore(llvm::Value *val, llvm::Value *ptr,
                                           const Type *utopiaTy) {
-  return createTBAAStore(val, ptr, getTBAAAccessTag(utopiaTy));
+  return createTBAAStore(val, ptr,
+                         tbaaManager.getTBAAAccessTag(*this, utopiaTy));
 }
 
 void CodeGen::emitLifetimeStart(llvm::AllocaInst *allocaInst, uint64_t size) {
@@ -3786,8 +3416,8 @@ void CodeGen::emitDefaultInitialization(llvm::Value *ptr, const Type *type) {
             offset = layout->getElementOffset(instanceIdx);
           }
 
-          llvm::MDNode *tbaaTag =
-              getTBAAStructAccessTag(type, fieldDecl->type, offset);
+          llvm::MDNode *tbaaTag = tbaaManager.getTBAAStructAccessTag(
+              *this, type, fieldDecl->type, offset);
 
           createTBAAStore(initVal, gep, tbaaTag);
         }

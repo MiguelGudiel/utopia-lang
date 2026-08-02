@@ -3,6 +3,8 @@ set(CORE_SOURCES
     utopia/AST/ASTCloner.cpp
     utopia/CodeGen/CodeGen.cpp
     utopia/CodeGen/BackendContext.cpp
+    utopia/CodeGen/DebugInfoEmitter.cpp
+    utopia/CodeGen/TBAAManager.cpp
     utopia/CodeGen/Mangler.cpp
     utopia/CodeGen/Intrinsics.cpp
     utopia/Common/Logger.cpp
