@@ -1,6 +1,7 @@
 #include "utopia/Driver/ModuleLoader.hpp"
 #include "utopia/Common/Logger.hpp"
 #include "utopia/Lexer/Lexer.hpp"
+#include "utopia/Lexer/Preprocessor.hpp"
 #include "utopia/Parser/Parser.hpp"
 #include <fstream>
 #include <sstream>
@@ -144,7 +145,10 @@ ModuleNode *ModuleLoader::loadModule(const std::string &importURI,
     fileContent = buffer.str();
   }
 
-  std::string_view persistentSource = astCtx.copyString(fileContent);
+  Preprocessor pp(fileContent, config.definedMacros);
+  std::string processedContent = pp.process();
+
+  std::string_view persistentSource = astCtx.copyString(processedContent);
   auto [sourceIt, inserted] =
       persistentSourceCache.insert({key, persistentSource});
   std::string_view sourceView = sourceIt->second;
@@ -171,7 +175,7 @@ ModuleNode *ModuleLoader::loadModule(const std::string &importURI,
     }
   }
 
-  Lexer lexer(sourceView, config.definedMacros);
+  Lexer lexer(sourceView);
   auto tokensVec = lexer.tokenize();
 
   auto tokens = astCtx.copyArray<Token>(tokensVec);

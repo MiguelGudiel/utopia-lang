@@ -17,6 +17,7 @@ set(CORE_SOURCES
     utopia/Format/PieceFactory.cpp
     utopia/Format/CodeWriter.cpp
     utopia/Lexer/Lexer.cpp
+    utopia/Lexer/Preprocessor.cpp
     utopia/Parser/Parser.cpp
     utopia/Sema/Sema.cpp
     utopia/Sema/DeclCollector.cpp
