@@ -14,7 +14,11 @@
 #include <llvm/IR/Value.h>
 
 namespace utopia {
+class Intrinsic;
+
 class CodeGen : public ASTVisitor<CodeGen, llvm::Value *> {
+  friend class Intrinsic;
+
 public:
   CodeGen(BackendContext &bCtx, llvm::Module &llvmMod, DiagnosticsEngine &diags,
           bool emitDebugInfo, std::string filePath);

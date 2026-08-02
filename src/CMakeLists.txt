@@ -4,6 +4,7 @@ set(CORE_SOURCES
     utopia/CodeGen/CodeGen.cpp
     utopia/CodeGen/BackendContext.cpp
     utopia/CodeGen/Mangler.cpp
+    utopia/CodeGen/Intrinsics.cpp
     utopia/Common/Logger.cpp
     utopia/Driver/Backend.cpp
     utopia/Driver/CompilerDriver.cpp

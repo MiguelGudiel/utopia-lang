@@ -1,4 +1,5 @@
 #include "utopia/CodeGen/CodeGen.hpp"
+#include "utopia/CodeGen/Intrinsics.hpp"
 #include <filesystem>
 #include <iostream>
 #include <llvm/ADT/APSInt.h>
@@ -714,30 +715,9 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
   if (node->kind == NodeKind::FunctionCall) {
     auto *call = static_cast<const FunctionCallNode *>(node);
     if (call->resolvedFunc && call->resolvedFunc->isIntrinsic) {
-      std::string_view intrinsic = call->resolvedFunc->intrinsicName;
-      if (intrinsic == "sizeof_type" && call->args.size() == 1 &&
-          call->args[0]->representedType) {
-        llvm::Type *llTy = getLLVMType(call->args[0]->representedType);
-        uint64_t size = mod.getDataLayout().getTypeAllocSize(llTy);
-        return builder.getInt64(size);
-      }
-      if (intrinsic == "sizeof_expr" && call->args.size() == 1 &&
-          call->args[0]->exprType) {
-        llvm::Type *llTy = getLLVMType(call->args[0]->exprType);
-        uint64_t size = mod.getDataLayout().getTypeAllocSize(llTy);
-        return builder.getInt64(size);
-      }
-      if (intrinsic == "typeof_type" && call->args.size() == 1 &&
-          call->args[0]->representedType) {
-        return createTypeReflectionConstant(
-            call->args[0]->representedType,
-            llvm::cast<llvm::StructType>(getLLVMType(call->exprType)));
-      }
-      if (intrinsic == "typeof_expr" && call->args.size() == 1 &&
-          call->args[0]->exprType) {
-        return createTypeReflectionConstant(
-            call->args[0]->exprType,
-            llvm::cast<llvm::StructType>(getLLVMType(call->exprType)));
+      if (const Intrinsic *intrinsic = IntrinsicRegistry::instance().get(
+              call->resolvedFunc->intrinsicName)) {
+        return intrinsic->evaluateConstant(*this, call);
       }
     }
   }
@@ -2834,38 +2814,9 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
 
   if (node->resolvedFunc) {
     if (node->resolvedFunc->isIntrinsic) {
-      std::string_view intrinsic = node->resolvedFunc->intrinsicName;
-      if (intrinsic == "sizeof_type") {
-        if (node->args.size() == 1 && node->args[0]->representedType) {
-          llvm::Type *llTy = getLLVMType(node->args[0]->representedType);
-          uint64_t size = mod.getDataLayout().getTypeAllocSize(llTy);
-          return builder.getInt64(size);
-        }
-        return builder.getInt64(0);
-      }
-      if (intrinsic == "sizeof_expr") {
-        if (node->args.size() == 1 && node->args[0]->exprType) {
-          llvm::Type *llTy = getLLVMType(node->args[0]->exprType);
-          uint64_t size = mod.getDataLayout().getTypeAllocSize(llTy);
-          return builder.getInt64(size);
-        }
-        return builder.getInt64(0);
-      }
-      if (intrinsic == "typeof_type") {
-        if (node->args.size() == 1 && node->args[0]->representedType) {
-          return createTypeReflectionConstant(
-              node->args[0]->representedType,
-              llvm::cast<llvm::StructType>(getLLVMType(node->exprType)));
-        }
-        return llvm::UndefValue::get(getLLVMType(node->exprType));
-      }
-      if (intrinsic == "typeof_expr") {
-        if (node->args.size() == 1 && node->args[0]->exprType) {
-          return createTypeReflectionConstant(
-              node->args[0]->exprType,
-              llvm::cast<llvm::StructType>(getLLVMType(node->exprType)));
-        }
-        return llvm::UndefValue::get(getLLVMType(node->exprType));
+      if (const Intrinsic *intrinsic = IntrinsicRegistry::instance().get(
+              node->resolvedFunc->intrinsicName)) {
+        return intrinsic->evaluateRuntime(*this, node);
       }
     }
 
