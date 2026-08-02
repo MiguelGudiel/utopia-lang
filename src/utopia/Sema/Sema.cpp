@@ -721,6 +721,10 @@ void DeclCollectorPass::visit(const FunctionDeclNode *node) {
       isExport = true;
     }
 
+    if (ann->name == "weak") {
+      const_cast<FunctionDeclNode *>(node)->isWeak = true;
+    }
+
     if (ann->name == "extern") {
       if (ann->args.empty()) {
         const_cast<FunctionDeclNode *>(node)->externAlias = node->name;
@@ -2475,7 +2479,9 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
   }
 
   for (const auto *ann : node->annotations) {
-    if (ann->name == "align") {
+    if (ann->name == "weak") {
+      const_cast<VarDeclNode *>(node)->isWeak = true;
+    } else if (ann->name == "align") {
       if (ann->args.size() != 1 || ann->args[0]->kind != NodeKind::Number ||
           static_cast<const NumberNode *>(ann->args[0])->isFloat) {
         SemaResult err = ctx->reportError(

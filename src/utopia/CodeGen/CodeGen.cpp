@@ -395,8 +395,12 @@ llvm::Function *CodeGen::getOrCreateFunction(const FunctionDeclNode *node) {
   llvm::FunctionType *funcType =
       llvm::FunctionType::get(retTy, paramTypes, node->isVariadic);
 
-  func = llvm::Function::Create(funcType, llvm::Function::ExternalLinkage,
-                                irName, mod);
+  /* Apply weak linkage if the function is annotated with @weak */
+  llvm::GlobalValue::LinkageTypes linkage =
+      node->isWeak ? llvm::GlobalValue::WeakAnyLinkage
+                   : llvm::GlobalValue::ExternalLinkage;
+
+  func = llvm::Function::Create(funcType, linkage, irName, mod);
 
   /* Apply the parsed calling convention before setting other attributes */
   if (node->callingConv == "stdcall") {
@@ -2248,8 +2252,13 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
     std::string bindName = node->mangledName.empty()
                                ? std::string(node->varName)
                                : node->mangledName;
-    auto *gvar = new llvm::GlobalVariable(mod, ty, isConstant,
-                                          llvm::GlobalValue::ExternalLinkage,
+
+    /* Apply weak linkage if the global variable is annotated with @weak */
+    llvm::GlobalValue::LinkageTypes linkage =
+        node->isWeak ? llvm::GlobalValue::WeakAnyLinkage
+                     : llvm::GlobalValue::ExternalLinkage;
+
+    auto *gvar = new llvm::GlobalVariable(mod, ty, isConstant, linkage,
                                           initConst, bindName);
 
     if (customAlign > 0) {
@@ -3074,9 +3083,15 @@ llvm::Value *CodeGen::visit(const ModuleNode *node) {
                                        : varDecl->mangledName;
             llvm::GlobalVariable *gvar = mod.getGlobalVariable(bindName);
             if (!gvar) {
-              gvar = new llvm::GlobalVariable(
-                  mod, ty, varDecl->type->isConstQualified(),
-                  llvm::GlobalValue::ExternalLinkage, nullptr, bindName);
+              /* Apply weak linkage if the dependency variable is annotated with
+               * @weak */
+              llvm::GlobalValue::LinkageTypes linkage =
+                  varDecl->isWeak ? llvm::GlobalValue::WeakAnyLinkage
+                                  : llvm::GlobalValue::ExternalLinkage;
+
+              gvar = new llvm::GlobalVariable(mod, ty,
+                                              varDecl->type->isConstQualified(),
+                                              linkage, nullptr, bindName);
             }
             cgCtx.bind(bindName, gvar, true);
           }

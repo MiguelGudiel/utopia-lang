@@ -960,7 +960,7 @@ void handleCompletion(const json &req) {
         "nodiscard",      "deprecated",   "inline",    "forceInline",
         "readnone",       "readonly",     "nosync",    "nofree",
         "willreturn",     "mustprogress", "nocapture", "nonnull",
-        "dereferenceable"};
+        "dereferenceable", "weak"};
     for (const auto &ann : builtInAnnotations) {
       addCompletion(ann, 8, "Built-in Annotation");
     }

@@ -230,6 +230,7 @@ struct VarDeclNode : public DeclNode {
   ExprNode *initializer;
   bool isGlobal = false;
   bool isStatic = false;
+  bool isWeak = false;
   std::string_view rawTypeStr;
 
   /* Reference to the resolved copy constructor for aggregate initialization */
@@ -292,6 +293,7 @@ struct FunctionDeclNode : public DeclNode {
   bool isVariadic;
   bool isImplicit;
   bool isStatic = false;
+  bool isWeak = false;
   mutable std::string_view externAlias;
   std::string_view callingConv = "cdecl";
   const RecordType *parentRecord = nullptr;

@@ -245,6 +245,7 @@ ASTNode *ASTCloner::visit(const VarDeclNode *n) {
                      : nullptr,
       n->line, n->column, n->length);
   node->isStatic = n->isStatic;
+  node->isWeak = n->isWeak;
   node->hasPublicMod = n->hasPublicMod;
   node->hasPrivateMod = n->hasPrivateMod;
   node->annotations = n->annotations;
@@ -278,6 +279,7 @@ ASTNode *ASTCloner::visit(const FunctionDeclNode *n) {
   if (n->body)
     node->body = static_cast<BlockNode *>(dispatch(n->body));
   node->isStatic = n->isStatic;
+  node->isWeak = n->isWeak;
   node->externAlias = n->externAlias;
   node->callingConv = n->callingConv;
   node->hasPublicMod = n->hasPublicMod;
