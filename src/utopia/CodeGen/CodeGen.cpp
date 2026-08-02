@@ -1,4 +1,5 @@
 #include "utopia/CodeGen/CodeGen.hpp"
+#include "utopia/CodeGen/Intrinsics.hpp"
 #include <filesystem>
 #include <iostream>
 #include <llvm/ADT/APSInt.h>
@@ -54,6 +55,10 @@ llvm::DIType *CodeGen::getDIType(const Type *type) {
   if (type->isBuiltinType()) {
     auto *bTy = static_cast<const BuiltinType *>(type);
     switch (bTy->getBuiltinKind()) {
+    case BuiltinKind::TypeVal:
+      diTy = dBuilder->createBasicType("Type", 8,
+                                       llvm::dwarf::DW_ATE_unsigned_char);
+      break;
     case BuiltinKind::Int8:
       diTy = dBuilder->createBasicType("int8", 8, llvm::dwarf::DW_ATE_signed);
       break;
@@ -225,6 +230,9 @@ llvm::Type *CodeGen::getLLVMType(const Type *type) {
   if (type->isBuiltinType()) {
     auto *bTy = static_cast<const BuiltinType *>(type);
     switch (bTy->getBuiltinKind()) {
+    case BuiltinKind::TypeVal:
+      return builder.getInt8Ty(); /* Dummy representation. Handled internally by
+                                     intrinsics */
     case BuiltinKind::Int8:
     case BuiltinKind::UInt8:
       return builder.getInt8Ty();
@@ -323,6 +331,53 @@ llvm::Type *CodeGen::getLLVMType(const Type *type) {
                     type->toString(),
                 currentFilePath});
   return builder.getInt8Ty();
+}
+
+llvm::Constant *
+CodeGen::createTypeReflectionConstant(const Type *t,
+                                      llvm::StructType *structTy) {
+  if (!t)
+    return llvm::UndefValue::get(structTy);
+
+  auto createStr = [&](const std::string &str) -> llvm::Constant * {
+    llvm::Constant *strConst =
+        llvm::ConstantDataArray::getString(ctx, str, true);
+    auto *gv = new llvm::GlobalVariable(mod, strConst->getType(), true,
+                                        llvm::GlobalValue::PrivateLinkage,
+                                        strConst, ".str.type");
+    gv->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+    llvm::Constant *zero = llvm::ConstantInt::get(builder.getInt32Ty(), 0);
+    return llvm::ConstantExpr::getInBoundsGetElementPtr(
+        strConst->getType(), gv, llvm::ArrayRef<llvm::Constant *>{zero, zero});
+  };
+
+  std::vector<llvm::Constant *> fields;
+  /* uint8* name */
+  fields.push_back(createStr(t->toString()));
+
+  const Type *unqual = t->getUnqualifiedType();
+
+  bool isClass = unqual->getKind() == TypeKind::Class;
+  bool isStruct = unqual->getKind() == TypeKind::Struct;
+  bool isPrimitive = unqual->isBuiltinType();
+  bool isEnum = unqual->getKind() == TypeKind::Enum;
+  bool isArray = unqual->getKind() == TypeKind::Array;
+  bool isPointer = unqual->isPointerType();
+
+  /* Bools in LLVM ABI */
+  fields.push_back(
+      llvm::ConstantInt::get(builder.getInt1Ty(), isClass ? 1 : 0));
+  fields.push_back(
+      llvm::ConstantInt::get(builder.getInt1Ty(), isStruct ? 1 : 0));
+  fields.push_back(
+      llvm::ConstantInt::get(builder.getInt1Ty(), isPrimitive ? 1 : 0));
+  fields.push_back(llvm::ConstantInt::get(builder.getInt1Ty(), isEnum ? 1 : 0));
+  fields.push_back(
+      llvm::ConstantInt::get(builder.getInt1Ty(), isArray ? 1 : 0));
+  fields.push_back(
+      llvm::ConstantInt::get(builder.getInt1Ty(), isPointer ? 1 : 0));
+
+  return llvm::ConstantStruct::get(structTy, fields);
 }
 
 llvm::Value *CodeGen::createImplicitCast(llvm::Value *src, llvm::Type *destTy) {
@@ -656,6 +711,16 @@ void CodeGen::emitConstructorCall(const FunctionCallNode *node,
 llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
   if (!node)
     return nullptr;
+
+  if (node->kind == NodeKind::FunctionCall) {
+    auto *call = static_cast<const FunctionCallNode *>(node);
+    if (call->resolvedFunc && call->resolvedFunc->isIntrinsic) {
+      if (const Intrinsic *intrinsic = IntrinsicRegistry::instance().get(
+              call->resolvedFunc->intrinsicName)) {
+        return intrinsic->evaluateConstant(*this, call);
+      }
+    }
+  }
 
   if (node->kind == NodeKind::Null) {
     return llvm::ConstantPointerNull::get(builder.getPtrTy());
@@ -1442,6 +1507,10 @@ llvm::Value *CodeGen::visit(const ClassDeclNode *node) {
 llvm::Value *CodeGen::visit(const EnumDeclNode *node) { return nullptr; }
 
 llvm::Value *CodeGen::visit(const EnumMemberNode *node) { return nullptr; }
+
+llvm::Value *CodeGen::visit(const TypeLiteralNode *node) {
+  return llvm::UndefValue::get(builder.getInt8Ty());
+}
 
 llvm::Value *CodeGen::visit(const VariableNode *node) {
   if (node->isField) {
@@ -2744,6 +2813,13 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
   std::vector<llvm::Value *> argsArgs;
 
   if (node->resolvedFunc) {
+    if (node->resolvedFunc->isIntrinsic) {
+      if (const Intrinsic *intrinsic = IntrinsicRegistry::instance().get(
+              node->resolvedFunc->intrinsicName)) {
+        return intrinsic->evaluateRuntime(*this, node);
+      }
+    }
+
     func = getOrCreateFunction(node->resolvedFunc);
 
     if (node->target->kind == NodeKind::MemberAccess) {

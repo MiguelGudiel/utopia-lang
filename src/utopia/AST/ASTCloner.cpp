@@ -81,6 +81,12 @@ ASTNode *ASTCloner::visit(const NullNode *n) {
   return ctx.create<NullNode>(n->line, n->column, n->length);
 }
 
+ASTNode *ASTCloner::visit(const TypeLiteralNode *n) {
+  auto *node = ctx.create<TypeLiteralNode>(cloneType(n->representedType),
+                                           n->line, n->column, n->length);
+  return node;
+}
+
 ASTNode *ASTCloner::visit(const VariableNode *n) {
   auto *node = ctx.create<VariableNode>(n->name, n->line, n->column, n->length);
   std::vector<const Type *> tArgs;

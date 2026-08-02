@@ -14,7 +14,11 @@
 #include <llvm/IR/Value.h>
 
 namespace utopia {
+class Intrinsic;
+
 class CodeGen : public ASTVisitor<CodeGen, llvm::Value *> {
+  friend class Intrinsic;
+
 public:
   CodeGen(BackendContext &bCtx, llvm::Module &llvmMod, DiagnosticsEngine &diags,
           bool emitDebugInfo, std::string filePath);
@@ -56,6 +60,7 @@ public:
   llvm::Value *visit(const ArraySubscriptNode *node);
   llvm::Value *visit(const NewExprNode *node);
   llvm::Value *visit(const DeleteExprNode *node);
+  llvm::Value *visit(const TypeLiteralNode *node);
   llvm::Value *visit(const ArrayLiteralNode *node);
   llvm::Value *visit(const NullNode *node);
   llvm::Value *visit(const EnumDeclNode *node);
@@ -116,6 +121,9 @@ private:
                                    const Type *utopiaTy);
   llvm::StoreInst *createTBAAStore(llvm::Value *val, llvm::Value *ptr,
                                    llvm::MDNode *tbaaTag);
+
+  llvm::Constant *createTypeReflectionConstant(const Type *t,
+                                               llvm::StructType *structTy);
 
   /* Lifetime Intrinsic Emission */
   void emitLifetimeStart(llvm::AllocaInst *allocaInst, uint64_t size);

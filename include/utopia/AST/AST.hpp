@@ -47,7 +47,8 @@ enum class NodeKind : uint8_t {
   Null,
   EnumDecl,
   EnumMember,
-  ImplicitCast
+  ImplicitCast,
+  TypeLiteral
 };
 
 struct ASTNode {
@@ -70,12 +71,19 @@ struct StmtNode : public ASTNode {
 
 struct ExprNode : public ASTNode {
   mutable const Type *exprType = nullptr;
-  mutable bool isLValue =
-      false; // Tracks if the expression represents a persistent memory location
+  mutable bool isLValue = false;
   bool hasParens = false;
+  mutable const Type *representedType = nullptr;
 
   explicit ExprNode(NodeKind k, int l = 0, int c = 0, int len = 0)
       : ASTNode(k, l, c, len) {}
+};
+
+struct TypeLiteralNode : public ExprNode {
+  TypeLiteralNode(const Type *t, int l, int c, int len)
+      : ExprNode(NodeKind::TypeLiteral, l, c, len) {
+    representedType = t;
+  }
 };
 
 struct AnnotationNode : public ASTNode {
@@ -294,6 +302,8 @@ struct FunctionDeclNode : public DeclNode {
   bool isImplicit;
   bool isStatic = false;
   bool isWeak = false;
+  bool isIntrinsic = false;
+  std::string_view intrinsicName;
   mutable std::string_view externAlias;
   std::string_view callingConv = "cdecl";
   const RecordType *parentRecord = nullptr;

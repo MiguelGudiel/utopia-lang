@@ -197,6 +197,10 @@ public:
     return isHit(n) ? n : nullptr;
   }
 
+  const ASTNode *visit(const TypeLiteralNode *n) {
+    return isHit(n) ? n : nullptr;
+  }
+
   const ASTNode *visit(const ModuleNode *n) {
     for (auto *s : n->statements)
       if (auto found = find(s))

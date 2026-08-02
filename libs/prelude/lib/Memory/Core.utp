@@ -3,3 +3,32 @@ void* malloc(uint64 size);
 
 @extern
 void free(void* ptr);
+
+class Type {
+  uint8* name;
+  bool isClass;
+  bool isStruct;
+  bool isPrimitive;
+  bool isEnum;
+  bool isArray;
+  bool isPointer;
+}
+
+class MethodInfo {
+  uint8* name;
+  uint8* mangledName;
+  Type returnType;
+  Type* args;
+}
+
+@intrinsic("sizeof_type")
+uint64 sizeof(Type t);
+
+@intrinsic("sizeof_expr")
+uint64 sizeof<T>(T val);
+
+@intrinsic("typeof_type")
+Type typeof(Type t);
+
+@intrinsic("typeof_expr")
+Type typeof<T>(T val);

@@ -717,6 +717,16 @@ void DeclCollectorPass::visit(const FunctionDeclNode *node) {
   bool isExport = false;
 
   for (const auto *ann : node->annotations) {
+    if (ann->name == "intrinsic") {
+      const_cast<FunctionDeclNode *>(node)->isIntrinsic = true;
+      if (!ann->args.empty() && ann->args[0]->kind == NodeKind::String) {
+        const_cast<FunctionDeclNode *>(node)->intrinsicName =
+            static_cast<const StringNode *>(ann->args[0])->value;
+      } else {
+        const_cast<FunctionDeclNode *>(node)->intrinsicName = node->name;
+      }
+    }
+
     if (ann->name == "export") {
       isExport = true;
     }
@@ -1828,6 +1838,12 @@ SemaResult TypeCheckPass::visit(const EnumMemberNode *node) {
   return ctx->astCtx.VoidTy;
 }
 
+SemaResult TypeCheckPass::visit(const TypeLiteralNode *node) {
+  node->exprType = ctx->astCtx.TypeValTy;
+  node->isLValue = false;
+  return node->exprType;
+}
+
 SemaResult TypeCheckPass::visit(const VariableNode *node) {
   if (!node->templateArgs.empty()) {
     auto decls = ctx->lookup(node->name);
@@ -2019,6 +2035,32 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
     }
   }
 
+  if (target->kind == NodeKind::StructDecl ||
+      target->kind == NodeKind::ClassDecl ||
+      target->kind == NodeKind::UnionDecl ||
+      target->kind == NodeKind::EnumDecl ||
+      target->kind == NodeKind::TypedefDecl) {
+
+    const Type *repTy = nullptr;
+    if (target->kind == NodeKind::StructDecl)
+      repTy = static_cast<const StructDeclNode *>(target)->recordType;
+    else if (target->kind == NodeKind::ClassDecl)
+      repTy = static_cast<const ClassDeclNode *>(target)->recordType;
+    else if (target->kind == NodeKind::UnionDecl)
+      repTy = static_cast<const UnionDeclNode *>(target)->recordType;
+    else if (target->kind == NodeKind::EnumDecl)
+      repTy = static_cast<const EnumDeclNode *>(target)->enumType;
+    else if (target->kind == NodeKind::TypedefDecl)
+      repTy = static_cast<const TypedefDeclNode *>(target)->aliasType;
+
+    const_cast<VariableNode *>(node)->resolvedDecl = target;
+    const_cast<VariableNode *>(node)->representedType = repTy;
+    node->exprType = ctx->astCtx.TypeValTy;
+    node->isLValue = false;
+    checkDeprecated(target, node);
+    return node->exprType;
+  }
+
   if (target->kind == NodeKind::VarDecl) {
     if (!target->isPublic(static_cast<const VarDeclNode *>(target)->varName) &&
         target->declFilePath != ctx->currentFile) {
@@ -2030,8 +2072,6 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
     ty = static_cast<const VarDeclNode *>(target)->type;
   } else if (target->kind == NodeKind::ParamDecl) {
     ty = static_cast<const ParamDeclNode *>(target)->type;
-    /* Apply dynamic decay of Array Types specifically to Parameters so
-       assignments and evaluation safely map to pointer representations. */
     if (ty->getKind() == TypeKind::Array) {
       ty = ctx->astCtx.getPointerType(
           static_cast<const ArrayType *>(ty)->getElementType());

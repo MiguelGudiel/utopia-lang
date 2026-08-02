@@ -12,7 +12,8 @@ public:
      * propagation of unhandled expected types across the pipeline */
     if (!node) [[unlikely]] {
       std::cerr << "[Fatal] ASTVisitor dispatch encountered a null AST node.\n";
-      throw std::runtime_error("ASTVisitor: ASTVisitor dispatch encountered a null AST node.");
+      throw std::runtime_error(
+          "ASTVisitor: ASTVisitor dispatch encountered a null AST node.");
     }
 
     switch (node->kind) {
@@ -127,6 +128,9 @@ public:
     case NodeKind::Delete:
       return static_cast<Derived *>(this)->visit(
           static_cast<const DeleteExprNode *>(node));
+    case NodeKind::TypeLiteral:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const TypeLiteralNode *>(node));
     case NodeKind::Null:
       return static_cast<Derived *>(this)->visit(
           static_cast<const NullNode *>(node));
@@ -139,7 +143,7 @@ public:
       std::cerr << "[Fatal] ASTVisitor dispatch failure. Unhandled NodeKind: "
                 << static_cast<int>(node->kind) << '\n';
       throw std::runtime_error("ASTVisitor: Unhandled NodeKind: " +
-                                  std::to_string(static_cast<int>(node->kind)));
+                               std::to_string(static_cast<int>(node->kind)));
     }
   }
 };
