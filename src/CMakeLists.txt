@@ -25,6 +25,7 @@ set(CORE_SOURCES
     utopia/Sema/TypeConversion.cpp
     utopia/Sema/OverloadResolution.cpp
     utopia/Sema/EffectAnalyzer.cpp
+    utopia/Sema/ControlFlowAnalyzer.cpp
 )
 
 add_library(utopia_core STATIC ${CORE_SOURCES})

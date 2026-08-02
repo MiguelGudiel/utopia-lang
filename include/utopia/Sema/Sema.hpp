@@ -13,7 +13,7 @@ namespace utopia {
  * both LValue and RValue references.
  */
 bool canImplicitlyCast(const Type *from, const Type *to,
-                              bool allowUserDefined = true);
+                       bool allowUserDefined = true);
 
 class SemaPass {
 public:
@@ -139,6 +139,62 @@ public:
   SemaResult visit(const EnumDeclNode *node);
   SemaResult visit(const EnumMemberNode *node);
   SemaResult visit(const ImplicitCastNode *node);
+};
+
+class ControlFlowPass : public SemaPass,
+                        public ASTVisitor<ControlFlowPass, void> {
+  SemaContext *ctx = nullptr;
+  bool isReachable = true;
+  bool alreadyInUnreachable = false;
+  bool isAssignTarget = false;
+  std::unordered_map<const VarDeclNode *, bool> initStates;
+  std::unordered_set<const ModuleNode *> visitedModules;
+
+public:
+  bool run(const ModuleNode *module, SemaContext &context) override;
+  const char *getName() const override { return "ControlFlowAnalyzer"; }
+
+  void visit(const ModuleNode *node);
+  void visit(const FunctionDeclNode *node);
+  void visit(const BlockNode *node);
+  void visit(const IfNode *node);
+  void visit(const ForNode *node);
+  void visit(const WhileNode *node);
+  void visit(const SwitchNode *node);
+  void visit(const CaseNode *node);
+  void visit(const BreakNode *node);
+  void visit(const ContinueNode *node);
+  void visit(const ReturnNode *node);
+  void visit(const VarDeclNode *node);
+  void visit(const AssignNode *node);
+  void visit(const VariableNode *node);
+  void visit(const UnaryOpNode *node);
+  void visit(const BinaryOpNode *node);
+  void visit(const FunctionCallNode *node);
+  void visit(const CastNode *node);
+  void visit(const MemberAccessNode *node);
+  void visit(const ArraySubscriptNode *node);
+  void visit(const ArrayLiteralNode *node);
+  void visit(const NewExprNode *node);
+  void visit(const DeleteExprNode *node);
+  void visit(const ImplicitCastNode *node);
+
+  void visit(const NumberNode *) {}
+  void visit(const BoolNode *) {}
+  void visit(const CharNode *) {}
+  void visit(const RuneNode *) {}
+  void visit(const StringNode *) {}
+  void visit(const NullNode *) {}
+  void visit(const TypeLiteralNode *) {}
+  void visit(const AnnotationNode *) {}
+  void visit(const AnnotationDeclNode *) {}
+  void visit(const TypedefDeclNode *) {}
+  void visit(const EnumDeclNode *) {}
+  void visit(const EnumMemberNode *) {}
+  void visit(const ParamDeclNode *) {}
+  void visit(const UnionDeclNode *) {}
+  void visit(const StructDeclNode *) {}
+  void visit(const ClassDeclNode *) {}
 };
 
 class SemaPipeline {

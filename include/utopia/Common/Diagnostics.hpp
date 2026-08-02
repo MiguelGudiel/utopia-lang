@@ -46,7 +46,7 @@ public:
 
       int lspEndCol;
       if (lspEndLine > lspLine) {
-        lspEndCol = std::max(0, lspCol + d.length);
+        lspEndCol = 9999;
       } else {
         // Prevent negative lengths from multi-line spanning nodes to avoid VS
         // Code rejecting the payload
