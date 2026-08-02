@@ -214,6 +214,9 @@ public:
                                 const ASTNode *node);
   ExprNode *performImplicitConversion(ExprNode *expr, const Type *to);
 
+  /* Analyzes an AST node to emit warnings if a nodiscard value is ignored */
+  void checkNodiscard(const ASTNode *node);
+
   SemaResult visit(const NumberNode *node);
   SemaResult visit(const BoolNode *node);
   SemaResult visit(const CharNode *node);

@@ -402,6 +402,131 @@ ExprNode *TypeCheckPass::performImplicitConversion(ExprNode *expr,
   return expr;
 }
 
+void TypeCheckPass::checkNodiscard(const ASTNode *node) {
+  if (!node)
+    return;
+
+  if (node->kind == NodeKind::Cast) {
+    auto *castNode = static_cast<const CastNode *>(node);
+    if (castNode->targetType && castNode->targetType->isVoid()) {
+      /* Explicit cast to void suppresses the nodiscard warning */
+      return;
+    }
+    checkNodiscard(castNode->expr);
+    return;
+  }
+  if (node->kind == NodeKind::ImplicitCast) {
+    checkNodiscard(static_cast<const ImplicitCastNode *>(node)->expr);
+    return;
+  }
+
+  bool isNodiscardFunc = false;
+  std::string funcName = "";
+
+  if (node->kind == NodeKind::FunctionCall) {
+    auto *call = static_cast<const FunctionCallNode *>(node);
+    if (call->resolvedFunc) {
+      for (const auto *ann : call->resolvedFunc->annotations) {
+        if (ann->name == "nodiscard") {
+          isNodiscardFunc = true;
+          funcName = std::string(call->resolvedFunc->name);
+          break;
+        }
+      }
+    }
+  } else if (node->kind == NodeKind::UnaryOp) {
+    auto *uop = static_cast<const UnaryOpNode *>(node);
+    if (uop->overloadedOperator) {
+      for (const auto *ann : uop->overloadedOperator->annotations) {
+        if (ann->name == "nodiscard") {
+          isNodiscardFunc = true;
+          funcName = "operator" + std::string(uop->op);
+          break;
+        }
+      }
+    }
+  } else if (node->kind == NodeKind::BinaryOp) {
+    auto *bop = static_cast<const BinaryOpNode *>(node);
+    if (bop->overloadedOperator) {
+      for (const auto *ann : bop->overloadedOperator->annotations) {
+        if (ann->name == "nodiscard") {
+          isNodiscardFunc = true;
+          funcName = "operator" + std::string(bop->op);
+          break;
+        }
+      }
+    }
+  } else if (node->kind == NodeKind::ArraySubscript) {
+    auto *sub = static_cast<const ArraySubscriptNode *>(node);
+    if (sub->overloadedOperator) {
+      for (const auto *ann : sub->overloadedOperator->annotations) {
+        if (ann->name == "nodiscard") {
+          isNodiscardFunc = true;
+          funcName = "operator[]";
+          break;
+        }
+      }
+    }
+  } else if (node->kind == NodeKind::Assign) {
+    auto *asn = static_cast<const AssignNode *>(node);
+    if (asn->overloadedOperator) {
+      for (const auto *ann : asn->overloadedOperator->annotations) {
+        if (ann->name == "nodiscard") {
+          isNodiscardFunc = true;
+          funcName = "operator" + std::string(asn->op);
+          break;
+        }
+      }
+    }
+  }
+
+  if (isNodiscardFunc) {
+    ctx->diags.report({DiagLevel::Warning, node->line, node->column,
+                       node->length,
+                       "Ignoring return value of function '" + funcName +
+                           "', declared with '@nodiscard' annotation.",
+                       std::string(ctx->currentFile), node->endLine});
+    return;
+  }
+
+  /* Check if the returned type itself is marked as nodiscard */
+  if (node->kind == NodeKind::FunctionCall || node->kind == NodeKind::UnaryOp ||
+      node->kind == NodeKind::BinaryOp ||
+      node->kind == NodeKind::ArraySubscript) {
+    const ExprNode *expr = static_cast<const ExprNode *>(node);
+    if (expr->exprType) {
+      const Type *unqual = expr->exprType->getUnqualifiedType();
+      const DeclNode *typeDecl = nullptr;
+      std::string typeName = "";
+
+      if (unqual->getKind() == TypeKind::Class ||
+          unqual->getKind() == TypeKind::Struct ||
+          unqual->getKind() == TypeKind::Union) {
+        auto *recTy = static_cast<const RecordType *>(unqual);
+        typeDecl = recTy->getDeclaration();
+        typeName = std::string(recTy->getName());
+      } else if (unqual->getKind() == TypeKind::Enum) {
+        auto *enumTy = static_cast<const EnumType *>(unqual);
+        typeDecl = enumTy->getDeclaration();
+        typeName = std::string(enumTy->getName());
+      }
+
+      if (typeDecl) {
+        for (const auto *ann : typeDecl->annotations) {
+          if (ann->name == "nodiscard") {
+            ctx->diags.report({DiagLevel::Warning, node->line, node->column,
+                               node->length,
+                               "Ignoring return value of type '" + typeName +
+                                   "', declared with '@nodiscard' annotation.",
+                               std::string(ctx->currentFile), node->endLine});
+            return;
+          }
+        }
+      }
+    }
+  }
+}
+
 bool DeclCollectorPass::run(const ModuleNode *module, SemaContext &context) {
   ctx = &context;
   dispatch(module);
@@ -1893,6 +2018,8 @@ SemaResult TypeCheckPass::visit(const ForNode *node) {
     auto initRes = dispatch(node->initStatement);
     if (!initRes)
       return std::unexpected(initRes.error());
+
+    checkNodiscard(node->initStatement);
   }
 
   if (node->condition) {
@@ -1911,6 +2038,8 @@ SemaResult TypeCheckPass::visit(const ForNode *node) {
     auto incRes = dispatch(node->increment);
     if (!incRes)
       return std::unexpected(incRes.error());
+
+    checkNodiscard(node->increment);
   }
 
   LoopGuard loopGuard(*ctx);
@@ -1977,6 +2106,8 @@ SemaResult TypeCheckPass::visit(const SwitchNode *node) {
     for (auto *s : c->statements) {
       if (!dispatch(s))
         hasErrors = true;
+
+      checkNodiscard(s);
     }
   }
 
@@ -2569,6 +2700,8 @@ SemaResult TypeCheckPass::visit(const BlockNode *node) {
     auto res = dispatch(stmt);
     if (!res)
       hasErrors = true;
+
+    checkNodiscard(stmt);
   }
 
   if (hasErrors) {
@@ -3791,6 +3924,8 @@ SemaResult TypeCheckPass::visit(const ModuleNode *node) {
     auto res = dispatch(stmt);
     if (!res)
       hasErrors = true;
+
+    checkNodiscard(stmt);
   }
 
   ctx->setCurrentFile(prevFile);

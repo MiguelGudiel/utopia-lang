@@ -16,6 +16,7 @@ struct Diagnostic {
   int length;
   std::string message;
   std::string filePath;
+  int endLine = 0;
 };
 
 class DiagnosticsEngine {
@@ -41,15 +42,22 @@ public:
     for (const auto &d : diagnostics) {
       int lspLine = d.line > 0 ? d.line - 1 : 0;
       int lspCol = d.column > 0 ? d.column - 1 : 0;
+      int lspEndLine = (d.endLine > 0) ? d.endLine - 1 : lspLine;
 
-      // Prevent negative lengths from multi-line spanning nodes to avoid VS
-      // Code rejecting the payload
-      int safeLen = std::max(1, d.length);
+      int lspEndCol;
+      if (lspEndLine > lspLine) {
+        lspEndCol = std::max(0, lspCol + d.length);
+      } else {
+        // Prevent negative lengths from multi-line spanning nodes to avoid VS
+        // Code rejecting the payload
+        int safeLen = std::max(1, d.length);
+        lspEndCol = lspCol + safeLen;
+      }
 
       j.push_back(
           {{"range",
             {{"start", {{"line", lspLine}, {"character", lspCol}}},
-             {"end", {{"line", lspLine}, {"character", lspCol + safeLen}}}}},
+             {"end", {{"line", lspEndLine}, {"character", lspEndCol}}}}},
            {"severity", d.level == DiagLevel::Error ? 1 : 2},
            {"message", d.message},
            {"source", "utopia"}});
