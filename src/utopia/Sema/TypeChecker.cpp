@@ -2206,18 +2206,119 @@ SemaResult TypeCheckPass::visit(const ParamDeclNode *node) {
   return node->type;
 }
 
+static bool hasEscapingBreak(const ASTNode *node, int breakableDepth = 0) {
+  if (!node)
+    return false;
+
+  switch (node->kind) {
+  case NodeKind::Break:
+    /* A break with depth 0 belongs to the loop we are actively evaluating */
+    return breakableDepth == 0;
+  case NodeKind::Block: {
+    const auto *block = static_cast<const BlockNode *>(node);
+    for (const auto *stmt : block->statements) {
+      if (hasEscapingBreak(stmt, breakableDepth))
+        return true;
+    }
+    return false;
+  }
+  case NodeKind::If: {
+    const auto *ifNode = static_cast<const IfNode *>(node);
+    if (hasEscapingBreak(ifNode->thenBlock, breakableDepth))
+      return true;
+    if (hasEscapingBreak(ifNode->elseBlock, breakableDepth))
+      return true;
+    return false;
+  }
+  case NodeKind::While: {
+    const auto *wNode = static_cast<const WhileNode *>(node);
+    /* Increment depth because any break inside will bind to this inner loop */
+    return hasEscapingBreak(wNode->body, breakableDepth + 1);
+  }
+  case NodeKind::For: {
+    const auto *fNode = static_cast<const ForNode *>(node);
+    return hasEscapingBreak(fNode->body, breakableDepth + 1);
+  }
+  case NodeKind::Switch: {
+    const auto *sNode = static_cast<const SwitchNode *>(node);
+    for (const auto *c : sNode->cases) {
+      for (const auto *stmt : c->statements) {
+        /* Switch statements also consume break instructions */
+        if (hasEscapingBreak(stmt, breakableDepth + 1))
+          return true;
+      }
+    }
+    return false;
+  }
+  default:
+    return false;
+  }
+}
+
 static bool guaranteesReturn(const ASTNode *node) {
   if (!node)
     return false;
+
   if (node->kind == NodeKind::Return)
     return true;
+
   if (node->kind == NodeKind::Block) {
     const auto *block = static_cast<const BlockNode *>(node);
     for (const auto *stmt : block->statements) {
       if (guaranteesReturn(stmt))
         return true;
     }
+    return false;
   }
+
+  if (node->kind == NodeKind::If) {
+    const auto *ifStmt = static_cast<const IfNode *>(node);
+    /* An 'if' statement only guarantees a return if it covers both branches */
+    if (!ifStmt->elseBlock)
+      return false;
+    return guaranteesReturn(ifStmt->thenBlock) &&
+           guaranteesReturn(ifStmt->elseBlock);
+  }
+
+  if (node->kind == NodeKind::Switch) {
+    const auto *switchStmt = static_cast<const SwitchNode *>(node);
+    /* A switch must be exhaustive (have a default) to guarantee a return */
+    if (!switchStmt->hasDefault)
+      return false;
+
+    for (const auto *c : switchStmt->cases) {
+      bool caseReturns = false;
+      for (const auto *stmt : c->statements) {
+        if (guaranteesReturn(stmt)) {
+          caseReturns = true;
+          break;
+        }
+      }
+      /* If any case drops through without a guaranteed return, the switch fails
+       */
+      if (!caseReturns)
+        return false;
+    }
+    return true;
+  }
+
+  if (node->kind == NodeKind::While) {
+    const auto *whileStmt = static_cast<const WhileNode *>(node);
+    if (whileStmt->condition &&
+        whileStmt->condition->kind == NodeKind::Boolean) {
+      const auto *boolCond =
+          static_cast<const BoolNode *>(whileStmt->condition);
+      /* An infinite loop guarantees that control flow will not fall through
+         the end of the function, provided it has no escaping break statements
+       */
+      if (boolCond->value) {
+        if (!hasEscapingBreak(whileStmt->body)) {
+          return true;
+        }
+      }
+    }
+  }
+
   return false;
 }
 
@@ -2348,8 +2449,9 @@ SemaResult TypeCheckPass::visit(const FunctionDeclNode *node) {
     if (!node->returnType->isVoid() && !guaranteesReturn(node->body)) {
       SemaResult err =
           ctx->reportError(node->line, node->column, node->length,
-                           "Non-void function must explicitly return "
-                           "a value in all control paths.");
+                           "This function has a return type of '" +
+                               node->returnType->toString() +
+                               "', but doesn't end with a return statement.");
       hasErrors = true;
     }
 
