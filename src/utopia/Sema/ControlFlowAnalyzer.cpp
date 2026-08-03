@@ -210,30 +210,27 @@ void ControlFlowPass::visit(const VarDeclNode *node) {
 void ControlFlowPass::visit(const AssignNode *node) {
   dispatch(node->value);
 
-  bool prevAssign = isAssignTarget;
+  bool prevAssignTarget = isAssignTarget;
   isAssignTarget = true;
   dispatch(node->target);
-  isAssignTarget = prevAssign;
+  isAssignTarget = prevAssignTarget;
 }
 
 void ControlFlowPass::visit(const VariableNode *node) {
-  if (isAssignTarget) {
-    if (node->resolvedDecl && node->resolvedDecl->kind == NodeKind::VarDecl) {
-      initStates[static_cast<const VarDeclNode *>(node->resolvedDecl)] = true;
-    }
-  } else {
-    if (node->resolvedDecl && node->resolvedDecl->kind == NodeKind::VarDecl) {
-      auto varDecl = static_cast<const VarDeclNode *>(node->resolvedDecl);
-      if (!varDecl->isGlobal && !varDecl->isStatic) {
+  if (node->resolvedDecl && node->resolvedDecl->kind == NodeKind::VarDecl) {
+    auto *varDecl = static_cast<const VarDeclNode *>(node->resolvedDecl);
+
+    if (!varDecl->isGlobal && !varDecl->isStatic) {
+      if (isAssignTarget) {
+        initStates[varDecl] = true;
+      } else {
         auto it = initStates.find(varDecl);
         if (it != initStates.end() && !it->second) {
           ctx->diags.report({DiagLevel::Warning, node->line, node->column,
                              node->length,
                              "Use of uninitialized variable '" +
-                                 std::string(node->name) + "'.",
-                             std::string(ctx->currentFile), node->endLine});
-
-          /* Prevent redundant warning cascades for the same variable */
+                                 std::string(node->name) + "'",
+                             std::string(ctx->currentFile)});
           initStates[varDecl] = true;
         }
       }
@@ -241,7 +238,25 @@ void ControlFlowPass::visit(const VariableNode *node) {
   }
 }
 
-void ControlFlowPass::visit(const UnaryOpNode *node) { dispatch(node->expr); }
+void ControlFlowPass::visit(const UnaryOpNode *node) {
+  if (node->op == "&") {
+    bool prevAssignTarget = isAssignTarget;
+    isAssignTarget = true;
+    dispatch(node->expr);
+    isAssignTarget = prevAssignTarget;
+
+    if (node->expr->kind == NodeKind::Variable) {
+      auto *varNode = static_cast<const VariableNode *>(node->expr);
+      if (varNode->resolvedDecl &&
+          varNode->resolvedDecl->kind == NodeKind::VarDecl) {
+        auto *varDecl = static_cast<const VarDeclNode *>(varNode->resolvedDecl);
+        initStates[varDecl] = true;
+      }
+    }
+  } else {
+    dispatch(node->expr);
+  }
+}
 
 void ControlFlowPass::visit(const BinaryOpNode *node) {
   dispatch(node->left);
@@ -249,9 +264,77 @@ void ControlFlowPass::visit(const BinaryOpNode *node) {
 }
 
 void ControlFlowPass::visit(const FunctionCallNode *node) {
-  dispatch(node->target);
-  for (auto *arg : node->args) {
-    dispatch(arg);
+  if (node->target) {
+    dispatch(node->target);
+  }
+
+  for (size_t i = 0; i < node->args.size(); ++i) {
+    auto *arg = node->args[i];
+    bool isMutableOutParam = false;
+    const Type *paramType = nullptr;
+
+    if (node->resolvedFunc && i < node->resolvedFunc->params.size()) {
+      paramType = node->resolvedFunc->params[i]->type;
+    } else if (node->target && node->target->exprType) {
+      const Type *unqual = node->target->exprType->getUnqualifiedType();
+      if (unqual->isPointerType()) {
+        const Type *pointee =
+            static_cast<const PointerType *>(unqual)->getPointeeType();
+        if (pointee->getKind() == TypeKind::Function) {
+          auto *fTy = static_cast<const FunctionType *>(pointee);
+          if (i < fTy->getParamTypes().size()) {
+            paramType = fTy->getParamTypes()[i];
+          }
+        }
+      }
+    }
+
+    if (paramType) {
+      if (paramType->isPointerType() || paramType->isReferenceType()) {
+        const Type *pointee = nullptr;
+        if (paramType->isPointerType()) {
+          pointee =
+              static_cast<const PointerType *>(paramType)->getPointeeType();
+        } else {
+          pointee =
+              static_cast<const ReferenceType *>(paramType)->getPointeeType();
+        }
+
+        if (pointee && !pointee->isConstQualified()) {
+          isMutableOutParam = true;
+        }
+      }
+    }
+
+    if (isMutableOutParam) {
+      bool prevAssignTarget = isAssignTarget;
+      isAssignTarget = true;
+      dispatch(arg);
+      isAssignTarget = prevAssignTarget;
+
+      if (arg->kind == NodeKind::Variable) {
+        auto *varNode = static_cast<const VariableNode *>(arg);
+        if (varNode->resolvedDecl &&
+            varNode->resolvedDecl->kind == NodeKind::VarDecl) {
+          auto *varDecl =
+              static_cast<const VarDeclNode *>(varNode->resolvedDecl);
+          initStates[varDecl] = true;
+        }
+      } else if (arg->kind == NodeKind::UnaryOp) {
+        auto *uop = static_cast<const UnaryOpNode *>(arg);
+        if (uop->op == "&" && uop->expr->kind == NodeKind::Variable) {
+          auto *varNode = static_cast<const VariableNode *>(uop->expr);
+          if (varNode->resolvedDecl &&
+              varNode->resolvedDecl->kind == NodeKind::VarDecl) {
+            auto *varDecl =
+                static_cast<const VarDeclNode *>(varNode->resolvedDecl);
+            initStates[varDecl] = true;
+          }
+        }
+      }
+    } else {
+      dispatch(arg);
+    }
   }
 }
 
@@ -262,8 +345,12 @@ void ControlFlowPass::visit(const MemberAccessNode *node) {
 }
 
 void ControlFlowPass::visit(const ArraySubscriptNode *node) {
-  dispatch(node->base);
+  bool prevAssignTarget = isAssignTarget;
+  isAssignTarget = false;
   dispatch(node->index);
+  isAssignTarget = prevAssignTarget;
+
+  dispatch(node->base);
 }
 
 void ControlFlowPass::visit(const ArrayLiteralNode *node) {
