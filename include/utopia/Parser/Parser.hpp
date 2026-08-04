@@ -107,6 +107,7 @@ private:
 
   ExprNode *parseExpression();
   ExprNode *parseAssignment();
+  ExprNode *parseTernary();
   ExprNode *parseLogicalOr();
   ExprNode *parseLogicalAnd();
   ExprNode *parseBitwiseOr();

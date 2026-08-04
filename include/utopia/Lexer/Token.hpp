@@ -69,6 +69,7 @@ enum class TokenType : uint8_t {
   RSHIFT_EQ,    // >>=
   ARROW,
   COLON,
+  QUESTION, /* ? */
   TRUE_KW,
   FALSE_KW,
   LPAREN,

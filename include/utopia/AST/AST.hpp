@@ -48,7 +48,8 @@ enum class NodeKind : uint8_t {
   EnumDecl,
   EnumMember,
   ImplicitCast,
-  TypeLiteral
+  TypeLiteral,
+  TernaryOp
 };
 
 struct ASTNode {
@@ -229,6 +230,18 @@ struct BinaryOpNode : public ExprNode {
       : ExprNode(NodeKind::BinaryOp, ln, c), op(o), left(l), right(r) {
     this->length = (right->column + right->length) - this->column;
   }
+};
+
+struct TernaryOpNode : public ExprNode {
+  ExprNode *condition;
+  ExprNode *trueExpr;
+  ExprNode *falseExpr;
+  mutable const Type *promotedType = nullptr;
+
+  TernaryOpNode(ExprNode *cond, ExprNode *tExpr, ExprNode *fExpr, int l, int c,
+                int len)
+      : ExprNode(NodeKind::TernaryOp, l, c, len), condition(cond),
+        trueExpr(tExpr), falseExpr(fExpr) {}
 };
 
 struct VarDeclNode : public DeclNode {

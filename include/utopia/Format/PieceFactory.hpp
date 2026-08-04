@@ -105,6 +105,7 @@ public:
   Piece *visit(const VariableNode *node);
   Piece *visit(const UnaryOpNode *node);
   Piece *visit(const BinaryOpNode *node);
+  Piece *visit(const TernaryOpNode *node);
   Piece *visit(const ModuleNode *node);
   Piece *visit(const AnnotationNode *node);
   Piece *visit(const AnnotationDeclNode *node);

@@ -590,6 +590,22 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
   if (!node)
     return nullptr;
 
+  if (node->kind == NodeKind::TernaryOp) {
+    auto *ternaryNode = static_cast<const TernaryOpNode *>(node);
+    llvm::Constant *condC = evaluateAsConstant(ternaryNode->condition);
+    if (!condC)
+      return nullptr;
+
+    if (auto *ci = llvm::dyn_cast<llvm::ConstantInt>(condC)) {
+      if (ci->getZExtValue() != 0) {
+        return evaluateAsConstant(ternaryNode->trueExpr);
+      } else {
+        return evaluateAsConstant(ternaryNode->falseExpr);
+      }
+    }
+    return nullptr;
+  }
+
   if (node->kind == NodeKind::FunctionCall) {
     auto *call = static_cast<const FunctionCallNode *>(node);
     if (call->resolvedFunc && call->resolvedFunc->isIntrinsic) {
@@ -1056,6 +1072,46 @@ llvm::Value *CodeGen::visit(const ImplicitCastNode *node) {
 llvm::Value *CodeGen::getLValue(const ExprNode *node) {
   if (!node)
     return nullptr;
+
+  if (node->kind == NodeKind::TernaryOp) {
+    auto *ternary = static_cast<const TernaryOpNode *>(node);
+    llvm::Value *condV = dispatch(ternary->condition);
+    condV = createImplicitCast(condV, builder.getInt1Ty());
+
+    llvm::Function *theFunction = builder.GetInsertBlock()->getParent();
+    llvm::BasicBlock *trueBB =
+        llvm::BasicBlock::Create(ctx, "ternary.lval.true", theFunction);
+    llvm::BasicBlock *falseBB =
+        llvm::BasicBlock::Create(ctx, "ternary.lval.false");
+    llvm::BasicBlock *mergeBB =
+        llvm::BasicBlock::Create(ctx, "ternary.lval.merge");
+
+    builder.CreateCondBr(condV, trueBB, falseBB);
+
+    builder.SetInsertPoint(trueBB);
+    llvm::Value *trueLVal = getLValue(ternary->trueExpr);
+    if (!trueLVal)
+      return nullptr;
+    trueBB = builder.GetInsertBlock();
+    builder.CreateBr(mergeBB);
+
+    theFunction->insert(theFunction->end(), falseBB);
+    builder.SetInsertPoint(falseBB);
+    llvm::Value *falseLVal = getLValue(ternary->falseExpr);
+    if (!falseLVal)
+      return nullptr;
+    falseBB = builder.GetInsertBlock();
+    builder.CreateBr(mergeBB);
+
+    theFunction->insert(theFunction->end(), mergeBB);
+    builder.SetInsertPoint(mergeBB);
+
+    llvm::PHINode *phi =
+        builder.CreatePHI(builder.getPtrTy(), 2, "ternary.lval.phi");
+    phi->addIncoming(trueLVal, trueBB);
+    phi->addIncoming(falseLVal, falseBB);
+    return phi;
+  }
 
   if (node->kind == NodeKind::ArraySubscript) {
     auto *subNode = static_cast<const ArraySubscriptNode *>(node);
@@ -2059,6 +2115,51 @@ llvm::Value *CodeGen::visit(const BinaryOpNode *node) {
   }
 
   return nullptr;
+}
+
+llvm::Value *CodeGen::visit(const TernaryOpNode *node) {
+  llvm::Value *condV = dispatch(node->condition);
+  if (!condV)
+    return nullptr;
+
+  condV = createImplicitCast(condV, builder.getInt1Ty());
+
+  llvm::Function *theFunction = builder.GetInsertBlock()->getParent();
+  llvm::BasicBlock *trueBB =
+      llvm::BasicBlock::Create(ctx, "ternary.true", theFunction);
+  llvm::BasicBlock *falseBB = llvm::BasicBlock::Create(ctx, "ternary.false");
+  llvm::BasicBlock *mergeBB = llvm::BasicBlock::Create(ctx, "ternary.merge");
+
+  builder.CreateCondBr(condV, trueBB, falseBB);
+
+  builder.SetInsertPoint(trueBB);
+  llvm::Value *trueV = dispatch(node->trueExpr);
+  if (!trueV && !node->exprType->isVoid())
+    return nullptr;
+  trueBB = builder.GetInsertBlock();
+  builder.CreateBr(mergeBB);
+
+  theFunction->insert(theFunction->end(), falseBB);
+  builder.SetInsertPoint(falseBB);
+  llvm::Value *falseV = dispatch(node->falseExpr);
+  if (!falseV && !node->exprType->isVoid())
+    return nullptr;
+  falseBB = builder.GetInsertBlock();
+  builder.CreateBr(mergeBB);
+
+  theFunction->insert(theFunction->end(), mergeBB);
+  builder.SetInsertPoint(mergeBB);
+
+  if (node->exprType->isVoid()) {
+    return nullptr;
+  }
+
+  llvm::Type *resTy = getLLVMType(node->exprType);
+  llvm::PHINode *phi = builder.CreatePHI(resTy, 2, "ternary.phi");
+  phi->addIncoming(trueV, trueBB);
+  phi->addIncoming(falseV, falseBB);
+
+  return phi;
 }
 
 llvm::Value *CodeGen::visit(const VarDeclNode *node) {

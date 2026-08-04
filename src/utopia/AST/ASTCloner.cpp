@@ -108,6 +108,20 @@ ASTNode *ASTCloner::visit(const BinaryOpNode *n) {
       static_cast<ExprNode *>(dispatch(n->right)), n->line, n->column);
 }
 
+ASTNode *ASTCloner::visit(const TernaryOpNode *n) {
+  auto *node =
+      ctx.create<TernaryOpNode>(static_cast<ExprNode *>(dispatch(n->condition)),
+                                static_cast<ExprNode *>(dispatch(n->trueExpr)),
+                                static_cast<ExprNode *>(dispatch(n->falseExpr)),
+                                n->line, n->column, n->length);
+  node->promotedType = cloneType(n->promotedType);
+  node->exprType = cloneType(n->exprType);
+  node->isLValue = n->isLValue;
+  node->hasParens = n->hasParens;
+  node->representedType = cloneType(n->representedType);
+  return node;
+}
+
 ASTNode *ASTCloner::visit(const AssignNode *n) {
   return ctx.create<AssignNode>(n->op,
                                 static_cast<ExprNode *>(dispatch(n->target)),

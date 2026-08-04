@@ -99,6 +99,17 @@ void EffectAnalyzer::visit(const UnaryOpNode *n) {
   dispatch(n->expr);
 }
 
+void EffectAnalyzer::visit(const BinaryOpNode *n) {
+  dispatch(n->left);
+  dispatch(n->right);
+}
+
+void EffectAnalyzer::visit(const TernaryOpNode *n) {
+  dispatch(n->condition);
+  dispatch(n->trueExpr);
+  dispatch(n->falseExpr);
+}
+
 void EffectAnalyzer::visit(const UnionDeclNode *n) {}
 
 void EffectAnalyzer::visit(const ArraySubscriptNode *n) {
@@ -167,11 +178,6 @@ void EffectAnalyzer::visit(const CastNode *n) {
     potentiallyInfinite = true;
   }
   dispatch(n->expr);
-}
-
-void EffectAnalyzer::visit(const BinaryOpNode *n) {
-  dispatch(n->left);
-  dispatch(n->right);
 }
 
 void EffectAnalyzer::visit(const VarDeclNode *n) {

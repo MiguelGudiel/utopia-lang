@@ -51,6 +51,7 @@ public:
   void visit(const VariableNode *) {}
   void visit(const UnaryOpNode *) {}
   void visit(const BinaryOpNode *) {}
+  void visit(const TernaryOpNode *) {}
   void visit(const AssignNode *) {}
   void visit(const BlockNode *) {}
   void visit(const FunctionCallNode *) {}
@@ -107,6 +108,7 @@ public:
   SemaResult visit(const VariableNode *node);
   SemaResult visit(const UnaryOpNode *node);
   SemaResult visit(const BinaryOpNode *node);
+  SemaResult visit(const TernaryOpNode *node);
   SemaResult visit(const VarDeclNode *node);
   SemaResult visit(const AssignNode *node);
   SemaResult visit(const BlockNode *node);
@@ -170,6 +172,7 @@ public:
   void visit(const VariableNode *node);
   void visit(const UnaryOpNode *node);
   void visit(const BinaryOpNode *node);
+  void visit(const TernaryOpNode *node);
   void visit(const FunctionCallNode *node);
   void visit(const CastNode *node);
   void visit(const MemberAccessNode *node);

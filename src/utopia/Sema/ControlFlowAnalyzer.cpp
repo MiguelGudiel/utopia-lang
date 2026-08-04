@@ -263,6 +263,34 @@ void ControlFlowPass::visit(const BinaryOpNode *node) {
   dispatch(node->right);
 }
 
+void ControlFlowPass::visit(const TernaryOpNode *node) {
+  dispatch(node->condition);
+
+  bool initialReachable = isReachable;
+  auto initialStates = initStates;
+
+  dispatch(node->trueExpr);
+  bool thenReachable = isReachable;
+  auto thenStates = initStates;
+
+  isReachable = initialReachable;
+  initStates = initialStates;
+
+  dispatch(node->falseExpr);
+  bool elseReachable = isReachable;
+
+  isReachable = thenReachable || elseReachable;
+
+  for (auto &[var, state] : initStates) {
+    if (state) {
+      auto it = thenStates.find(var);
+      if (it == thenStates.end() || !it->second) {
+        state = false;
+      }
+    }
+  }
+}
+
 void ControlFlowPass::visit(const FunctionCallNode *node) {
   if (node->target) {
     dispatch(node->target);

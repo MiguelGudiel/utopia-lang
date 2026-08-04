@@ -58,6 +58,16 @@ public:
     return isHit(n) ? n : nullptr;
   }
 
+  const ASTNode *visit(const TernaryOpNode *n) {
+    if (auto found = find(n->condition))
+      return found;
+    if (auto found = find(n->trueExpr))
+      return found;
+    if (auto found = find(n->falseExpr))
+      return found;
+    return isHit(n) ? n : nullptr;
+  }
+
   const ASTNode *visit(const AssignNode *n) {
     if (auto found = find(n->target))
       return found;

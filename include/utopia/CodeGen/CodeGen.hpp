@@ -33,6 +33,7 @@ public:
   llvm::Value *visit(const VariableNode *node);
   llvm::Value *visit(const UnaryOpNode *node);
   llvm::Value *visit(const BinaryOpNode *node);
+  llvm::Value *visit(const TernaryOpNode *node);
   llvm::Value *visit(const VarDeclNode *node);
   llvm::Value *visit(const AssignNode *node);
   llvm::Value *visit(const BlockNode *node);

@@ -7,9 +7,9 @@ namespace utopia {
 static bool isExpressionStatement(NodeKind kind) {
   return kind == NodeKind::FunctionCall || kind == NodeKind::Assign ||
          kind == NodeKind::UnaryOp || kind == NodeKind::BinaryOp ||
-         kind == NodeKind::Variable || kind == NodeKind::Number ||
-         kind == NodeKind::String || kind == NodeKind::Delete ||
-         kind == NodeKind::New;
+         kind == NodeKind::TernaryOp || kind == NodeKind::Variable ||
+         kind == NodeKind::Number || kind == NodeKind::String ||
+         kind == NodeKind::Delete || kind == NodeKind::New;
 }
 
 static int getActualStartLine(const ASTNode *node) {
@@ -53,9 +53,10 @@ Piece *PieceFactory::dispatchStmt(const ASTNode *node) {
   bool isExpr =
       node->kind == NodeKind::FunctionCall || node->kind == NodeKind::Assign ||
       node->kind == NodeKind::UnaryOp || node->kind == NodeKind::BinaryOp ||
-      node->kind == NodeKind::Variable || node->kind == NodeKind::Number ||
-      node->kind == NodeKind::String || node->kind == NodeKind::Delete ||
-      node->kind == NodeKind::New || node->kind == NodeKind::ArraySubscript ||
+      node->kind == NodeKind::TernaryOp || node->kind == NodeKind::Variable ||
+      node->kind == NodeKind::Number || node->kind == NodeKind::String ||
+      node->kind == NodeKind::Delete || node->kind == NodeKind::New ||
+      node->kind == NodeKind::ArraySubscript ||
       node->kind == NodeKind::MemberAccess || node->kind == NodeKind::Cast ||
       node->kind == NodeKind::ImplicitCast || node->kind == NodeKind::Null ||
       node->kind == NodeKind::Boolean || node->kind == NodeKind::Char ||
@@ -311,12 +312,6 @@ Piece *PieceFactory::visit(const TypeLiteralNode *node) {
   return create<TextPiece>(node->representedType->toString());
 }
 
-Piece *PieceFactory::visit(const BinaryOpNode *node) {
-  Piece *left = dispatchExpr(node->left);
-  Piece *right = dispatchExpr(node->right);
-  return create<InfixPiece>(left, std::string(node->op), right);
-}
-
 Piece *PieceFactory::visit(const UnaryOpNode *node) {
   Piece *expr = dispatchExpr(node->expr);
   if (node->isPostfix) {
@@ -325,6 +320,19 @@ Piece *PieceFactory::visit(const UnaryOpNode *node) {
   }
   return create<ConcatPiece>(
       std::vector<Piece *>{create<TextPiece>(std::string(node->op)), expr});
+}
+
+Piece *PieceFactory::visit(const BinaryOpNode *node) {
+  Piece *left = dispatchExpr(node->left);
+  Piece *right = dispatchExpr(node->right);
+  return create<InfixPiece>(left, std::string(node->op), right);
+}
+
+Piece *PieceFactory::visit(const TernaryOpNode *node) {
+  return create<ConcatPiece>(std::vector<Piece *>{
+      dispatchExpr(node->condition), create<TextPiece>(" ? "),
+      dispatchExpr(node->trueExpr), create<TextPiece>(" : "),
+      dispatchExpr(node->falseExpr)});
 }
 
 Piece *PieceFactory::visit(const BlockNode *node) {
@@ -565,6 +573,7 @@ Piece *PieceFactory::visit(const FunctionDeclNode *node) {
                           innerStmt->kind == NodeKind::Assign ||
                           innerStmt->kind == NodeKind::UnaryOp ||
                           innerStmt->kind == NodeKind::BinaryOp ||
+                          innerStmt->kind == NodeKind::TernaryOp ||
                           innerStmt->kind == NodeKind::Variable ||
                           innerStmt->kind == NodeKind::Number ||
                           innerStmt->kind == NodeKind::String ||

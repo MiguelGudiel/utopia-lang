@@ -451,6 +451,9 @@ Token Lexer::parseToken() {
     return {TokenType::BANG, std::string_view(start, 1), startLine, startCol};
   case '@':
     return {TokenType::AT, std::string_view(start, 1), startLine, startCol};
+  case '?':
+    return {TokenType::QUESTION, std::string_view(start, 1), startLine,
+            startCol};
   case '(':
     return {TokenType::LPAREN, std::string_view(start, 1), startLine, startCol};
   case ')':

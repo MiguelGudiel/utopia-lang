@@ -40,6 +40,9 @@ public:
     case NodeKind::BinaryOp:
       return static_cast<Derived *>(this)->visit(
           static_cast<const BinaryOpNode *>(node));
+    case NodeKind::TernaryOp:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const TernaryOpNode *>(node));
     case NodeKind::Module:
       return static_cast<Derived *>(this)->visit(
           static_cast<const ModuleNode *>(node));

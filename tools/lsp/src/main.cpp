@@ -145,6 +145,7 @@ public:
   void visit(const VariableNode *) {}
   void visit(const UnaryOpNode *) {}
   void visit(const BinaryOpNode *) {}
+  void visit(const TernaryOpNode *) {}
   void visit(const AssignNode *) {}
   void visit(const ArrayLiteralNode *) {}
   void visit(const ArraySubscriptNode *) {}
@@ -1667,7 +1668,7 @@ public:
       return;
     tokens.push_back({line, col, length, type, modifiers});
   }
-  
+
   void visit(const TypeLiteralNode *n) {
     if (n->representedType &&
         !n->representedType->getUnqualifiedType()->isBuiltinType()) {
@@ -1910,6 +1911,11 @@ public:
   void visit(const BinaryOpNode *n) {
     dispatch(n->left);
     dispatch(n->right);
+  }
+  void visit(const TernaryOpNode *n) {
+    dispatch(n->condition);
+    dispatch(n->trueExpr);
+    dispatch(n->falseExpr);
   }
   void visit(const CastNode *n) { dispatch(n->expr); }
   void visit(const ImplicitCastNode *n) { dispatch(n->expr); }

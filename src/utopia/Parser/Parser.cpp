@@ -1408,6 +1408,23 @@ ExprNode *Parser::parseUnary() {
   return parsePostfix();
 }
 
+ExprNode *Parser::parseTernary() {
+  auto expr = parseLogicalOr();
+  if (match(TokenType::QUESTION)) {
+    int line = expr->line;
+    int col = expr->column;
+
+    auto trueExpr = parseExpression();
+    expect(TokenType::COLON, "Expected ':' in ternary operator");
+    auto falseExpr = parseAssignment();
+
+    int endCol = falseExpr->column + falseExpr->length;
+    return astCtx.create<TernaryOpNode>(expr, trueExpr, falseExpr, line, col,
+                                        endCol - col);
+  }
+  return expr;
+}
+
 DeclNode *Parser::parseRecordDecl(TypeKind kind) {
   int line = currentToken().line;
   int col = currentToken().column;
@@ -2093,7 +2110,7 @@ ExprNode *Parser::parseExpressionStatement() {
 ExprNode *Parser::parseExpression() { return parseAssignment(); }
 
 ExprNode *Parser::parseAssignment() {
-  auto expr = parseLogicalOr();
+  auto expr = parseTernary();
 
   switch (currentToken().type) {
   case TokenType::ASSIGN:

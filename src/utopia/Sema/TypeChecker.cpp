@@ -1504,6 +1504,65 @@ SemaResult TypeCheckPass::visit(const BinaryOpNode *node) {
   return res;
 }
 
+SemaResult TypeCheckPass::visit(const TernaryOpNode *node) {
+  auto condRes = dispatch(node->condition);
+  if (!condRes)
+    return std::unexpected(ErrorInfo{node->line, node->column, node->length,
+                                     "Cascading error in ternary condition"});
+
+  if (!canImplicitlyCast(*condRes, ctx->astCtx.BoolTy)) {
+    return ctx->reportError(
+        node->condition->line, node->condition->column, node->condition->length,
+        "Ternary condition must evaluate to a boolean type.");
+  }
+
+  auto trueRes = dispatch(node->trueExpr);
+  auto falseRes = dispatch(node->falseExpr);
+
+  if (!trueRes || !falseRes)
+    return std::unexpected(ErrorInfo{node->line, node->column, node->length,
+                                     "Cascading error in ternary branches"});
+
+  const Type *tType = *trueRes;
+  const Type *fType = *falseRes;
+  const Type *resType = nullptr;
+
+  if (canImplicitlyCast(fType, tType)) {
+    resType = tType;
+    const_cast<TernaryOpNode *>(node)->falseExpr =
+        performImplicitConversion(node->falseExpr, tType);
+  } else if (canImplicitlyCast(tType, fType)) {
+    resType = fType;
+    const_cast<TernaryOpNode *>(node)->trueExpr =
+        performImplicitConversion(node->trueExpr, fType);
+  } else if (tType->isNumeric() && fType->isNumeric()) {
+    resType = ctx->astCtx.getPromotedNumericType(tType, fType);
+    checkImplicitCastWarning(tType, resType, node->trueExpr);
+    checkImplicitCastWarning(fType, resType, node->falseExpr);
+    const_cast<TernaryOpNode *>(node)->trueExpr =
+        performImplicitConversion(node->trueExpr, resType);
+    const_cast<TernaryOpNode *>(node)->falseExpr =
+        performImplicitConversion(node->falseExpr, resType);
+  } else {
+    return ctx->reportError(
+        node->line, node->column, node->length,
+        "Incompatible operand types in ternary operator: '" +
+            tType->toString() + "' and '" + fType->toString() + "'.");
+  }
+
+  node->promotedType = resType;
+  node->exprType = resType;
+
+  if (node->trueExpr->isLValue && node->falseExpr->isLValue &&
+      ctx->isSameType(tType, fType)) {
+    node->isLValue = true;
+  } else {
+    node->isLValue = false;
+  }
+
+  return resType;
+}
+
 SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
   const_cast<VarDeclNode *>(node)->type = resolveIfTemplate(node->type);
   const Type *declType = node->type;
