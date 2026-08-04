@@ -151,6 +151,9 @@ const Type *Parser::parseType(bool inNewExpr) {
     std::vector<const Type *> tArgs;
     if (currentToken().type != TokenType::GT) {
       do {
+        if (currentToken().type == TokenType::GT ||
+            currentToken().type == TokenType::RSHIFT)
+          break;
         tArgs.push_back(parseType());
       } while (match(TokenType::COMMA));
     }
@@ -197,6 +200,8 @@ const Type *Parser::parseType(bool inNewExpr) {
     if (currentToken().type != TokenType::RPAREN &&
         currentToken().type != TokenType::EOF_TOK) {
       do {
+        if (currentToken().type == TokenType::RPAREN)
+          break;
         paramTypes.push_back(parseType());
       } while (match(TokenType::COMMA));
     }
@@ -426,6 +431,7 @@ std::vector<ParamDeclNode *> Parser::parseParameterList(bool &isVariadic) {
 
     if (match(TokenType::ELLIPSIS)) {
       isVariadic = true;
+      match(TokenType::COMMA);
       break;
     }
 
@@ -438,6 +444,11 @@ std::vector<ParamDeclNode *> Parser::parseParameterList(bool &isVariadic) {
 
     if (inNamedBlock && currentToken().type == TokenType::RBRACE) {
       advance();
+      match(TokenType::COMMA);
+      break;
+    }
+
+    if (currentToken().type == TokenType::RPAREN) {
       break;
     }
 
@@ -509,11 +520,16 @@ std::vector<ParamDeclNode *> Parser::parseParameterList(bool &isVariadic) {
       if (inNamedBlock) {
         expect(TokenType::RBRACE,
                "Expected '}' to close named parameter list.");
+        match(TokenType::COMMA);
       }
       break;
     } else {
       if (inNamedBlock && currentToken().type == TokenType::RBRACE) {
         advance();
+        match(TokenType::COMMA);
+        break;
+      }
+      if (currentToken().type == TokenType::RPAREN) {
         break;
       }
     }
@@ -722,6 +738,9 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
       }
 
       constructor->body = parseFunctionBody(astCtx.VoidTy);
+      constructor->length =
+          constructor->body->column + constructor->body->length - cCol;
+      constructor->endLine = constructor->body->endLine;
       continue;
     }
 
@@ -737,17 +756,21 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
     std::string_view memName = currentToken().value;
 
     expect(TokenType::IDENTIFIER, "Expected member name");
+
+    int endLine = currentToken().line;
+    int endCol = currentToken().column + 1;
     expect(TokenType::SEMICOLON, "Expected ';'");
 
     checkRecordMemberRedefinition(memName, fields, {}, nullptr, mLine, mCol,
                                   memName.length());
 
     auto field = astCtx.create<VarDeclNode>(memType, memName, nullptr, mLine,
-                                            mCol, memName.length());
+                                            mCol, endCol - mCol);
     field->annotations = memberAnnotations;
     field->hasPublicMod = isPub;
     field->hasPrivateMod = isPriv;
     field->rawTypeStr = rawTypeStr;
+    field->endLine = endLine;
 
     if (!doc.empty())
       field->docString = astCtx.copyString(doc);
@@ -1559,6 +1582,9 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
       }
 
       destructor->body = parseFunctionBody(astCtx.VoidTy);
+      destructor->length =
+          destructor->body->column + destructor->body->length - dCol;
+      destructor->endLine = destructor->body->endLine;
       continue;
     }
 
@@ -1600,6 +1626,9 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
       }
 
       constructor->body = parseFunctionBody(astCtx.VoidTy);
+      constructor->length =
+          constructor->body->column + constructor->body->length - cCol;
+      constructor->endLine = constructor->body->endLine;
       checkConstructorRedefinition(constructors, constructor, cLine, cCol,
                                    name.length());
       constructors.push_back(constructor);
@@ -1686,10 +1715,16 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
         method->docString = astCtx.copyString(doc);
 
       if (isExtern || isIntrinsic) {
+        int endLine = currentToken().line;
+        int endCol = currentToken().column + 1;
         expect(TokenType::SEMICOLON,
                "Expected ';' after extern or intrinsic method declaration");
+        method->length = endCol - mCol;
+        method->endLine = endLine;
       } else {
         method->body = parseFunctionBody(memType);
+        method->length = method->body->column + method->body->length - mCol;
+        method->endLine = method->body->endLine;
       }
 
       if (cursor > 0 && !tokens[cursor - 1].trailingComment.empty()) {
@@ -1727,18 +1762,21 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
       if (match(TokenType::ASSIGN)) {
         init = parseExpression();
       }
+      int endLine = currentToken().line;
+      int endCol = currentToken().column + 1;
       expect(TokenType::SEMICOLON, "Expected ';'");
 
       checkRecordMemberRedefinition(memName, fields, methods, nullptr, mLine,
                                     mCol, memName.length());
 
       auto field = astCtx.create<VarDeclNode>(memType, memName, init, mLine,
-                                              mCol, memName.length());
+                                              mCol, endCol - mCol);
       field->isStatic = isStatic;
       field->annotations = memberAnnotations;
       field->hasPublicMod = isPub;
       field->hasPrivateMod = isPriv;
       field->rawTypeStr = rawTypeStr;
+      field->endLine = endLine;
 
       if (!doc.empty())
         field->docString = astCtx.copyString(doc);
@@ -1898,8 +1936,12 @@ DeclNode *Parser::parseEnumDecl() {
       init = parseExpression();
     }
 
-    auto memberNode = astCtx.create<EnumMemberNode>(
-        mName, init, mLine, mCol, currentToken().column - mCol);
+    int endLine = init ? init->endLine : mLine;
+    int endCol = init ? (init->column + init->length) : currentToken().column;
+
+    auto memberNode =
+        astCtx.create<EnumMemberNode>(mName, init, mLine, mCol, endCol - mCol);
+    memberNode->endLine = endLine;
     memberNode->hasPublicMod = isPub;
     memberNode->hasPrivateMod = isPriv;
 

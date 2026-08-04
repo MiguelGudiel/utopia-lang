@@ -531,6 +531,17 @@ Piece *PieceFactory::visit(const FunctionDeclNode *node) {
     pfx += std::string(node->name);
   }
 
+  if (node->isTemplate) {
+    pfx += "<";
+    for (size_t i = 0; i < node->templateParams.size(); ++i) {
+      pfx += std::string(node->templateParams[i]);
+      if (i < node->templateParams.size() - 1) {
+        pfx += ", ";
+      }
+    }
+    pfx += ">";
+  }
+
   std::vector<Piece *> signature;
   signature.push_back(create<TextPiece>(pfx));
 
@@ -755,6 +766,18 @@ Piece *createRecord(PieceFactory *factory, const T *node, const char *kw) {
   }
 
   std::string pfx = std::string(kw) + " " + std::string(node->name);
+
+  if (node->isTemplate) {
+    pfx += "<";
+    for (size_t i = 0; i < node->templateParams.size(); ++i) {
+      pfx += std::string(node->templateParams[i]);
+      if (i < node->templateParams.size() - 1) {
+        pfx += ", ";
+      }
+    }
+    pfx += ">";
+  }
+
   Piece *mainRecord;
 
   if (node->isOpaque) {
