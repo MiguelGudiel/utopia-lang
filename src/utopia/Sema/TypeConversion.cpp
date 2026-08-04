@@ -34,6 +34,25 @@ bool canImplicitlyCast(const Type *from, const Type *to,
   const Type *unqualFrom = baseFrom->getUnqualifiedType();
   const Type *unqualTo = baseTo->getUnqualifiedType();
 
+  /* Implicit Array to ListLiteralView intrinsic resolution */
+  if (unqualFrom->getKind() == TypeKind::Array &&
+      unqualTo->getKind() == TypeKind::Struct) {
+    auto *arrFrom = static_cast<const ArrayType *>(unqualFrom);
+    auto *recTo = static_cast<const RecordType *>(unqualTo);
+    if (recTo->getName().starts_with("ListLiteralView_")) {
+      std::string expectedName = "ListLiteralView_";
+      std::string argStr = arrFrom->getElementType()->toString();
+      for (char &c : argStr) {
+        if (!isalnum(c))
+          c = '_';
+      }
+      expectedName += argStr;
+      if (recTo->getName() == expectedName) {
+        return true;
+      }
+    }
+  }
+
   /* Support casting from an internal TypeVal to a user-defined generic 'Type'
    * class */
   if (unqualFrom->isBuiltinType() &&
@@ -304,6 +323,20 @@ ExprNode *TypeCheckPass::performImplicitConversion(ExprNode *expr,
     return expr;
 
   const Type *unqualTo = to->getUnqualifiedType();
+  const Type *unqualFrom = expr->exprType->getUnqualifiedType();
+
+  /* Intercept Array to ListLiteralView intrinsic conversion */
+  if (unqualFrom->getKind() == TypeKind::Array &&
+      unqualTo->getKind() == TypeKind::Struct) {
+    auto *recTo = static_cast<const RecordType *>(unqualTo);
+    if (recTo->getName().starts_with("ListLiteralView_")) {
+      auto *castNode = ctx->astCtx.create<ImplicitCastNode>(
+          expr, to, nullptr, expr->line, expr->column, expr->length);
+      castNode->exprType = to;
+      castNode->isLValue = false;
+      return castNode;
+    }
+  }
 
   /* Prioritize built-in or exact primitive type mappings */
   if (canImplicitlyCast(expr->exprType, to, false))
@@ -327,8 +360,15 @@ ExprNode *TypeCheckPass::performImplicitConversion(ExprNode *expr,
       for (auto *ctor : ctors) {
         if (ctor->params.size() == 1) {
           if (canImplicitlyCast(expr->exprType, ctor->params[0]->type, false)) {
+            ExprNode *innerExpr = expr;
+            if (expr->exprType->getUnqualifiedType() !=
+                ctor->params[0]->type->getUnqualifiedType()) {
+              innerExpr =
+                  performImplicitConversion(expr, ctor->params[0]->type);
+            }
+
             auto *castNode = ctx->astCtx.create<ImplicitCastNode>(
-                expr, to, ctor, expr->line, expr->column, expr->length);
+                innerExpr, to, ctor, expr->line, expr->column, expr->length);
             castNode->exprType = to;
             castNode->isLValue = to->isReferenceType();
             return castNode;

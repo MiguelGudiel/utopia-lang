@@ -995,6 +995,56 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
 }
 
 llvm::Value *CodeGen::visit(const ImplicitCastNode *node) {
+  if (!node->conversionConstructor) {
+    const Type *unqualTarget = node->targetType->getUnqualifiedType();
+    const Type *unqualExpr = node->expr->exprType->getUnqualifiedType();
+
+    if (unqualTarget->getKind() == TypeKind::Struct &&
+        unqualExpr->getKind() == TypeKind::Array) {
+      auto *recTy = static_cast<const RecordType *>(unqualTarget);
+      if (recTy->getName().starts_with("ListLiteralView_")) {
+        llvm::Type *llTy = getLLVMType(node->targetType);
+        llvm::AllocaInst *temp = createEntryBlockAlloca(llTy, "llv.tmp");
+        emitDefaultInitialization(temp, node->targetType);
+
+        llvm::Value *arrPtr = nullptr;
+        if (node->expr->exprType->isPointerType()) {
+          arrPtr = dispatch(node->expr);
+        } else {
+          arrPtr = getLValue(node->expr);
+        }
+
+        if (!arrPtr) {
+          llvm::Value *val = dispatch(node->expr);
+          arrPtr = createEntryBlockAlloca(val->getType(), "llv.arr.tmp");
+          builder.CreateStore(val, arrPtr);
+        }
+
+        llvm::Type *llvmArrTy = getLLVMType(unqualExpr);
+        llvm::Value *decayedPtr = builder.CreateInBoundsGEP(
+            llvmArrTy, arrPtr, {builder.getInt32(0), builder.getInt32(0)});
+
+        uint64_t arrSize =
+            static_cast<const ArrayType *>(unqualExpr)->getSize();
+
+        llvm::Value *dataField = builder.CreateStructGEP(llTy, temp, 0);
+        builder.CreateStore(decayedPtr, dataField);
+
+        llvm::Value *lenField = builder.CreateStructGEP(llTy, temp, 1);
+        builder.CreateStore(builder.getInt64(arrSize), lenField);
+
+        if (!node->exprType->isVoid()) {
+          if (node->exprType->isReferenceType() ||
+              node->exprType->getKind() == TypeKind::RValueReference) {
+            return temp;
+          }
+          return createTBAALoad(llTy, temp, node->exprType);
+        }
+        return temp;
+      }
+    }
+  }
+
   const Type *objectType = node->targetType;
   if (objectType->isReferenceType()) {
     objectType =
