@@ -1046,8 +1046,8 @@ void handleCompletion(const json &req) {
         "extern",  "required", "operator"};
 
     std::vector<std::string> primitives = {
-        "int8",   "int16",   "int32",   "int64",  "uint8",  "uint16", "uint32",
-        "uint64", "float32", "float64", "bool",   "void",   "String", "char",
+        "int8",   "int16",   "int32",   "int64",  "uint8", "uint16", "uint32",
+        "uint64", "float32", "float64", "bool",   "void",  "String", "char",
         "rune",   "int",     "uint",    "double", "usize"};
 
     for (const auto &kw : keywords) {
@@ -1975,6 +1975,20 @@ void handleSemanticTokens(const json &req) {
       SemanticTokenVisitor visitor(doc.text);
       visitor.dispatch(doc.ast);
 
+      /* Lexical pass to inject Semantic Tokens for primitive types.
+       * The AST Visitor explicitly skips built-in types because they lack
+       * a concrete declaration node. This guarantees that all primitive
+       * types (including usize) are highlighted correctly by the LSP,
+       * overriding any incomplete static TextMate grammars. */
+      Lexer lexer(doc.text);
+      for (const auto &tok : lexer.tokenize()) {
+        if (tok.type == TokenType::TYPE_KW) {
+          visitor.addToken(tok.line > 0 ? tok.line - 1 : 0,
+                           tok.column > 0 ? tok.column - 1 : 0,
+                           tok.value.length(), 3, 0); /* 3 represents "type" */
+        }
+      }
+
       std::vector<SemanticToken> tokens = std::move(visitor.tokens);
       std::sort(tokens.begin(), tokens.end());
 
@@ -1984,6 +1998,12 @@ void handleSemanticTokens(const json &req) {
       for (const auto &tok : tokens) {
         int deltaLine = tok.line - prevLine;
         int deltaCol = (deltaLine == 0) ? (tok.col - prevCol) : tok.col;
+
+        /* Prevent negative deltas that could crash the VS Code LSP client
+         * in the rare event of duplicate tokens at the exact same location. */
+        if (deltaLine < 0 || (deltaLine == 0 && deltaCol < 0)) {
+          continue;
+        }
 
         data.push_back(deltaLine);
         data.push_back(deltaCol);
