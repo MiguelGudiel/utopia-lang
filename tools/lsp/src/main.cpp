@@ -1048,7 +1048,7 @@ void handleCompletion(const json &req) {
     std::vector<std::string> primitives = {
         "int8",   "int16",   "int32",   "int64",  "uint8",  "uint16", "uint32",
         "uint64", "float32", "float64", "bool",   "void",   "String", "char",
-        "rune",   "int",     "uint",    "double", "usize_t"};
+        "rune",   "int",     "uint",    "double", "usize"};
 
     for (const auto &kw : keywords) {
       addCompletion(kw, 14, "Keyword");

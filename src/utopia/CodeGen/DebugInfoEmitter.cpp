@@ -85,6 +85,11 @@ llvm::DIType *DebugInfoEmitter::getDIType(CodeGen &cg, const Type *type) {
       diTy =
           dBuilder->createBasicType("uint64", 64, llvm::dwarf::DW_ATE_unsigned);
       break;
+    case BuiltinKind::USize:
+      diTy = dBuilder->createBasicType(
+          "usize", mod.getDataLayout().getPointerSizeInBits(),
+          llvm::dwarf::DW_ATE_unsigned);
+      break;
     case BuiltinKind::Float32:
       diTy =
           dBuilder->createBasicType("float32", 32, llvm::dwarf::DW_ATE_float);

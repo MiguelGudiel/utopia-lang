@@ -2,8 +2,8 @@ export "ListLiteralView.utp";
 
 class List<T> {
   private T* _data;
-  private uint64 _length;
-  private uint64 _capacity;
+  private usize _length;
+  private usize _capacity;
 
   public List() {
     this._length = 0;
@@ -15,7 +15,7 @@ class List<T> {
     this._length = view.length;
     this._capacity = view.length > 8 ? view.length * 2 : 8;
     this._data = new T[this._capacity];
-    for (uint64 i = 0; i < view.length; i++) {
+    for (usize i = 0; i < view.length; i++) {
       this._data[i] = view.data[i];
     }
   }
@@ -24,7 +24,7 @@ class List<T> {
     this._length = other._length;
     this._capacity = other._capacity;
     this._data = new T[this._capacity];
-    for (uint64 i = 0; i < this._length; i++) {
+    for (usize i = 0; i < this._length; i++) {
       this._data[i] = other._data[i];
     }
   }
@@ -42,7 +42,7 @@ class List<T> {
     this._length = other._length;
     this._capacity = other._capacity;
     this._data = new T[this._capacity];
-    for (uint64 i = 0; i < this._length; i++) {
+    for (usize i = 0; i < this._length; i++) {
       this._data[i] = other._data[i];
     }
   }
@@ -54,16 +54,16 @@ class List<T> {
     this._length = view.length;
     this._capacity = view.length > 8 ? view.length * 2 : 8;
     this._data = new T[this._capacity];
-    for (uint64 i = 0; i < view.length; i++) {
+    for (usize i = 0; i < view.length; i++) {
       this._data[i] = view.data[i];
     }
   }
 
-  public uint64 length() {
+  public usize length() {
     return this._length;
   }
 
-  public uint64 capacity() {
+  public usize capacity() {
     return this._capacity;
   }
 
@@ -71,7 +71,7 @@ class List<T> {
     if (this._length >= this._capacity) {
       this._capacity = this._capacity * 2;
       T* newData = new T[this._capacity];
-      for (uint64 i = 0; i < this._length; i++) {
+      for (usize i = 0; i < this._length; i++) {
         newData[i] = this._data[i];
       }
       delete[] this._data;
@@ -82,7 +82,7 @@ class List<T> {
   }
 
   @inline
-  public T& operator[](uint64 index) {
+  public T& operator[](usize index) {
     return this._data[index];
   }
 }

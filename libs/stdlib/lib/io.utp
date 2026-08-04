@@ -46,10 +46,10 @@ static void* _fopen(const uint8* filename, const uint8* mode);
 static int32 _fclose(void* stream);
 
 @extern("fread")
-static uint64 _fread(void* ptr, uint64 size, uint64 count, void* stream);
+static usize _fread(void* ptr, usize size, usize count, void* stream);
 
 @extern("fwrite")
-static uint64 _fwrite(const void* ptr, uint64 size, uint64 count, void* stream);
+static usize _fwrite(const void* ptr, usize size, usize count, void* stream);
 
 @extern("fseek")
 static int32 _fseek(void* stream, int64 offset, int32 origin);
@@ -98,8 +98,8 @@ class Path {
 
   static String getDirectoryName(String path) {
     int64 lastSlash = -1;
-    uint64 len = path.length();
-    for (uint64 i = 0; i < len; i++) {
+    usize len = path.length();
+    for (usize i = 0; i < len; i++) {
       if (path[i] == 47 || path[i] == 92) {
         lastSlash = i as int64;
       }
@@ -108,22 +108,22 @@ class Path {
     
     String dir;
     for (int64 i = 0; i <= lastSlash; i++) {
-      dir.push_back(path[i as uint64]);
+      dir.push_back(path[i as usize]);
     }
     return dir;
   }
 
   static String getFileName(String path) {
     int64 lastSlash = -1;
-    uint64 len = path.length();
-    for (uint64 i = 0; i < len; i++) {
+    usize len = path.length();
+    for (usize i = 0; i < len; i++) {
       if (path[i] == 47 || path[i] == 92) {
         lastSlash = i as int64;
       }
     }
     
     String file;
-    for (uint64 i = (lastSlash + 1) as uint64; i < len; i++) {
+    for (usize i = (lastSlash + 1) as usize; i < len; i++) {
       file.push_back(path[i]);
     }
     return file;
@@ -180,12 +180,12 @@ class FileHandle {
   @inline
   bool isOpen() => this._handle != null;
 
-  uint64 read(uint8* buffer, uint64 size, uint64 count) {
+  usize read(uint8* buffer, usize size, usize count) {
     if (this._handle == null) return 0;
     return _fread(buffer, size, count, this._handle);
   }
 
-  uint64 write(const uint8* buffer, uint64 size, uint64 count) {
+  usize write(const uint8* buffer, usize size, usize count) {
     if (this._handle == null) return 0;
     return _fwrite(buffer, size, count, this._handle);
   }
@@ -245,7 +245,7 @@ class File {
 
     uint8[4096] buffer;
     while (true) {
-      uint64 bytesRead = src.read(&buffer[0], 1, 4096);
+      usize bytesRead = src.read(&buffer[0], 1, 4096);
       if (bytesRead == 0) break;
       dest.write(&buffer[0], 1, bytesRead);
     }
@@ -262,7 +262,7 @@ class File {
     return this.rename(newPath);
   }
 
-  uint64 length() {
+  usize length() {
     void* file = _fopen(this._path.c_str(), "rb");
     if (file == null) return 0;
     _fseek(file, 0, 2);
@@ -270,7 +270,7 @@ class File {
     _fclose(file);
     
     if (size < 0) return 0;
-    return size as uint64;
+    return size as usize;
   }
 
   String readAsString() {
@@ -286,8 +286,8 @@ class File {
       return "";
     }
 
-    uint8* buffer = new uint8[size as uint64 + 1];
-    uint64 readSize = _fread(buffer, 1, size as uint64, file);
+    uint8* buffer = new uint8[size as usize + 1];
+    usize readSize = _fread(buffer, 1, size as usize, file);
     buffer[readSize] = 0;
 
     _fclose(file);
@@ -301,7 +301,7 @@ class File {
     void* file = _fopen(this._path.c_str(), "wb");
     if (file == null) return false;
 
-    uint64 written = _fwrite(content.c_str(), 1, content.length(), file);
+    usize written = _fwrite(content.c_str(), 1, content.length(), file);
     _fclose(file);
     return written == content.length();
   }
@@ -310,7 +310,7 @@ class File {
     void* file = _fopen(this._path.c_str(), "ab");
     if (file == null) return false;
 
-    uint64 written = _fwrite(content.c_str(), 1, content.length(), file);
+    usize written = _fwrite(content.c_str(), 1, content.length(), file);
     _fclose(file);
     return written == content.length();
   }

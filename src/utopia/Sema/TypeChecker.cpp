@@ -539,6 +539,8 @@ SemaResult TypeCheckPass::visit(const NumberNode *node) {
 
   if (!isHex && (raw.ends_with('f') || raw.ends_with('F'))) {
     ty = ctx->astCtx.Float32Ty;
+  } else if (raw.ends_with("uz") || raw.ends_with("UZ")) {
+    ty = ctx->astCtx.USizeTy;
   } else if (raw.ends_with("ul") || raw.ends_with("UL") ||
              raw.ends_with("lu") || raw.ends_with("LU")) {
     ty = ctx->astCtx.UInt64Ty;

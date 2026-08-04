@@ -30,6 +30,7 @@ public:
   const BuiltinType *UInt16Ty;
   const BuiltinType *UInt32Ty;
   const BuiltinType *UInt64Ty;
+  const BuiltinType *USizeTy;
   const BuiltinType *Float32Ty;
   const BuiltinType *Float64Ty;
   const BuiltinType *TypeValTy;
@@ -45,6 +46,7 @@ public:
     UInt16Ty = create<BuiltinType>(BuiltinKind::UInt16);
     UInt32Ty = create<BuiltinType>(BuiltinKind::UInt32);
     UInt64Ty = create<BuiltinType>(BuiltinKind::UInt64);
+    USizeTy = create<BuiltinType>(BuiltinKind::USize);
     Float32Ty = create<BuiltinType>(BuiltinKind::Float32);
     Float64Ty = create<BuiltinType>(BuiltinKind::Float64);
     TypeValTy = create<BuiltinType>(BuiltinKind::TypeVal);
@@ -169,8 +171,10 @@ public:
       return Int8Ty;
     if (name == "uint" || name == "uint32")
       return UInt32Ty;
-    if (name == "uint64" || name == "usize_t")
+    if (name == "uint64")
       return UInt64Ty;
+    if (name == "usize")
+      return USizeTy;
     if (name == "uint16")
       return UInt16Ty;
     if (name == "uint8" || name == "char")
@@ -210,6 +214,21 @@ public:
       return Float32Ty;
     }
 
+    /* Handle USize dynamically to preserve the underlying 8x8 fast matrix */
+    if (k1 == BuiltinKind::USize && k2 == BuiltinKind::USize) {
+      return USizeTy;
+    }
+    if (k1 == BuiltinKind::USize) {
+      if (k2 == BuiltinKind::Int64 || k2 == BuiltinKind::UInt64)
+        return UInt64Ty;
+      return USizeTy;
+    }
+    if (k2 == BuiltinKind::USize) {
+      if (k1 == BuiltinKind::Int64 || k1 == BuiltinKind::UInt64)
+        return UInt64Ty;
+      return USizeTy;
+    }
+
     /*
      * 2D Type Promotion Matrix for Integer Arithmetic.
      * Prevents lossy conversions by safely expanding to the next compatible
@@ -220,12 +239,12 @@ public:
      * 4: UInt8, 5: UInt16, 6: UInt32, 7: UInt64
      */
     static constexpr BuiltinKind promotionMatrix[8][8] = {
-        /*             Int8                 Int16                Int32 Int64
-               UInt8                UInt16               UInt32 UInt64 */
-        /* Int8   */ {BuiltinKind::Int8, BuiltinKind::Int16, BuiltinKind::Int32,
-                      BuiltinKind::Int64, BuiltinKind::Int16,
-                      BuiltinKind::Int32, BuiltinKind::Int64,
-                      BuiltinKind::UInt64},
+        /*            Int8               Int16                Int32 Int64
+                      UInt8              UInt16               UInt32 UInt64 */
+        /* Int8   */
+        {BuiltinKind::Int8, BuiltinKind::Int16, BuiltinKind::Int32,
+         BuiltinKind::Int64, BuiltinKind::Int16, BuiltinKind::Int32,
+         BuiltinKind::Int64, BuiltinKind::UInt64},
         /* Int16  */
         {BuiltinKind::Int16, BuiltinKind::Int16, BuiltinKind::Int32,
          BuiltinKind::Int64, BuiltinKind::Int16, BuiltinKind::Int32,

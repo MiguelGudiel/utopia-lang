@@ -1,5 +1,5 @@
 @extern
-void* malloc(uint64 size);
+void* malloc(usize size);
 
 @extern
 void free(void* ptr);
@@ -22,10 +22,10 @@ class MethodInfo {
 }
 
 @intrinsic("sizeof_type")
-uint64 sizeof(Type t);
+usize sizeof(Type t);
 
 @intrinsic("sizeof_expr")
-uint64 sizeof<T>(T val);
+usize sizeof<T>(T val);
 
 @intrinsic("typeof_type")
 Type typeof(Type t);

@@ -41,6 +41,7 @@ enum class BuiltinKind {
   UInt16,
   UInt32,
   UInt64,
+  USize,
   Float32,
   Float64,
   Bool,
@@ -269,7 +270,8 @@ inline bool Type::isInteger() const {
   if (!unqual->isBuiltinType())
     return false;
   auto b = static_cast<const BuiltinType *>(unqual)->getBuiltinKind();
-  return b >= BuiltinKind::Int8 && b <= BuiltinKind::UInt64;
+  return (b >= BuiltinKind::Int8 && b <= BuiltinKind::UInt64) ||
+         b == BuiltinKind::USize;
 }
 
 inline bool Type::isFloat() const {
@@ -350,6 +352,8 @@ inline std::string Type::toString() const {
       return "uint32";
     case BuiltinKind::UInt64:
       return "uint64";
+    case BuiltinKind::USize:
+      return "usize";
     case BuiltinKind::Float32:
       return "float32";
     case BuiltinKind::Float64:
@@ -358,6 +362,8 @@ inline std::string Type::toString() const {
       return "bool";
     case BuiltinKind::Void:
       return "void";
+    case BuiltinKind::TypeVal:
+      return "Type";
     }
   } else if (isPointerType()) {
     return static_cast<const PointerType *>(this)

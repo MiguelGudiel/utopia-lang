@@ -107,6 +107,8 @@ std::string Mangler::mangleType(const Type *t) {
       return "j";
     case BuiltinKind::UInt64:
       return "y";
+    case BuiltinKind::USize:
+      return "z";
     case BuiltinKind::Float32:
       return "f";
     case BuiltinKind::Float64:
@@ -115,6 +117,8 @@ std::string Mangler::mangleType(const Type *t) {
       return "b";
     case BuiltinKind::Void:
       return "v";
+    case BuiltinKind::TypeVal:
+      return "T";
     }
   }
   if (t->getKind() == TypeKind::Struct || t->getKind() == TypeKind::Class ||

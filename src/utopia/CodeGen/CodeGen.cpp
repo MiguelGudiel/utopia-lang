@@ -123,6 +123,8 @@ llvm::Type *CodeGen::getLLVMType(const Type *type) {
     case BuiltinKind::Int64:
     case BuiltinKind::UInt64:
       return builder.getInt64Ty();
+    case BuiltinKind::USize:
+      return builder.getIntNTy(mod.getDataLayout().getPointerSizeInBits());
     case BuiltinKind::Float32:
       return builder.getFloatTy();
     case BuiltinKind::Float64:

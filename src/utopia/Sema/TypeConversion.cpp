@@ -193,6 +193,7 @@ void TypeCheckPass::checkImplicitCastWarning(const Type *from, const Type *to,
         return 4;
       case BuiltinKind::Int64:
       case BuiltinKind::UInt64:
+      case BuiltinKind::USize:
         return 8;
       default:
         return 0;
@@ -210,15 +211,16 @@ void TypeCheckPass::checkImplicitCastWarning(const Type *from, const Type *to,
 
       bool isFromUnsigned =
           (fKind == BuiltinKind::UInt8 || fKind == BuiltinKind::UInt16 ||
-           fKind == BuiltinKind::UInt32 || fKind == BuiltinKind::UInt64);
+           fKind == BuiltinKind::UInt32 || fKind == BuiltinKind::UInt64 ||
+           fKind == BuiltinKind::USize);
       bool isToUnsigned =
           (tKind == BuiltinKind::UInt8 || tKind == BuiltinKind::UInt16 ||
-           tKind == BuiltinKind::UInt32 || tKind == BuiltinKind::UInt64);
+           tKind == BuiltinKind::UInt32 || tKind == BuiltinKind::UInt64 ||
+           tKind == BuiltinKind::USize);
 
       if (isFromUnsigned != isToUnsigned) {
         if (!isFromUnsigned && isToUnsigned) {
-          // Signed to Unsigned: Always risky (negative values wrap to massive
-          // unsigned ones)
+          // Signed to Unsigned: Always risky
           signMismatch = true;
         } else if (isFromUnsigned && !isToUnsigned) {
           // Unsigned to Signed: Safe only if the destination type is strictly

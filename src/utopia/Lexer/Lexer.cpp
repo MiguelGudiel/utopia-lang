@@ -81,7 +81,7 @@ static bool isTypeKeyword(std::string_view id) {
          id == "int8" || id == "uint" || id == "uint32" || id == "uint64" ||
          id == "uint16" || id == "uint8" || id == "float" || id == "float32" ||
          id == "float64" || id == "double" || id == "char" || id == "rune" ||
-         id == "usize_t" || id == "bool" || id == "void";
+         id == "usize" || id == "bool" || id == "void";
 }
 
 Token Lexer::nextToken() {
@@ -308,7 +308,7 @@ Token Lexer::parseToken() {
     while (cursor < source.length()) {
       unsigned char nextC = source[cursor];
       if (nextC == 'f' || nextC == 'F' || nextC == 'u' || nextC == 'U' ||
-          nextC == 'l' || nextC == 'L') {
+          nextC == 'l' || nextC == 'L' || nextC == 'z' || nextC == 'Z') {
         advance();
       } else {
         break;

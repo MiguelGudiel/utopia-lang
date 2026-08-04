@@ -1,22 +1,22 @@
 class String {
   private uint8* data;
-  private uint64 len;
-  private uint64 cap;
+  private usize len;
+  private usize cap;
 
   /* Internal utilities for memory and string length evaluation to avoid 
      heavy external dependencies inside the prelude. */
-  private static uint64 c_strlen(const uint8* str) {
+  private static usize c_strlen(const uint8* str) {
     if (str == null)
       return 0;
-    uint64 i = 0;
+    usize i = 0;
     while (str[i] != 0) {
       i++;
     }
     return i;
   }
 
-  private static void c_strcpy(uint8* dest, const uint8* src, uint64 length) {
-    for (uint64 i = 0; i < length; i++) {
+  private static void c_strcpy(uint8* dest, const uint8* src, usize length) {
+    for (usize i = 0; i < length; i++) {
       dest[i] = src[i];
     }
     dest[length] = 0;
@@ -29,7 +29,7 @@ class String {
   private static float64 c_atof(const uint8* str);
   
   @extern("snprintf")
-  private static int32 c_snprintf(uint8* str, uint64 size, const uint8* format, ...);
+  private static int32 c_snprintf(uint8* str, usize size, const uint8* format, ...);
 
   public String() {
     this.len = 0;
@@ -55,50 +55,50 @@ class String {
   public String(int8 v) {
     this.cap = 15;
     this.data = new uint8[16];
-    this.len = String.c_snprintf(this.data, 16, "%d", v) as uint64;
+    this.len = String.c_snprintf(this.data, 16, "%d", v) as usize;
   }
 
   public String(uint8 v) {
     this.cap = 15;
     this.data = new uint8[16];
-    this.len = String.c_snprintf(this.data, 16, "%u", v) as uint64;
+    this.len = String.c_snprintf(this.data, 16, "%u", v) as usize;
   }
 
   public String(int16 v) {
     this.cap = 15;
     this.data = new uint8[16];
-    this.len = String.c_snprintf(this.data, 16, "%d", v) as uint64;
+    this.len = String.c_snprintf(this.data, 16, "%d", v) as usize;
   }
 
   public String(uint16 v) {
     this.cap = 15;
     this.data = new uint8[16];
-    this.len = String.c_snprintf(this.data, 16, "%u", v) as uint64;
+    this.len = String.c_snprintf(this.data, 16, "%u", v) as usize;
   }
 
   public String(int32 v) {
     this.cap = 15;
     this.data = new uint8[16];
-    this.len = String.c_snprintf(this.data, 16, "%d", v) as uint64;
+    this.len = String.c_snprintf(this.data, 16, "%d", v) as usize;
   }
 
   public String(uint32 v) {
     this.cap = 15;
     this.data = new uint8[16];
-    this.len = String.c_snprintf(this.data, 16, "%u", v) as uint64;
+    this.len = String.c_snprintf(this.data, 16, "%u", v) as usize;
   }
 
   public String(int64 v) {
     this.cap = 31;
     this.data = new uint8[32];
     /* Standard format specifier for 64-bit integer */
-    this.len = String.c_snprintf(this.data, 32, "%lld", v) as uint64;
+    this.len = String.c_snprintf(this.data, 32, "%lld", v) as usize;
   }
 
-  public String(uint64 v) {
+  public String(usize v) {
     this.cap = 31;
     this.data = new uint8[32];
-    this.len = String.c_snprintf(this.data, 32, "%llu", v) as uint64;
+    this.len = String.c_snprintf(this.data, 32, "%llu", v) as usize;
   }
 
   public String(float32 v) {
@@ -106,13 +106,13 @@ class String {
     this.data = new uint8[32];
     /* CodeGen automatically promotes variadic float32 to float64, 
      * making "%g" completely safe. */
-    this.len = String.c_snprintf(this.data, 32, "%g", v) as uint64;
+    this.len = String.c_snprintf(this.data, 32, "%g", v) as usize;
   }
 
   public String(float64 v) {
     this.cap = 31;
     this.data = new uint8[32];
-    this.len = String.c_snprintf(this.data, 32, "%g", v) as uint64;
+    this.len = String.c_snprintf(this.data, 32, "%g", v) as usize;
   }
 
   public String(bool v) {
@@ -166,7 +166,7 @@ class String {
 
   public bool operator==(const String& other) {
     if (this.len != other.len) return false;
-    for (uint64 i = 0; i < this.len; i++) {
+    for (usize i = 0; i < this.len; i++) {
       if (this.data[i] != other.data[i]) return false;
     }
     return true;
@@ -174,9 +174,9 @@ class String {
 
   public bool operator==(const uint8* str) {
     if (str == null) return this.len == 0;
-    uint64 str_len = String.c_strlen(str);
+    usize str_len = String.c_strlen(str);
     if (this.len != str_len) return false;
-    for (uint64 i = 0; i < this.len; i++) {
+    for (usize i = 0; i < this.len; i++) {
       if (this.data[i] != str[i]) return false;
     }
     return true;
@@ -200,7 +200,7 @@ class String {
     result.data = new uint8[result.cap + 1];
 
     String.c_strcpy(result.data, this.data, this.len);
-    for (uint64 i = 0; i < other.len; i++) {
+    for (usize i = 0; i < other.len; i++) {
       result.data[this.len + i] = other.data[i];
     }
     result.data[result.len] = 0;
@@ -215,7 +215,7 @@ class String {
       return result;
     }
 
-    uint64 str_len = String.c_strlen(str);
+    usize str_len = String.c_strlen(str);
     result.len = this.len + str_len;
     result.cap = result.len + 15;
         
@@ -223,7 +223,7 @@ class String {
     result.data = new uint8[result.cap + 1];
 
     String.c_strcpy(result.data, this.data, this.len);
-    for (uint64 i = 0; i < str_len; i++) {
+    for (usize i = 0; i < str_len; i++) {
       result.data[this.len + i] = str[i];
     }
     result.data[result.len] = 0;
@@ -238,17 +238,17 @@ class String {
   }
 
   @inline
-  public uint8& operator[](uint64 index) {
+  public uint8& operator[](usize index) {
     return this.data[index];
   }
 
   @inline
-  public uint64 length() {
+  public usize length() {
     return this.len;
   }
 
   @inline
-  public uint64 capacity() {
+  public usize capacity() {
     return this.cap;
   }
 
