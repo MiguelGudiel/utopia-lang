@@ -192,12 +192,7 @@ llvm::Type *CodeGen::getLLVMType(const Type *type) {
 
         bool isPacked = false;
         if (const DeclNode *decl = rec->getDeclaration()) {
-          for (const auto *ann : decl->annotations) {
-            if (ann->name == "packed") {
-              isPacked = true;
-              break;
-            }
-          }
+          isPacked = decl->isPacked;
         }
         structTy->setBody(elements, isPacked);
       }
@@ -2235,30 +2230,14 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
       elemTyForAlign->getKind() == TypeKind::Union) {
     if (const DeclNode *decl =
             static_cast<const RecordType *>(elemTyForAlign)->getDeclaration()) {
-      for (const auto *ann : decl->annotations) {
-        if (ann->name == "align" && !ann->args.empty() &&
-            ann->args[0]->kind == NodeKind::Number) {
-          uint64_t typeAlign = std::stoull(
-              std::string(static_cast<const NumberNode *>(ann->args[0])->raw),
-              nullptr, 0);
-          if (typeAlign > customAlign) {
-            customAlign = typeAlign;
-          }
-        }
+      if (decl->alignment > customAlign) {
+        customAlign = decl->alignment;
       }
     }
   }
 
-  for (const auto *ann : node->annotations) {
-    if (ann->name == "align" && !ann->args.empty() &&
-        ann->args[0]->kind == NodeKind::Number) {
-      uint64_t varAlign = std::stoull(
-          std::string(static_cast<const NumberNode *>(ann->args[0])->raw),
-          nullptr, 0);
-      if (varAlign > customAlign) {
-        customAlign = varAlign;
-      }
-    }
+  if (node->alignment > customAlign) {
+    customAlign = node->alignment;
   }
 
   if (node->type->isReferenceType() ||

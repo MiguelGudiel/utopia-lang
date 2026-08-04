@@ -125,6 +125,8 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
       instDecl->hasPrivateMod = tmplDecl->hasPrivateMod;
       instDecl->annotations = tmplDecl->annotations;
       instDecl->declFilePath = tmplDecl->declFilePath;
+      instDecl->alignment = tmplDecl->alignment;
+      instDecl->isPacked = tmplDecl->isPacked;
 
       if (instDecl->kind == NodeKind::ClassDecl) {
         static_cast<ClassDeclNode *>(instDecl)->name = mangledView;
@@ -622,6 +624,8 @@ SemaResult TypeCheckPass::visit(const UnionDeclNode *node) {
           auto err = ctx->reportError(ann->line, ann->column, ann->length,
                                       "Alignment must be a power of 2.");
           hasErrors = true;
+        } else {
+          const_cast<UnionDeclNode *>(node)->alignment = alignVal;
         }
       }
     } else if (ann->name == "packed") {
@@ -630,6 +634,8 @@ SemaResult TypeCheckPass::visit(const UnionDeclNode *node) {
             ctx->reportError(ann->line, ann->column, ann->length,
                              "The @packed annotation does not take arguments.");
         hasErrors = true;
+      } else {
+        const_cast<UnionDeclNode *>(node)->isPacked = true;
       }
     }
   }
@@ -693,6 +699,8 @@ SemaResult TypeCheckPass::visit(const StructDeclNode *node) {
           auto err = ctx->reportError(ann->line, ann->column, ann->length,
                                       "Alignment must be a power of 2.");
           hasErrors = true;
+        } else {
+          const_cast<StructDeclNode *>(node)->alignment = alignVal;
         }
       }
     } else if (ann->name == "packed") {
@@ -701,6 +709,8 @@ SemaResult TypeCheckPass::visit(const StructDeclNode *node) {
             ctx->reportError(ann->line, ann->column, ann->length,
                              "The @packed annotation does not take arguments.");
         hasErrors = true;
+      } else {
+        const_cast<StructDeclNode *>(node)->isPacked = true;
       }
     }
   }
@@ -764,6 +774,8 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
           auto err = ctx->reportError(ann->line, ann->column, ann->length,
                                       "Alignment must be a power of 2.");
           hasErrors = true;
+        } else {
+          const_cast<ClassDeclNode *>(node)->alignment = alignVal;
         }
       }
     } else if (ann->name == "packed") {
@@ -772,6 +784,8 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
             ctx->reportError(ann->line, ann->column, ann->length,
                              "The @packed annotation does not take arguments.");
         hasErrors = true;
+      } else {
+        const_cast<ClassDeclNode *>(node)->isPacked = true;
       }
     }
   }
@@ -1619,6 +1633,8 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
         if (alignVal == 0 || (alignVal & (alignVal - 1)) != 0) {
           SemaResult err = ctx->reportError(ann->line, ann->column, ann->length,
                                             "Alignment must be a power of 2.");
+        } else {
+          const_cast<VarDeclNode *>(node)->alignment = alignVal;
         }
       }
     } else if (ann->name == "packed") {
