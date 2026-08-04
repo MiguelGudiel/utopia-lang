@@ -1,0 +1,4 @@
+struct ListLiteralView<T> {
+  const T* data;
+  uint64 length;
+}

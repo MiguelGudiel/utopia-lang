@@ -1,0 +1,88 @@
+export "ListLiteralView.utp";
+
+class List<T> {
+  private T* _data;
+  private uint64 _length;
+  private uint64 _capacity;
+
+  public List() {
+    this._length = 0;
+    this._capacity = 8;
+    this._data = new T[this._capacity];
+  }
+
+  public List(ListLiteralView<T> view) {
+    this._length = view.length;
+    this._capacity = view.length > 8 ? view.length * 2 : 8;
+    this._data = new T[this._capacity];
+    for (uint64 i = 0; i < view.length; i++) {
+      this._data[i] = view.data[i];
+    }
+  }
+
+  public List(const List<T>& other) {
+    this._length = other._length;
+    this._capacity = other._capacity;
+    this._data = new T[this._capacity];
+    for (uint64 i = 0; i < this._length; i++) {
+      this._data[i] = other._data[i];
+    }
+  }
+
+  public ~List() {
+    if (this._data != null) {
+      delete[] this._data;
+    }
+  }
+
+  public void operator=(const List<T>& other) {
+    if (this._data != null) {
+      delete[] this._data;
+    }
+    this._length = other._length;
+    this._capacity = other._capacity;
+    this._data = new T[this._capacity];
+    for (uint64 i = 0; i < this._length; i++) {
+      this._data[i] = other._data[i];
+    }
+  }
+
+  public void operator=(ListLiteralView<T> view) {
+    if (this._data != null) {
+      delete[] this._data;
+    }
+    this._length = view.length;
+    this._capacity = view.length > 8 ? view.length * 2 : 8;
+    this._data = new T[this._capacity];
+    for (uint64 i = 0; i < view.length; i++) {
+      this._data[i] = view.data[i];
+    }
+  }
+
+  public uint64 length() {
+    return this._length;
+  }
+
+  public uint64 capacity() {
+    return this._capacity;
+  }
+
+  public void push(T value) {
+    if (this._length >= this._capacity) {
+      this._capacity = this._capacity * 2;
+      T* newData = new T[this._capacity];
+      for (uint64 i = 0; i < this._length; i++) {
+        newData[i] = this._data[i];
+      }
+      delete[] this._data;
+      this._data = newData;
+    }
+    this._data[this._length] = value;
+    this._length++;
+  }
+
+  @inline
+  public T& operator[](uint64 index) {
+    return this._data[index];
+  }
+}

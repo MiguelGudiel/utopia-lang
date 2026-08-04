@@ -109,8 +109,9 @@ public:
     }
 
     // Prevent shadowing variables from parent control-flow or
-    // parameter scopes
-    if (scopes.size() > 1) {
+    // parameter scopes, explicitly allowing 'this' to be redefined across
+    // boundaries
+    if (scopes.size() > 1 && name != "this") {
       for (auto it = scopes.rbegin() + 1; it != scopes.rend(); ++it) {
         if (it->kind == ScopeKind::Regular) {
           break;

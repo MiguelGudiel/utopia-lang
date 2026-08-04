@@ -234,6 +234,15 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
     auto *p = static_cast<const ReferenceType *>(t);
     return ctx->astCtx.getReferenceType(resolveIfTemplate(p->getPointeeType()));
   }
+  if (t->getKind() == TypeKind::RValueReference) {
+    auto *r = static_cast<const RValueReferenceType *>(t);
+    return ctx->astCtx.getRValueReferenceType(
+        resolveIfTemplate(r->getPointeeType()));
+  }
+  if (t->getKind() == TypeKind::Const) {
+    auto *c = static_cast<const ConstType *>(t);
+    return ctx->astCtx.getConstType(resolveIfTemplate(c->getBaseType()));
+  }
   if (t->getKind() == TypeKind::Array) {
     auto *p = static_cast<const ArrayType *>(t);
     return ctx->astCtx.getArrayType(resolveIfTemplate(p->getElementType()),
@@ -1317,11 +1326,7 @@ SemaResult TypeCheckPass::visit(const UnaryOpNode *node) {
     resType = ctx->astCtx.BoolTy;
   } else if (node->op == "&") {
     /* Allow array subscripts to be addressable as l-values */
-    if (node->expr->kind != NodeKind::Variable &&
-        node->expr->kind != NodeKind::UnaryOp &&
-        node->expr->kind != NodeKind::FunctionCall &&
-        node->expr->kind != NodeKind::MemberAccess &&
-        node->expr->kind != NodeKind::ArraySubscript) {
+    if (!node->expr->isLValue) {
       return ctx->reportError(node->line, node->column, node->length,
                               "Cannot take address of r-value");
     }
@@ -1372,11 +1377,7 @@ SemaResult TypeCheckPass::visit(const UnaryOpNode *node) {
                               "Unary operator '" + std::string(node->op) +
                                   "' requires a numeric operand");
     }
-    if (node->expr->kind != NodeKind::Variable &&
-        node->expr->kind != NodeKind::MemberAccess &&
-        node->expr->kind != NodeKind::ArraySubscript &&
-        !(node->expr->kind == NodeKind::UnaryOp &&
-          static_cast<const UnaryOpNode *>(node->expr)->op == "*")) {
+    if (!node->expr->isLValue) {
       return ctx->reportError(
           node->line, node->column, node->length,
           "Expression is not assignable (must be an l-value)");
@@ -1828,10 +1829,7 @@ SemaResult TypeCheckPass::visit(const AssignNode *node) {
     return opDecl->returnType;
   }
 
-  if (node->target->kind != NodeKind::Variable &&
-      node->target->kind != NodeKind::UnaryOp &&
-      node->target->kind != NodeKind::MemberAccess &&
-      node->target->kind != NodeKind::ArraySubscript) {
+  if (!node->target->isLValue) {
     return ctx->reportError(
         node->target->line, node->target->column, node->target->length,
         "Expression is not assignable (must be an l-value)");
@@ -2490,6 +2488,13 @@ SemaResult TypeCheckPass::visit(const FunctionDeclNode *node) {
   }
 
   for (const auto *param : node->params) {
+    /* Dispatch the parameter to ensure template instances are properly mapped
+     * to their RecordType definitions */
+    auto paramRes = dispatch(param);
+    if (!paramRes) {
+      hasErrors = true;
+    }
+
     if (param->defaultValue) {
       auto defRes = dispatch(param->defaultValue);
       if (!defRes) {
@@ -3190,16 +3195,10 @@ SemaResult TypeCheckPass::visit(const ReturnNode *node) {
                                      "Cascading error in return expression"});
 
   if (expectedRet->isReferenceType()) {
-    /* Array subscript elements can be safely returned as references */
-    if (node->value->kind != NodeKind::Variable &&
-        node->value->kind != NodeKind::UnaryOp &&
-        node->value->kind != NodeKind::FunctionCall &&
-        node->value->kind != NodeKind::MemberAccess &&
-        node->value->kind != NodeKind::ArraySubscript) {
+    if (!node->value->isLValue) {
       return ctx->reportError(node->line, node->column, node->length,
                               "Cannot return a non-lvalue as a reference.");
     }
-    return *valType;
   }
 
   if (expectedRet->isVoid() || !canImplicitlyCast(*valType, expectedRet)) {

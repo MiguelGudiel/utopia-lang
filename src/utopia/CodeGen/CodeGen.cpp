@@ -1007,22 +1007,7 @@ llvm::Value *CodeGen::visit(const ImplicitCastNode *node) {
         llvm::AllocaInst *temp = createEntryBlockAlloca(llTy, "llv.tmp");
         emitDefaultInitialization(temp, node->targetType);
 
-        llvm::Value *arrPtr = nullptr;
-        if (node->expr->exprType->isPointerType()) {
-          arrPtr = dispatch(node->expr);
-        } else {
-          arrPtr = getLValue(node->expr);
-        }
-
-        if (!arrPtr) {
-          llvm::Value *val = dispatch(node->expr);
-          arrPtr = createEntryBlockAlloca(val->getType(), "llv.arr.tmp");
-          builder.CreateStore(val, arrPtr);
-        }
-
-        llvm::Type *llvmArrTy = getLLVMType(unqualExpr);
-        llvm::Value *decayedPtr = builder.CreateInBoundsGEP(
-            llvmArrTy, arrPtr, {builder.getInt32(0), builder.getInt32(0)});
+        llvm::Value *decayedPtr = dispatch(node->expr);
 
         uint64_t arrSize =
             static_cast<const ArrayType *>(unqualExpr)->getSize();
@@ -1144,6 +1129,7 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
     llvm::Value *trueLVal = getLValue(ternary->trueExpr);
     if (!trueLVal)
       return nullptr;
+    trueLVal = createImplicitCast(trueLVal, builder.getPtrTy());
     trueBB = builder.GetInsertBlock();
     builder.CreateBr(mergeBB);
 
@@ -1152,6 +1138,7 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
     llvm::Value *falseLVal = getLValue(ternary->falseExpr);
     if (!falseLVal)
       return nullptr;
+    falseLVal = createImplicitCast(falseLVal, builder.getPtrTy());
     falseBB = builder.GetInsertBlock();
     builder.CreateBr(mergeBB);
 
@@ -1163,6 +1150,13 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
     phi->addIncoming(trueLVal, trueBB);
     phi->addIncoming(falseLVal, falseBB);
     return phi;
+  }
+
+  if (node->kind == NodeKind::ArrayLiteral) {
+    /* Array literal evaluation intrinsically constructs a local temporary
+     * allocation and yields the decayed pointer. Opaque pointers map this
+     * gracefully as a valid l-value. */
+    return dispatch(node);
   }
 
   if (node->kind == NodeKind::ArraySubscript) {
@@ -2189,6 +2183,9 @@ llvm::Value *CodeGen::visit(const TernaryOpNode *node) {
   llvm::Value *trueV = dispatch(node->trueExpr);
   if (!trueV && !node->exprType->isVoid())
     return nullptr;
+  if (!node->exprType->isVoid() && trueV) {
+    trueV = createImplicitCast(trueV, getLLVMType(node->exprType));
+  }
   trueBB = builder.GetInsertBlock();
   builder.CreateBr(mergeBB);
 
@@ -2197,6 +2194,9 @@ llvm::Value *CodeGen::visit(const TernaryOpNode *node) {
   llvm::Value *falseV = dispatch(node->falseExpr);
   if (!falseV && !node->exprType->isVoid())
     return nullptr;
+  if (!node->exprType->isVoid() && falseV) {
+    falseV = createImplicitCast(falseV, getLLVMType(node->exprType));
+  }
   falseBB = builder.GetInsertBlock();
   builder.CreateBr(mergeBB);
 
@@ -3169,9 +3169,6 @@ llvm::Value *CodeGen::visit(const ModuleNode *node) {
                                   : llvm::GlobalValue::ExternalLinkage;
 
               llvm::Constant *init = nullptr;
-              if (!varDecl->isExtern) {
-                init = llvm::Constant::getNullValue(ty);
-              }
 
               gvar = new llvm::GlobalVariable(mod, ty,
                                               varDecl->type->isConstQualified(),

@@ -14,3 +14,5 @@ build:
     - "lib/Memory/Core.utp"
     - "lib/System/OS.utp"
     - "lib/IO/Console.utp"
+    - "lib/Core/ListLiteralView.utp"
+    - "lib/Core/List.utp"
