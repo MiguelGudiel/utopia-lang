@@ -17,18 +17,7 @@ static int getActualStartLine(const ASTNode *node) {
     return 0;
   int startLine = node->line;
 
-  bool isDecl =
-      (node->kind == NodeKind::VarDecl ||
-       node->kind == NodeKind::FunctionDecl ||
-       node->kind == NodeKind::StructDecl ||
-       node->kind == NodeKind::ClassDecl || node->kind == NodeKind::UnionDecl ||
-       node->kind == NodeKind::AnnotationDecl ||
-       node->kind == NodeKind::EnumDecl ||
-       node->kind == NodeKind::TypedefDecl ||
-       node->kind == NodeKind::ParamDecl || node->kind == NodeKind::EnumMember);
-
-  if (isDecl) {
-    auto decl = static_cast<const DeclNode *>(node);
+  if (auto *decl = llvm::dyn_cast<DeclNode>(node)) {
     if (!decl->annotations.empty()) {
       startLine = decl->annotations.front()->line;
     }
@@ -50,21 +39,13 @@ static int getActualStartLine(const ASTNode *node) {
 Piece *PieceFactory::dispatchStmt(const ASTNode *node) {
   if (!node)
     return nullptr;
-  bool isExpr =
-      node->kind == NodeKind::FunctionCall || node->kind == NodeKind::Assign ||
-      node->kind == NodeKind::UnaryOp || node->kind == NodeKind::BinaryOp ||
-      node->kind == NodeKind::TernaryOp || node->kind == NodeKind::Variable ||
-      node->kind == NodeKind::Number || node->kind == NodeKind::String ||
-      node->kind == NodeKind::Delete || node->kind == NodeKind::New ||
-      node->kind == NodeKind::ArraySubscript ||
-      node->kind == NodeKind::MemberAccess || node->kind == NodeKind::Cast ||
-      node->kind == NodeKind::ImplicitCast || node->kind == NodeKind::Null ||
-      node->kind == NodeKind::Boolean || node->kind == NodeKind::Char ||
-      node->kind == NodeKind::Rune || node->kind == NodeKind::ArrayLiteral ||
-      node->kind == NodeKind::TypeLiteral;
 
-  Piece *p = isExpr ? dispatchExpr(static_cast<const ExprNode *>(node))
-                    : dispatch(node);
+  Piece *p = nullptr;
+  if (auto *expr = llvm::dyn_cast<ExprNode>(node)) {
+    p = dispatchExpr(expr);
+  } else {
+    p = dispatch(node);
+  }
 
   if (!node->trailingComment.empty()) {
     std::string tComment = std::string(node->trailingComment);
@@ -89,17 +70,16 @@ Piece *PieceFactory::extractChain(const ExprNode *node) {
   const ExprNode *current = node;
 
   while (current && !current->hasParens) {
-    if (current->kind == NodeKind::FunctionCall) {
-      auto *call = static_cast<const FunctionCallNode *>(current);
-      if (call->target->kind == NodeKind::MemberAccess) {
+    if (auto *call = llvm::dyn_cast<FunctionCallNode>(current)) {
+      if (auto *ma = llvm::dyn_cast<MemberAccessNode>(call->target)) {
         links.push_back(current);
-        current = static_cast<const MemberAccessNode *>(call->target)->object;
+        current = ma->object;
       } else {
         break;
       }
-    } else if (current->kind == NodeKind::MemberAccess) {
+    } else if (auto *ma = llvm::dyn_cast<MemberAccessNode>(current)) {
       links.push_back(current);
-      current = static_cast<const MemberAccessNode *>(current)->object;
+      current = ma->object;
     } else {
       break;
     }
@@ -120,8 +100,7 @@ Piece *PieceFactory::extractChain(const ExprNode *node) {
     ChainLinkKind kind;
     Piece *linkPiece = nullptr;
 
-    if (linkNode->kind == NodeKind::MemberAccess) {
-      auto *ma = static_cast<const MemberAccessNode *>(linkNode);
+    if (auto *ma = llvm::dyn_cast<MemberAccessNode>(linkNode)) {
       kind = ChainLinkKind::Property;
       hasProperties = true;
 
@@ -136,16 +115,14 @@ Piece *PieceFactory::extractChain(const ExprNode *node) {
         memberStr += ">";
       }
       linkPiece = create<TextPiece>(memberStr);
-    } else if (linkNode->kind == NodeKind::FunctionCall) {
-      auto *call = static_cast<const FunctionCallNode *>(linkNode);
-      auto *ma = static_cast<const MemberAccessNode *>(call->target);
+    } else if (auto *call = llvm::dyn_cast<FunctionCallNode>(linkNode)) {
+      auto *ma = llvm::cast<MemberAccessNode>(call->target);
 
       auto actualArgs = call->hasRawArgs ? call->rawArgs : call->args;
       bool isBlock = false;
       if (!actualArgs.empty()) {
-        auto lastArgKind = actualArgs.back()->kind;
-        if (lastArgKind == NodeKind::Block ||
-            lastArgKind == NodeKind::ArrayLiteral) {
+        if (llvm::isa<BlockNode>(actualArgs.back()) ||
+            llvm::isa<ArrayLiteralNode>(actualArgs.back())) {
           isBlock = true;
         }
       }
@@ -576,35 +553,12 @@ Piece *PieceFactory::visit(const FunctionDeclNode *node) {
       Piece *bodyPiece = nullptr;
       const ASTNode *innerStmt = node->body->statements[0];
 
-      if (innerStmt->kind == NodeKind::Return) {
-        auto *retNode = static_cast<const ReturnNode *>(innerStmt);
+      if (auto *retNode = llvm::dyn_cast<ReturnNode>(innerStmt)) {
         bodyPiece = dispatchExpr(retNode->value);
+      } else if (auto *exprStmt = llvm::dyn_cast<ExprNode>(innerStmt)) {
+        bodyPiece = dispatchExpr(exprStmt);
       } else {
-        bool isExprStmt = innerStmt->kind == NodeKind::FunctionCall ||
-                          innerStmt->kind == NodeKind::Assign ||
-                          innerStmt->kind == NodeKind::UnaryOp ||
-                          innerStmt->kind == NodeKind::BinaryOp ||
-                          innerStmt->kind == NodeKind::TernaryOp ||
-                          innerStmt->kind == NodeKind::Variable ||
-                          innerStmt->kind == NodeKind::Number ||
-                          innerStmt->kind == NodeKind::String ||
-                          innerStmt->kind == NodeKind::Delete ||
-                          innerStmt->kind == NodeKind::New ||
-                          innerStmt->kind == NodeKind::ArraySubscript ||
-                          innerStmt->kind == NodeKind::MemberAccess ||
-                          innerStmt->kind == NodeKind::Cast ||
-                          innerStmt->kind == NodeKind::ImplicitCast ||
-                          innerStmt->kind == NodeKind::Null ||
-                          innerStmt->kind == NodeKind::Boolean ||
-                          innerStmt->kind == NodeKind::Char ||
-                          innerStmt->kind == NodeKind::Rune ||
-                          innerStmt->kind == NodeKind::ArrayLiteral;
-
-        if (isExprStmt) {
-          bodyPiece = dispatchExpr(static_cast<const ExprNode *>(innerStmt));
-        } else {
-          bodyPiece = dispatchStmt(innerStmt);
-        }
+        bodyPiece = dispatchStmt(innerStmt);
       }
 
       if (!bodyPiece) {

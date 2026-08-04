@@ -73,21 +73,19 @@ llvm::Type *CodeGen::getLLVMType(const Type *type) {
   if (!type)
     return builder.getVoidTy();
 
-  if (type->getKind() == TypeKind::Const) {
-    return getLLVMType(static_cast<const ConstType *>(type)->getBaseType());
+  if (auto *cTy = llvm::dyn_cast<ConstType>(type)) {
+    return getLLVMType(cTy->getBaseType());
   }
-  if (type->getKind() == TypeKind::Enum) {
-    return getLLVMType(
-        static_cast<const EnumType *>(type)->getUnderlyingType());
+  if (auto *eTy = llvm::dyn_cast<EnumType>(type)) {
+    return getLLVMType(eTy->getUnderlyingType());
   }
-  if (type->getKind() == TypeKind::Alias) {
-    return getLLVMType(static_cast<const AliasType *>(type)->getTarget());
+  if (auto *aliasTy = llvm::dyn_cast<AliasType>(type)) {
+    return getLLVMType(aliasTy->getTarget());
   }
-  if (type->getKind() == TypeKind::Function) {
-    auto *fTy = static_cast<const FunctionType *>(type);
+  if (auto *fTy = llvm::dyn_cast<FunctionType>(type)) {
     std::vector<llvm::Type *> paramTys;
     for (const auto *p : fTy->getParamTypes()) {
-      if (p->getKind() == TypeKind::Array) {
+      if (llvm::isa<ArrayType>(p)) {
         paramTys.push_back(builder.getPtrTy());
       } else {
         paramTys.push_back(getLLVMType(p));
@@ -97,7 +95,7 @@ llvm::Type *CodeGen::getLLVMType(const Type *type) {
                                    false);
   }
 
-  if (type->getKind() == TypeKind::TemplateParam) {
+  if (llvm::isa<TemplateParamType>(type)) {
     diags.report({DiagLevel::Error, 0, 0, 0,
                   "Uninstantiated template parameter '" + type->toString() +
                       "' reached code generation.",
@@ -105,8 +103,7 @@ llvm::Type *CodeGen::getLLVMType(const Type *type) {
     return builder.getInt8Ty();
   }
 
-  if (type->isBuiltinType()) {
-    auto *bTy = static_cast<const BuiltinType *>(type);
+  if (auto *bTy = llvm::dyn_cast<BuiltinType>(type)) {
     switch (bTy->getBuiltinKind()) {
     case BuiltinKind::TypeVal:
       return builder.getInt8Ty(); /* Dummy representation. Handled internally by
@@ -134,18 +131,13 @@ llvm::Type *CodeGen::getLLVMType(const Type *type) {
     case BuiltinKind::Void:
       return builder.getVoidTy();
     }
-  } else if (type->isPointerType() || type->isReferenceType() ||
-             type->getKind() == TypeKind::RValueReference) {
+  } else if (llvm::isa<PointerType>(type) || llvm::isa<ReferenceType>(type) ||
+             llvm::isa<RValueReferenceType>(type)) {
     return builder.getPtrTy();
-  } else if (type->getKind() == TypeKind::Array) {
-    auto *arrTy = static_cast<const ArrayType *>(type);
+  } else if (auto *arrTy = llvm::dyn_cast<ArrayType>(type)) {
     return llvm::ArrayType::get(getLLVMType(arrTy->getElementType()),
                                 arrTy->getSize());
-  } else if (type->getKind() == TypeKind::Struct ||
-             type->getKind() == TypeKind::Class ||
-             type->getKind() == TypeKind::Union) {
-    auto rec = static_cast<const RecordType *>(type);
-
+  } else if (auto *rec = llvm::dyn_cast<RecordType>(type)) {
     llvm::StructType *structTy =
         llvm::StructType::getTypeByName(ctx, rec->getName());
 
@@ -158,7 +150,7 @@ llvm::Type *CodeGen::getLLVMType(const Type *type) {
     if (structTy->isOpaque() && !rec->isOpaque()) {
       std::vector<llvm::Type *> elements;
 
-      if (type->getKind() == TypeKind::Union) {
+      if (llvm::isa<UnionType>(type)) {
         uint64_t maxSize = 0;
         llvm::Type *maxAlignType = builder.getInt8Ty();
         uint64_t maxAlign = 1;
@@ -232,12 +224,12 @@ CodeGen::createTypeReflectionConstant(const Type *t,
 
   const Type *unqual = t->getUnqualifiedType();
 
-  bool isClass = unqual->getKind() == TypeKind::Class;
-  bool isStruct = unqual->getKind() == TypeKind::Struct;
-  bool isPrimitive = unqual->isBuiltinType();
-  bool isEnum = unqual->getKind() == TypeKind::Enum;
-  bool isArray = unqual->getKind() == TypeKind::Array;
-  bool isPointer = unqual->isPointerType();
+  bool isClass = llvm::isa<ClassType>(unqual);
+  bool isStruct = llvm::isa<StructType>(unqual);
+  bool isPrimitive = llvm::isa<BuiltinType>(unqual);
+  bool isEnum = llvm::isa<EnumType>(unqual);
+  bool isArray = llvm::isa<ArrayType>(unqual);
+  bool isPointer = llvm::isa<PointerType>(unqual);
 
   /* Bools in LLVM ABI */
   fields.push_back(
@@ -309,7 +301,7 @@ llvm::Function *CodeGen::getOrCreateFunction(const FunctionDeclNode *node) {
   }
 
   for (const auto *p : node->params) {
-    if (p->type->getKind() == TypeKind::Array) {
+    if (llvm::isa<ArrayType>(p->type)) {
       paramTypes.push_back(builder.getPtrTy());
     } else {
       paramTypes.push_back(getLLVMType(p->type));
@@ -398,8 +390,7 @@ llvm::Function *CodeGen::getOrCreateFunction(const FunctionDeclNode *node) {
       } else if (ann->name == "nonnull") {
         addAttrObj(llvm::Attribute::get(ctx, llvm::Attribute::NonNull));
       } else if (ann->name == "dereferenceable" && !ann->args.empty()) {
-        if (ann->args[0]->kind == NodeKind::Number) {
-          auto *num = static_cast<const NumberNode *>(ann->args[0]);
+        if (auto *num = llvm::dyn_cast<NumberNode>(ann->args[0])) {
           if (!num->isFloat) {
             uint64_t sz = std::stoull(std::string(num->raw), nullptr, 0);
             addAttrObj(llvm::Attribute::getWithDereferenceableBytes(ctx, sz));
@@ -408,24 +399,23 @@ llvm::Function *CodeGen::getOrCreateFunction(const FunctionDeclNode *node) {
       }
     }
 
-    if (!type->isReferenceType() && !type->isPointerType() &&
-        type->getKind() != TypeKind::RValueReference)
+    if (!llvm::isa<ReferenceType>(type) && !llvm::isa<PointerType>(type) &&
+        !llvm::isa<RValueReferenceType>(type))
       return;
 
-    if (type->isReferenceType() ||
-        type->getKind() == TypeKind::RValueReference) {
+    if (llvm::isa<ReferenceType>(type) ||
+        llvm::isa<RValueReferenceType>(type)) {
       addAttrObj(llvm::Attribute::get(ctx, llvm::Attribute::NonNull));
       addAttrObj(llvm::Attribute::get(ctx, llvm::Attribute::NoUndef));
     }
 
     const Type *pointee = nullptr;
-    if (type->isReferenceType()) {
-      pointee = static_cast<const ReferenceType *>(type)->getPointeeType();
-    } else if (type->getKind() == TypeKind::RValueReference) {
-      pointee =
-          static_cast<const RValueReferenceType *>(type)->getPointeeType();
-    } else {
-      pointee = static_cast<const PointerType *>(type)->getPointeeType();
+    if (auto *refTy = llvm::dyn_cast<ReferenceType>(type)) {
+      pointee = refTy->getPointeeType();
+    } else if (auto *rvRefTy = llvm::dyn_cast<RValueReferenceType>(type)) {
+      pointee = rvRefTy->getPointeeType();
+    } else if (auto *ptrTy = llvm::dyn_cast<PointerType>(type)) {
+      pointee = ptrTy->getPointeeType();
     }
 
     if (pointee->isConstQualified() && paramIdx.has_value()) {
@@ -436,40 +426,40 @@ llvm::Function *CodeGen::getOrCreateFunction(const FunctionDeclNode *node) {
 
     const Type *unqualPointee = pointee->getUnqualifiedType();
 
-    if (unqualPointee->isBuiltinType() &&
-        (type->isReferenceType() ||
-         type->getKind() == TypeKind::RValueReference)) {
-      auto kind =
-          static_cast<const BuiltinType *>(unqualPointee)->getBuiltinKind();
-      uint64_t size = 0;
-      switch (kind) {
-      case BuiltinKind::Int8:
-      case BuiltinKind::UInt8:
-      case BuiltinKind::Bool:
-        size = 1;
-        break;
-      case BuiltinKind::Int16:
-      case BuiltinKind::UInt16:
-        size = 2;
-        break;
-      case BuiltinKind::Int32:
-      case BuiltinKind::UInt32:
-      case BuiltinKind::Float32:
-        size = 4;
-        break;
-      case BuiltinKind::Int64:
-      case BuiltinKind::UInt64:
-      case BuiltinKind::Float64:
-        size = 8;
-        break;
-      case BuiltinKind::Void:
-      default:
-        break;
-      }
+    if (auto *builtinPointee = llvm::dyn_cast<BuiltinType>(unqualPointee)) {
+      if (llvm::isa<ReferenceType>(type) ||
+          llvm::isa<RValueReferenceType>(type)) {
+        auto kind = builtinPointee->getBuiltinKind();
+        uint64_t size = 0;
+        switch (kind) {
+        case BuiltinKind::Int8:
+        case BuiltinKind::UInt8:
+        case BuiltinKind::Bool:
+          size = 1;
+          break;
+        case BuiltinKind::Int16:
+        case BuiltinKind::UInt16:
+          size = 2;
+          break;
+        case BuiltinKind::Int32:
+        case BuiltinKind::UInt32:
+        case BuiltinKind::Float32:
+          size = 4;
+          break;
+        case BuiltinKind::Int64:
+        case BuiltinKind::UInt64:
+        case BuiltinKind::Float64:
+          size = 8;
+          break;
+        case BuiltinKind::Void:
+        default:
+          break;
+        }
 
-      if (size > 0) {
-        addAttrObj(llvm::Attribute::getWithDereferenceableBytes(ctx, size));
-        addAttrObj(llvm::Attribute::getWithAlignment(ctx, llvm::Align(size)));
+        if (size > 0) {
+          addAttrObj(llvm::Attribute::getWithDereferenceableBytes(ctx, size));
+          addAttrObj(llvm::Attribute::getWithAlignment(ctx, llvm::Align(size)));
+        }
       }
     }
   };
@@ -587,8 +577,7 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
   if (!node)
     return nullptr;
 
-  if (node->kind == NodeKind::TernaryOp) {
-    auto *ternaryNode = static_cast<const TernaryOpNode *>(node);
+  if (auto *ternaryNode = llvm::dyn_cast<TernaryOpNode>(node)) {
     llvm::Constant *condC = evaluateAsConstant(ternaryNode->condition);
     if (!condC)
       return nullptr;
@@ -603,8 +592,7 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
     return nullptr;
   }
 
-  if (node->kind == NodeKind::FunctionCall) {
-    auto *call = static_cast<const FunctionCallNode *>(node);
+  if (auto *call = llvm::dyn_cast<FunctionCallNode>(node)) {
     if (call->resolvedFunc && call->resolvedFunc->isIntrinsic) {
       if (const Intrinsic *intrinsic = IntrinsicRegistry::instance().get(
               call->resolvedFunc->intrinsicName)) {
@@ -613,12 +601,11 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
     }
   }
 
-  if (node->kind == NodeKind::Null) {
+  if (llvm::isa<NullNode>(node)) {
     return llvm::ConstantPointerNull::get(builder.getPtrTy());
   }
 
-  if (node->kind == NodeKind::String) {
-    auto *strNode = static_cast<const StringNode *>(node);
+  if (auto *strNode = llvm::dyn_cast<StringNode>(node)) {
     llvm::Constant *strConst = llvm::ConstantDataArray::getString(
         ctx, llvm::StringRef(strNode->value.data(), strNode->value.length()),
         true);
@@ -631,15 +618,14 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
         strConst->getType(), gv, llvm::ArrayRef<llvm::Constant *>{zero, zero});
   }
 
-  if (node->kind == NodeKind::ImplicitCast || node->kind == NodeKind::Cast) {
+  if (llvm::isa<ImplicitCastNode>(node) || llvm::isa<CastNode>(node)) {
     const ExprNode *innerExpr = nullptr;
     const Type *targetType = nullptr;
-    if (node->kind == NodeKind::ImplicitCast) {
-      auto *castNode = static_cast<const ImplicitCastNode *>(node);
-      innerExpr = castNode->expr;
-      targetType = castNode->targetType;
+    if (auto *implCastNode = llvm::dyn_cast<ImplicitCastNode>(node)) {
+      innerExpr = implCastNode->expr;
+      targetType = implCastNode->targetType;
     } else {
-      auto *castNode = static_cast<const CastNode *>(node);
+      auto *castNode = llvm::cast<CastNode>(node);
       innerExpr = castNode->expr;
       targetType = castNode->targetType;
     }
@@ -688,8 +674,7 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
     }
   }
 
-  if (node->kind == NodeKind::ArrayLiteral) {
-    auto *arrNode = static_cast<const ArrayLiteralNode *>(node);
+  if (auto *arrNode = llvm::dyn_cast<ArrayLiteralNode>(node)) {
     std::vector<llvm::Constant *> elems;
     for (const auto *elem : arrNode->elements) {
       auto *c = evaluateAsConstant(elem);
@@ -703,14 +688,12 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
     return llvm::ConstantArray::get(llvm::cast<llvm::ArrayType>(destTy), elems);
   }
 
-  if (node->kind == NodeKind::Boolean) {
-    auto *boolNode = static_cast<const BoolNode *>(node);
+  if (auto *boolNode = llvm::dyn_cast<BoolNode>(node)) {
     return boolNode->value ? llvm::ConstantInt::getTrue(ctx)
                            : llvm::ConstantInt::getFalse(ctx);
   }
 
-  if (node->kind == NodeKind::Number) {
-    auto *num = static_cast<const NumberNode *>(node);
+  if (auto *num = llvm::dyn_cast<NumberNode>(node)) {
     std::string numStr(num->raw);
 
     bool isHex = false;
@@ -751,26 +734,23 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
     }
   }
 
-  if (node->kind == NodeKind::Char) {
-    auto *charNode = static_cast<const CharNode *>(node);
+  if (auto *charNode = llvm::dyn_cast<CharNode>(node)) {
     return llvm::ConstantInt::get(builder.getInt8Ty(), charNode->value);
   }
 
-  if (node->kind == NodeKind::Rune) {
-    auto *runeNode = static_cast<const RuneNode *>(node);
+  if (auto *runeNode = llvm::dyn_cast<RuneNode>(node)) {
     return llvm::ConstantInt::get(builder.getInt32Ty(), runeNode->value);
   }
 
-  if (node->kind == NodeKind::Variable) {
-    auto *varNode = static_cast<const VariableNode *>(node);
+  if (auto *varNode = llvm::dyn_cast<VariableNode>(node)) {
     std::string lookupName = std::string(varNode->name);
 
-    if (varNode->resolvedDecl &&
-        varNode->resolvedDecl->kind == NodeKind::VarDecl) {
-      auto *varDecl = static_cast<const VarDeclNode *>(varNode->resolvedDecl);
-      if ((varDecl->isStatic || varDecl->isExtern) &&
-          !varDecl->mangledName.empty()) {
-        lookupName = varDecl->mangledName;
+    if (varNode->resolvedDecl) {
+      if (auto *varDecl = llvm::dyn_cast<VarDeclNode>(varNode->resolvedDecl)) {
+        if ((varDecl->isStatic || varDecl->isExtern) &&
+            !varDecl->mangledName.empty()) {
+          lookupName = varDecl->mangledName;
+        }
       }
     }
 
@@ -789,8 +769,7 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
     return nullptr;
   }
 
-  if (node->kind == NodeKind::MemberAccess) {
-    auto *maNode = static_cast<const MemberAccessNode *>(node);
+  if (auto *maNode = llvm::dyn_cast<MemberAccessNode>(node)) {
     if (maNode->isEnumMember) {
       llvm::Type *llTy = getLLVMType(maNode->exprType);
       return llvm::ConstantInt::get(llTy, maNode->enumMember->evaluatedValue,
@@ -799,19 +778,18 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
     return nullptr;
   }
 
-  if (node->kind == NodeKind::UnaryOp) {
-    auto *unNode = static_cast<const UnaryOpNode *>(node);
-
-    if (unNode->op == "&" && unNode->expr->kind == NodeKind::Variable) {
-      auto *varNode = static_cast<const VariableNode *>(unNode->expr);
+  if (auto *unNode = llvm::dyn_cast<UnaryOpNode>(node)) {
+    if (unNode->op == "&" && llvm::isa<VariableNode>(unNode->expr)) {
+      auto *varNode = llvm::cast<VariableNode>(unNode->expr);
       std::string lookupName = std::string(varNode->name);
 
-      if (varNode->resolvedDecl &&
-          varNode->resolvedDecl->kind == NodeKind::VarDecl) {
-        auto *varDecl = static_cast<const VarDeclNode *>(varNode->resolvedDecl);
-        if ((varDecl->isStatic || varDecl->isExtern) &&
-            !varDecl->mangledName.empty()) {
-          lookupName = varDecl->mangledName;
+      if (varNode->resolvedDecl) {
+        if (auto *varDecl =
+                llvm::dyn_cast<VarDeclNode>(varNode->resolvedDecl)) {
+          if ((varDecl->isStatic || varDecl->isExtern) &&
+              !varDecl->mangledName.empty()) {
+            lookupName = varDecl->mangledName;
+          }
         }
       }
 
@@ -853,8 +831,7 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
     }
   }
 
-  if (node->kind == NodeKind::BinaryOp) {
-    auto *binNode = static_cast<const BinaryOpNode *>(node);
+  if (auto *binNode = llvm::dyn_cast<BinaryOpNode>(node)) {
     llvm::Constant *L = evaluateAsConstant(binNode->left);
     llvm::Constant *R = evaluateAsConstant(binNode->right);
 
