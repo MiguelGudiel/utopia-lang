@@ -5,13 +5,13 @@ class List<T> {
   private usize _length;
   private usize _capacity;
 
-  public List() {
+  List() {
     this._length = 0;
     this._capacity = 8;
     this._data = new T[this._capacity];
   }
 
-  public List(ListLiteralView<T> view) {
+  List(ListLiteralView<T> view) {
     this._length = view.length;
     this._capacity = view.length > 8 ? view.length * 2 : 8;
     this._data = new T[this._capacity];
@@ -20,7 +20,7 @@ class List<T> {
     }
   }
 
-  public List(const List<T>& other) {
+  List(const List<T>& other) {
     this._length = other._length;
     this._capacity = other._capacity;
     this._data = new T[this._capacity];
@@ -29,13 +29,13 @@ class List<T> {
     }
   }
 
-  public ~List() {
+  ~List() {
     if (this._data != null) {
       delete[] this._data;
     }
   }
 
-  public void operator=(const List<T>& other) {
+  void operator=(const List<T>& other) {
     if (this._data != null) {
       delete[] this._data;
     }
@@ -47,7 +47,7 @@ class List<T> {
     }
   }
 
-  public void operator=(ListLiteralView<T> view) {
+  void operator=(ListLiteralView<T> view) {
     if (this._data != null) {
       delete[] this._data;
     }
@@ -59,15 +59,15 @@ class List<T> {
     }
   }
 
-  public usize length() {
+  usize length() {
     return this._length;
   }
 
-  public usize capacity() {
+  usize capacity() {
     return this._capacity;
   }
 
-  public void push(T value) {
+  void push(T value) {
     if (this._length >= this._capacity) {
       this._capacity = this._capacity * 2;
       T* newData = new T[this._capacity];
@@ -82,7 +82,7 @@ class List<T> {
   }
 
   @inline
-  public T& operator[](usize index) {
+  T& operator[](usize index) {
     return this._data[index];
   }
 }
