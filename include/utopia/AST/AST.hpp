@@ -1,6 +1,5 @@
 #pragma once
 #include "utopia/Common/Types.hpp"
-#include "utopia/Lexer/Token.hpp"
 #include <cstdint>
 #include <llvm/ADT/ArrayRef.h>
 #include <llvm/Support/Casting.h>
@@ -155,6 +154,10 @@ struct DeclNode : public ASTNode {
   bool hasPublicMod = false;
   bool hasPrivateMod = false;
   std::string_view declFilePath;
+
+  /* Exact token location for LSP tooling */
+  int identifierColumn = 0;
+  int identifierLength = 0;
 
   bool isTemplate = false;
   llvm::ArrayRef<std::string_view> templateParams;

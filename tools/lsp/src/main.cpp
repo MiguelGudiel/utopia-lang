@@ -214,6 +214,11 @@ SourceLocation getExactNameLocation(const std::string &text,
     return {-1, -1, 0};
   }
 
+  if (decl->identifierColumn > 0 && decl->identifierLength > 0) {
+    return {decl->line > 0 ? decl->line - 1 : 0, decl->identifierColumn - 1,
+            decl->identifierLength};
+  }
+
   SourceLocation loc{decl->line > 0 ? decl->line - 1 : 0,
                      decl->column > 0 ? decl->column - 1 : 0,
                      decl->length > 0 ? decl->length : 1};
