@@ -83,6 +83,8 @@ private:
 
   const Type *parseType(bool inNewExpr = false);
   const Type *applyArrayDeclarator(const Type *baseType);
+  const Type *parseTypeModifiers(const Type *baseType, bool inNewExpr);
+  
   std::string consumeComments();
   ExprNode *parseArrayLiteral();
   ASTNode *parseStatement();

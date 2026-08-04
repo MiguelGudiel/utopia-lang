@@ -115,6 +115,32 @@ std::string_view Parser::parseOperatorName() {
   return astCtx.copyString(name);
 }
 
+const Type *Parser::parseTypeModifiers(const Type *baseType, bool inNewExpr) {
+  const Type *ty = baseType;
+  while (currentToken().type == TokenType::STAR ||
+         currentToken().type == TokenType::AMPERSAND ||
+         currentToken().type == TokenType::LOGICAL_AND ||
+         currentToken().type == TokenType::CONST_KW ||
+         (!inNewExpr && currentToken().type == TokenType::LBRACKET)) {
+    if (currentToken().type == TokenType::CONST_KW) {
+      ty = astCtx.getConstType(ty);
+      advance();
+    } else if (currentToken().type == TokenType::STAR) {
+      ty = astCtx.getPointerType(ty);
+      advance();
+    } else if (currentToken().type == TokenType::AMPERSAND) {
+      ty = astCtx.getReferenceType(ty);
+      advance();
+    } else if (currentToken().type == TokenType::LOGICAL_AND) {
+      ty = astCtx.getRValueReferenceType(ty);
+      advance();
+    } else if (!inNewExpr && currentToken().type == TokenType::LBRACKET) {
+      ty = applyArrayDeclarator(ty);
+    }
+  }
+  return ty;
+}
+
 const Type *Parser::parseType(bool inNewExpr) {
   bool isConst = match(TokenType::CONST_KW);
 
@@ -172,27 +198,7 @@ const Type *Parser::parseType(bool inNewExpr) {
     ty = astCtx.getConstType(ty);
   }
 
-  while (currentToken().type == TokenType::STAR ||
-         currentToken().type == TokenType::AMPERSAND ||
-         currentToken().type == TokenType::LOGICAL_AND ||
-         currentToken().type == TokenType::CONST_KW ||
-         (!inNewExpr && currentToken().type == TokenType::LBRACKET)) {
-    if (currentToken().type == TokenType::CONST_KW) {
-      ty = astCtx.getConstType(ty);
-      advance();
-    } else if (currentToken().type == TokenType::STAR) {
-      ty = astCtx.getPointerType(ty);
-      advance();
-    } else if (currentToken().type == TokenType::AMPERSAND) {
-      ty = astCtx.getReferenceType(ty);
-      advance();
-    } else if (currentToken().type == TokenType::LOGICAL_AND) {
-      ty = astCtx.getRValueReferenceType(ty);
-      advance();
-    } else if (!inNewExpr && currentToken().type == TokenType::LBRACKET) {
-      ty = applyArrayDeclarator(ty);
-    }
-  }
+  ty = parseTypeModifiers(ty, inNewExpr);
 
   if (match(TokenType::FUNCTION_KW)) {
     expect(TokenType::LPAREN, "Expected '(' after 'Function'");
@@ -208,30 +214,9 @@ const Type *Parser::parseType(bool inNewExpr) {
     expect(TokenType::RPAREN, "Expected ')' after function parameters");
 
     ty = astCtx.getFunctionType(ty, astCtx.copyArray<const Type *>(paramTypes));
-
     ty = astCtx.getPointerType(ty);
 
-    while (currentToken().type == TokenType::STAR ||
-           currentToken().type == TokenType::AMPERSAND ||
-           currentToken().type == TokenType::LOGICAL_AND ||
-           currentToken().type == TokenType::CONST_KW ||
-           (!inNewExpr && currentToken().type == TokenType::LBRACKET)) {
-      if (currentToken().type == TokenType::CONST_KW) {
-        ty = astCtx.getConstType(ty);
-        advance();
-      } else if (currentToken().type == TokenType::STAR) {
-        ty = astCtx.getPointerType(ty);
-        advance();
-      } else if (currentToken().type == TokenType::AMPERSAND) {
-        ty = astCtx.getReferenceType(ty);
-        advance();
-      } else if (currentToken().type == TokenType::LOGICAL_AND) {
-        ty = astCtx.getRValueReferenceType(ty);
-        advance();
-      } else if (!inNewExpr && currentToken().type == TokenType::LBRACKET) {
-        ty = applyArrayDeclarator(ty);
-      }
-    }
+    ty = parseTypeModifiers(ty, inNewExpr);
   }
 
   return ty;
