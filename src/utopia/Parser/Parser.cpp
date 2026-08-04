@@ -2071,11 +2071,6 @@ DeclNode *Parser::parseDeclarationOrFunction(
     return funcDecl;
   }
 
-  if (isExtern) {
-    reportError(line, col, idLen, "Variables cannot be declared as extern.");
-    throw ParseException();
-  }
-
   if (isIntrinsic) {
     reportError(line, col, idLen, "Variables cannot be declared as intrinsic.");
     throw ParseException();

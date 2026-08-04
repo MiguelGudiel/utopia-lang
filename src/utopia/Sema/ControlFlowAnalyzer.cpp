@@ -220,7 +220,7 @@ void ControlFlowPass::visit(const VariableNode *node) {
   if (node->resolvedDecl && node->resolvedDecl->kind == NodeKind::VarDecl) {
     auto *varDecl = static_cast<const VarDeclNode *>(node->resolvedDecl);
 
-    if (!varDecl->isGlobal && !varDecl->isStatic) {
+    if (!varDecl->isGlobal && !varDecl->isStatic && !varDecl->isExtern) {
       if (isAssignTarget) {
         initStates[varDecl] = true;
       } else {

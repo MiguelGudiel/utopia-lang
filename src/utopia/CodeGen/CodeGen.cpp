@@ -771,7 +771,8 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
     if (varNode->resolvedDecl &&
         varNode->resolvedDecl->kind == NodeKind::VarDecl) {
       auto *varDecl = static_cast<const VarDeclNode *>(varNode->resolvedDecl);
-      if (varDecl->isStatic && !varDecl->mangledName.empty()) {
+      if ((varDecl->isStatic || varDecl->isExtern) &&
+          !varDecl->mangledName.empty()) {
         lookupName = varDecl->mangledName;
       }
     }
@@ -811,7 +812,8 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
       if (varNode->resolvedDecl &&
           varNode->resolvedDecl->kind == NodeKind::VarDecl) {
         auto *varDecl = static_cast<const VarDeclNode *>(varNode->resolvedDecl);
-        if (varDecl->isStatic && !varDecl->mangledName.empty()) {
+        if ((varDecl->isStatic || varDecl->isExtern) &&
+            !varDecl->mangledName.empty()) {
           lookupName = varDecl->mangledName;
         }
       }
@@ -1186,7 +1188,8 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
     if (varNode->resolvedDecl &&
         varNode->resolvedDecl->kind == NodeKind::VarDecl) {
       auto *varDecl = static_cast<const VarDeclNode *>(varNode->resolvedDecl);
-      if (varDecl->isStatic && !varDecl->mangledName.empty()) {
+      if ((varDecl->isStatic || varDecl->isExtern) &&
+          !varDecl->mangledName.empty()) {
         lookupName = varDecl->mangledName;
       }
     }
@@ -2252,7 +2255,7 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
 
   llvm::Type *ty = getLLVMType(node->type);
 
-  if (isGlobal) {
+  if (isGlobal || node->isExtern) {
     llvm::Constant *initConst = nullptr;
     if (node->initializer) {
       initConst = evaluateAsConstant(node->initializer);
@@ -2293,7 +2296,7 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
       }
     }
 
-    if (!initConst) {
+    if (!initConst && !node->isExtern) {
       initConst = llvm::Constant::getNullValue(ty);
     }
 
@@ -2307,8 +2310,11 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
         node->isWeak ? llvm::GlobalValue::WeakAnyLinkage
                      : llvm::GlobalValue::ExternalLinkage;
 
-    auto *gvar = new llvm::GlobalVariable(mod, ty, isConstant, linkage,
-                                          initConst, bindName);
+    llvm::GlobalVariable *gvar = mod.getGlobalVariable(bindName);
+    if (!gvar) {
+      gvar = new llvm::GlobalVariable(mod, ty, isConstant, linkage, initConst,
+                                      bindName);
+    }
 
     if (customAlign > 0) {
       gvar->setAlignment(llvm::Align(customAlign));
@@ -2316,7 +2322,12 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
 
     diEmitter.emitGlobalVariable(*this, gvar, node, bindName);
 
-    cgCtx.bind(bindName, gvar, true);
+    if (isGlobal) {
+      cgCtx.bind(bindName, gvar, true);
+    } else {
+      cgCtx.bind(node->varName, gvar, true);
+    }
+
     return gvar;
   }
 
@@ -3094,7 +3105,7 @@ llvm::Value *CodeGen::visit(const ModuleNode *node) {
           getOrCreateFunction(static_cast<const FunctionDeclNode *>(stmt));
         } else if (stmt->kind == NodeKind::VarDecl) {
           auto *varDecl = static_cast<const VarDeclNode *>(stmt);
-          if (varDecl->isGlobal) {
+          if (varDecl->isGlobal || varDecl->isExtern) {
             llvm::Type *ty = getLLVMType(varDecl->type);
             std::string bindName = varDecl->mangledName.empty()
                                        ? std::string(varDecl->varName)
@@ -3107,9 +3118,14 @@ llvm::Value *CodeGen::visit(const ModuleNode *node) {
                   varDecl->isWeak ? llvm::GlobalValue::WeakAnyLinkage
                                   : llvm::GlobalValue::ExternalLinkage;
 
+              llvm::Constant *init = nullptr;
+              if (!varDecl->isExtern) {
+                init = llvm::Constant::getNullValue(ty);
+              }
+
               gvar = new llvm::GlobalVariable(mod, ty,
                                               varDecl->type->isConstQualified(),
-                                              linkage, nullptr, bindName);
+                                              linkage, init, bindName);
             }
             cgCtx.bind(bindName, gvar, true);
           }

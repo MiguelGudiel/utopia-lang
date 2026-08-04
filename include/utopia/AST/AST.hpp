@@ -252,6 +252,8 @@ struct VarDeclNode : public DeclNode {
   bool isGlobal = false;
   bool isStatic = false;
   bool isWeak = false;
+  bool isExtern = false;
+  std::string_view externAlias;
   std::string_view rawTypeStr;
 
   /* Reference to the resolved copy constructor for aggregate initialization */

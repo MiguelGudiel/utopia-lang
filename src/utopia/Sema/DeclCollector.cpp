@@ -198,6 +198,30 @@ void DeclCollectorPass::visit(const SwitchNode *node) {
 }
 
 void DeclCollectorPass::visit(const VarDeclNode *node) {
+  bool isExtern = false;
+  for (const auto *ann : node->annotations) {
+    if (ann->name == "extern") {
+      isExtern = true;
+      if (ann->args.empty()) {
+        const_cast<VarDeclNode *>(node)->externAlias = node->varName;
+      } else if (ann->args.size() == 1 &&
+                 ann->args[0]->kind == NodeKind::String) {
+        const_cast<VarDeclNode *>(node)->externAlias =
+            static_cast<const StringNode *>(ann->args[0])->value;
+      } else {
+        ctx->reportError(ann->line, ann->column, ann->length,
+                         "The @extern annotation for variables accepts at most "
+                         "one string literal argument.");
+      }
+    }
+  }
+
+  if (isExtern) {
+    const_cast<VarDeclNode *>(node)->isExtern = true;
+    const_cast<VarDeclNode *>(node)->mangledName =
+        std::string(node->externAlias);
+  }
+
   ctx->addDecl(node->varName, node);
 }
 

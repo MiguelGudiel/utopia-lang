@@ -1634,10 +1634,16 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
 
   if (declType->isConstQualified() && !node->initializer &&
       !declType->isReferenceType() &&
-      declType->getKind() != TypeKind::RValueReference) {
+      declType->getKind() != TypeKind::RValueReference && !node->isExtern) {
     SemaResult err =
         ctx->reportError(node->line, node->column, node->length,
                          "Constant variables must be initialized.");
+  }
+
+  if (node->isExtern && node->initializer) {
+    SemaResult err =
+        ctx->reportError(node->line, node->column, node->length,
+                         "Extern variables cannot have an initializer.");
   }
 
   if (node->initializer) {

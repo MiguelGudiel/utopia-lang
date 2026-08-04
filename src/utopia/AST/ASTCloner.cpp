@@ -266,6 +266,8 @@ ASTNode *ASTCloner::visit(const VarDeclNode *n) {
       n->line, n->column, n->length);
   node->isStatic = n->isStatic;
   node->isWeak = n->isWeak;
+  node->isExtern = n->isExtern;
+  node->externAlias = n->externAlias;
   node->hasPublicMod = n->hasPublicMod;
   node->hasPrivateMod = n->hasPrivateMod;
   node->annotations = n->annotations;
