@@ -46,6 +46,51 @@ public:
 
   void write(const std::string &text) { _writeInternal(text, false); }
 
+  void writeComment(const std::string &text) {
+    if (text.empty())
+      return;
+
+    flushWhitespace();
+
+    if (!measureOnly) {
+      buffer += text;
+    }
+
+    size_t start = 0;
+    while (start < text.length()) {
+      size_t nextNewline = text.find('\n', start);
+      size_t len = (nextNewline != std::string::npos) ? (nextNewline - start)
+                                                      : (text.length() - start);
+      currentColumn += len;
+
+      for (const Piece *p : activePieces) {
+        if (std::find(currentLinePieces.begin(), currentLinePieces.end(), p) ==
+            currentLinePieces.end()) {
+          currentLinePieces.push_back(p);
+        }
+      }
+      forgiveOverflow = true;
+
+      if (nextNewline != std::string::npos) {
+        currentLinePieces.clear();
+        currentColumn = 0;
+
+        /*
+         * The text is already appended in its entirety above.
+         * Injecting another newline here duplicates the breaks and breaks the
+         * layout.
+         */
+
+        pendingWhitespace = Whitespace::None;
+        forgiveOverflow = false;
+        currentLine++;
+        start = nextNewline + 1;
+      } else {
+        break;
+      }
+    }
+  }
+
   void _writeInternal(const std::string &text, bool isStringLiteral) {
     if (text.empty())
       return;

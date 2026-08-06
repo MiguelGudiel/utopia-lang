@@ -1,8 +1,8 @@
 #pragma once
 #include "utopia/Common/Types.hpp"
-#include "utopia/Lexer/Token.hpp"
 #include <cstdint>
 #include <llvm/ADT/ArrayRef.h>
+#include <llvm/Support/Casting.h>
 #include <string_view>
 #include <unordered_set>
 
@@ -60,6 +60,7 @@ struct ASTNode {
   int endLine;
   std::string_view docString;
   std::string_view trailingComment;
+  std::string_view endComment;
 
   explicit ASTNode(NodeKind k, int l = 0, int c = 0, int len = 0)
       : kind(k), line(l), column(c), length(len), endLine(l) {}
@@ -68,6 +69,22 @@ struct ASTNode {
 struct StmtNode : public ASTNode {
   explicit StmtNode(NodeKind k, int l = 0, int c = 0, int len = 0)
       : ASTNode(k, l, c, len) {}
+
+  static bool classof(const ASTNode *node) {
+    switch (node->kind) {
+    case NodeKind::Block:
+    case NodeKind::If:
+    case NodeKind::For:
+    case NodeKind::While:
+    case NodeKind::Switch:
+    case NodeKind::Break:
+    case NodeKind::Continue:
+    case NodeKind::Return:
+      return true;
+    default:
+      return false;
+    }
+  }
 };
 
 struct ExprNode : public ASTNode {
@@ -78,12 +95,44 @@ struct ExprNode : public ASTNode {
 
   explicit ExprNode(NodeKind k, int l = 0, int c = 0, int len = 0)
       : ASTNode(k, l, c, len) {}
+
+  static bool classof(const ASTNode *node) {
+    switch (node->kind) {
+    case NodeKind::Number:
+    case NodeKind::Boolean:
+    case NodeKind::Char:
+    case NodeKind::Rune:
+    case NodeKind::String:
+    case NodeKind::Variable:
+    case NodeKind::BinaryOp:
+    case NodeKind::UnaryOp:
+    case NodeKind::TernaryOp:
+    case NodeKind::Assign:
+    case NodeKind::FunctionCall:
+    case NodeKind::Cast:
+    case NodeKind::MemberAccess:
+    case NodeKind::ArraySubscript:
+    case NodeKind::ArrayLiteral:
+    case NodeKind::New:
+    case NodeKind::Delete:
+    case NodeKind::Null:
+    case NodeKind::ImplicitCast:
+    case NodeKind::TypeLiteral:
+      return true;
+    default:
+      return false;
+    }
+  }
 };
 
 struct TypeLiteralNode : public ExprNode {
   TypeLiteralNode(const Type *t, int l, int c, int len)
       : ExprNode(NodeKind::TypeLiteral, l, c, len) {
     representedType = t;
+  }
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::TypeLiteral;
   }
 };
 
@@ -93,6 +142,10 @@ struct AnnotationNode : public ASTNode {
   AnnotationNode(std::string_view n, llvm::ArrayRef<ExprNode *> a, int l, int c,
                  int len)
       : ASTNode(NodeKind::Annotation, l, c, len), name(n), args(a) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Annotation;
+  }
 };
 
 struct FunctionDeclNode;
@@ -103,8 +156,16 @@ struct DeclNode : public ASTNode {
   bool hasPrivateMod = false;
   std::string_view declFilePath;
 
+  /* Exact token location for LSP tooling */
+  int identifierColumn = 0;
+  int identifierLength = 0;
+
   bool isTemplate = false;
   llvm::ArrayRef<std::string_view> templateParams;
+
+  /* Resolved attributes */
+  uint64_t alignment = 0;
+  bool isPacked = false;
 
   explicit DeclNode(NodeKind k, int l = 0, int c = 0, int len = 0)
       : ASTNode(k, l, c, len) {}
@@ -120,15 +181,37 @@ struct DeclNode : public ASTNode {
       return true;
     return !declName.starts_with("_");
   }
+
+  static bool classof(const ASTNode *node) {
+    switch (node->kind) {
+    case NodeKind::AnnotationDecl:
+    case NodeKind::TypedefDecl:
+    case NodeKind::VarDecl:
+    case NodeKind::FunctionDecl:
+    case NodeKind::ParamDecl:
+    case NodeKind::StructDecl:
+    case NodeKind::UnionDecl:
+    case NodeKind::ClassDecl:
+    case NodeKind::EnumDecl:
+    case NodeKind::EnumMember:
+      return true;
+    default:
+      return false;
+    }
+  }
 };
 
 struct EnumMemberNode : public DeclNode {
   std::string_view name;
   ExprNode *initializer;
-  mutable int64_t evaluatedValue = 0; // Evaluated statically during Sema
+  mutable int64_t evaluatedValue = 0;
 
   EnumMemberNode(std::string_view n, ExprNode *init, int l, int c, int len)
       : DeclNode(NodeKind::EnumMember, l, c, len), name(n), initializer(init) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::EnumMember;
+  }
 };
 
 struct EnumDeclNode : public DeclNode {
@@ -139,6 +222,10 @@ struct EnumDeclNode : public DeclNode {
 
   EnumDeclNode(std::string_view n, const Type *u, int l, int c, int len)
       : DeclNode(NodeKind::EnumDecl, l, c, len), name(n), underlyingType(u) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::EnumDecl;
+  }
 };
 
 struct NumberNode : public ExprNode {
@@ -146,34 +233,58 @@ struct NumberNode : public ExprNode {
   bool isFloat;
   NumberNode(std::string_view r, bool f, int l, int c, int len)
       : ExprNode(NodeKind::Number, l, c, len), raw(r), isFloat(f) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Number;
+  }
 };
 
 struct BoolNode : public ExprNode {
   bool value;
   BoolNode(bool v, int l, int c, int len)
       : ExprNode(NodeKind::Boolean, l, c, len), value(v) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Boolean;
+  }
 };
 
 struct CharNode : public ExprNode {
   uint8_t value;
   CharNode(uint8_t v, int l, int c, int len)
       : ExprNode(NodeKind::Char, l, c, len), value(v) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Char;
+  }
 };
 
 struct RuneNode : public ExprNode {
   uint32_t value;
   RuneNode(uint32_t v, int l, int c, int len)
       : ExprNode(NodeKind::Rune, l, c, len), value(v) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Rune;
+  }
 };
 
 struct StringNode : public ExprNode {
   std::string_view value;
   StringNode(std::string_view v, int l, int c, int len)
       : ExprNode(NodeKind::String, l, c, len), value(v) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::String;
+  }
 };
 
 struct NullNode : public ExprNode {
   NullNode(int l, int c, int len) : ExprNode(NodeKind::Null, l, c, len) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Null;
+  }
 };
 
 struct VariableNode : public ExprNode {
@@ -187,6 +298,10 @@ struct VariableNode : public ExprNode {
 
   VariableNode(std::string_view n, int l, int c, int len)
       : ExprNode(NodeKind::Variable, l, c, len), name(n) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Variable;
+  }
 };
 
 struct TypedefDeclNode : public DeclNode {
@@ -200,6 +315,10 @@ struct TypedefDeclNode : public DeclNode {
                   int len)
       : DeclNode(NodeKind::TypedefDecl, l, c, len), aliasName(name),
         targetType(target), aliasType(nullptr) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::TypedefDecl;
+  }
 };
 
 struct UnaryOpNode : public ExprNode {
@@ -217,6 +336,10 @@ struct UnaryOpNode : public ExprNode {
       this->length = (e->column + e->length) - c;
     }
   }
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::UnaryOp;
+  }
 };
 
 struct BinaryOpNode : public ExprNode {
@@ -230,6 +353,10 @@ struct BinaryOpNode : public ExprNode {
       : ExprNode(NodeKind::BinaryOp, ln, c), op(o), left(l), right(r) {
     this->length = (right->column + right->length) - this->column;
   }
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::BinaryOp;
+  }
 };
 
 struct TernaryOpNode : public ExprNode {
@@ -242,6 +369,10 @@ struct TernaryOpNode : public ExprNode {
                 int len)
       : ExprNode(NodeKind::TernaryOp, l, c, len), condition(cond),
         trueExpr(tExpr), falseExpr(fExpr) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::TernaryOp;
+  }
 };
 
 struct VarDeclNode : public DeclNode {
@@ -264,6 +395,10 @@ struct VarDeclNode : public DeclNode {
               int len)
       : DeclNode(NodeKind::VarDecl, l, c, len), type(t), varName(n),
         initializer(init), isInitialized(init != nullptr) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::VarDecl;
+  }
 };
 
 struct AssignNode : public ExprNode {
@@ -275,20 +410,33 @@ struct AssignNode : public ExprNode {
   AssignNode(std::string_view o, ExprNode *t, ExprNode *v, int l, int c,
              int len)
       : ExprNode(NodeKind::Assign, l, c, len), op(o), target(t), value(v) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Assign;
+  }
 };
 
 struct BlockNode : public StmtNode {
   llvm::ArrayRef<ASTNode *> statements;
   bool isExpressionBody = false;
+  bool hasBraces = true;
 
   BlockNode(int l, int c) : StmtNode(NodeKind::Block, l, c, 1) {}
   void finalize(int endCol) { this->length = endCol - this->column; }
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Block;
+  }
 };
 
 struct ReturnNode : public StmtNode {
   ExprNode *value;
   ReturnNode(ExprNode *v, int l, int c, int len)
       : StmtNode(NodeKind::Return, l, c, len), value(v) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Return;
+  }
 };
 
 struct ParamDeclNode : public DeclNode {
@@ -303,6 +451,10 @@ struct ParamDeclNode : public DeclNode {
                 bool isReq, int l, int c, int len)
       : DeclNode(NodeKind::ParamDecl, l, c, len), type(t), name(n),
         defaultValue(defVal), isNamed(isN), isRequired(isReq) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::ParamDecl;
+  }
 };
 
 struct FunctionDeclNode : public DeclNode {
@@ -339,6 +491,10 @@ struct FunctionDeclNode : public DeclNode {
       : DeclNode(NodeKind::FunctionDecl, l, c), returnType(ret), name(n),
         body(nullptr), isConst(isC), isMethod(isMeth), isExtern(isExt),
         isVariadic(isVar), isImplicit(isImpl) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::FunctionDecl;
+  }
 };
 
 struct FunctionCallNode : public ExprNode {
@@ -354,6 +510,10 @@ struct FunctionCallNode : public ExprNode {
                    llvm::ArrayRef<std::string_view> n, int l, int c, int len)
       : ExprNode(NodeKind::FunctionCall, l, c, len), target(t), args(a),
         argNames(n) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::FunctionCall;
+  }
 };
 
 struct CastNode : public ExprNode {
@@ -361,24 +521,30 @@ struct CastNode : public ExprNode {
   const Type *targetType;
   std::string_view rawTargetTypeStr;
 
-  /* Resolves to a valid single-argument constructor if the cast
-   * requires a user-defined conversion. */
   const FunctionDeclNode *conversionConstructor = nullptr;
 
   CastNode(ExprNode *e, const Type *target, int l, int c, int len)
       : ExprNode(NodeKind::Cast, l, c, len), expr(e), targetType(target) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Cast;
+  }
 };
 
 struct ForNode : public StmtNode {
-  ASTNode *initStatement; // It can be a VarDeclNode or an ExprNode (or null).
-  ExprNode *condition;    // Optional
-  ExprNode *increment;    // Optional
+  ASTNode *initStatement;
+  ExprNode *condition;
+  ExprNode *increment;
   BlockNode *body;
 
   ForNode(ASTNode *init, ExprNode *cond, ExprNode *inc, BlockNode *b, int l,
           int c, int len)
       : StmtNode(NodeKind::For, l, c, len), initStatement(init),
         condition(cond), increment(inc), body(b) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::For;
+  }
 };
 
 struct WhileNode : public StmtNode {
@@ -387,14 +553,22 @@ struct WhileNode : public StmtNode {
 
   WhileNode(ExprNode *cond, BlockNode *b, int l, int c, int len)
       : StmtNode(NodeKind::While, l, c, len), condition(cond), body(b) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::While;
+  }
 };
 
 struct CaseNode : public ASTNode {
-  ExprNode *value; /* nullptr represents 'default' */
+  ExprNode *value;
   llvm::ArrayRef<ASTNode *> statements;
 
   CaseNode(ExprNode *v, llvm::ArrayRef<ASTNode *> stmts, int l, int c, int len)
       : ASTNode(NodeKind::Case, l, c, len), value(v), statements(stmts) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Case;
+  }
 };
 
 struct SwitchNode : public StmtNode {
@@ -406,15 +580,27 @@ struct SwitchNode : public StmtNode {
              int col, int len)
       : StmtNode(NodeKind::Switch, l, col, len), condition(cond), cases(c),
         hasDefault(hd) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Switch;
+  }
 };
 
 struct BreakNode : public StmtNode {
   BreakNode(int l, int c, int len) : StmtNode(NodeKind::Break, l, c, len) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Break;
+  }
 };
 
 struct ContinueNode : public StmtNode {
   ContinueNode(int l, int c, int len)
       : StmtNode(NodeKind::Continue, l, c, len) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Continue;
+  }
 };
 
 struct IfNode : public StmtNode {
@@ -425,6 +611,10 @@ struct IfNode : public StmtNode {
   IfNode(ExprNode *cond, BlockNode *tb, ASTNode *eb, int l, int c, int len)
       : StmtNode(NodeKind::If, l, c, len), condition(cond), thenBlock(tb),
         elseBlock(eb) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::If;
+  }
 };
 
 struct ModuleNode : public ASTNode {
@@ -444,6 +634,10 @@ struct ModuleNode : public ASTNode {
   bool canSee(std::string_view targetFilePath) const;
   bool exports(std::string_view targetFilePath,
                std::unordered_set<const ModuleNode *> &visited) const;
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Module;
+  }
 };
 
 struct AnnotationDeclNode : public DeclNode {
@@ -456,6 +650,10 @@ struct AnnotationDeclNode : public DeclNode {
   AnnotationDeclNode(std::string_view n, int l, int c, int len)
       : DeclNode(NodeKind::AnnotationDecl, l, c, len), name(n),
         constructor(nullptr) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::AnnotationDecl;
+  }
 };
 
 struct UnionDeclNode : public DeclNode {
@@ -470,6 +668,10 @@ struct UnionDeclNode : public DeclNode {
 
   UnionDeclNode(std::string_view n, int l, int c, int len)
       : DeclNode(NodeKind::UnionDecl, l, c, len), name(n), destructor(nullptr) {
+  }
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::UnionDecl;
   }
 };
 
@@ -486,6 +688,10 @@ struct StructDeclNode : public DeclNode {
   StructDeclNode(std::string_view n, int l, int c, int len)
       : DeclNode(NodeKind::StructDecl, l, c, len), name(n),
         destructor(nullptr) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::StructDecl;
+  }
 };
 
 struct ClassDeclNode : public DeclNode {
@@ -500,6 +706,10 @@ struct ClassDeclNode : public DeclNode {
 
   ClassDeclNode(std::string_view n, int l, int c, int len)
       : DeclNode(NodeKind::ClassDecl, l, c, len), name(n), destructor(nullptr) {
+  }
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::ClassDecl;
   }
 };
 
@@ -522,6 +732,10 @@ struct MemberAccessNode : public ExprNode {
   MemberAccessNode(ExprNode *obj, std::string_view mem, int l, int c, int len)
       : ExprNode(NodeKind::MemberAccess, l, c, len), object(obj),
         memberName(mem) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::MemberAccess;
+  }
 };
 
 struct ArraySubscriptNode : public ExprNode {
@@ -531,12 +745,20 @@ struct ArraySubscriptNode : public ExprNode {
 
   ArraySubscriptNode(ExprNode *b, ExprNode *i, int l, int c, int len)
       : ExprNode(NodeKind::ArraySubscript, l, c, len), base(b), index(i) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::ArraySubscript;
+  }
 };
 
 struct ArrayLiteralNode : public ExprNode {
   llvm::ArrayRef<ExprNode *> elements;
   ArrayLiteralNode(llvm::ArrayRef<ExprNode *> elems, int l, int c, int len)
       : ExprNode(NodeKind::ArrayLiteral, l, c, len), elements(elems) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::ArrayLiteral;
+  }
 };
 
 struct NewExprNode : public ExprNode {
@@ -556,6 +778,10 @@ struct NewExprNode : public ExprNode {
               bool hasParens, int l, int c, int len)
       : ExprNode(NodeKind::New, l, c, len), allocatedType(allocTy),
         arraySize(arrSize), args(a), argNames(n), hasParens(hasParens) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::New;
+  }
 };
 
 struct DeleteExprNode : public ExprNode {
@@ -564,6 +790,10 @@ struct DeleteExprNode : public ExprNode {
 
   DeleteExprNode(ExprNode *p, bool isArr, int l, int c, int len)
       : ExprNode(NodeKind::Delete, l, c, len), ptr(p), isArray(isArr) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Delete;
+  }
 };
 
 struct ImplicitCastNode : public ExprNode {
@@ -575,6 +805,10 @@ struct ImplicitCastNode : public ExprNode {
                    const FunctionDeclNode *ctor, int l, int c, int len)
       : ExprNode(NodeKind::ImplicitCast, l, c, len), expr(e),
         targetType(target), conversionConstructor(ctor) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::ImplicitCast;
+  }
 };
 
 } // namespace utopia

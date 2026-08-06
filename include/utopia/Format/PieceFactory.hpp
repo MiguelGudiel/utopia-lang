@@ -2,84 +2,9 @@
 #include "utopia/AST/ASTVisitor.hpp"
 #include "utopia/Format/Piece.hpp"
 #include <memory>
-#include <string>
 #include <vector>
 
 namespace utopia {
-
-/* Strips original indentation from multiline block comments to prevent
- the CodeWriter from double-indenting the internal lines. */
-inline std::string formatCommentString(const std::string &raw) {
-  if (raw.length() < 2 || raw.substr(0, 2) != "/*")
-    return raw;
-
-  std::string result;
-  size_t start = 0;
-  bool firstLine = true;
-  size_t commonIndent = std::string::npos;
-  bool allLinesStartWithStar = true;
-
-  /* First pass: Calculate the common indentation of all internal lines */
-  start = 0;
-  while (start < raw.length()) {
-    size_t end = raw.find('\n', start);
-    if (end == std::string::npos)
-      end = raw.length();
-
-    if (!firstLine) {
-      size_t indent = 0;
-      while (start + indent < end &&
-             (raw[start + indent] == ' ' || raw[start + indent] == '\t')) {
-        indent++;
-      }
-      if (start + indent < end) {
-        if (commonIndent == std::string::npos || indent < commonIndent) {
-          commonIndent = indent;
-        }
-        if (raw[start + indent] != '*') {
-          allLinesStartWithStar = false;
-        }
-      }
-    }
-    firstLine = false;
-    start = end + 1;
-  }
-
-  if (commonIndent == std::string::npos)
-    commonIndent = 0;
-
-  /* Preserve the 1-space offset for standard Javadoc-style block comments */
-  size_t stripCount = (allLinesStartWithStar && commonIndent > 0)
-                          ? commonIndent - 1
-                          : commonIndent;
-
-  /* Second pass: Strip the calculated indentation */
-  start = 0;
-  firstLine = true;
-  while (start < raw.length()) {
-    size_t end = raw.find('\n', start);
-    if (end == std::string::npos)
-      end = raw.length();
-
-    if (firstLine) {
-      result += raw.substr(start, end - start);
-    } else {
-      result += "\n";
-      size_t spacesToSkip = 0;
-      while (spacesToSkip < stripCount && start + spacesToSkip < end &&
-             (raw[start + spacesToSkip] == ' ' ||
-              raw[start + spacesToSkip] == '\t')) {
-        spacesToSkip++;
-      }
-      result += raw.substr(start + spacesToSkip, end - (start + spacesToSkip));
-    }
-
-    firstLine = false;
-    start = end + 1;
-  }
-
-  return result;
-}
 
 class PieceFactory : public ASTVisitor<PieceFactory, Piece *> {
 public:
@@ -92,7 +17,7 @@ public:
     return raw;
   }
 
-  Piece* extractChain(const ExprNode* node);
+  Piece *extractChain(const ExprNode *node);
   Piece *dispatchExpr(const ExprNode *node);
 
   Piece *dispatchStmt(const ASTNode *node);

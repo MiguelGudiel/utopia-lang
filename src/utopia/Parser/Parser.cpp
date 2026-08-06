@@ -115,6 +115,32 @@ std::string_view Parser::parseOperatorName() {
   return astCtx.copyString(name);
 }
 
+const Type *Parser::parseTypeModifiers(const Type *baseType, bool inNewExpr) {
+  const Type *ty = baseType;
+  while (currentToken().type == TokenType::STAR ||
+         currentToken().type == TokenType::AMPERSAND ||
+         currentToken().type == TokenType::LOGICAL_AND ||
+         currentToken().type == TokenType::CONST_KW ||
+         (!inNewExpr && currentToken().type == TokenType::LBRACKET)) {
+    if (currentToken().type == TokenType::CONST_KW) {
+      ty = astCtx.getConstType(ty);
+      advance();
+    } else if (currentToken().type == TokenType::STAR) {
+      ty = astCtx.getPointerType(ty);
+      advance();
+    } else if (currentToken().type == TokenType::AMPERSAND) {
+      ty = astCtx.getReferenceType(ty);
+      advance();
+    } else if (currentToken().type == TokenType::LOGICAL_AND) {
+      ty = astCtx.getRValueReferenceType(ty);
+      advance();
+    } else if (!inNewExpr && currentToken().type == TokenType::LBRACKET) {
+      ty = applyArrayDeclarator(ty);
+    }
+  }
+  return ty;
+}
+
 const Type *Parser::parseType(bool inNewExpr) {
   bool isConst = match(TokenType::CONST_KW);
 
@@ -172,27 +198,7 @@ const Type *Parser::parseType(bool inNewExpr) {
     ty = astCtx.getConstType(ty);
   }
 
-  while (currentToken().type == TokenType::STAR ||
-         currentToken().type == TokenType::AMPERSAND ||
-         currentToken().type == TokenType::LOGICAL_AND ||
-         currentToken().type == TokenType::CONST_KW ||
-         (!inNewExpr && currentToken().type == TokenType::LBRACKET)) {
-    if (currentToken().type == TokenType::CONST_KW) {
-      ty = astCtx.getConstType(ty);
-      advance();
-    } else if (currentToken().type == TokenType::STAR) {
-      ty = astCtx.getPointerType(ty);
-      advance();
-    } else if (currentToken().type == TokenType::AMPERSAND) {
-      ty = astCtx.getReferenceType(ty);
-      advance();
-    } else if (currentToken().type == TokenType::LOGICAL_AND) {
-      ty = astCtx.getRValueReferenceType(ty);
-      advance();
-    } else if (!inNewExpr && currentToken().type == TokenType::LBRACKET) {
-      ty = applyArrayDeclarator(ty);
-    }
-  }
+  ty = parseTypeModifiers(ty, inNewExpr);
 
   if (match(TokenType::FUNCTION_KW)) {
     expect(TokenType::LPAREN, "Expected '(' after 'Function'");
@@ -208,30 +214,9 @@ const Type *Parser::parseType(bool inNewExpr) {
     expect(TokenType::RPAREN, "Expected ')' after function parameters");
 
     ty = astCtx.getFunctionType(ty, astCtx.copyArray<const Type *>(paramTypes));
-
     ty = astCtx.getPointerType(ty);
 
-    while (currentToken().type == TokenType::STAR ||
-           currentToken().type == TokenType::AMPERSAND ||
-           currentToken().type == TokenType::LOGICAL_AND ||
-           currentToken().type == TokenType::CONST_KW ||
-           (!inNewExpr && currentToken().type == TokenType::LBRACKET)) {
-      if (currentToken().type == TokenType::CONST_KW) {
-        ty = astCtx.getConstType(ty);
-        advance();
-      } else if (currentToken().type == TokenType::STAR) {
-        ty = astCtx.getPointerType(ty);
-        advance();
-      } else if (currentToken().type == TokenType::AMPERSAND) {
-        ty = astCtx.getReferenceType(ty);
-        advance();
-      } else if (currentToken().type == TokenType::LOGICAL_AND) {
-        ty = astCtx.getRValueReferenceType(ty);
-        advance();
-      } else if (!inNewExpr && currentToken().type == TokenType::LBRACKET) {
-        ty = applyArrayDeclarator(ty);
-      }
-    }
+    ty = parseTypeModifiers(ty, inNewExpr);
   }
 
   return ty;
@@ -271,9 +256,7 @@ std::string Parser::consumeComments() {
         if (*p == '\n')
           newlines++;
       }
-      if (newlines > 1) {
-        doc += std::string(newlines - 1, '\n');
-      }
+      doc += std::string(newlines, '\n');
     }
   }
 
@@ -286,12 +269,22 @@ ModuleNode *Parser::parseModule(std::string_view filePath) {
   std::vector<std::string_view> imports;
   std::vector<std::string_view> exports;
   std::vector<ASTNode *> statements;
+  std::string moduleDoc;
 
   while (currentToken().type != TokenType::EOF_TOK) {
     try {
       if (currentToken().type == TokenType::IDENTIFIER &&
           (currentToken().value == "import" ||
            currentToken().value == "export")) {
+
+        std::string importDoc = consumeComments();
+        if (!importDoc.empty()) {
+          if (moduleDoc.empty()) {
+            moduleDoc = importDoc;
+          } else {
+            moduleDoc += importDoc;
+          }
+        }
 
         bool isExport = (currentToken().value == "export");
         advance();
@@ -346,6 +339,30 @@ ModuleNode *Parser::parseModule(std::string_view filePath) {
     } catch (const ParseException &) {
       synchronize();
     }
+  }
+
+  std::string eofDoc = consumeComments();
+  if (!eofDoc.empty()) {
+    if (!statements.empty()) {
+      ASTNode *lastStmt = statements.back();
+      std::string combined;
+      if (!lastStmt->trailingComment.empty()) {
+        combined = std::string(lastStmt->trailingComment) + "\n" + eofDoc;
+      } else {
+        combined = "\n" + eofDoc;
+      }
+      lastStmt->trailingComment = astCtx.copyString(combined);
+    } else {
+      if (moduleDoc.empty()) {
+        moduleDoc = eofDoc;
+      } else {
+        moduleDoc += eofDoc;
+      }
+    }
+  }
+
+  if (!moduleDoc.empty()) {
+    module->docString = astCtx.copyString(moduleDoc);
   }
 
   module->rawImports = astCtx.copyArray<std::string_view>(imports);
@@ -472,6 +489,7 @@ std::vector<ParamDeclNode *> Parser::parseParameterList(bool &isVariadic) {
     std::string_view rawTypeStr(typeStart, typeEnd - typeStart);
 
     std::string_view pName = currentToken().value;
+    int idCol = currentToken().column;
     int pLen = (int)pName.length();
     expect(TokenType::IDENTIFIER, "Expected parameter name.");
 
@@ -509,6 +527,9 @@ std::vector<ParamDeclNode *> Parser::parseParameterList(bool &isVariadic) {
     auto paramNode = astCtx.create<ParamDeclNode>(
         pType, pName, defVal, inNamedBlock, isRequired, pLine, pCol, pLen);
     paramNode->rawTypeStr = rawTypeStr;
+    paramNode->identifierColumn = idCol;
+    paramNode->identifierLength = pLen;
+
     if (!doc.empty())
       paramNode->docString = astCtx.copyString(doc);
     if (cursor > 0 && !tokens[cursor - 1].trailingComment.empty()) {
@@ -658,6 +679,8 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
   expect(TokenType::CLASS_KW, "Expected 'class' after 'annotation'");
 
   std::string_view name = currentToken().value;
+  int idCol = currentToken().column;
+  int idLen = name.length();
   expect(TokenType::IDENTIFIER, "Expected annotation class name");
 
   RecordType *classTy = astCtx.createRecordType(TypeKind::Class, name);
@@ -703,6 +726,7 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
         peekToken().value == name) {
       int cLine = currentToken().line;
       int cCol = currentToken().column;
+      int ctorIdCol = peekToken().column;
 
       advance(); /* const */
       advance(); /* name */
@@ -730,6 +754,8 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
       constructor->annotations = memberAnnotations;
       constructor->hasPublicMod = isPub;
       constructor->hasPrivateMod = isPriv;
+      constructor->identifierColumn = ctorIdCol;
+      constructor->identifierLength = name.length();
 
       if (!doc.empty())
         constructor->docString = astCtx.copyString(doc);
@@ -754,6 +780,8 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
     std::string_view rawTypeStr(typeStart, typeEnd - typeStart);
 
     std::string_view memName = currentToken().value;
+    int memIdCol = currentToken().column;
+    int memIdLen = memName.length();
 
     expect(TokenType::IDENTIFIER, "Expected member name");
 
@@ -771,6 +799,8 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
     field->hasPrivateMod = isPriv;
     field->rawTypeStr = rawTypeStr;
     field->endLine = endLine;
+    field->identifierColumn = memIdCol;
+    field->identifierLength = memIdLen;
 
     if (!doc.empty())
       field->docString = astCtx.copyString(doc);
@@ -781,9 +811,31 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
     fields.push_back(field);
   }
 
+  std::string closingDoc = consumeComments();
+
   int endLine = currentToken().line;
   int endCol = currentToken().column + 1;
   expect(TokenType::RBRACE, "Expected '}'");
+
+  if (!closingDoc.empty()) {
+    ASTNode *lastMember = nullptr;
+    for (auto *f : fields)
+      if (!lastMember || f->endLine > lastMember->endLine)
+        lastMember = f;
+    if (constructor &&
+        (!lastMember || constructor->endLine > lastMember->endLine))
+      lastMember = constructor;
+
+    if (lastMember) {
+      std::string combined;
+      if (!lastMember->trailingComment.empty()) {
+        combined = std::string(lastMember->trailingComment) + "\n" + closingDoc;
+      } else {
+        combined = "\n" + closingDoc;
+      }
+      lastMember->trailingComment = astCtx.copyString(combined);
+    }
+  }
 
   std::vector<FieldInfo> fInfos;
   for (size_t i = 0; i < fields.size(); ++i) {
@@ -797,6 +849,8 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
   node->constructor = constructor;
   node->annotations = annotations;
   node->endLine = endLine;
+  node->identifierColumn = idCol;
+  node->identifierLength = idLen;
 
   if (!constructor) {
     reportError(line, col, endCol - col,
@@ -934,6 +988,8 @@ DeclNode *Parser::parseTypedefDecl() {
   advance(); /* consume 'typedef' */
 
   std::string_view name = currentToken().value;
+  int idCol = currentToken().column;
+  int idLen = name.length();
   expect(TokenType::IDENTIFIER, "Expected alias name after 'typedef'");
 
   expect(TokenType::ASSIGN, "Expected '=' in typedef declaration");
@@ -987,6 +1043,9 @@ DeclNode *Parser::parseTypedefDecl() {
     decl->rawTargetTypeStr = rawTypeStr;
   }
   decl->endLine = endLine;
+  decl->identifierColumn = idCol;
+  decl->identifierLength = idLen;
+
   return decl;
 }
 
@@ -1001,6 +1060,7 @@ BlockNode *Parser::parseStatementAsBlock() {
   auto stmt = parseStatement();
 
   auto block = astCtx.create<BlockNode>(startLine, startCol);
+  block->hasBraces = false;
   if (stmt) {
     std::vector<ASTNode *> statements = {stmt};
     block->statements = astCtx.copyArray<ASTNode *>(statements);
@@ -1178,9 +1238,22 @@ SwitchNode *Parser::parseSwitchStatement() {
     cases.push_back(caseNode);
   }
 
+  std::string closingDoc = consumeComments();
+
   int endLine = currentToken().line;
   int endCol = currentToken().column + 1;
   expect(TokenType::RBRACE, "Expected '}' at end of switch block");
+
+  if (!closingDoc.empty() && !cases.empty()) {
+    ASTNode *lastCase = cases.back();
+    std::string combined;
+    if (!lastCase->trailingComment.empty()) {
+      combined = std::string(lastCase->trailingComment) + "\n" + closingDoc;
+    } else {
+      combined = "\n" + closingDoc;
+    }
+    lastCase->trailingComment = astCtx.copyString(combined);
+  }
 
   auto node =
       astCtx.create<SwitchNode>(cond, astCtx.copyArray<CaseNode *>(cases),
@@ -1454,6 +1527,8 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
   advance();
 
   std::string_view name = currentToken().value;
+  int idCol = currentToken().column;
+  int idLen = name.length();
   expect(TokenType::IDENTIFIER, "Expected record name");
 
   std::vector<std::string_view> tParams;
@@ -1506,6 +1581,9 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
       node = uNode;
     }
 
+    node->identifierColumn = idCol;
+    node->identifierLength = idLen;
+
     popTemplateParams(tParams.size());
     return node;
   }
@@ -1551,6 +1629,8 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
       advance();
 
       std::string_view dtorName = currentToken().value;
+      int dtorIdCol = currentToken().column;
+      int dtorIdLen = dtorName.length() + 1; // account for ~ in LSP targeting
       expect(TokenType::IDENTIFIER, "Expected record name after '~'");
 
       if (dtorName != name) {
@@ -1574,6 +1654,8 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
       destructor->annotations = memberAnnotations;
       destructor->hasPublicMod = isPub;
       destructor->hasPrivateMod = isPriv;
+      destructor->identifierColumn = dCol; // starts at ~
+      destructor->identifierLength = dtorIdLen;
 
       if (!doc.empty())
         destructor->docString = astCtx.copyString(doc);
@@ -1589,10 +1671,12 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
     }
 
     bool isConstCtor = false;
+    int ctorIdCol = currentToken().column;
     if (currentToken().type == TokenType::CONST_KW &&
         peekToken().type == TokenType::IDENTIFIER &&
         peekToken().value == name && peekToken(2).type == TokenType::LPAREN) {
       isConstCtor = true;
+      ctorIdCol = peekToken().column;
     }
 
     if (isConstCtor || (currentToken().type == TokenType::IDENTIFIER &&
@@ -1618,6 +1702,8 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
       constructor->annotations = memberAnnotations;
       constructor->hasPublicMod = isPub;
       constructor->hasPrivateMod = isPriv;
+      constructor->identifierColumn = ctorIdCol;
+      constructor->identifierLength = name.length();
 
       if (!doc.empty())
         constructor->docString = astCtx.copyString(doc);
@@ -1662,10 +1748,15 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
     std::string_view rawTypeStr(typeStart, typeEnd - typeStart);
 
     std::string_view memName;
+    int memIdCol = currentToken().column;
+    int memIdLen = 0;
+
     if (match(TokenType::OPERATOR_KW)) {
       memName = parseOperatorName();
+      memIdLen = memName.length();
     } else {
       memName = currentToken().value;
+      memIdLen = memName.length();
       expect(TokenType::IDENTIFIER, "Expected member name");
     }
 
@@ -1710,6 +1801,8 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
       method->hasPublicMod = isPub;
       method->hasPrivateMod = isPriv;
       method->rawReturnTypeStr = rawTypeStr;
+      method->identifierColumn = memIdCol;
+      method->identifierLength = memIdLen;
 
       if (!doc.empty())
         method->docString = astCtx.copyString(doc);
@@ -1777,6 +1870,8 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
       field->hasPrivateMod = isPriv;
       field->rawTypeStr = rawTypeStr;
       field->endLine = endLine;
+      field->identifierColumn = memIdCol;
+      field->identifierLength = memIdLen;
 
       if (!doc.empty())
         field->docString = astCtx.copyString(doc);
@@ -1870,6 +1965,9 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
     node = uNode;
   }
 
+  node->identifierColumn = idCol;
+  node->identifierLength = idLen;
+
   popTemplateParams(tParams.size());
   return node;
 }
@@ -1880,6 +1978,8 @@ DeclNode *Parser::parseEnumDecl() {
   advance(); /* consume 'enum' */
 
   std::string_view name = currentToken().value;
+  int idCol = currentToken().column;
+  int idLen = name.length();
   expect(TokenType::IDENTIFIER, "Expected enum name");
 
   const Type *underlyingType = astCtx.Int32Ty;
@@ -1920,6 +2020,8 @@ DeclNode *Parser::parseEnumDecl() {
     int mLine = currentToken().line;
     int mCol = currentToken().column;
     std::string_view mName = currentToken().value;
+    int midCol = currentToken().column;
+    int midLen = mName.length();
     expect(TokenType::IDENTIFIER, "Expected enum member name");
 
     for (auto *existing : members) {
@@ -1944,6 +2046,8 @@ DeclNode *Parser::parseEnumDecl() {
     memberNode->endLine = endLine;
     memberNode->hasPublicMod = isPub;
     memberNode->hasPrivateMod = isPriv;
+    memberNode->identifierColumn = midCol;
+    memberNode->identifierLength = midLen;
 
     if (!doc.empty())
       memberNode->docString = astCtx.copyString(doc);
@@ -1958,15 +2062,31 @@ DeclNode *Parser::parseEnumDecl() {
     }
   }
 
+  std::string closingDoc = consumeComments();
+
   int endLine = currentToken().line;
   int endCol = currentToken().column + 1;
   expect(TokenType::RBRACE, "Expected '}'");
+
+  if (!closingDoc.empty() && !members.empty()) {
+    ASTNode *lastMember = members.back();
+    std::string combined;
+    if (!lastMember->trailingComment.empty()) {
+      combined = std::string(lastMember->trailingComment) + "\n" + closingDoc;
+    } else {
+      combined = "\n" + closingDoc;
+    }
+    lastMember->trailingComment = astCtx.copyString(combined);
+  }
 
   auto node = astCtx.create<EnumDeclNode>(name, underlyingType, line, col,
                                           endCol - col);
   node->members = astCtx.copyArray<EnumMemberNode *>(members);
   node->enumType = astCtx.getEnumType(name, underlyingType);
   node->endLine = endLine;
+  node->identifierColumn = idCol;
+  node->identifierLength = idLen;
+
   return node;
 }
 
@@ -2000,14 +2120,17 @@ DeclNode *Parser::parseDeclarationOrFunction(
   std::string_view rawTypeStr(typeStart, typeEnd - typeStart);
 
   std::string_view id;
+  int idCol = currentToken().column;
+  int idLen = 0;
+
   if (match(TokenType::OPERATOR_KW)) {
     id = parseOperatorName();
+    idLen = id.length();
   } else {
     id = currentToken().value;
+    idLen = id.length();
     expect(TokenType::IDENTIFIER, "Expected identifier after type");
   }
-
-  int idLen = (int)id.length();
 
   std::vector<std::string_view> tParams;
   if (match(TokenType::LT)) {
@@ -2048,6 +2171,8 @@ DeclNode *Parser::parseDeclarationOrFunction(
     funcDecl->isStatic = isStatic;
     funcDecl->params = astCtx.copyArray<ParamDeclNode *>(params);
     funcDecl->rawReturnTypeStr = rawTypeStr;
+    funcDecl->identifierColumn = idCol;
+    funcDecl->identifierLength = idLen;
 
     if (isExtern || isIntrinsic) {
       int endLine = currentToken().line;
@@ -2093,6 +2218,9 @@ DeclNode *Parser::parseDeclarationOrFunction(
       astCtx.create<VarDeclNode>(nodeType, id, init, line, col, endCol - col);
   varDecl->rawTypeStr = rawTypeStr;
   varDecl->endLine = endLine;
+  varDecl->identifierColumn = idCol;
+  varDecl->identifierLength = idLen;
+
   return varDecl;
 }
 
@@ -2111,9 +2239,23 @@ BlockNode *Parser::parseBlock() {
     }
   }
 
+  std::string closingDoc = consumeComments();
+
   int endLine = currentToken().line;
   int endCol = currentToken().column + 1;
   expect(TokenType::RBRACE, "Expected '}'");
+
+  if (!closingDoc.empty() && !statements.empty()) {
+    ASTNode *lastStmt = statements.back();
+    std::string combined;
+    if (!lastStmt->trailingComment.empty()) {
+      combined = std::string(lastStmt->trailingComment) + "\n" + closingDoc;
+    } else {
+      combined = "\n" + closingDoc;
+    }
+    lastStmt->trailingComment = astCtx.copyString(combined);
+  }
+
   block->statements = astCtx.copyArray<ASTNode *>(statements);
   block->finalize(endCol);
   block->endLine = endLine;

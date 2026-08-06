@@ -217,21 +217,21 @@ void ControlFlowPass::visit(const AssignNode *node) {
 }
 
 void ControlFlowPass::visit(const VariableNode *node) {
-  if (node->resolvedDecl && node->resolvedDecl->kind == NodeKind::VarDecl) {
-    auto *varDecl = static_cast<const VarDeclNode *>(node->resolvedDecl);
-
-    if (!varDecl->isGlobal && !varDecl->isStatic && !varDecl->isExtern) {
-      if (isAssignTarget) {
-        initStates[varDecl] = true;
-      } else {
-        auto it = initStates.find(varDecl);
-        if (it != initStates.end() && !it->second) {
-          ctx->diags.report({DiagLevel::Warning, node->line, node->column,
-                             node->length,
-                             "Use of uninitialized variable '" +
-                                 std::string(node->name) + "'",
-                             std::string(ctx->currentFile)});
+  if (node->resolvedDecl) {
+    if (auto *varDecl = llvm::dyn_cast<VarDeclNode>(node->resolvedDecl)) {
+      if (!varDecl->isGlobal && !varDecl->isStatic && !varDecl->isExtern) {
+        if (isAssignTarget) {
           initStates[varDecl] = true;
+        } else {
+          auto it = initStates.find(varDecl);
+          if (it != initStates.end() && !it->second) {
+            ctx->diags.report({DiagLevel::Warning, node->line, node->column,
+                               node->length,
+                               "Use of uninitialized variable '" +
+                                   std::string(node->name) + "'",
+                               std::string(ctx->currentFile)});
+            initStates[varDecl] = true;
+          }
         }
       }
     }
@@ -245,12 +245,12 @@ void ControlFlowPass::visit(const UnaryOpNode *node) {
     dispatch(node->expr);
     isAssignTarget = prevAssignTarget;
 
-    if (node->expr->kind == NodeKind::Variable) {
-      auto *varNode = static_cast<const VariableNode *>(node->expr);
-      if (varNode->resolvedDecl &&
-          varNode->resolvedDecl->kind == NodeKind::VarDecl) {
-        auto *varDecl = static_cast<const VarDeclNode *>(varNode->resolvedDecl);
-        initStates[varDecl] = true;
+    if (auto *varNode = llvm::dyn_cast<VariableNode>(node->expr)) {
+      if (varNode->resolvedDecl) {
+        if (auto *varDecl =
+                llvm::dyn_cast<VarDeclNode>(varNode->resolvedDecl)) {
+          initStates[varDecl] = true;
+        }
       }
     }
   } else {
@@ -340,23 +340,22 @@ void ControlFlowPass::visit(const FunctionCallNode *node) {
       dispatch(arg);
       isAssignTarget = prevAssignTarget;
 
-      if (arg->kind == NodeKind::Variable) {
-        auto *varNode = static_cast<const VariableNode *>(arg);
-        if (varNode->resolvedDecl &&
-            varNode->resolvedDecl->kind == NodeKind::VarDecl) {
-          auto *varDecl =
-              static_cast<const VarDeclNode *>(varNode->resolvedDecl);
-          initStates[varDecl] = true;
-        }
-      } else if (arg->kind == NodeKind::UnaryOp) {
-        auto *uop = static_cast<const UnaryOpNode *>(arg);
-        if (uop->op == "&" && uop->expr->kind == NodeKind::Variable) {
-          auto *varNode = static_cast<const VariableNode *>(uop->expr);
-          if (varNode->resolvedDecl &&
-              varNode->resolvedDecl->kind == NodeKind::VarDecl) {
-            auto *varDecl =
-                static_cast<const VarDeclNode *>(varNode->resolvedDecl);
+      if (auto *varNode = llvm::dyn_cast<VariableNode>(arg)) {
+        if (varNode->resolvedDecl) {
+          if (auto *varDecl =
+                  llvm::dyn_cast<VarDeclNode>(varNode->resolvedDecl)) {
             initStates[varDecl] = true;
+          }
+        }
+      } else if (auto *uop = llvm::dyn_cast<UnaryOpNode>(arg)) {
+        if (uop->op == "&") {
+          if (auto *varNode = llvm::dyn_cast<VariableNode>(uop->expr)) {
+            if (varNode->resolvedDecl) {
+              if (auto *varDecl =
+                      llvm::dyn_cast<VarDeclNode>(varNode->resolvedDecl)) {
+                initStates[varDecl] = true;
+              }
+            }
           }
         }
       }

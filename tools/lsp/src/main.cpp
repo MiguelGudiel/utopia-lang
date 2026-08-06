@@ -214,6 +214,11 @@ SourceLocation getExactNameLocation(const std::string &text,
     return {-1, -1, 0};
   }
 
+  if (decl->identifierColumn > 0 && decl->identifierLength > 0) {
+    return {decl->line > 0 ? decl->line - 1 : 0, decl->identifierColumn - 1,
+            decl->identifierLength};
+  }
+
   SourceLocation loc{decl->line > 0 ? decl->line - 1 : 0,
                      decl->column > 0 ? decl->column - 1 : 0,
                      decl->length > 0 ? decl->length : 1};
@@ -221,26 +226,26 @@ SourceLocation getExactNameLocation(const std::string &text,
     return loc;
 
   std::string_view name;
-  if (decl->kind == NodeKind::VarDecl)
-    name = static_cast<const VarDeclNode *>(decl)->varName;
-  else if (decl->kind == NodeKind::FunctionDecl)
-    name = static_cast<const FunctionDeclNode *>(decl)->name;
-  else if (decl->kind == NodeKind::ParamDecl)
-    name = static_cast<const ParamDeclNode *>(decl)->name;
-  else if (decl->kind == NodeKind::StructDecl)
-    name = static_cast<const StructDeclNode *>(decl)->name;
-  else if (decl->kind == NodeKind::ClassDecl)
-    name = static_cast<const ClassDeclNode *>(decl)->name;
-  else if (decl->kind == NodeKind::UnionDecl)
-    name = static_cast<const UnionDeclNode *>(decl)->name;
-  else if (decl->kind == NodeKind::EnumDecl)
-    name = static_cast<const EnumDeclNode *>(decl)->name;
-  else if (decl->kind == NodeKind::TypedefDecl)
-    name = static_cast<const TypedefDeclNode *>(decl)->aliasName;
-  else if (decl->kind == NodeKind::EnumMember)
-    name = static_cast<const EnumMemberNode *>(decl)->name;
-  else if (decl->kind == NodeKind::AnnotationDecl)
-    name = static_cast<const AnnotationDeclNode *>(decl)->name;
+  if (auto *varDecl = llvm::dyn_cast<VarDeclNode>(decl))
+    name = varDecl->varName;
+  else if (auto *funcDecl = llvm::dyn_cast<FunctionDeclNode>(decl))
+    name = funcDecl->name;
+  else if (auto *paramDecl = llvm::dyn_cast<ParamDeclNode>(decl))
+    name = paramDecl->name;
+  else if (auto *structDecl = llvm::dyn_cast<StructDeclNode>(decl))
+    name = structDecl->name;
+  else if (auto *classDecl = llvm::dyn_cast<ClassDeclNode>(decl))
+    name = classDecl->name;
+  else if (auto *unionDecl = llvm::dyn_cast<UnionDeclNode>(decl))
+    name = unionDecl->name;
+  else if (auto *enumDecl = llvm::dyn_cast<EnumDeclNode>(decl))
+    name = enumDecl->name;
+  else if (auto *typedefDecl = llvm::dyn_cast<TypedefDeclNode>(decl))
+    name = typedefDecl->aliasName;
+  else if (auto *enumMem = llvm::dyn_cast<EnumMemberNode>(decl))
+    name = enumMem->name;
+  else if (auto *annDecl = llvm::dyn_cast<AnnotationDeclNode>(decl))
+    name = annDecl->name;
 
   if (name.empty())
     return loc;
@@ -334,29 +339,19 @@ std::string getHoverTextForDecl(const DeclNode *decl) {
     return "";
   std::string text;
 
-  if (decl->kind == NodeKind::ClassDecl) {
-    text = "```utopia\nclass " +
-           std::string(static_cast<const ClassDeclNode *>(decl)->name) +
-           "\n```";
-  } else if (decl->kind == NodeKind::StructDecl) {
-    text = "```utopia\nstruct " +
-           std::string(static_cast<const StructDeclNode *>(decl)->name) +
-           "\n```";
-  } else if (decl->kind == NodeKind::UnionDecl) {
-    text = "```utopia\nunion " +
-           std::string(static_cast<const UnionDeclNode *>(decl)->name) +
-           "\n```";
-  } else if (decl->kind == NodeKind::EnumDecl) {
-    text = "```utopia\nenum " +
-           std::string(static_cast<const EnumDeclNode *>(decl)->name) + "\n```";
-  } else if (decl->kind == NodeKind::TypedefDecl) {
-    text = "```utopia\ntypedef " +
-           std::string(static_cast<const TypedefDeclNode *>(decl)->aliasName) +
-           "\n```";
-  } else if (decl->kind == NodeKind::AnnotationDecl) {
-    text = "```utopia\nannotation " +
-           std::string(static_cast<const AnnotationDeclNode *>(decl)->name) +
-           "\n```";
+  if (auto *classDecl = llvm::dyn_cast<ClassDeclNode>(decl)) {
+    text = "```utopia\nclass " + std::string(classDecl->name) + "\n```";
+  } else if (auto *structDecl = llvm::dyn_cast<StructDeclNode>(decl)) {
+    text = "```utopia\nstruct " + std::string(structDecl->name) + "\n```";
+  } else if (auto *unionDecl = llvm::dyn_cast<UnionDeclNode>(decl)) {
+    text = "```utopia\nunion " + std::string(unionDecl->name) + "\n```";
+  } else if (auto *enumDecl = llvm::dyn_cast<EnumDeclNode>(decl)) {
+    text = "```utopia\nenum " + std::string(enumDecl->name) + "\n```";
+  } else if (auto *typedefDecl = llvm::dyn_cast<TypedefDeclNode>(decl)) {
+    text =
+        "```utopia\ntypedef " + std::string(typedefDecl->aliasName) + "\n```";
+  } else if (auto *annDecl = llvm::dyn_cast<AnnotationDeclNode>(decl)) {
+    text = "```utopia\nannotation " + std::string(annDecl->name) + "\n```";
   }
 
   if (!decl->docString.empty())
@@ -798,8 +793,7 @@ void handleDefinition(const json &req) {
     if (node) {
       const DeclNode *targetDecl = nullptr;
 
-      if (node->kind == NodeKind::Variable) {
-        auto varNode = static_cast<const VariableNode *>(node);
+      if (auto *varNode = llvm::dyn_cast<VariableNode>(node)) {
         if (varNode->resolvedDecl) {
           targetDecl = varNode->resolvedDecl;
         } else if (varNode->isField && varNode->parentType) {
@@ -807,12 +801,12 @@ void handleDefinition(const json &req) {
           auto decl = recTy->getDeclaration();
           if (decl) {
             llvm::ArrayRef<VarDeclNode *> fields;
-            if (decl->kind == NodeKind::ClassDecl) {
-              fields = static_cast<const ClassDeclNode *>(decl)->fields;
-            } else if (decl->kind == NodeKind::StructDecl) {
-              fields = static_cast<const StructDeclNode *>(decl)->fields;
-            } else if (decl->kind == NodeKind::UnionDecl) {
-              fields = static_cast<const UnionDeclNode *>(decl)->fields;
+            if (auto *cDecl = llvm::dyn_cast<ClassDeclNode>(decl)) {
+              fields = cDecl->fields;
+            } else if (auto *sDecl = llvm::dyn_cast<StructDeclNode>(decl)) {
+              fields = sDecl->fields;
+            } else if (auto *uDecl = llvm::dyn_cast<UnionDeclNode>(decl)) {
+              fields = uDecl->fields;
             }
             for (auto *f : fields) {
               if (f->varName == varNode->name) {
@@ -822,10 +816,9 @@ void handleDefinition(const json &req) {
             }
           }
         }
-      } else if (node->kind == NodeKind::FunctionCall) {
-        targetDecl = static_cast<const FunctionCallNode *>(node)->resolvedFunc;
-      } else if (node->kind == NodeKind::MemberAccess) {
-        auto ma = static_cast<const MemberAccessNode *>(node);
+      } else if (auto *callNode = llvm::dyn_cast<FunctionCallNode>(node)) {
+        targetDecl = callNode->resolvedFunc;
+      } else if (auto *ma = llvm::dyn_cast<MemberAccessNode>(node)) {
         if (ma->isMethodRef) {
           targetDecl = ma->resolvedMethod;
         } else if (ma->isStaticFieldRef) {
@@ -852,12 +845,12 @@ void handleDefinition(const json &req) {
               auto decl = recTy->getDeclaration();
               if (decl) {
                 llvm::ArrayRef<VarDeclNode *> fields;
-                if (decl->kind == NodeKind::ClassDecl) {
-                  fields = static_cast<const ClassDeclNode *>(decl)->fields;
-                } else if (decl->kind == NodeKind::StructDecl) {
-                  fields = static_cast<const StructDeclNode *>(decl)->fields;
-                } else if (decl->kind == NodeKind::UnionDecl) {
-                  fields = static_cast<const UnionDeclNode *>(decl)->fields;
+                if (auto *cDecl = llvm::dyn_cast<ClassDeclNode>(decl)) {
+                  fields = cDecl->fields;
+                } else if (auto *sDecl = llvm::dyn_cast<StructDeclNode>(decl)) {
+                  fields = sDecl->fields;
+                } else if (auto *uDecl = llvm::dyn_cast<UnionDeclNode>(decl)) {
+                  fields = uDecl->fields;
                 }
                 for (auto *f : fields) {
                   if (f->varName == ma->memberName) {
@@ -869,34 +862,23 @@ void handleDefinition(const json &req) {
             }
           }
         }
-      } else if (node->kind == NodeKind::New) {
-        targetDecl =
-            static_cast<const NewExprNode *>(node)->resolvedConstructor;
-      } else if (node->kind == NodeKind::Cast) {
-        targetDecl =
-            getTypeDeclaration(static_cast<const CastNode *>(node)->targetType);
-      } else if (node->kind == NodeKind::FunctionDecl ||
-                 node->kind == NodeKind::VarDecl ||
-                 node->kind == NodeKind::ParamDecl ||
-                 node->kind == NodeKind::ClassDecl ||
-                 node->kind == NodeKind::StructDecl ||
-                 node->kind == NodeKind::UnionDecl ||
-                 node->kind == NodeKind::EnumDecl ||
-                 node->kind == NodeKind::EnumMember ||
-                 node->kind == NodeKind::TypedefDecl ||
-                 node->kind == NodeKind::AnnotationDecl) {
-
-        targetDecl = static_cast<const DeclNode *>(node);
+      } else if (auto *newNode = llvm::dyn_cast<NewExprNode>(node)) {
+        targetDecl = newNode->resolvedConstructor;
+      } else if (auto *castNode = llvm::dyn_cast<CastNode>(node)) {
+        targetDecl = getTypeDeclaration(castNode->targetType);
+      } else if (auto *declNode = llvm::dyn_cast<DeclNode>(node)) {
+        targetDecl = declNode;
         auto loc = getExactNameLocation(doc.text, targetDecl);
 
         if (col - 1 < loc.col) {
           const Type *t = nullptr;
-          if (targetDecl->kind == NodeKind::VarDecl)
-            t = static_cast<const VarDeclNode *>(targetDecl)->type;
-          else if (targetDecl->kind == NodeKind::FunctionDecl)
-            t = static_cast<const FunctionDeclNode *>(targetDecl)->returnType;
-          else if (targetDecl->kind == NodeKind::ParamDecl)
-            t = static_cast<const ParamDeclNode *>(targetDecl)->type;
+          if (auto *varDecl = llvm::dyn_cast<VarDeclNode>(targetDecl))
+            t = varDecl->type;
+          else if (auto *funcDecl =
+                       llvm::dyn_cast<FunctionDeclNode>(targetDecl))
+            t = funcDecl->returnType;
+          else if (auto *paramDecl = llvm::dyn_cast<ParamDeclNode>(targetDecl))
+            t = paramDecl->type;
 
           if (t) {
             if (auto typeDecl = getTypeDeclaration(t)) {
@@ -1585,19 +1567,123 @@ void handleFormatting(const json &req) {
   std::string uri = req["params"]["textDocument"]["uri"];
   json res = nullptr;
 
-  std::shared_lock<std::shared_mutex> lock(docMutex);
-  if (documents.contains(uri)) {
-    auto &doc = documents[uri];
-    if (doc.ast) {
-      std::string formatted = Formatter::format(doc.ast);
-      if (!formatted.empty()) {
-        int lineCount = std::count(doc.text.begin(), doc.text.end(), '\n') + 1;
-        res = json::array();
-        res.push_back({{"range",
-                        {{"start", {{"line", 0}, {"character", 0}}},
-                         {"end", {{"line", lineCount}, {"character", 0}}}}},
-                       {"newText", formatted}});
+  std::string textToFormat;
+  std::filesystem::path projRoot;
+
+  {
+    std::shared_lock<std::shared_mutex> lock(docMutex);
+    if (documents.contains(uri)) {
+      textToFormat = documents[uri].text;
+    }
+  }
+
+  if (!textToFormat.empty()) {
+    std::string filePath = uriToPath(uri);
+    std::filesystem::path currentPath(filePath);
+
+    {
+      std::lock_guard<std::mutex> lock(cacheMutex);
+      if (uriToProjectRoot.contains(uri)) {
+        projRoot = uriToProjectRoot[uri];
+      } else {
+        projRoot = findProjectRootLSP(currentPath);
+        uriToProjectRoot[uri] = projRoot;
       }
+    }
+
+    ModuleLoaderConfig modConfig;
+    bool foundCache = false;
+    std::string projRootStr = projRoot.string();
+
+    {
+      std::lock_guard<std::mutex> lock(cacheMutex);
+      if (projectConfigCache.contains(projRootStr)) {
+        modConfig = projectConfigCache[projRootStr];
+        foundCache = true;
+      }
+    }
+
+    if (!foundCache) {
+      modConfig.projectRoot = projRoot;
+      std::filesystem::path stdlibPath =
+          projRoot.empty() ? ""
+                           : projRoot.parent_path().parent_path() / "libs" /
+                                 "stdlib" / "lib";
+      std::filesystem::path preludePath =
+          projRoot.empty() ? ""
+                           : projRoot.parent_path().parent_path() / "libs" /
+                                 "prelude" / "lib";
+      std::filesystem::path buildLibPath =
+          projRoot.empty() ? ""
+                           : projRoot.parent_path().parent_path() / "libs" /
+                                 "builder" / "lib";
+
+#ifdef UTOPIA_SOURCE_DIR
+      if (!std::filesystem::exists(stdlibPath)) {
+        stdlibPath = std::filesystem::path(UTOPIA_SOURCE_DIR) / "libs" /
+                     "stdlib" / "lib";
+        preludePath = std::filesystem::path(UTOPIA_SOURCE_DIR) / "libs" /
+                      "prelude" / "lib";
+        buildLibPath = std::filesystem::path(UTOPIA_SOURCE_DIR) / "libs" /
+                       "builder" / "lib";
+      }
+#endif
+
+      modConfig.stdlibRoot = stdlibPath;
+      modConfig.preludeRoot = preludePath;
+      modConfig.buildLibRoot = buildLibPath;
+
+      if (!projRoot.empty()) {
+        std::unordered_set<std::string> visited;
+        loadPackagesLSP(projRoot / "build.yaml", modConfig.packages,
+                        modConfig.includeDirs, visited);
+      }
+
+#if defined(_WIN32)
+      modConfig.definedMacros.insert("_WIN32");
+#elif defined(__APPLE__)
+      modConfig.definedMacros.insert("__APPLE__");
+#elif defined(__linux__) || defined(__gnu_linux__)
+      modConfig.definedMacros.insert("__gnu_linux__");
+#endif
+#if defined(__x86_64__) || defined(_M_X64)
+      modConfig.definedMacros.insert("x64");
+#elif defined(__aarch64__) || defined(_M_ARM64)
+      modConfig.definedMacros.insert("arm64");
+#endif
+
+      std::lock_guard<std::mutex> lock(cacheMutex);
+      projectConfigCache[projRootStr] = modConfig;
+    }
+
+    if (currentPath.filename() == "build.utp") {
+      modConfig.isBuildScript = true;
+    }
+
+    modConfig.isFormatting = true;
+
+    ASTContext formatAstCtx;
+    DiagnosticsEngine formatDiags;
+    formatDiags.printToConsole = false;
+
+    ModuleLoader loader(formatAstCtx, modConfig, formatDiags);
+
+    try {
+      ModuleNode *formatAst = loader.loadModule(
+          filePath, currentPath.parent_path(), 0, 0, 0, filePath, textToFormat);
+      if (formatAst) {
+        std::string formatted = Formatter::format(formatAst);
+        if (!formatted.empty()) {
+          int lineCount =
+              std::count(textToFormat.begin(), textToFormat.end(), '\n') + 1;
+          res = json::array();
+          res.push_back({{"range",
+                          {{"start", {{"line", 0}, {"character", 0}}},
+                           {"end", {{"line", lineCount}, {"character", 0}}}}},
+                         {"newText", formatted}});
+        }
+      }
+    } catch (...) {
     }
   }
   sendResponse({{"jsonrpc", "2.0"}, {"id", req["id"]}, {"result", res}});

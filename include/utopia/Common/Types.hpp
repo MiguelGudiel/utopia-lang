@@ -86,6 +86,10 @@ class BuiltinType : public Type {
 public:
   explicit BuiltinType(BuiltinKind k) : Type(TypeKind::Builtin), bKind(k) {}
   BuiltinKind getBuiltinKind() const { return bKind; }
+
+  static bool classof(const Type *t) {
+    return t->getKind() == TypeKind::Builtin;
+  }
 };
 
 class PointerType : public Type {
@@ -94,6 +98,10 @@ class PointerType : public Type {
 public:
   explicit PointerType(const Type *p) : Type(TypeKind::Pointer), pointee(p) {}
   const Type *getPointeeType() const { return pointee; }
+
+  static bool classof(const Type *t) {
+    return t->getKind() == TypeKind::Pointer;
+  }
 };
 
 class ReferenceType : public Type {
@@ -103,6 +111,10 @@ public:
   explicit ReferenceType(const Type *p)
       : Type(TypeKind::Reference), pointee(p) {}
   const Type *getPointeeType() const { return pointee; }
+
+  static bool classof(const Type *t) {
+    return t->getKind() == TypeKind::Reference;
+  }
 };
 
 class RValueReferenceType : public Type {
@@ -112,6 +124,10 @@ public:
   explicit RValueReferenceType(const Type *p)
       : Type(TypeKind::RValueReference), pointee(p) {}
   const Type *getPointeeType() const { return pointee; }
+
+  static bool classof(const Type *t) {
+    return t->getKind() == TypeKind::RValueReference;
+  }
 };
 
 class ConstType : public Type {
@@ -120,6 +136,8 @@ class ConstType : public Type {
 public:
   explicit ConstType(const Type *b) : Type(TypeKind::Const), base(b) {}
   const Type *getBaseType() const { return base; }
+
+  static bool classof(const Type *t) { return t->getKind() == TypeKind::Const; }
 };
 
 class ArrayType : public Type {
@@ -131,6 +149,8 @@ public:
       : Type(TypeKind::Array), elementType(elem), size(sz) {}
   const Type *getElementType() const { return elementType; }
   uint64_t getSize() const { return size; }
+
+  static bool classof(const Type *t) { return t->getKind() == TypeKind::Array; }
 };
 
 class RecordType : public Type {
@@ -160,21 +180,34 @@ public:
     }
     return nullptr;
   }
+
+  static bool classof(const Type *t) {
+    return t->getKind() == TypeKind::Struct ||
+           t->getKind() == TypeKind::Class || t->getKind() == TypeKind::Union;
+  }
 };
 
 class UnionType : public RecordType {
 public:
   explicit UnionType(std::string_view n) : RecordType(TypeKind::Union, n) {}
+
+  static bool classof(const Type *t) { return t->getKind() == TypeKind::Union; }
 };
 
 class StructType : public RecordType {
 public:
   explicit StructType(std::string_view n) : RecordType(TypeKind::Struct, n) {}
+
+  static bool classof(const Type *t) {
+    return t->getKind() == TypeKind::Struct;
+  }
 };
 
 class ClassType : public RecordType {
 public:
   explicit ClassType(std::string_view n) : RecordType(TypeKind::Class, n) {}
+
+  static bool classof(const Type *t) { return t->getKind() == TypeKind::Class; }
 };
 
 class TemplateParamType : public Type {
@@ -184,6 +217,10 @@ public:
   explicit TemplateParamType(std::string_view n)
       : Type(TypeKind::TemplateParam), name(n) {}
   std::string_view getName() const { return name; }
+
+  static bool classof(const Type *t) {
+    return t->getKind() == TypeKind::TemplateParam;
+  }
 };
 
 class TemplateInstType : public Type {
@@ -200,6 +237,10 @@ public:
   llvm::ArrayRef<const Type *> getTemplateArgs() const { return templateArgs; }
   const Type *getResolvedType() const { return resolvedType; }
   void setResolvedType(const Type *t) const { resolvedType = t; }
+
+  static bool classof(const Type *t) {
+    return t->getKind() == TypeKind::TemplateInst;
+  }
 };
 
 class FunctionType : public Type {
@@ -211,6 +252,10 @@ public:
       : Type(TypeKind::Function), returnType(ret), paramTypes(params) {}
   const Type *getReturnType() const { return returnType; }
   llvm::ArrayRef<const Type *> getParamTypes() const { return paramTypes; }
+
+  static bool classof(const Type *t) {
+    return t->getKind() == TypeKind::Function;
+  }
 };
 
 class AliasType : public Type {
@@ -226,6 +271,8 @@ public:
   void setTarget(const Type *t) const { target = t; }
   const DeclNode *getDeclaration() const { return declaration; }
   void setDeclaration(const DeclNode *decl) const { declaration = decl; }
+
+  static bool classof(const Type *t) { return t->getKind() == TypeKind::Alias; }
 };
 
 class EnumType : public Type {
@@ -242,6 +289,8 @@ public:
   const Type *getUnderlyingType() const { return underlyingType; }
   const DeclNode *getDeclaration() const { return declaration; }
   void setDeclaration(const DeclNode *decl) const { declaration = decl; }
+
+  static bool classof(const Type *t) { return t->getKind() == TypeKind::Enum; }
 };
 
 inline bool Type::isConstQualified() const { return kind == TypeKind::Const; }

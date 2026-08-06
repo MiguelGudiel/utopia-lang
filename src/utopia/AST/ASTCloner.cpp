@@ -195,6 +195,8 @@ ASTNode *ASTCloner::visit(const BlockNode *n) {
   b->statements = cloneArray(n->statements);
   b->length = n->length;
   b->endLine = n->endLine;
+  b->isExpressionBody = n->isExpressionBody;
+  b->hasBraces = n->hasBraces;
   return b;
 }
 
@@ -276,6 +278,8 @@ ASTNode *ASTCloner::visit(const VarDeclNode *n) {
   node->rawTypeStr = n->rawTypeStr;
   node->endLine = n->endLine;
   node->isInitialized = n->isInitialized;
+  node->alignment = n->alignment;
+  node->isPacked = n->isPacked;
   return node;
 }
 
@@ -291,6 +295,8 @@ ASTNode *ASTCloner::visit(const ParamDeclNode *n) {
   node->docString = n->docString;
   node->trailingComment = n->trailingComment;
   node->rawTypeStr = n->rawTypeStr;
+  node->alignment = n->alignment;
+  node->isPacked = n->isPacked;
   return node;
 }
 
@@ -316,6 +322,8 @@ ASTNode *ASTCloner::visit(const FunctionDeclNode *n) {
   node->parentRecord = n->parentRecord;
   node->rawReturnTypeStr = n->rawReturnTypeStr;
   node->endLine = n->endLine;
+  node->alignment = n->alignment;
+  node->isPacked = n->isPacked;
   return node;
 }
 
@@ -336,6 +344,8 @@ ASTNode *ASTCloner::visit(const UnionDeclNode *n) {
   node->isOpaque = n->isOpaque;
   node->isTemplate = false;
   node->endLine = n->endLine;
+  node->alignment = n->alignment;
+  node->isPacked = n->isPacked;
   return node;
 }
 
@@ -356,6 +366,8 @@ ASTNode *ASTCloner::visit(const ClassDeclNode *n) {
   node->isOpaque = n->isOpaque;
   node->isTemplate = false;
   node->endLine = n->endLine;
+  node->alignment = n->alignment;
+  node->isPacked = n->isPacked;
   return node;
 }
 
@@ -376,6 +388,8 @@ ASTNode *ASTCloner::visit(const StructDeclNode *n) {
   node->isOpaque = n->isOpaque;
   node->isTemplate = false;
   node->endLine = n->endLine;
+  node->alignment = n->alignment;
+  node->isPacked = n->isPacked;
   return node;
 }
 

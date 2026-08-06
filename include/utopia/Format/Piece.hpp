@@ -55,6 +55,20 @@ private:
   std::string text;
 };
 
+class CommentPiece : public Piece {
+public:
+  explicit CommentPiece(std::string text) : text(std::move(text)) {}
+
+  void format(CodeWriter &writer, const State &state,
+              const std::function<void(const Piece *, State)> &formatChild)
+      const override {
+    writer.writeComment(text);
+  }
+
+private:
+  std::string text;
+};
+
 class BlankLinePiece : public Piece {
 public:
   void
@@ -262,31 +276,40 @@ private:
 
 class BlockPiece : public Piece {
 public:
-  explicit BlockPiece(std::vector<Piece *> statements)
-      : statements(std::move(statements)) {}
+  explicit BlockPiece(std::vector<Piece *> statements, bool hasBraces = true)
+      : statements(std::move(statements)), hasBraces(hasBraces) {}
 
-  bool isBlockLike() const override { return true; }
+  bool isBlockLike() const override { return hasBraces; }
 
   void format(CodeWriter &writer, const State &state,
               const std::function<void(const Piece *, State)> &formatChild)
       const override {
-    writer.write("{");
-    if (!statements.empty()) {
-      writer.pushIndent(Indent::Block);
-      writer.newline();
+    if (hasBraces) {
+      writer.write("{");
+      if (!statements.empty()) {
+        writer.pushIndent(Indent::Block);
+        writer.newline();
+        for (size_t i = 0; i < statements.size(); ++i) {
+          formatChild(statements[i], State::Unsplit);
+          if (i < statements.size() - 1) {
+            writer.newline();
+          }
+        }
+        writer.popIndent();
+        writer.newline();
+      } else {
+        writer.write("}");
+        return;
+      }
+      writer.write("}");
+    } else {
       for (size_t i = 0; i < statements.size(); ++i) {
         formatChild(statements[i], State::Unsplit);
         if (i < statements.size() - 1) {
           writer.newline();
         }
       }
-      writer.popIndent();
-      writer.newline();
-    } else {
-      writer.write("}");
-      return;
     }
-    writer.write("}");
   }
 
   void forEachChild(
@@ -297,6 +320,7 @@ public:
 
 private:
   std::vector<Piece *> statements;
+  bool hasBraces;
 };
 
 class ListPiece : public Piece {
@@ -445,9 +469,11 @@ private:
 class ControlFlowPiece : public Piece {
 public:
   ControlFlowPiece(std::string keyword, Piece *condition, Piece *body,
-                   Piece *elseBody = nullptr)
+                   Piece *elseBody = nullptr, bool bodyOnNewLine = false,
+                   bool elseBodyOnNewLine = false)
       : keyword(std::move(keyword)), condition(condition), body(body),
-        elseBody(elseBody) {}
+        elseBody(elseBody), bodyOnNewLine(bodyOnNewLine),
+        elseBodyOnNewLine(elseBodyOnNewLine) {}
 
   void format(CodeWriter &writer, const State &state,
               const std::function<void(const Piece *, State)> &formatChild)
@@ -460,14 +486,33 @@ public:
       writer.write(")");
     }
     if (body) {
-      writer.space();
-      formatChild(body, State::Unsplit);
+      if (bodyOnNewLine) {
+        writer.pushIndent(Indent::Block);
+        writer.newline();
+        formatChild(body, State::Unsplit);
+        writer.popIndent();
+      } else {
+        writer.space();
+        formatChild(body, State::Unsplit);
+      }
     }
     if (elseBody) {
-      writer.space();
+      if (bodyOnNewLine) {
+        writer.newline();
+      } else {
+        writer.space();
+      }
       writer.write("else");
-      writer.space();
-      formatChild(elseBody, State::Unsplit);
+
+      if (elseBodyOnNewLine) {
+        writer.pushIndent(Indent::Block);
+        writer.newline();
+        formatChild(elseBody, State::Unsplit);
+        writer.popIndent();
+      } else {
+        writer.space();
+        formatChild(elseBody, State::Unsplit);
+      }
     }
   }
 
@@ -475,7 +520,8 @@ public:
       const std::function<void(const Piece *)> &callback) const override {
     if (condition)
       callback(condition);
-    callback(body);
+    if (body)
+      callback(body);
     if (elseBody)
       callback(elseBody);
   }
@@ -485,6 +531,8 @@ private:
   Piece *condition;
   Piece *body;
   Piece *elseBody;
+  bool bodyOnNewLine;
+  bool elseBodyOnNewLine;
 };
 
 class CasePiece : public Piece {

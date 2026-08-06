@@ -13,17 +13,17 @@ bool canImplicitlyCast(const Type *from, const Type *to,
     return true;
 
   const Type *baseFrom = from;
-  if (from->isReferenceType()) {
-    baseFrom = static_cast<const ReferenceType *>(from)->getPointeeType();
-  } else if (from->getKind() == TypeKind::RValueReference) {
-    baseFrom = static_cast<const RValueReferenceType *>(from)->getPointeeType();
+  if (auto *refTy = llvm::dyn_cast<ReferenceType>(from)) {
+    baseFrom = refTy->getPointeeType();
+  } else if (auto *rvRefTy = llvm::dyn_cast<RValueReferenceType>(from)) {
+    baseFrom = rvRefTy->getPointeeType();
   }
 
   const Type *baseTo = to;
-  if (to->isReferenceType()) {
-    baseTo = static_cast<const ReferenceType *>(to)->getPointeeType();
-  } else if (to->getKind() == TypeKind::RValueReference) {
-    baseTo = static_cast<const RValueReferenceType *>(to)->getPointeeType();
+  if (auto *refTyTo = llvm::dyn_cast<ReferenceType>(to)) {
+    baseTo = refTyTo->getPointeeType();
+  } else if (auto *rvRefTyTo = llvm::dyn_cast<RValueReferenceType>(to)) {
+    baseTo = rvRefTyTo->getPointeeType();
   }
 
   if (baseFrom == baseTo)
@@ -35,79 +35,75 @@ bool canImplicitlyCast(const Type *from, const Type *to,
   const Type *unqualTo = baseTo->getUnqualifiedType();
 
   /* Implicit Array to ListLiteralView intrinsic resolution */
-  if (unqualFrom->getKind() == TypeKind::Array &&
-      unqualTo->getKind() == TypeKind::Struct) {
-    auto *arrFrom = static_cast<const ArrayType *>(unqualFrom);
-    auto *recTo = static_cast<const RecordType *>(unqualTo);
-    if (recTo->getName().starts_with("ListLiteralView_")) {
-      std::string expectedName = "ListLiteralView_";
-      std::string argStr = arrFrom->getElementType()->toString();
-      for (char &c : argStr) {
-        if (!isalnum(c))
-          c = '_';
-      }
-      expectedName += argStr;
-      if (recTo->getName() == expectedName) {
-        return true;
+  if (auto *arrFrom = llvm::dyn_cast<ArrayType>(unqualFrom)) {
+    if (auto *recTo = llvm::dyn_cast<RecordType>(unqualTo)) {
+      if (recTo->getName().starts_with("ListLiteralView_")) {
+        std::string expectedName = "ListLiteralView_";
+        std::string argStr = arrFrom->getElementType()->toString();
+        for (char &c : argStr) {
+          if (!isalnum(c))
+            c = '_';
+        }
+        expectedName += argStr;
+        if (recTo->getName() == expectedName) {
+          return true;
+        }
       }
     }
   }
 
   /* Support casting from an internal TypeVal to a user-defined generic 'Type'
    * class */
-  if (unqualFrom->isBuiltinType() &&
-      static_cast<const BuiltinType *>(unqualFrom)->getBuiltinKind() ==
-          BuiltinKind::TypeVal) {
-    if (unqualTo->getKind() == TypeKind::Class &&
-        static_cast<const RecordType *>(unqualTo)->getName() == "Type")
-      return true;
-    if (unqualTo->isBuiltinType() &&
-        static_cast<const BuiltinType *>(unqualTo)->getBuiltinKind() ==
-            BuiltinKind::TypeVal)
-      return true;
+  if (auto *builtinFrom = llvm::dyn_cast<BuiltinType>(unqualFrom)) {
+    if (builtinFrom->getBuiltinKind() == BuiltinKind::TypeVal) {
+      if (auto *classTo = llvm::dyn_cast<ClassType>(unqualTo)) {
+        if (classTo->getName() == "Type")
+          return true;
+      }
+      if (auto *builtinTo = llvm::dyn_cast<BuiltinType>(unqualTo)) {
+        if (builtinTo->getBuiltinKind() == BuiltinKind::TypeVal)
+          return true;
+      }
+    }
   }
 
   /* Process user-defined single-argument conversion constructors */
-  if (allowUserDefined && (unqualTo->getKind() == TypeKind::Class ||
-                           unqualTo->getKind() == TypeKind::Struct ||
-                           unqualTo->getKind() == TypeKind::Union)) {
-    auto *recTy = static_cast<const RecordType *>(unqualTo);
-    if (auto *decl = recTy->getDeclaration()) {
-      llvm::ArrayRef<FunctionDeclNode *> ctors;
-      if (decl->kind == NodeKind::ClassDecl)
-        ctors = static_cast<const ClassDeclNode *>(decl)->constructors;
-      else if (decl->kind == NodeKind::StructDecl)
-        ctors = static_cast<const StructDeclNode *>(decl)->constructors;
-      else if (decl->kind == NodeKind::UnionDecl)
-        ctors = static_cast<const UnionDeclNode *>(decl)->constructors;
+  if (allowUserDefined) {
+    if (auto *recTy = llvm::dyn_cast<RecordType>(unqualTo)) {
+      if (auto *decl = recTy->getDeclaration()) {
+        llvm::ArrayRef<FunctionDeclNode *> ctors;
+        if (auto *classDecl = llvm::dyn_cast<ClassDeclNode>(decl))
+          ctors = classDecl->constructors;
+        else if (auto *structDecl = llvm::dyn_cast<StructDeclNode>(decl))
+          ctors = structDecl->constructors;
+        else if (auto *unionDecl = llvm::dyn_cast<UnionDeclNode>(decl))
+          ctors = unionDecl->constructors;
 
-      for (auto *ctor : ctors) {
-        if (ctor->params.size() == 1) {
-          if (canImplicitlyCast(from, ctor->params[0]->type, false))
-            return true;
+        for (auto *ctor : ctors) {
+          if (ctor->params.size() == 1) {
+            if (canImplicitlyCast(from, ctor->params[0]->type, false))
+              return true;
+          }
         }
       }
     }
   }
 
-  if (unqualFrom->getKind() == TypeKind::Enum &&
-      unqualTo->getKind() == TypeKind::Enum) {
+  if (llvm::isa<EnumType>(unqualFrom) && llvm::isa<EnumType>(unqualTo)) {
     return unqualFrom == unqualTo;
   }
 
-  if (unqualFrom->getKind() == TypeKind::Array &&
-      unqualTo->getKind() == TypeKind::Array) {
-    auto *arrFrom = static_cast<const ArrayType *>(unqualFrom);
-    auto *arrTo = static_cast<const ArrayType *>(unqualTo);
+  if (auto *arrFrom = llvm::dyn_cast<ArrayType>(unqualFrom)) {
+    if (auto *arrTo = llvm::dyn_cast<ArrayType>(unqualTo)) {
+      /* Allow empty or un-typed array literals to bind to expected target array
+       * type */
+      if (arrFrom->getSize() == 0 || arrFrom->getElementType()->isVoid())
+        return true;
 
-    /* Allow empty or un-typed array literals to bind to expected target array
-     * type */
-    if (arrFrom->getSize() == 0 || arrFrom->getElementType()->isVoid())
-      return true;
-
-    if (arrFrom->getSize() == arrTo->getSize())
-      return canImplicitlyCast(arrFrom->getElementType(),
-                               arrTo->getElementType(), allowUserDefined);
+      if (arrFrom->getSize() == arrTo->getSize())
+        return canImplicitlyCast(arrFrom->getElementType(),
+                                 arrTo->getElementType(), allowUserDefined);
+    }
   }
 
   if (unqualFrom == unqualTo) {
@@ -115,46 +111,46 @@ bool canImplicitlyCast(const Type *from, const Type *to,
       return true;
   }
 
-  if (unqualFrom->getKind() == TypeKind::Array && unqualTo->isPointerType()) {
-    const Type *elemTy =
-        static_cast<const ArrayType *>(unqualFrom)->getElementType();
-    const Type *toPointee =
-        static_cast<const PointerType *>(unqualTo)->getPointeeType();
-    if (toPointee->isVoid() ||
-        elemTy->getUnqualifiedType() == toPointee->getUnqualifiedType())
-      return true;
+  if (auto *arrFrom = llvm::dyn_cast<ArrayType>(unqualFrom)) {
+    if (auto *ptrTo = llvm::dyn_cast<PointerType>(unqualTo)) {
+      const Type *elemTy = arrFrom->getElementType();
+      const Type *toPointee = ptrTo->getPointeeType();
+      if (toPointee->isVoid() ||
+          elemTy->getUnqualifiedType() == toPointee->getUnqualifiedType())
+        return true;
+    }
   }
 
-  if (unqualFrom->isPointerType() && unqualTo->isPointerType()) {
-    const Type *fromPointee =
-        static_cast<const PointerType *>(unqualFrom)->getPointeeType();
-    const Type *toPointee =
-        static_cast<const PointerType *>(unqualTo)->getPointeeType();
+  if (auto *ptrFrom = llvm::dyn_cast<PointerType>(unqualFrom)) {
+    if (auto *ptrTo = llvm::dyn_cast<PointerType>(unqualTo)) {
+      const Type *fromPointee = ptrFrom->getPointeeType();
+      const Type *toPointee = ptrTo->getPointeeType();
 
-    /* Universal null pointer interoperability */
-    if (toPointee->isVoid() || fromPointee->isVoid())
-      return true;
+      /* Universal null pointer interoperability */
+      if (toPointee->isVoid() || fromPointee->isVoid())
+        return true;
 
-    /* Enforce strict parameter structural equality for function pointer
-     * assignments */
-    if (fromPointee->getKind() == TypeKind::Function &&
-        toPointee->getKind() == TypeKind::Function) {
-      auto fF = static_cast<const FunctionType *>(fromPointee);
-      auto fT = static_cast<const FunctionType *>(toPointee);
-      if (fF->getReturnType()->getUnqualifiedType() !=
-          fT->getReturnType()->getUnqualifiedType())
-        return false;
-      if (fF->getParamTypes().size() != fT->getParamTypes().size())
-        return false;
-      for (size_t i = 0; i < fF->getParamTypes().size(); i++) {
-        if (fF->getParamTypes()[i]->getUnqualifiedType() !=
-            fT->getParamTypes()[i]->getUnqualifiedType())
-          return false;
+      /* Enforce strict parameter structural equality for function pointer
+       * assignments */
+      if (auto *fF = llvm::dyn_cast<FunctionType>(fromPointee)) {
+        if (auto *fT = llvm::dyn_cast<FunctionType>(toPointee)) {
+          if (fF->getReturnType()->getUnqualifiedType() !=
+              fT->getReturnType()->getUnqualifiedType())
+            return false;
+          if (fF->getParamTypes().size() != fT->getParamTypes().size())
+            return false;
+          for (size_t i = 0; i < fF->getParamTypes().size(); i++) {
+            if (fF->getParamTypes()[i]->getUnqualifiedType() !=
+                fT->getParamTypes()[i]->getUnqualifiedType())
+              return false;
+          }
+          return true;
+        }
       }
-      return true;
-    }
 
-    return fromPointee->getUnqualifiedType() == toPointee->getUnqualifiedType();
+      return fromPointee->getUnqualifiedType() ==
+             toPointee->getUnqualifiedType();
+    }
   }
 
   return unqualFrom->isNumeric() && unqualTo->isNumeric();
@@ -237,15 +233,14 @@ void TypeCheckPass::checkImplicitCastWarning(const Type *from, const Type *to,
       const NumberNode *numNode = nullptr;
       bool isNegative = false;
 
-      if (node->kind == NodeKind::Number) {
-        numNode = static_cast<const NumberNode *>(node);
-      } else if (node->kind == NodeKind::UnaryOp) {
-        auto uop = static_cast<const UnaryOpNode *>(node);
-        if (uop->op == "-" && uop->expr->kind == NodeKind::Number) {
-          numNode = static_cast<const NumberNode *>(uop->expr);
+      if (auto *num = llvm::dyn_cast<NumberNode>(node)) {
+        numNode = num;
+      } else if (auto *uop = llvm::dyn_cast<UnaryOpNode>(node)) {
+        if (uop->op == "-" && llvm::isa<NumberNode>(uop->expr)) {
+          numNode = llvm::cast<NumberNode>(uop->expr);
           isNegative = true;
-        } else if (uop->op == "+" && uop->expr->kind == NodeKind::Number) {
-          numNode = static_cast<const NumberNode *>(uop->expr);
+        } else if (uop->op == "+" && llvm::isa<NumberNode>(uop->expr)) {
+          numNode = llvm::cast<NumberNode>(uop->expr);
         }
       }
 
@@ -321,22 +316,22 @@ ExprNode *TypeCheckPass::performImplicitConversion(ExprNode *expr,
   if (!expr || !expr->exprType || !to)
     return expr;
 
-  if (expr->kind == NodeKind::ImplicitCast)
+  if (llvm::isa<ImplicitCastNode>(expr))
     return expr;
 
   const Type *unqualTo = to->getUnqualifiedType();
   const Type *unqualFrom = expr->exprType->getUnqualifiedType();
 
   /* Intercept Array to ListLiteralView intrinsic conversion */
-  if (unqualFrom->getKind() == TypeKind::Array &&
-      unqualTo->getKind() == TypeKind::Struct) {
-    auto *recTo = static_cast<const RecordType *>(unqualTo);
-    if (recTo->getName().starts_with("ListLiteralView_")) {
-      auto *castNode = ctx->astCtx.create<ImplicitCastNode>(
-          expr, to, nullptr, expr->line, expr->column, expr->length);
-      castNode->exprType = to;
-      castNode->isLValue = false;
-      return castNode;
+  if (llvm::isa<ArrayType>(unqualFrom)) {
+    if (auto *recTo = llvm::dyn_cast<RecordType>(unqualTo)) {
+      if (recTo->getName().starts_with("ListLiteralView_")) {
+        auto *castNode = ctx->astCtx.create<ImplicitCastNode>(
+            expr, to, nullptr, expr->line, expr->column, expr->length);
+        castNode->exprType = to;
+        castNode->isLValue = false;
+        return castNode;
+      }
     }
   }
 
@@ -346,18 +341,15 @@ ExprNode *TypeCheckPass::performImplicitConversion(ExprNode *expr,
 
   /* Intercept and rewrite aggregate initialization to invoke conversion
    * constructors */
-  if (unqualTo->getKind() == TypeKind::Class ||
-      unqualTo->getKind() == TypeKind::Struct ||
-      unqualTo->getKind() == TypeKind::Union) {
-    auto *recTy = static_cast<const RecordType *>(unqualTo);
+  if (auto *recTy = llvm::dyn_cast<RecordType>(unqualTo)) {
     if (auto *decl = recTy->getDeclaration()) {
       llvm::ArrayRef<FunctionDeclNode *> ctors;
-      if (decl->kind == NodeKind::ClassDecl)
-        ctors = static_cast<const ClassDeclNode *>(decl)->constructors;
-      else if (decl->kind == NodeKind::StructDecl)
-        ctors = static_cast<const StructDeclNode *>(decl)->constructors;
-      else
-        ctors = static_cast<const UnionDeclNode *>(decl)->constructors;
+      if (auto *classDecl = llvm::dyn_cast<ClassDeclNode>(decl))
+        ctors = classDecl->constructors;
+      else if (auto *structDecl = llvm::dyn_cast<StructDeclNode>(decl))
+        ctors = structDecl->constructors;
+      else if (auto *unionDecl = llvm::dyn_cast<UnionDeclNode>(decl))
+        ctors = unionDecl->constructors;
 
       for (auto *ctor : ctors) {
         if (ctor->params.size() == 1) {

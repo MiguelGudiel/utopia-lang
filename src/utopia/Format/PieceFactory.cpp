@@ -17,18 +17,7 @@ static int getActualStartLine(const ASTNode *node) {
     return 0;
   int startLine = node->line;
 
-  bool isDecl =
-      (node->kind == NodeKind::VarDecl ||
-       node->kind == NodeKind::FunctionDecl ||
-       node->kind == NodeKind::StructDecl ||
-       node->kind == NodeKind::ClassDecl || node->kind == NodeKind::UnionDecl ||
-       node->kind == NodeKind::AnnotationDecl ||
-       node->kind == NodeKind::EnumDecl ||
-       node->kind == NodeKind::TypedefDecl ||
-       node->kind == NodeKind::ParamDecl || node->kind == NodeKind::EnumMember);
-
-  if (isDecl) {
-    auto decl = static_cast<const DeclNode *>(node);
+  if (auto *decl = llvm::dyn_cast<DeclNode>(node)) {
     if (!decl->annotations.empty()) {
       startLine = decl->annotations.front()->line;
     }
@@ -37,49 +26,72 @@ static int getActualStartLine(const ASTNode *node) {
   /* Discount lines occupied by multi-line docstrings to calculate the true
      starting point of the entity. */
   if (!node->docString.empty()) {
-    int docLines = 1;
+    int newlines = 0;
     for (char c : node->docString) {
       if (c == '\n')
-        docLines++;
+        newlines++;
     }
-    startLine -= docLines;
+    startLine -= newlines;
   }
   return startLine;
+}
+
+static int getActualEndLine(const ASTNode *node) {
+  if (!node)
+    return 0;
+  int endLine = node->endLine;
+
+  if (!node->trailingComment.empty()) {
+    int newlines = 0;
+    for (char c : node->trailingComment) {
+      if (c == '\n')
+        newlines++;
+    }
+    endLine += newlines;
+  }
+  return endLine;
 }
 
 Piece *PieceFactory::dispatchStmt(const ASTNode *node) {
   if (!node)
     return nullptr;
-  bool isExpr =
-      node->kind == NodeKind::FunctionCall || node->kind == NodeKind::Assign ||
-      node->kind == NodeKind::UnaryOp || node->kind == NodeKind::BinaryOp ||
-      node->kind == NodeKind::TernaryOp || node->kind == NodeKind::Variable ||
-      node->kind == NodeKind::Number || node->kind == NodeKind::String ||
-      node->kind == NodeKind::Delete || node->kind == NodeKind::New ||
-      node->kind == NodeKind::ArraySubscript ||
-      node->kind == NodeKind::MemberAccess || node->kind == NodeKind::Cast ||
-      node->kind == NodeKind::ImplicitCast || node->kind == NodeKind::Null ||
-      node->kind == NodeKind::Boolean || node->kind == NodeKind::Char ||
-      node->kind == NodeKind::Rune || node->kind == NodeKind::ArrayLiteral ||
-      node->kind == NodeKind::TypeLiteral;
 
-  Piece *p = isExpr ? dispatchExpr(static_cast<const ExprNode *>(node))
-                    : dispatch(node);
+  Piece *p = nullptr;
+  if (auto *expr = llvm::dyn_cast<ExprNode>(node)) {
+    p = dispatchExpr(expr);
+  } else {
+    p = dispatch(node);
+  }
 
   if (!node->trailingComment.empty()) {
     std::string tComment = std::string(node->trailingComment);
-    /* Inject a single space fallback if the user left zero whitespace. */
-    if (tComment.empty() || (tComment[0] != ' ' && tComment[0] != '\t')) {
-      tComment = " " + tComment;
-    }
+    /* Directly append the trailing comment without injecting artificial spaces,
+       as the Lexer already captures the exact preceding whitespace. */
     p = create<ConcatPiece>(
-        std::vector<Piece *>{p, create<StringPiece>(tComment)});
+        std::vector<Piece *>{p, create<CommentPiece>(tComment)});
   }
 
   if (!node->docString.empty()) {
-    p = create<SequencePiece>(std::vector<Piece *>{
-        create<StringPiece>(formatCommentString(std::string(node->docString))),
-        p});
+    std::string doc = std::string(node->docString);
+    int trailingNewlines = 0;
+    while (!doc.empty() && doc.back() == '\n') {
+      trailingNewlines++;
+      doc.pop_back();
+    }
+
+    std::vector<Piece *> pieces;
+    if (!doc.empty()) {
+      pieces.push_back(create<CommentPiece>(doc));
+    }
+
+    if (trailingNewlines == 0 && !doc.empty()) {
+      pieces.push_back(create<TextPiece>(" "));
+    } else if (trailingNewlines > 0) {
+      pieces.push_back(create<NewlinesPiece>(trailingNewlines));
+    }
+
+    pieces.push_back(p);
+    p = create<ConcatPiece>(std::move(pieces));
   }
   return p;
 }
@@ -89,17 +101,16 @@ Piece *PieceFactory::extractChain(const ExprNode *node) {
   const ExprNode *current = node;
 
   while (current && !current->hasParens) {
-    if (current->kind == NodeKind::FunctionCall) {
-      auto *call = static_cast<const FunctionCallNode *>(current);
-      if (call->target->kind == NodeKind::MemberAccess) {
+    if (auto *call = llvm::dyn_cast<FunctionCallNode>(current)) {
+      if (auto *ma = llvm::dyn_cast<MemberAccessNode>(call->target)) {
         links.push_back(current);
-        current = static_cast<const MemberAccessNode *>(call->target)->object;
+        current = ma->object;
       } else {
         break;
       }
-    } else if (current->kind == NodeKind::MemberAccess) {
+    } else if (auto *ma = llvm::dyn_cast<MemberAccessNode>(current)) {
       links.push_back(current);
-      current = static_cast<const MemberAccessNode *>(current)->object;
+      current = ma->object;
     } else {
       break;
     }
@@ -120,8 +131,7 @@ Piece *PieceFactory::extractChain(const ExprNode *node) {
     ChainLinkKind kind;
     Piece *linkPiece = nullptr;
 
-    if (linkNode->kind == NodeKind::MemberAccess) {
-      auto *ma = static_cast<const MemberAccessNode *>(linkNode);
+    if (auto *ma = llvm::dyn_cast<MemberAccessNode>(linkNode)) {
       kind = ChainLinkKind::Property;
       hasProperties = true;
 
@@ -136,16 +146,14 @@ Piece *PieceFactory::extractChain(const ExprNode *node) {
         memberStr += ">";
       }
       linkPiece = create<TextPiece>(memberStr);
-    } else if (linkNode->kind == NodeKind::FunctionCall) {
-      auto *call = static_cast<const FunctionCallNode *>(linkNode);
-      auto *ma = static_cast<const MemberAccessNode *>(call->target);
+    } else if (auto *call = llvm::dyn_cast<FunctionCallNode>(linkNode)) {
+      auto *ma = llvm::cast<MemberAccessNode>(call->target);
 
       auto actualArgs = call->hasRawArgs ? call->rawArgs : call->args;
       bool isBlock = false;
       if (!actualArgs.empty()) {
-        auto lastArgKind = actualArgs.back()->kind;
-        if (lastArgKind == NodeKind::Block ||
-            lastArgKind == NodeKind::ArrayLiteral) {
+        if (llvm::isa<BlockNode>(actualArgs.back()) ||
+            llvm::isa<ArrayLiteralNode>(actualArgs.back())) {
           isBlock = true;
         }
       }
@@ -239,6 +247,7 @@ Piece *PieceFactory::visit(const NumberNode *node) {
 
 Piece *PieceFactory::visit(const StringNode *node) {
   std::string escaped = "\"";
+  const char hexDigits[] = "0123456789ABCDEF";
   for (char c : node->value) {
     switch (c) {
     case '\n':
@@ -260,7 +269,15 @@ Piece *PieceFactory::visit(const StringNode *node) {
       escaped += "\\\"";
       break;
     default:
-      escaped += c;
+      /* Escape non-printable control characters back to hex representation */
+      if (static_cast<unsigned char>(c) < 32 ||
+          static_cast<unsigned char>(c) == 127) {
+        escaped += "\\x";
+        escaped += hexDigits[(static_cast<unsigned char>(c) >> 4) & 0x0F];
+        escaped += hexDigits[static_cast<unsigned char>(c) & 0x0F];
+      } else {
+        escaped += c;
+      }
       break;
     }
   }
@@ -274,6 +291,7 @@ Piece *PieceFactory::visit(const BoolNode *node) {
 
 Piece *PieceFactory::visit(const CharNode *node) {
   std::string escaped;
+  const char hexDigits[] = "0123456789ABCDEF";
   switch (node->value) {
   case '\n':
     escaped = "\\n";
@@ -294,7 +312,14 @@ Piece *PieceFactory::visit(const CharNode *node) {
     escaped = "\\'";
     break;
   default:
-    escaped = std::string(1, static_cast<char>(node->value));
+    /* Escape non-printable control characters back to hex representation */
+    if (node->value < 32 || node->value == 127) {
+      escaped += "\\x";
+      escaped += hexDigits[(node->value >> 4) & 0x0F];
+      escaped += hexDigits[node->value & 0x0F];
+    } else {
+      escaped = std::string(1, static_cast<char>(node->value));
+    }
     break;
   }
   return create<TextPiece>("'" + escaped + "'");
@@ -347,26 +372,52 @@ Piece *PieceFactory::visit(const BlockNode *node) {
 
     if (i < node->statements.size() - 1) {
       auto *nextStmt = node->statements[i + 1];
-      int diff = getActualStartLine(nextStmt) - stmt->endLine;
+      int diff = getActualStartLine(nextStmt) - getActualEndLine(stmt);
       if (diff > 1) {
         stmts.push_back(create<NewlinesPiece>(diff));
       }
     }
   }
-  return create<BlockPiece>(std::move(stmts));
+  return create<BlockPiece>(std::move(stmts), node->hasBraces);
 }
 
 Piece *PieceFactory::visit(const IfNode *node) {
   Piece *cond = dispatchExpr(node->condition);
   Piece *thenBlock = dispatchStmt(node->thenBlock);
   Piece *elseBlock = node->elseBlock ? dispatchStmt(node->elseBlock) : nullptr;
-  return create<ControlFlowPiece>("if", cond, thenBlock, elseBlock);
+
+  bool thenOnNewLine = false;
+  if (node->thenBlock && node->thenBlock->kind == NodeKind::Block) {
+    auto *b = static_cast<const BlockNode *>(node->thenBlock);
+    if (!b->hasBraces && b->line > node->condition->endLine) {
+      thenOnNewLine = true;
+    }
+  }
+
+  bool elseBodyOnNewLine = false;
+  if (node->elseBlock && node->elseBlock->kind == NodeKind::Block) {
+    auto *b = static_cast<const BlockNode *>(node->elseBlock);
+    if (!b->hasBraces && b->line > node->thenBlock->endLine) {
+      elseBodyOnNewLine = true;
+    }
+  }
+
+  return create<ControlFlowPiece>("if", cond, thenBlock, elseBlock,
+                                  thenOnNewLine, elseBodyOnNewLine);
 }
 
 Piece *PieceFactory::visit(const WhileNode *node) {
   Piece *cond = dispatchExpr(node->condition);
   Piece *body = dispatchStmt(node->body);
-  return create<ControlFlowPiece>("while", cond, body, nullptr);
+
+  bool bodyOnNewLine = false;
+  if (node->body && node->body->kind == NodeKind::Block) {
+    auto *b = static_cast<const BlockNode *>(node->body);
+    if (!b->hasBraces && b->line > node->condition->endLine) {
+      bodyOnNewLine = true;
+    }
+  }
+  return create<ControlFlowPiece>("while", cond, body, nullptr, bodyOnNewLine);
 }
 
 Piece *PieceFactory::visit(const ForNode *node) {
@@ -392,8 +443,21 @@ Piece *PieceFactory::visit(const ForNode *node) {
     forCond.push_back(dispatchExpr(node->increment));
 
   Piece *condPiece = create<ConcatPiece>(std::move(forCond));
+
+  bool bodyOnNewLine = false;
+  if (node->body && node->body->kind == NodeKind::Block) {
+    auto *b = static_cast<const BlockNode *>(node->body);
+    int condEndLine =
+        node->increment
+            ? node->increment->endLine
+            : (node->condition ? node->condition->endLine : node->line);
+    if (!b->hasBraces && b->line > condEndLine) {
+      bodyOnNewLine = true;
+    }
+  }
+
   return create<ControlFlowPiece>("for", condPiece, dispatchStmt(node->body),
-                                  nullptr);
+                                  nullptr, bodyOnNewLine);
 }
 
 Piece *PieceFactory::visit(const FunctionCallNode *node) {
@@ -576,35 +640,12 @@ Piece *PieceFactory::visit(const FunctionDeclNode *node) {
       Piece *bodyPiece = nullptr;
       const ASTNode *innerStmt = node->body->statements[0];
 
-      if (innerStmt->kind == NodeKind::Return) {
-        auto *retNode = static_cast<const ReturnNode *>(innerStmt);
+      if (auto *retNode = llvm::dyn_cast<ReturnNode>(innerStmt)) {
         bodyPiece = dispatchExpr(retNode->value);
+      } else if (auto *exprStmt = llvm::dyn_cast<ExprNode>(innerStmt)) {
+        bodyPiece = dispatchExpr(exprStmt);
       } else {
-        bool isExprStmt = innerStmt->kind == NodeKind::FunctionCall ||
-                          innerStmt->kind == NodeKind::Assign ||
-                          innerStmt->kind == NodeKind::UnaryOp ||
-                          innerStmt->kind == NodeKind::BinaryOp ||
-                          innerStmt->kind == NodeKind::TernaryOp ||
-                          innerStmt->kind == NodeKind::Variable ||
-                          innerStmt->kind == NodeKind::Number ||
-                          innerStmt->kind == NodeKind::String ||
-                          innerStmt->kind == NodeKind::Delete ||
-                          innerStmt->kind == NodeKind::New ||
-                          innerStmt->kind == NodeKind::ArraySubscript ||
-                          innerStmt->kind == NodeKind::MemberAccess ||
-                          innerStmt->kind == NodeKind::Cast ||
-                          innerStmt->kind == NodeKind::ImplicitCast ||
-                          innerStmt->kind == NodeKind::Null ||
-                          innerStmt->kind == NodeKind::Boolean ||
-                          innerStmt->kind == NodeKind::Char ||
-                          innerStmt->kind == NodeKind::Rune ||
-                          innerStmt->kind == NodeKind::ArrayLiteral;
-
-        if (isExprStmt) {
-          bodyPiece = dispatchExpr(static_cast<const ExprNode *>(innerStmt));
-        } else {
-          bodyPiece = dispatchStmt(innerStmt);
-        }
+        bodyPiece = dispatchStmt(innerStmt);
       }
 
       if (!bodyPiece) {
@@ -700,26 +741,72 @@ Piece *PieceFactory::visit(const ImplicitCastNode *node) {
 
 Piece *PieceFactory::visit(const ModuleNode *node) {
   std::vector<Piece *> stmts;
+
+  Piece *headerDoc = nullptr;
+  if (!node->docString.empty()) {
+    std::string doc = std::string(node->docString);
+    int trailingNewlines = 0;
+    while (!doc.empty() && doc.back() == '\n') {
+      trailingNewlines++;
+      doc.pop_back();
+    }
+
+    std::vector<Piece *> dp;
+    if (!doc.empty()) {
+      dp.push_back(create<CommentPiece>(doc));
+    }
+
+    if (trailingNewlines == 0 && !doc.empty()) {
+      dp.push_back(create<TextPiece>(" "));
+    } else if (trailingNewlines > 0) {
+      dp.push_back(create<NewlinesPiece>(trailingNewlines));
+    }
+    headerDoc = create<ConcatPiece>(std::move(dp));
+  }
+
+  std::vector<Piece *> importsExports;
   for (auto imp : node->rawImports) {
-    stmts.push_back(create<TextPiece>("import \"" + std::string(imp) + "\";"));
+    importsExports.push_back(
+        create<TextPiece>("import \"" + std::string(imp) + "\";"));
   }
   for (auto exp : node->rawExports) {
-    stmts.push_back(create<TextPiece>("export \"" + std::string(exp) + "\";"));
+    importsExports.push_back(
+        create<TextPiece>("export \"" + std::string(exp) + "\";"));
   }
-  if (!node->rawImports.empty() || !node->rawExports.empty()) {
+
+  if (headerDoc) {
+    if (!importsExports.empty()) {
+      importsExports[0] = create<ConcatPiece>(
+          std::vector<Piece *>{headerDoc, importsExports[0]});
+    } else if (node->statements.empty()) {
+      stmts.push_back(headerDoc);
+    }
+  }
+
+  for (auto ie : importsExports) {
+    stmts.push_back(ie);
+  }
+
+  if (!importsExports.empty() && !node->statements.empty()) {
     stmts.push_back(create<BlankLinePiece>());
   }
+
   for (size_t i = 0; i < node->statements.size(); ++i) {
     auto *stmt = node->statements[i];
     Piece *p = dispatchStmt(stmt);
     if (isExpressionStatement(stmt->kind)) {
       p = create<ConcatPiece>(std::vector<Piece *>{p, create<TextPiece>(";")});
     }
+
+    if (i == 0 && headerDoc && importsExports.empty()) {
+      p = create<ConcatPiece>(std::vector<Piece *>{headerDoc, p});
+    }
+
     stmts.push_back(p);
 
     if (i < node->statements.size() - 1) {
       auto *nextStmt = node->statements[i + 1];
-      int diff = getActualStartLine(nextStmt) - stmt->endLine;
+      int diff = getActualStartLine(nextStmt) - getActualEndLine(stmt);
       if (diff > 1) {
         stmts.push_back(create<NewlinesPiece>(diff));
       }
@@ -809,7 +896,8 @@ Piece *createRecord(PieceFactory *factory, const T *node, const char *kw) {
       stmts.push_back(factory->dispatchStmt(allMembers[i]));
       if (i < allMembers.size() - 1) {
         auto *nextStmt = allMembers[i + 1];
-        int diff = getActualStartLine(nextStmt) - allMembers[i]->endLine;
+        int diff =
+            getActualStartLine(nextStmt) - getActualEndLine(allMembers[i]);
         if (diff > 1) {
           stmts.push_back(factory->create<NewlinesPiece>(diff));
         }
@@ -889,7 +977,7 @@ Piece *PieceFactory::visit(const AnnotationDeclNode *node) {
     stmts.push_back(dispatchStmt(allMembers[i]));
     if (i < allMembers.size() - 1) {
       auto *nextStmt = allMembers[i + 1];
-      int diff = getActualStartLine(nextStmt) - allMembers[i]->endLine;
+      int diff = getActualStartLine(nextStmt) - getActualEndLine(allMembers[i]);
       if (diff > 1) {
         stmts.push_back(create<NewlinesPiece>(diff));
       }
@@ -929,7 +1017,7 @@ Piece *PieceFactory::visit(const SwitchNode *node) {
 
     if (i < node->cases.size() - 1) {
       auto *nextCase = node->cases[i + 1];
-      int diff = getActualStartLine(nextCase) - c->endLine;
+      int diff = getActualStartLine(nextCase) - getActualEndLine(c);
       if (diff > 1) {
         cases.push_back(create<NewlinesPiece>(diff));
       }
@@ -963,7 +1051,7 @@ Piece *PieceFactory::visit(const CaseNode *node) {
 
     if (i < node->statements.size() - 1) {
       auto *nextStmt = node->statements[i + 1];
-      int diff = getActualStartLine(nextStmt) - s->endLine;
+      int diff = getActualStartLine(nextStmt) - getActualEndLine(s);
       if (diff > 1) {
         stmts.push_back(create<NewlinesPiece>(diff));
       }
