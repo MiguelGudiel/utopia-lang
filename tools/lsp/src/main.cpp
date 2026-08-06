@@ -1567,19 +1567,123 @@ void handleFormatting(const json &req) {
   std::string uri = req["params"]["textDocument"]["uri"];
   json res = nullptr;
 
-  std::shared_lock<std::shared_mutex> lock(docMutex);
-  if (documents.contains(uri)) {
-    auto &doc = documents[uri];
-    if (doc.ast) {
-      std::string formatted = Formatter::format(doc.ast);
-      if (!formatted.empty()) {
-        int lineCount = std::count(doc.text.begin(), doc.text.end(), '\n') + 1;
-        res = json::array();
-        res.push_back({{"range",
-                        {{"start", {{"line", 0}, {"character", 0}}},
-                         {"end", {{"line", lineCount}, {"character", 0}}}}},
-                       {"newText", formatted}});
+  std::string textToFormat;
+  std::filesystem::path projRoot;
+
+  {
+    std::shared_lock<std::shared_mutex> lock(docMutex);
+    if (documents.contains(uri)) {
+      textToFormat = documents[uri].text;
+    }
+  }
+
+  if (!textToFormat.empty()) {
+    std::string filePath = uriToPath(uri);
+    std::filesystem::path currentPath(filePath);
+
+    {
+      std::lock_guard<std::mutex> lock(cacheMutex);
+      if (uriToProjectRoot.contains(uri)) {
+        projRoot = uriToProjectRoot[uri];
+      } else {
+        projRoot = findProjectRootLSP(currentPath);
+        uriToProjectRoot[uri] = projRoot;
       }
+    }
+
+    ModuleLoaderConfig modConfig;
+    bool foundCache = false;
+    std::string projRootStr = projRoot.string();
+
+    {
+      std::lock_guard<std::mutex> lock(cacheMutex);
+      if (projectConfigCache.contains(projRootStr)) {
+        modConfig = projectConfigCache[projRootStr];
+        foundCache = true;
+      }
+    }
+
+    if (!foundCache) {
+      modConfig.projectRoot = projRoot;
+      std::filesystem::path stdlibPath =
+          projRoot.empty() ? ""
+                           : projRoot.parent_path().parent_path() / "libs" /
+                                 "stdlib" / "lib";
+      std::filesystem::path preludePath =
+          projRoot.empty() ? ""
+                           : projRoot.parent_path().parent_path() / "libs" /
+                                 "prelude" / "lib";
+      std::filesystem::path buildLibPath =
+          projRoot.empty() ? ""
+                           : projRoot.parent_path().parent_path() / "libs" /
+                                 "builder" / "lib";
+
+#ifdef UTOPIA_SOURCE_DIR
+      if (!std::filesystem::exists(stdlibPath)) {
+        stdlibPath = std::filesystem::path(UTOPIA_SOURCE_DIR) / "libs" /
+                     "stdlib" / "lib";
+        preludePath = std::filesystem::path(UTOPIA_SOURCE_DIR) / "libs" /
+                      "prelude" / "lib";
+        buildLibPath = std::filesystem::path(UTOPIA_SOURCE_DIR) / "libs" /
+                       "builder" / "lib";
+      }
+#endif
+
+      modConfig.stdlibRoot = stdlibPath;
+      modConfig.preludeRoot = preludePath;
+      modConfig.buildLibRoot = buildLibPath;
+
+      if (!projRoot.empty()) {
+        std::unordered_set<std::string> visited;
+        loadPackagesLSP(projRoot / "build.yaml", modConfig.packages,
+                        modConfig.includeDirs, visited);
+      }
+
+#if defined(_WIN32)
+      modConfig.definedMacros.insert("_WIN32");
+#elif defined(__APPLE__)
+      modConfig.definedMacros.insert("__APPLE__");
+#elif defined(__linux__) || defined(__gnu_linux__)
+      modConfig.definedMacros.insert("__gnu_linux__");
+#endif
+#if defined(__x86_64__) || defined(_M_X64)
+      modConfig.definedMacros.insert("x64");
+#elif defined(__aarch64__) || defined(_M_ARM64)
+      modConfig.definedMacros.insert("arm64");
+#endif
+
+      std::lock_guard<std::mutex> lock(cacheMutex);
+      projectConfigCache[projRootStr] = modConfig;
+    }
+
+    if (currentPath.filename() == "build.utp") {
+      modConfig.isBuildScript = true;
+    }
+
+    modConfig.isFormatting = true;
+
+    ASTContext formatAstCtx;
+    DiagnosticsEngine formatDiags;
+    formatDiags.printToConsole = false;
+
+    ModuleLoader loader(formatAstCtx, modConfig, formatDiags);
+
+    try {
+      ModuleNode *formatAst = loader.loadModule(
+          filePath, currentPath.parent_path(), 0, 0, 0, filePath, textToFormat);
+      if (formatAst) {
+        std::string formatted = Formatter::format(formatAst);
+        if (!formatted.empty()) {
+          int lineCount =
+              std::count(textToFormat.begin(), textToFormat.end(), '\n') + 1;
+          res = json::array();
+          res.push_back({{"range",
+                          {{"start", {{"line", 0}, {"character", 0}}},
+                           {"end", {{"line", lineCount}, {"character", 0}}}}},
+                         {"newText", formatted}});
+        }
+      }
+    } catch (...) {
     }
   }
   sendResponse({{"jsonrpc", "2.0"}, {"id", req["id"]}, {"result", res}});

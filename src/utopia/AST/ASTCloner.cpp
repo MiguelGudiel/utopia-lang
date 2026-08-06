@@ -195,6 +195,8 @@ ASTNode *ASTCloner::visit(const BlockNode *n) {
   b->statements = cloneArray(n->statements);
   b->length = n->length;
   b->endLine = n->endLine;
+  b->isExpressionBody = n->isExpressionBody;
+  b->hasBraces = n->hasBraces;
   return b;
 }
 

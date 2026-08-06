@@ -19,12 +19,12 @@ class Console {
     String result;
     while (true) {
       int32 c = Console.c_getchar();
-      
+
       /* Break on EOF (-1) or newline */
       if (c == -1 || c == 10) {
         break;
       }
-      
+
       /* Ignore carriage return */
       if (c != 13) {
         result.push_back(c as uint8);

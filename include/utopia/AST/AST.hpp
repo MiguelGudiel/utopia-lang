@@ -60,6 +60,7 @@ struct ASTNode {
   int endLine;
   std::string_view docString;
   std::string_view trailingComment;
+  std::string_view endComment;
 
   explicit ASTNode(NodeKind k, int l = 0, int c = 0, int len = 0)
       : kind(k), line(l), column(c), length(len), endLine(l) {}
@@ -418,6 +419,7 @@ struct AssignNode : public ExprNode {
 struct BlockNode : public StmtNode {
   llvm::ArrayRef<ASTNode *> statements;
   bool isExpressionBody = false;
+  bool hasBraces = true;
 
   BlockNode(int l, int c) : StmtNode(NodeKind::Block, l, c, 1) {}
   void finalize(int endCol) { this->length = endCol - this->column; }

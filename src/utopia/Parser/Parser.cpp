@@ -256,9 +256,7 @@ std::string Parser::consumeComments() {
         if (*p == '\n')
           newlines++;
       }
-      if (newlines > 1) {
-        doc += std::string(newlines - 1, '\n');
-      }
+      doc += std::string(newlines, '\n');
     }
   }
 
@@ -271,12 +269,22 @@ ModuleNode *Parser::parseModule(std::string_view filePath) {
   std::vector<std::string_view> imports;
   std::vector<std::string_view> exports;
   std::vector<ASTNode *> statements;
+  std::string moduleDoc;
 
   while (currentToken().type != TokenType::EOF_TOK) {
     try {
       if (currentToken().type == TokenType::IDENTIFIER &&
           (currentToken().value == "import" ||
            currentToken().value == "export")) {
+
+        std::string importDoc = consumeComments();
+        if (!importDoc.empty()) {
+          if (moduleDoc.empty()) {
+            moduleDoc = importDoc;
+          } else {
+            moduleDoc += importDoc;
+          }
+        }
 
         bool isExport = (currentToken().value == "export");
         advance();
@@ -331,6 +339,30 @@ ModuleNode *Parser::parseModule(std::string_view filePath) {
     } catch (const ParseException &) {
       synchronize();
     }
+  }
+
+  std::string eofDoc = consumeComments();
+  if (!eofDoc.empty()) {
+    if (!statements.empty()) {
+      ASTNode *lastStmt = statements.back();
+      std::string combined;
+      if (!lastStmt->trailingComment.empty()) {
+        combined = std::string(lastStmt->trailingComment) + "\n" + eofDoc;
+      } else {
+        combined = "\n" + eofDoc;
+      }
+      lastStmt->trailingComment = astCtx.copyString(combined);
+    } else {
+      if (moduleDoc.empty()) {
+        moduleDoc = eofDoc;
+      } else {
+        moduleDoc += eofDoc;
+      }
+    }
+  }
+
+  if (!moduleDoc.empty()) {
+    module->docString = astCtx.copyString(moduleDoc);
   }
 
   module->rawImports = astCtx.copyArray<std::string_view>(imports);
@@ -779,9 +811,31 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
     fields.push_back(field);
   }
 
+  std::string closingDoc = consumeComments();
+
   int endLine = currentToken().line;
   int endCol = currentToken().column + 1;
   expect(TokenType::RBRACE, "Expected '}'");
+
+  if (!closingDoc.empty()) {
+    ASTNode *lastMember = nullptr;
+    for (auto *f : fields)
+      if (!lastMember || f->endLine > lastMember->endLine)
+        lastMember = f;
+    if (constructor &&
+        (!lastMember || constructor->endLine > lastMember->endLine))
+      lastMember = constructor;
+
+    if (lastMember) {
+      std::string combined;
+      if (!lastMember->trailingComment.empty()) {
+        combined = std::string(lastMember->trailingComment) + "\n" + closingDoc;
+      } else {
+        combined = "\n" + closingDoc;
+      }
+      lastMember->trailingComment = astCtx.copyString(combined);
+    }
+  }
 
   std::vector<FieldInfo> fInfos;
   for (size_t i = 0; i < fields.size(); ++i) {
@@ -1006,6 +1060,7 @@ BlockNode *Parser::parseStatementAsBlock() {
   auto stmt = parseStatement();
 
   auto block = astCtx.create<BlockNode>(startLine, startCol);
+  block->hasBraces = false;
   if (stmt) {
     std::vector<ASTNode *> statements = {stmt};
     block->statements = astCtx.copyArray<ASTNode *>(statements);
@@ -1183,9 +1238,22 @@ SwitchNode *Parser::parseSwitchStatement() {
     cases.push_back(caseNode);
   }
 
+  std::string closingDoc = consumeComments();
+
   int endLine = currentToken().line;
   int endCol = currentToken().column + 1;
   expect(TokenType::RBRACE, "Expected '}' at end of switch block");
+
+  if (!closingDoc.empty() && !cases.empty()) {
+    ASTNode *lastCase = cases.back();
+    std::string combined;
+    if (!lastCase->trailingComment.empty()) {
+      combined = std::string(lastCase->trailingComment) + "\n" + closingDoc;
+    } else {
+      combined = "\n" + closingDoc;
+    }
+    lastCase->trailingComment = astCtx.copyString(combined);
+  }
 
   auto node =
       astCtx.create<SwitchNode>(cond, astCtx.copyArray<CaseNode *>(cases),
@@ -1994,9 +2062,22 @@ DeclNode *Parser::parseEnumDecl() {
     }
   }
 
+  std::string closingDoc = consumeComments();
+
   int endLine = currentToken().line;
   int endCol = currentToken().column + 1;
   expect(TokenType::RBRACE, "Expected '}'");
+
+  if (!closingDoc.empty() && !members.empty()) {
+    ASTNode *lastMember = members.back();
+    std::string combined;
+    if (!lastMember->trailingComment.empty()) {
+      combined = std::string(lastMember->trailingComment) + "\n" + closingDoc;
+    } else {
+      combined = "\n" + closingDoc;
+    }
+    lastMember->trailingComment = astCtx.copyString(combined);
+  }
 
   auto node = astCtx.create<EnumDeclNode>(name, underlyingType, line, col,
                                           endCol - col);
@@ -2158,9 +2239,23 @@ BlockNode *Parser::parseBlock() {
     }
   }
 
+  std::string closingDoc = consumeComments();
+
   int endLine = currentToken().line;
   int endCol = currentToken().column + 1;
   expect(TokenType::RBRACE, "Expected '}'");
+
+  if (!closingDoc.empty() && !statements.empty()) {
+    ASTNode *lastStmt = statements.back();
+    std::string combined;
+    if (!lastStmt->trailingComment.empty()) {
+      combined = std::string(lastStmt->trailingComment) + "\n" + closingDoc;
+    } else {
+      combined = "\n" + closingDoc;
+    }
+    lastStmt->trailingComment = astCtx.copyString(combined);
+  }
+
   block->statements = astCtx.copyArray<ASTNode *>(statements);
   block->finalize(endCol);
   block->endLine = endLine;
