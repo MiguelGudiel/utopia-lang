@@ -79,14 +79,51 @@ class LocalVarCollector : public ASTVisitor<LocalVarCollector, void> {
 public:
   int targetLine;
   std::vector<const VarDeclNode *> locals;
+  std::vector<std::string> activeUsings;
+  std::string currentNamespace;
+  const FunctionDeclNode *closestFunc = nullptr;
 
   LocalVarCollector(int line) : targetLine(line) {}
 
-  void visit(const NamespaceDeclNode *n) {
-    for (auto *s : n->statements)
-      dispatch(s);
+  void visit(const ModuleNode *n) {
+    for (auto *s : n->statements) {
+      if (s->line <= targetLine)
+        dispatch(s);
+    }
   }
-  void visit(const UsingNode *) {}
+
+  void visit(const NamespaceDeclNode *n) {
+    if (n->line <= targetLine) {
+      std::string oldNs = currentNamespace;
+      currentNamespace = currentNamespace.empty()
+                             ? std::string(n->name)
+                             : currentNamespace + "." + std::string(n->name);
+      for (auto *s : n->statements) {
+        if (s->line <= targetLine)
+          dispatch(s);
+      }
+      if (targetLine > n->endLine && !n->isFileScoped) {
+        currentNamespace = oldNs;
+      }
+    }
+  }
+
+  void visit(const UsingNode *n) {
+    if (n->line <= targetLine)
+      activeUsings.push_back(std::string(n->name));
+  }
+
+  void visit(const FunctionDeclNode *n) {
+    if (n->line <= targetLine && n->endLine >= targetLine) {
+      closestFunc = n;
+      for (auto *p : n->params)
+        dispatch(p);
+      if (n->body)
+        dispatch(n->body);
+    }
+  }
+
+  void visit(const ParamDeclNode *n) {}
 
   void visit(const VarDeclNode *n) {
     if (n->line <= targetLine)
@@ -96,49 +133,62 @@ public:
   }
 
   void visit(const BlockNode *n) {
-    for (auto *s : n->statements)
-      dispatch(s);
+    for (auto *s : n->statements) {
+      if (s->line <= targetLine)
+        dispatch(s);
+    }
   }
 
   void visit(const IfNode *n) {
     if (n->condition)
       dispatch(n->condition);
-    if (n->thenBlock)
+    if (n->thenBlock && n->thenBlock->line <= targetLine)
       dispatch(n->thenBlock);
-    if (n->elseBlock)
+    if (n->elseBlock && n->elseBlock->line <= targetLine)
       dispatch(n->elseBlock);
   }
 
   void visit(const ForNode *n) {
-    if (n->initStatement)
+    if (n->initStatement && n->initStatement->line <= targetLine)
       dispatch(n->initStatement);
     if (n->condition)
       dispatch(n->condition);
     if (n->increment)
       dispatch(n->increment);
-    if (n->body)
+    if (n->body && n->body->line <= targetLine)
       dispatch(n->body);
   }
 
   void visit(const WhileNode *n) {
     if (n->condition)
       dispatch(n->condition);
-    if (n->body)
+    if (n->body && n->body->line <= targetLine)
       dispatch(n->body);
   }
 
   void visit(const SwitchNode *n) {
     if (n->condition)
       dispatch(n->condition);
-    for (auto *c : n->cases)
-      dispatch(c);
+    for (auto *c : n->cases) {
+      if (c->line <= targetLine)
+        dispatch(c);
+    }
   }
 
   void visit(const CaseNode *n) {
     if (n->value)
       dispatch(n->value);
-    for (auto *s : n->statements)
-      dispatch(s);
+    for (auto *s : n->statements) {
+      if (s->line <= targetLine)
+        dispatch(s);
+    }
+  }
+
+  void visit(const AssignNode *n) {
+    if (n->target)
+      dispatch(n->target);
+    if (n->value)
+      dispatch(n->value);
   }
 
   void visit(const NumberNode *) {}
@@ -152,7 +202,6 @@ public:
   void visit(const UnaryOpNode *) {}
   void visit(const BinaryOpNode *) {}
   void visit(const TernaryOpNode *) {}
-  void visit(const AssignNode *) {}
   void visit(const ArrayLiteralNode *) {}
   void visit(const ArraySubscriptNode *) {}
   void visit(const MemberAccessNode *) {}
@@ -164,8 +213,6 @@ public:
   void visit(const ReturnNode *) {}
   void visit(const BreakNode *) {}
   void visit(const ContinueNode *) {}
-  void visit(const ParamDeclNode *) {}
-  void visit(const FunctionDeclNode *) {}
   void visit(const StructDeclNode *) {}
   void visit(const ClassDeclNode *) {}
   void visit(const UnionDeclNode *) {}
@@ -174,7 +221,6 @@ public:
   void visit(const AnnotationDeclNode *) {}
   void visit(const TypedefDeclNode *) {}
   void visit(const AnnotationNode *) {}
-  void visit(const ModuleNode *) {}
 };
 
 std::string pathToUri(std::string_view path) {
@@ -1014,8 +1060,9 @@ void handleCompletion(const json &req) {
       idEnd--;
     }
     int idStart = idEnd;
-    while (idStart >= 0 && (std::isalnum(targetLineStr[idStart]) ||
-                            targetLineStr[idStart] == '_')) {
+    while (idStart >= 0 &&
+           (std::isalnum(targetLineStr[idStart]) ||
+            targetLineStr[idStart] == '_' || targetLineStr[idStart] == '.')) {
       idStart--;
     }
     idStart++;
@@ -1028,12 +1075,12 @@ void handleCompletion(const json &req) {
     addBuiltInAnnotations();
   } else if (!isDotCompletion) {
     std::vector<std::string> keywords = {
-        "if",      "else",     "while",      "for",      "switch", "case",
-        "default", "break",    "continue",   "return",   "import", "export",
-        "as",      "new",      "delete",     "struct",   "union",  "class",
-        "enum",    "typedef",  "annotation", "Function", "this",   "null",
-        "true",    "false",    "public",     "private",  "const",  "static",
-        "extern",  "required", "operator"};
+        "if",      "else",     "while",      "for",       "switch", "case",
+        "default", "break",    "continue",   "return",    "import", "export",
+        "as",      "new",      "delete",     "struct",    "union",  "class",
+        "enum",    "typedef",  "annotation", "Function",  "this",   "null",
+        "true",    "false",    "public",     "private",   "const",  "static",
+        "extern",  "required", "operator",   "namespace", "using"};
 
     std::vector<std::string> primitives = {
         "int8",   "int16",   "int32",   "int64",  "uint8", "uint16", "uint32",
@@ -1062,7 +1109,9 @@ void handleCompletion(const json &req) {
     auto &doc = documents[uri];
     if (doc.ast) {
       std::unordered_set<const ModuleNode *> visitedMods;
-      std::vector<const DeclNode *> globals;
+      std::unordered_map<std::string, std::vector<const DeclNode *>>
+          namespaceMembers;
+      std::vector<const DeclNode *> rootGlobals;
 
       std::function<void(const ModuleNode *)> collectGlobals =
           [&](const ModuleNode *mod) {
@@ -1070,18 +1119,81 @@ void handleCompletion(const json &req) {
               return;
             visitedMods.insert(mod);
 
-            for (const auto *stmt : mod->statements) {
-              if (stmt->kind == NodeKind::FunctionDecl ||
-                  stmt->kind == NodeKind::VarDecl ||
-                  stmt->kind == NodeKind::ClassDecl ||
-                  stmt->kind == NodeKind::StructDecl ||
-                  stmt->kind == NodeKind::UnionDecl ||
-                  stmt->kind == NodeKind::EnumDecl ||
-                  stmt->kind == NodeKind::TypedefDecl ||
-                  stmt->kind == NodeKind::AnnotationDecl) {
-                globals.push_back(static_cast<const DeclNode *>(stmt));
-              }
-            }
+            std::function<void(llvm::ArrayRef<ASTNode *>, const std::string &)>
+                collectStmts = [&](llvm::ArrayRef<ASTNode *> stmts,
+                                   const std::string &currentNs) {
+                  for (const auto *stmt : stmts) {
+                    if (stmt->kind == NodeKind::NamespaceDecl) {
+                      auto *nsDecl =
+                          static_cast<const NamespaceDeclNode *>(stmt);
+
+                      std::string nsName = std::string(nsDecl->name);
+                      std::string runningNs = currentNs;
+
+                      /* Break down multi-part namespaces (e.g., 'wow.Math')
+                       * into individual virtual components to register them
+                       * accurately in the scope tree. */
+                      size_t start = 0;
+                      while (true) {
+                        size_t dot = nsName.find('.', start);
+                        std::string part =
+                            (dot == std::string::npos)
+                                ? nsName.substr(start)
+                                : nsName.substr(start, dot - start);
+
+                        std::string nextNs =
+                            runningNs.empty() ? part : runningNs + "." + part;
+
+                        auto *virtualNs = doc.astCtx->getOrCreateNamespace(
+                            doc.astCtx->copyString(nextNs));
+
+                        /* Carry over the documentation to the terminal
+                         * namespace node */
+                        if (dot == std::string::npos &&
+                            virtualNs->docString.empty()) {
+                          virtualNs->docString = nsDecl->docString;
+                        }
+
+                        if (runningNs.empty()) {
+                          if (std::find(rootGlobals.begin(), rootGlobals.end(),
+                                        virtualNs) == rootGlobals.end()) {
+                            rootGlobals.push_back(virtualNs);
+                          }
+                        } else {
+                          auto &vec = namespaceMembers[runningNs];
+                          if (std::find(vec.begin(), vec.end(), virtualNs) ==
+                              vec.end()) {
+                            vec.push_back(virtualNs);
+                          }
+                        }
+
+                        runningNs = nextNs;
+
+                        if (dot == std::string::npos)
+                          break;
+                        start = dot + 1;
+                      }
+
+                      collectStmts(nsDecl->statements, runningNs);
+                    } else if (stmt->kind == NodeKind::FunctionDecl ||
+                               stmt->kind == NodeKind::VarDecl ||
+                               stmt->kind == NodeKind::ClassDecl ||
+                               stmt->kind == NodeKind::StructDecl ||
+                               stmt->kind == NodeKind::UnionDecl ||
+                               stmt->kind == NodeKind::EnumDecl ||
+                               stmt->kind == NodeKind::TypedefDecl ||
+                               stmt->kind == NodeKind::AnnotationDecl) {
+                      if (currentNs.empty())
+                        rootGlobals.push_back(
+                            static_cast<const DeclNode *>(stmt));
+                      else
+                        namespaceMembers[currentNs].push_back(
+                            static_cast<const DeclNode *>(stmt));
+                    }
+                  }
+                };
+
+            collectStmts(mod->statements, "");
 
             for (const auto *imp : mod->importedModules)
               collectGlobals(imp);
@@ -1091,183 +1203,394 @@ void handleCompletion(const json &req) {
 
       collectGlobals(doc.ast);
 
-      const FunctionDeclNode *closestFunc = nullptr;
-      for (const auto *stmt : doc.ast->statements) {
-        if (stmt->kind == NodeKind::FunctionDecl) {
-          auto *f = static_cast<const FunctionDeclNode *>(stmt);
-          if (f->line <= line) {
-            if (!closestFunc || f->line > closestFunc->line) {
-              closestFunc = f;
-            }
-          }
-        }
-      }
+      LocalVarCollector collector(line);
+      collector.dispatch(doc.ast);
 
       if (isDotCompletion && !triggerWord.empty()) {
         const Type *instanceType = nullptr;
         const DeclNode *staticTypeDecl = nullptr;
+        std::string currentStaticNs = "";
 
-        if (closestFunc) {
-          if (triggerWord == "this" && closestFunc->parentRecord) {
-            instanceType = closestFunc->parentRecord;
-          } else {
-            for (const auto *p : closestFunc->params) {
-              if (p->name == triggerWord) {
-                instanceType = p->type;
-                break;
-              }
-            }
-            if (!instanceType && closestFunc->body) {
-              LocalVarCollector collector(line);
-              collector.dispatch(closestFunc->body);
-              for (const auto *local : collector.locals) {
-                if (local->varName == triggerWord) {
-                  instanceType = local->type;
+        std::vector<std::string> chain;
+        std::stringstream ss(triggerWord);
+        std::string item;
+        while (std::getline(ss, item, '.')) {
+          if (!item.empty())
+            chain.push_back(item);
+        }
+
+        if (!chain.empty()) {
+          std::string first = chain[0];
+
+          if (collector.closestFunc) {
+            if (first == "this" && collector.closestFunc->parentRecord) {
+              instanceType = collector.closestFunc->parentRecord;
+            } else {
+              for (const auto *p : collector.closestFunc->params) {
+                if (p->name == first) {
+                  instanceType = p->type;
                   break;
+                }
+              }
+              if (!instanceType) {
+                for (const auto *l : collector.locals) {
+                  if (l->varName == first) {
+                    instanceType = l->type;
+                    break;
+                  }
                 }
               }
             }
           }
-        }
 
-        if (!instanceType) {
-          for (const auto *decl : globals) {
-            if (decl->kind == NodeKind::VarDecl) {
-              auto *v = static_cast<const VarDeclNode *>(decl);
-              if (v->varName == triggerWord) {
-                instanceType = v->type;
-                break;
+          if (!instanceType) {
+            auto checkDecls = [&](const std::vector<const DeclNode *> &decls) {
+              for (const auto *decl : decls) {
+                if (decl->kind == NodeKind::VarDecl &&
+                    static_cast<const VarDeclNode *>(decl)->varName == first) {
+                  instanceType = static_cast<const VarDeclNode *>(decl)->type;
+                  return true;
+                } else if (decl->kind == NodeKind::ClassDecl &&
+                           static_cast<const ClassDeclNode *>(decl)->name ==
+                               first) {
+                  staticTypeDecl = decl;
+                  return true;
+                } else if (decl->kind == NodeKind::StructDecl &&
+                           static_cast<const StructDeclNode *>(decl)->name ==
+                               first) {
+                  staticTypeDecl = decl;
+                  return true;
+                } else if (decl->kind == NodeKind::UnionDecl &&
+                           static_cast<const UnionDeclNode *>(decl)->name ==
+                               first) {
+                  staticTypeDecl = decl;
+                  return true;
+                } else if (decl->kind == NodeKind::EnumDecl &&
+                           static_cast<const EnumDeclNode *>(decl)->name ==
+                               first) {
+                  staticTypeDecl = decl;
+                  return true;
+                } else if (decl->kind == NodeKind::NamespaceDecl &&
+                           static_cast<const NamespaceDeclNode *>(decl)->name ==
+                               first) {
+                  currentStaticNs =
+                      static_cast<const NamespaceDeclNode *>(decl)->fqName;
+                  staticTypeDecl = decl;
+                  return true;
+                }
+              }
+              return false;
+            };
+
+            if (!checkDecls(rootGlobals)) {
+              if (!collector.currentNamespace.empty()) {
+                checkDecls(namespaceMembers[collector.currentNamespace]);
+              }
+              if (!instanceType && !staticTypeDecl) {
+                for (const auto &u : collector.activeUsings) {
+                  if (checkDecls(namespaceMembers[u]))
+                    break;
+                }
               }
             }
           }
-        }
 
-        if (!instanceType) {
-          for (const auto *decl : globals) {
-            if (decl->kind == NodeKind::ClassDecl) {
-              if (static_cast<const ClassDeclNode *>(decl)->name ==
-                  triggerWord) {
-                staticTypeDecl = decl;
-                break;
+          for (size_t i = 1; i < chain.size(); ++i) {
+            std::string part = chain[i];
+            const Type *nextInstanceType = nullptr;
+            const DeclNode *nextStaticDecl = nullptr;
+            std::string nextStaticNs = "";
+
+            if (instanceType) {
+              const Type *unqual = instanceType->getUnqualifiedType();
+              while (unqual->isPointerType())
+                unqual = static_cast<const PointerType *>(unqual)
+                             ->getPointeeType()
+                             ->getUnqualifiedType();
+              while (unqual->isReferenceType() ||
+                     unqual->getKind() == TypeKind::RValueReference) {
+                if (unqual->isReferenceType())
+                  unqual = static_cast<const ReferenceType *>(unqual)
+                               ->getPointeeType()
+                               ->getUnqualifiedType();
+                else
+                  unqual = static_cast<const RValueReferenceType *>(unqual)
+                               ->getPointeeType()
+                               ->getUnqualifiedType();
               }
-            } else if (decl->kind == NodeKind::StructDecl) {
-              if (static_cast<const StructDeclNode *>(decl)->name ==
-                  triggerWord) {
-                staticTypeDecl = decl;
-                break;
+              if (unqual->getKind() == TypeKind::Class ||
+                  unqual->getKind() == TypeKind::Struct ||
+                  unqual->getKind() == TypeKind::Union) {
+                auto *recTy = static_cast<const RecordType *>(unqual);
+                const DeclNode *rDecl = recTy->getDeclaration();
+                if (!rDecl) {
+                  auto findRec =
+                      [&](const std::vector<const DeclNode *> &decls) {
+                        for (const auto *decl : decls) {
+                          if ((decl->kind == NodeKind::ClassDecl &&
+                               static_cast<const ClassDeclNode *>(decl)->name ==
+                                   recTy->getName()) ||
+                              (decl->kind == NodeKind::StructDecl &&
+                               static_cast<const StructDeclNode *>(decl)
+                                       ->name == recTy->getName()) ||
+                              (decl->kind == NodeKind::UnionDecl &&
+                               static_cast<const UnionDeclNode *>(decl)->name ==
+                                   recTy->getName())) {
+                            return decl;
+                          }
+                        }
+                        return (const DeclNode *)nullptr;
+                      };
+                  rDecl = findRec(rootGlobals);
+                  if (!rDecl) {
+                    for (const auto &pair : namespaceMembers) {
+                      rDecl = findRec(pair.second);
+                      if (rDecl)
+                        break;
+                    }
+                  }
+                }
+
+                if (rDecl) {
+                  llvm::ArrayRef<VarDeclNode *> fields;
+                  if (rDecl->kind == NodeKind::ClassDecl)
+                    fields = static_cast<const ClassDeclNode *>(rDecl)->fields;
+                  else if (rDecl->kind == NodeKind::StructDecl)
+                    fields = static_cast<const StructDeclNode *>(rDecl)->fields;
+                  else if (rDecl->kind == NodeKind::UnionDecl)
+                    fields = static_cast<const UnionDeclNode *>(rDecl)->fields;
+
+                  for (const auto *f : fields) {
+                    if (f->varName == part) {
+                      nextInstanceType = f->type;
+                      break;
+                    }
+                  }
+                }
               }
-            } else if (decl->kind == NodeKind::UnionDecl) {
-              if (static_cast<const UnionDeclNode *>(decl)->name ==
-                  triggerWord) {
-                staticTypeDecl = decl;
-                break;
-              }
-            } else if (decl->kind == NodeKind::EnumDecl) {
-              if (static_cast<const EnumDeclNode *>(decl)->name ==
-                  triggerWord) {
-                staticTypeDecl = decl;
-                break;
+            } else if (staticTypeDecl) {
+              if (staticTypeDecl->kind == NodeKind::NamespaceDecl) {
+                for (const auto *decl : namespaceMembers[currentStaticNs]) {
+                  if (decl->kind == NodeKind::VarDecl &&
+                      static_cast<const VarDeclNode *>(decl)->varName == part) {
+                    nextInstanceType =
+                        static_cast<const VarDeclNode *>(decl)->type;
+                    break;
+                  } else if (decl->kind == NodeKind::ClassDecl &&
+                             static_cast<const ClassDeclNode *>(decl)->name ==
+                                 part) {
+                    nextStaticDecl = decl;
+                    break;
+                  } else if (decl->kind == NodeKind::StructDecl &&
+                             static_cast<const StructDeclNode *>(decl)->name ==
+                                 part) {
+                    nextStaticDecl = decl;
+                    break;
+                  } else if (decl->kind == NodeKind::UnionDecl &&
+                             static_cast<const UnionDeclNode *>(decl)->name ==
+                                 part) {
+                    nextStaticDecl = decl;
+                    break;
+                  } else if (decl->kind == NodeKind::EnumDecl &&
+                             static_cast<const EnumDeclNode *>(decl)->name ==
+                                 part) {
+                    nextStaticDecl = decl;
+                    break;
+                  } else if (decl->kind == NodeKind::NamespaceDecl &&
+                             static_cast<const NamespaceDeclNode *>(decl)
+                                     ->name == part) {
+                    nextStaticDecl = decl;
+                    nextStaticNs =
+                        static_cast<const NamespaceDeclNode *>(decl)->fqName;
+                    break;
+                  }
+                }
+              } else if (staticTypeDecl->kind == NodeKind::ClassDecl ||
+                         staticTypeDecl->kind == NodeKind::StructDecl ||
+                         staticTypeDecl->kind == NodeKind::UnionDecl) {
+                llvm::ArrayRef<VarDeclNode *> fields;
+                if (staticTypeDecl->kind == NodeKind::ClassDecl)
+                  fields = static_cast<const ClassDeclNode *>(staticTypeDecl)
+                               ->fields;
+                else if (staticTypeDecl->kind == NodeKind::StructDecl)
+                  fields = static_cast<const StructDeclNode *>(staticTypeDecl)
+                               ->fields;
+                else if (staticTypeDecl->kind == NodeKind::UnionDecl)
+                  fields = static_cast<const UnionDeclNode *>(staticTypeDecl)
+                               ->fields;
+                for (const auto *f : fields) {
+                  if (f->isStatic && f->varName == part) {
+                    nextInstanceType = f->type;
+                    break;
+                  }
+                }
               }
             }
+
+            instanceType = nextInstanceType;
+            staticTypeDecl = nextStaticDecl;
+            currentStaticNs = nextStaticNs;
+            if (!instanceType && !staticTypeDecl)
+              break;
           }
         }
 
         if (instanceType) {
           const Type *unqual = instanceType->getUnqualifiedType();
-          while (unqual->isPointerType()) {
+          while (unqual->isPointerType())
             unqual = static_cast<const PointerType *>(unqual)
                          ->getPointeeType()
                          ->getUnqualifiedType();
-          }
-          while (unqual->isReferenceType()) {
-            unqual = static_cast<const ReferenceType *>(unqual)
-                         ->getPointeeType()
-                         ->getUnqualifiedType();
-          }
-          if (unqual->getKind() == TypeKind::RValueReference) {
-            unqual = static_cast<const RValueReferenceType *>(unqual)
-                         ->getPointeeType()
-                         ->getUnqualifiedType();
+          while (unqual->isReferenceType() ||
+                 unqual->getKind() == TypeKind::RValueReference) {
+            if (unqual->isReferenceType())
+              unqual = static_cast<const ReferenceType *>(unqual)
+                           ->getPointeeType()
+                           ->getUnqualifiedType();
+            else
+              unqual = static_cast<const RValueReferenceType *>(unqual)
+                           ->getPointeeType()
+                           ->getUnqualifiedType();
           }
 
           if (unqual->getKind() == TypeKind::Class ||
               unqual->getKind() == TypeKind::Struct ||
               unqual->getKind() == TypeKind::Union) {
             auto *recTy = static_cast<const RecordType *>(unqual);
-            if (recTy->getDeclaration()) {
-              staticTypeDecl = recTy->getDeclaration();
-            } else {
-              for (const auto *decl : globals) {
-                if ((decl->kind == NodeKind::ClassDecl &&
-                     static_cast<const ClassDeclNode *>(decl)->name ==
-                         recTy->getName()) ||
-                    (decl->kind == NodeKind::StructDecl &&
-                     static_cast<const StructDeclNode *>(decl)->name ==
-                         recTy->getName()) ||
-                    (decl->kind == NodeKind::UnionDecl &&
-                     static_cast<const UnionDeclNode *>(decl)->name ==
-                         recTy->getName())) {
-                  staticTypeDecl = decl;
-                  break;
+            const DeclNode *rDecl = recTy->getDeclaration();
+            if (!rDecl) {
+              auto findRec = [&](const std::vector<const DeclNode *> &decls) {
+                for (const auto *decl : decls) {
+                  if ((decl->kind == NodeKind::ClassDecl &&
+                       static_cast<const ClassDeclNode *>(decl)->name ==
+                           recTy->getName()) ||
+                      (decl->kind == NodeKind::StructDecl &&
+                       static_cast<const StructDeclNode *>(decl)->name ==
+                           recTy->getName()) ||
+                      (decl->kind == NodeKind::UnionDecl &&
+                       static_cast<const UnionDeclNode *>(decl)->name ==
+                           recTy->getName())) {
+                    return decl;
+                  }
+                }
+                return (const DeclNode *)nullptr;
+              };
+              rDecl = findRec(rootGlobals);
+              if (!rDecl) {
+                for (const auto &pair : namespaceMembers) {
+                  rDecl = findRec(pair.second);
+                  if (rDecl)
+                    break;
+                }
+              }
+            }
+
+            if (rDecl) {
+              llvm::ArrayRef<VarDeclNode *> fields;
+              llvm::ArrayRef<FunctionDeclNode *> methods;
+              if (rDecl->kind == NodeKind::ClassDecl) {
+                fields = static_cast<const ClassDeclNode *>(rDecl)->fields;
+                methods = static_cast<const ClassDeclNode *>(rDecl)->methods;
+              } else if (rDecl->kind == NodeKind::StructDecl) {
+                fields = static_cast<const StructDeclNode *>(rDecl)->fields;
+                methods = static_cast<const StructDeclNode *>(rDecl)->methods;
+              } else if (rDecl->kind == NodeKind::UnionDecl) {
+                fields = static_cast<const UnionDeclNode *>(rDecl)->fields;
+                methods = static_cast<const UnionDeclNode *>(rDecl)->methods;
+              }
+
+              for (const auto *f : fields) {
+                if (!f->isStatic) {
+                  std::string detail = f->type ? f->type->toString() : "auto";
+                  addCompletion(std::string(f->varName), 5, detail,
+                                std::string(f->docString));
+                }
+              }
+              for (const auto *m : methods) {
+                if (!m->isStatic && !m->name.starts_with("operator")) {
+                  std::string detail =
+                      m->returnType ? m->returnType->toString() : "auto";
+                  addCompletion(std::string(m->name), 2, detail,
+                                std::string(m->docString));
                 }
               }
             }
           }
-        }
-
-        if (staticTypeDecl) {
-          bool isInstance = (instanceType != nullptr);
-
-          if (staticTypeDecl->kind == NodeKind::ClassDecl ||
-              staticTypeDecl->kind == NodeKind::StructDecl ||
-              staticTypeDecl->kind == NodeKind::UnionDecl) {
+        } else if (staticTypeDecl) {
+          if (staticTypeDecl->kind == NodeKind::NamespaceDecl) {
+            for (const auto *decl : namespaceMembers[currentStaticNs]) {
+              if (decl->kind == NodeKind::FunctionDecl) {
+                auto *f = static_cast<const FunctionDeclNode *>(decl);
+                if (f->name.starts_with("operator"))
+                  continue;
+                std::string detail =
+                    f->returnType ? f->returnType->toString() : "auto";
+                addCompletion(std::string(f->name), 3, detail,
+                              std::string(f->docString));
+              } else if (decl->kind == NodeKind::VarDecl) {
+                auto *v = static_cast<const VarDeclNode *>(decl);
+                std::string detail = v->type ? v->type->toString() : "auto";
+                addCompletion(std::string(v->varName), 6, detail,
+                              std::string(v->docString));
+              } else if (decl->kind == NodeKind::ClassDecl) {
+                auto *c = static_cast<const ClassDeclNode *>(decl);
+                addCompletion(std::string(c->name), 7, "class",
+                              std::string(c->docString));
+              } else if (decl->kind == NodeKind::StructDecl) {
+                auto *s = static_cast<const StructDeclNode *>(decl);
+                addCompletion(std::string(s->name), 22, "struct",
+                              std::string(s->docString));
+              } else if (decl->kind == NodeKind::UnionDecl) {
+                auto *u = static_cast<const UnionDeclNode *>(decl);
+                addCompletion(std::string(u->name), 22, "union",
+                              std::string(u->docString));
+              } else if (decl->kind == NodeKind::EnumDecl) {
+                auto *e = static_cast<const EnumDeclNode *>(decl);
+                addCompletion(std::string(e->name), 13, "enum",
+                              std::string(e->docString));
+              } else if (decl->kind == NodeKind::NamespaceDecl) {
+                auto *n = static_cast<const NamespaceDeclNode *>(decl);
+                addCompletion(std::string(n->name), 9, "namespace",
+                              std::string(n->docString));
+              }
+            }
+          } else if (staticTypeDecl->kind == NodeKind::ClassDecl ||
+                     staticTypeDecl->kind == NodeKind::StructDecl ||
+                     staticTypeDecl->kind == NodeKind::UnionDecl) {
             llvm::ArrayRef<VarDeclNode *> fields;
             llvm::ArrayRef<FunctionDeclNode *> methods;
-
             if (staticTypeDecl->kind == NodeKind::ClassDecl) {
-              auto *c = static_cast<const ClassDeclNode *>(staticTypeDecl);
-              fields = c->fields;
-              methods = c->methods;
+              fields =
+                  static_cast<const ClassDeclNode *>(staticTypeDecl)->fields;
+              methods =
+                  static_cast<const ClassDeclNode *>(staticTypeDecl)->methods;
             } else if (staticTypeDecl->kind == NodeKind::StructDecl) {
-              auto *s = static_cast<const StructDeclNode *>(staticTypeDecl);
-              fields = s->fields;
-              methods = s->methods;
-            } else {
-              auto *u = static_cast<const UnionDeclNode *>(staticTypeDecl);
-              fields = u->fields;
-              methods = u->methods;
+              fields =
+                  static_cast<const StructDeclNode *>(staticTypeDecl)->fields;
+              methods =
+                  static_cast<const StructDeclNode *>(staticTypeDecl)->methods;
+            } else if (staticTypeDecl->kind == NodeKind::UnionDecl) {
+              fields =
+                  static_cast<const UnionDeclNode *>(staticTypeDecl)->fields;
+              methods =
+                  static_cast<const UnionDeclNode *>(staticTypeDecl)->methods;
             }
-
             for (const auto *f : fields) {
-              if (isInstance && !f->isStatic) {
-                std::string detail = f->type ? f->type->toString() : "auto";
-                addCompletion(std::string(f->varName), 5, detail,
-                              std::string(f->docString));
-              } else if (!isInstance && f->isStatic) {
+              if (f->isStatic) {
                 std::string detail = f->type ? f->type->toString() : "auto";
                 addCompletion(std::string(f->varName), 5, detail,
                               std::string(f->docString));
               }
             }
-
             for (const auto *m : methods) {
-              if (m->name.starts_with("operator"))
-                continue;
-
-              if (isInstance && !m->isStatic) {
-                std::string detail =
-                    m->returnType ? m->returnType->toString() : "auto";
-                addCompletion(std::string(m->name), 2, detail,
-                              std::string(m->docString));
-              } else if (!isInstance && m->isStatic) {
+              if (m->isStatic && !m->name.starts_with("operator")) {
                 std::string detail =
                     m->returnType ? m->returnType->toString() : "auto";
                 addCompletion(std::string(m->name), 2, detail,
                               std::string(m->docString));
               }
             }
-          } else if (!isInstance &&
-                     staticTypeDecl->kind == NodeKind::EnumDecl) {
+          } else if (staticTypeDecl->kind == NodeKind::EnumDecl) {
             auto *e = static_cast<const EnumDeclNode *>(staticTypeDecl);
             for (const auto *em : e->members) {
               addCompletion(std::string(em->name), 20, "enum member",
@@ -1275,76 +1598,75 @@ void handleCompletion(const json &req) {
             }
           }
         }
-      } else if (isAtCompletion) {
-        for (const auto *decl : globals) {
-          if (decl->kind == NodeKind::AnnotationDecl) {
-            auto *a = static_cast<const AnnotationDeclNode *>(decl);
-            addCompletion(std::string(a->name), 8, "annotation",
-                          std::string(a->docString));
-          }
-        }
       } else if (!isDotCompletion) {
-        for (const auto *decl : globals) {
-          if (decl->kind == NodeKind::FunctionDecl) {
-            auto *f = static_cast<const FunctionDeclNode *>(decl);
-            if (f->name.starts_with("operator"))
+        if (collector.closestFunc) {
+          for (const auto *p : collector.closestFunc->params) {
+            if (p->name == "this")
               continue;
-            std::string detail =
-                f->returnType ? f->returnType->toString() : "auto";
-            addCompletion(std::string(f->name), 3, detail,
-                          std::string(f->docString));
-          } else if (decl->kind == NodeKind::VarDecl) {
-            auto *v = static_cast<const VarDeclNode *>(decl);
-            std::string detail = v->type ? v->type->toString() : "auto";
-            addCompletion(std::string(v->varName), 6, detail,
-                          std::string(v->docString));
-          } else if (decl->kind == NodeKind::ClassDecl) {
-            auto *c = static_cast<const ClassDeclNode *>(decl);
-            addCompletion(std::string(c->name), 7, "class",
-                          std::string(c->docString));
-          } else if (decl->kind == NodeKind::StructDecl) {
-            auto *s = static_cast<const StructDeclNode *>(decl);
-            addCompletion(std::string(s->name), 22, "struct",
-                          std::string(s->docString));
-          } else if (decl->kind == NodeKind::UnionDecl) {
-            auto *u = static_cast<const UnionDeclNode *>(decl);
-            addCompletion(std::string(u->name), 22, "union",
-                          std::string(u->docString));
-          } else if (decl->kind == NodeKind::EnumDecl) {
-            auto *e = static_cast<const EnumDeclNode *>(decl);
-            addCompletion(std::string(e->name), 13, "enum",
-                          std::string(e->docString));
-            for (const auto *em : e->members) {
-              addCompletion(std::string(em->name), 20, "enum member",
-                            std::string(em->docString));
-            }
-          } else if (decl->kind == NodeKind::TypedefDecl) {
-            auto *t = static_cast<const TypedefDeclNode *>(decl);
-            addCompletion(std::string(t->aliasName), 8, "typedef",
-                          std::string(t->docString));
-          } else if (decl->kind == NodeKind::AnnotationDecl) {
-            auto *a = static_cast<const AnnotationDeclNode *>(decl);
-            addCompletion(std::string(a->name), 8, "annotation",
-                          std::string(a->docString));
-          }
-        }
-
-        if (closestFunc) {
-          for (const auto *p : closestFunc->params) {
             std::string detail = p->type ? p->type->toString() : "auto";
             addCompletion(std::string(p->name), 6, detail,
                           std::string(p->docString));
           }
-          if (closestFunc->body) {
-            LocalVarCollector collector(line);
-            collector.dispatch(closestFunc->body);
-            for (const auto *local : collector.locals) {
+        }
+        for (const auto *l : collector.locals) {
+          std::string detail = l->type ? l->type->toString() : "auto";
+          addCompletion(std::string(l->varName), 6, detail,
+                        std::string(l->docString));
+        }
+
+        auto addDeclItems = [&](const std::vector<const DeclNode *> &decls) {
+          for (const auto *decl : decls) {
+            if (decl->kind == NodeKind::FunctionDecl) {
+              auto *f = static_cast<const FunctionDeclNode *>(decl);
+              if (f->name.starts_with("operator"))
+                continue;
               std::string detail =
-                  local->type ? local->type->toString() : "auto";
-              addCompletion(std::string(local->varName), 6, detail,
-                            std::string(local->docString));
+                  f->returnType ? f->returnType->toString() : "auto";
+              addCompletion(std::string(f->name), 3, detail,
+                            std::string(f->docString));
+            } else if (decl->kind == NodeKind::VarDecl) {
+              auto *v = static_cast<const VarDeclNode *>(decl);
+              std::string detail = v->type ? v->type->toString() : "auto";
+              addCompletion(std::string(v->varName), 6, detail,
+                            std::string(v->docString));
+            } else if (decl->kind == NodeKind::ClassDecl) {
+              auto *c = static_cast<const ClassDeclNode *>(decl);
+              addCompletion(std::string(c->name), 7, "class",
+                            std::string(c->docString));
+            } else if (decl->kind == NodeKind::StructDecl) {
+              auto *s = static_cast<const StructDeclNode *>(decl);
+              addCompletion(std::string(s->name), 22, "struct",
+                            std::string(s->docString));
+            } else if (decl->kind == NodeKind::UnionDecl) {
+              auto *u = static_cast<const UnionDeclNode *>(decl);
+              addCompletion(std::string(u->name), 22, "union",
+                            std::string(u->docString));
+            } else if (decl->kind == NodeKind::EnumDecl) {
+              auto *e = static_cast<const EnumDeclNode *>(decl);
+              addCompletion(std::string(e->name), 13, "enum",
+                            std::string(e->docString));
+            } else if (decl->kind == NodeKind::TypedefDecl) {
+              auto *t = static_cast<const TypedefDeclNode *>(decl);
+              addCompletion(std::string(t->aliasName), 8, "typedef",
+                            std::string(t->docString));
+            } else if (decl->kind == NodeKind::AnnotationDecl) {
+              auto *a = static_cast<const AnnotationDeclNode *>(decl);
+              addCompletion(std::string(a->name), 8, "annotation",
+                            std::string(a->docString));
+            } else if (decl->kind == NodeKind::NamespaceDecl) {
+              auto *n = static_cast<const NamespaceDeclNode *>(decl);
+              addCompletion(std::string(n->name), 9, "namespace",
+                            std::string(n->docString));
             }
           }
+        };
+
+        addDeclItems(rootGlobals);
+        if (!collector.currentNamespace.empty()) {
+          addDeclItems(namespaceMembers[collector.currentNamespace]);
+        }
+        for (const auto &u : collector.activeUsings) {
+          addDeclItems(namespaceMembers[u]);
         }
       }
     }
@@ -2149,7 +2471,9 @@ void handleSemanticTokens(const json &req) {
                    tok.type == TokenType::STATIC_KW ||
                    tok.type == TokenType::PUBLIC_KW ||
                    tok.type == TokenType::PRIVATE_KW ||
-                   tok.type == TokenType::REQUIRED_KW) {
+                   tok.type == TokenType::REQUIRED_KW ||
+                   tok.type == TokenType::NAMESPACE_KW ||
+                   tok.type == TokenType::USING_KW) {
           visitor.addToken(tok.line > 0 ? tok.line - 1 : 0,
                            tok.column > 0 ? tok.column - 1 : 0,
                            tok.value.length(), 11,

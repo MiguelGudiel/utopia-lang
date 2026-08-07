@@ -52,16 +52,18 @@ public:
 
     flushWhitespace();
 
-    if (!measureOnly) {
-      buffer += text;
-    }
-
     size_t start = 0;
     while (start < text.length()) {
       size_t nextNewline = text.find('\n', start);
       size_t len = (nextNewline != std::string::npos) ? (nextNewline - start)
                                                       : (text.length() - start);
-      currentColumn += len;
+      std::string chunk = text.substr(start, len);
+
+      if (!measureOnly) {
+        buffer += chunk;
+      }
+
+      currentColumn += chunk.length();
 
       for (const Piece *p : activePieces) {
         if (std::find(currentLinePieces.begin(), currentLinePieces.end(), p) ==
@@ -75,16 +77,33 @@ public:
         currentLinePieces.clear();
         currentColumn = 0;
 
+        start = nextNewline + 1;
+
         /*
-         * The text is already appended in its entirety above.
-         * Injecting another newline here duplicates the breaks and breaks the
-         * layout.
+         * Determine if the next line is an independent comment joined by the
+         * parser rather than an internal line of a block comment. Joined
+         * comments start exactly with '//' or '/*' without leading spaces.
          */
+        bool isJoinedComment = false;
+        if (start + 1 < text.length() && text[start] == '/' &&
+            (text[start + 1] == '/' || text[start + 1] == '*')) {
+          isJoinedComment = true;
+        }
+
+        if (!measureOnly) {
+          buffer += "\n";
+          if (isJoinedComment) {
+            buffer.append(currentIndent, ' ');
+          }
+        }
+
+        if (isJoinedComment) {
+          currentColumn += currentIndent;
+        }
 
         pendingWhitespace = Whitespace::None;
         forgiveOverflow = false;
         currentLine++;
-        start = nextNewline + 1;
       } else {
         break;
       }

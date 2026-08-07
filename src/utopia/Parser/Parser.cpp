@@ -443,8 +443,12 @@ ModuleNode *Parser::parseModule(std::string_view filePath) {
         }
 
       } else if (currentToken().type == TokenType::NAMESPACE_KW) {
+        std::string doc = consumeComments();
         bool isFileScoped = false;
         auto ns = parseNamespaceDecl(isFileScoped);
+        if (!doc.empty()) {
+          ns->docString = astCtx.copyString(doc);
+        }
         if (isFileScoped) {
           if (fileScopedNs) {
             reportError(ns->line, ns->column, ns->length,
@@ -458,7 +462,12 @@ ModuleNode *Parser::parseModule(std::string_view filePath) {
           statements.push_back(ns);
         }
       } else if (currentToken().type == TokenType::USING_KW) {
-        statements.push_back(parseUsing());
+        std::string doc = consumeComments();
+        auto u = parseUsing();
+        if (!doc.empty()) {
+          u->docString = astCtx.copyString(doc);
+        }
+        statements.push_back(u);
       } else if (currentToken().type != TokenType::EOF_TOK) {
         if (currentToken().type == TokenType::RBRACE) {
           reportError(currentToken().line, currentToken().column, 1,
@@ -1071,8 +1080,12 @@ NamespaceDeclNode *Parser::parseNamespaceDecl(bool &isFileScoped) {
   std::vector<ASTNode *> stmts;
   while (currentToken().type != TokenType::RBRACE &&
          currentToken().type != TokenType::EOF_TOK) {
-    if (auto stmt = parseStatement()) {
-      stmts.push_back(stmt);
+    try {
+      if (auto stmt = parseStatement()) {
+        stmts.push_back(stmt);
+      }
+    } catch (const ParseException &) {
+      synchronize();
     }
   }
 
@@ -1482,8 +1495,12 @@ SwitchNode *Parser::parseSwitchStatement() {
         break;
       }
 
-      if (auto stmt = parseStatement()) {
-        stmts.push_back(stmt);
+      try {
+        if (auto stmt = parseStatement()) {
+          stmts.push_back(stmt);
+        }
+      } catch (const ParseException &) {
+        synchronize();
       }
     }
 
@@ -2563,8 +2580,12 @@ BlockNode *Parser::parseBlock() {
 
   while (currentToken().type != TokenType::RBRACE &&
          currentToken().type != TokenType::EOF_TOK) {
-    if (auto stmt = parseStatement()) {
-      statements.push_back(stmt);
+    try {
+      if (auto stmt = parseStatement()) {
+        statements.push_back(stmt);
+      }
+    } catch (const ParseException &) {
+      synchronize();
     }
   }
 

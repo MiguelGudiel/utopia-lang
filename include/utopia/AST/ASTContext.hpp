@@ -352,7 +352,15 @@ public:
     auto it = namespaces.find(fqName);
     if (it != namespaces.end())
       return it->second;
-    auto *ns = create<NamespaceDeclNode>(fqName, 0, 0, 0);
+
+    /* Extract the simple name from the fully qualified name to ensure
+     * IDE completions and hover tooltips only display the relevant component.
+     */
+    size_t dot = fqName.find_last_of('.');
+    std::string_view simpleName =
+        (dot == std::string_view::npos) ? fqName : fqName.substr(dot + 1);
+
+    auto *ns = create<NamespaceDeclNode>(simpleName, 0, 0, 0);
     ns->fqName = fqName;
     namespaces[fqName] = ns;
     return ns;
