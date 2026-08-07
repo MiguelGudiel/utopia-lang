@@ -2114,10 +2114,10 @@ void handleSemanticTokens(const json &req) {
       SemanticTokenVisitor visitor(doc.text, doc.astCtx.get());
       visitor.dispatch(doc.ast);
 
-      /* Lexical pass to inject Semantic Tokens for primitive types.
-       * The AST Visitor explicitly skips built-in types because they lack
-       * a concrete declaration node. This guarantees that all primitive
-       * types (including usize) are highlighted correctly by the LSP,
+      /* Lexical pass to inject Semantic Tokens for primitive types and
+       * keywords. The AST Visitor explicitly skips built-in types because they
+       * lack a concrete declaration node. This guarantees that all primitive
+       * types and special keywords are highlighted correctly by the LSP,
        * overriding any incomplete static TextMate grammars. */
       Lexer lexer(doc.text);
       for (const auto &tok : lexer.tokenize()) {
@@ -2125,6 +2125,16 @@ void handleSemanticTokens(const json &req) {
           visitor.addToken(tok.line > 0 ? tok.line - 1 : 0,
                            tok.column > 0 ? tok.column - 1 : 0,
                            tok.value.length(), 3, 0); /* 3 represents "type" */
+        } else if (tok.type == TokenType::VAR_KW ||
+                   tok.type == TokenType::CONST_KW ||
+                   tok.type == TokenType::STATIC_KW ||
+                   tok.type == TokenType::PUBLIC_KW ||
+                   tok.type == TokenType::PRIVATE_KW ||
+                   tok.type == TokenType::REQUIRED_KW) {
+          visitor.addToken(tok.line > 0 ? tok.line - 1 : 0,
+                           tok.column > 0 ? tok.column - 1 : 0,
+                           tok.value.length(), 11,
+                           0); /* 11 represents "keyword" */
         }
       }
 
@@ -2194,7 +2204,7 @@ int main() {
                     {{"tokenTypes",
                       {"class", "struct", "enum", "type", "function", "method",
                        "property", "variable", "parameter", "enumMember",
-                       "macro"}},
+                       "macro", "keyword"}},
                      {"tokenModifiers",
                       {"declaration", "static", "readonly"}}}},
                    {"range", false},
