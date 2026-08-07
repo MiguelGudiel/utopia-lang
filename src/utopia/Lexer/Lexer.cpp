@@ -230,6 +230,8 @@ Token Lexer::parseToken() {
       return {TokenType::AS, id, startLine, startCol};
     if (id == "const")
       return {TokenType::CONST_KW, id, startLine, startCol};
+    if (id == "var")
+      return {TokenType::VAR_KW, id, startLine, startCol};
     if (id == "annotation")
       return {TokenType::ANNOTATION_KW, id, startLine, startCol};
     if (id == "static")

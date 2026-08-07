@@ -1547,7 +1547,53 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
   const_cast<VarDeclNode *>(node)->type = resolveIfTemplate(node->type);
   const Type *declType = node->type;
 
-  /* Check for strictly unresolved types delegated safely from the parser */
+  bool isAuto = declType->getUnqualifiedType()->getKind() == TypeKind::Auto;
+
+  if (isAuto && !node->initializer && !node->isExtern) {
+    return ctx->reportError(
+        node->line, node->column, node->length,
+        "Variables with inferred type must be initialized.");
+  }
+
+  /* Evaluate Initializer & Infer Type (if required) */
+  if (node->initializer) {
+    auto initRes = dispatch(node->initializer);
+    if (!initRes) {
+      return initRes;
+    }
+
+    if (isAuto) {
+      const Type *inferred = *initRes;
+
+      /* Array-to-pointer decay exactly like C++'s auto logic */
+      if (inferred->getKind() == TypeKind::Array) {
+        inferred = ctx->astCtx.getPointerType(
+            static_cast<const ArrayType *>(inferred)->getElementType());
+      }
+
+      /* Strip top-level references off the initializer when inferring type */
+      if (inferred->isReferenceType()) {
+        inferred =
+            static_cast<const ReferenceType *>(inferred)->getPointeeType();
+      } else if (inferred->getKind() == TypeKind::RValueReference) {
+        inferred = static_cast<const RValueReferenceType *>(inferred)
+                       ->getPointeeType();
+      }
+
+      if (inferred->isConstQualified()) {
+        inferred = inferred->getUnqualifiedType();
+      }
+
+      if (declType->isConstQualified()) {
+        inferred = ctx->astCtx.getConstType(inferred);
+      }
+
+      declType = inferred;
+      const_cast<VarDeclNode *>(node)->type = declType;
+    }
+  }
+
+  /* Core Type Validations */
   if (declType->getKind() == TypeKind::TemplateParam) {
     return ctx->reportError(node->line, node->column, node->length,
                             "Unknown type: '" + declType->toString() + "'");
@@ -1570,6 +1616,7 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
                        ->getElementType()
                        ->getUnqualifiedType();
   }
+
   if (baseUnqualTy->getKind() == TypeKind::Struct ||
       baseUnqualTy->getKind() == TypeKind::Class ||
       baseUnqualTy->getKind() == TypeKind::Union) {
@@ -1594,6 +1641,7 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
     }
   }
 
+  /* Process Annotations */
   for (const auto *ann : node->annotations) {
     if (ann->name == "weak") {
       const_cast<VarDeclNode *>(node)->isWeak = true;
@@ -1627,6 +1675,7 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
     const_cast<VarDeclNode *>(node)->isGlobal = true;
   }
 
+  /* Validate Initialization state */
   if (declType->isConstQualified() && !node->initializer &&
       !declType->isReferenceType() &&
       declType->getKind() != TypeKind::RValueReference && !node->isExtern) {
@@ -1641,11 +1690,18 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
                          "Extern variables cannot have an initializer.");
   }
 
-  if (node->initializer) {
-    auto initRes = dispatch(node->initializer);
-    if (!initRes) {
-      return initRes;
+  if (declType->isReferenceType() ||
+      declType->getKind() == TypeKind::RValueReference) {
+    if (!node->initializer && !node->isExtern) {
+      SemaResult err =
+          ctx->reportError(node->line, node->column, node->length,
+                           "References must be initialized upon declaration.");
     }
+  }
+
+  /* Semantic checks on the initializer against the resolved type */
+  if (node->initializer) {
+    const Type *initTy = node->initializer->exprType;
 
     if (declType->isReferenceType()) {
       /* Allow binding references to array subscript elements */
@@ -1665,19 +1721,17 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
                              "Cannot bind an l-value to an r-value reference.");
       }
     } else {
-      if (!canImplicitlyCast(*initRes, declType)) {
-        std::string initTypeStr = *initRes ? (*initRes)->toString() : "unknown";
+      if (!canImplicitlyCast(initTy, declType)) {
+        std::string initTypeStr = initTy ? initTy->toString() : "unknown";
         SemaResult err = ctx->reportError(
             node->line, node->column, node->length,
             "Cannot initialize variable of type '" + declType->toString() +
                 "' with type '" + initTypeStr + "'");
       } else {
-        checkImplicitCastWarning(*initRes, declType, node->initializer);
+        checkImplicitCastWarning(initTy, declType, node->initializer);
         const_cast<VarDeclNode *>(node)->initializer =
             performImplicitConversion(node->initializer, declType);
 
-        /* Evaluate deep copy construction to prevent shallow copy of aggregates
-         * with destructors */
         if (baseUnqualTy->getKind() == TypeKind::Class ||
             baseUnqualTy->getKind() == TypeKind::Struct ||
             baseUnqualTy->getKind() == TypeKind::Union) {
@@ -1788,11 +1842,6 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
         }
       }
     }
-  } else if (declType->isReferenceType() ||
-             declType->getKind() == TypeKind::RValueReference) {
-    SemaResult err =
-        ctx->reportError(node->line, node->column, node->length,
-                         "References must be initialized upon declaration.");
   }
 
   if (ctx->getScopeDepth() > 1) {

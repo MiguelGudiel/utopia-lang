@@ -34,6 +34,7 @@ public:
   const BuiltinType *Float32Ty;
   const BuiltinType *Float64Ty;
   const BuiltinType *TypeValTy;
+  const AutoType *AutoTy;
 
   ASTContext() {
     VoidTy = create<BuiltinType>(BuiltinKind::Void);
@@ -50,6 +51,7 @@ public:
     Float32Ty = create<BuiltinType>(BuiltinKind::Float32);
     Float64Ty = create<BuiltinType>(BuiltinKind::Float64);
     TypeValTy = create<BuiltinType>(BuiltinKind::TypeVal);
+    AutoTy = create<AutoType>();
   }
   ~ASTContext() = default;
 

@@ -924,6 +924,7 @@ ASTNode *Parser::parseStatement() {
   } else if (currentToken().type == TokenType::CONTINUE_KW) {
     node = parseContinueStatement();
   } else if (currentToken().type == TokenType::CONST_KW ||
+             currentToken().type == TokenType::VAR_KW ||
              currentToken().type == TokenType::STATIC_KW ||
              ((currentToken().type == TokenType::TYPE_KW ||
                (currentToken().type == TokenType::IDENTIFIER &&
@@ -1120,6 +1121,7 @@ ForNode *Parser::parseForStatement() {
   if (currentToken().type != TokenType::SEMICOLON) {
     if (currentToken().type == TokenType::TYPE_KW ||
         currentToken().type == TokenType::CONST_KW ||
+        currentToken().type == TokenType::VAR_KW ||
         (currentToken().type == TokenType::IDENTIFIER &&
          (peekToken().type == TokenType::IDENTIFIER ||
           astCtx.getRecordType(currentToken().value) != nullptr))) {
@@ -2133,11 +2135,34 @@ DeclNode *Parser::parseDeclarationOrFunction(
     }
   }
 
-  const char *typeStart = currentToken().value.data();
-  const Type *nodeType = parseType();
-  const char *typeEnd =
-      tokens[cursor - 1].value.data() + tokens[cursor - 1].value.length();
-  std::string_view rawTypeStr(typeStart, typeEnd - typeStart);
+  const Type *nodeType = nullptr;
+  std::string_view rawTypeStr;
+
+  bool isImplicitlyTyped = false;
+  bool isConstDecl = false;
+
+  if (match(TokenType::VAR_KW)) {
+    isImplicitlyTyped = true;
+    nodeType = astCtx.AutoTy;
+    rawTypeStr = "var";
+  } else if (currentToken().type == TokenType::CONST_KW &&
+             peekToken().type == TokenType::IDENTIFIER &&
+             (peekToken(2).type == TokenType::ASSIGN ||
+              peekToken(2).type == TokenType::SEMICOLON)) {
+    advance(); /* Consume 'const' */
+    isImplicitlyTyped = true;
+    isConstDecl = true;
+    nodeType = astCtx.getConstType(astCtx.AutoTy);
+    rawTypeStr = "const";
+  }
+
+  if (!isImplicitlyTyped) {
+    const char *typeStart = currentToken().value.data();
+    nodeType = parseType();
+    const char *typeEnd =
+        tokens[cursor - 1].value.data() + tokens[cursor - 1].value.length();
+    rawTypeStr = std::string_view(typeStart, typeEnd - typeStart);
+  }
 
   std::string_view id;
   int idCol = currentToken().column;

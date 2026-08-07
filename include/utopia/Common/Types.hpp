@@ -29,7 +29,8 @@ enum class TypeKind {
   Alias,
   Enum,
   TemplateParam,
-  TemplateInst
+  TemplateInst,
+  Auto
 };
 
 enum class BuiltinKind {
@@ -138,6 +139,13 @@ public:
   const Type *getBaseType() const { return base; }
 
   static bool classof(const Type *t) { return t->getKind() == TypeKind::Const; }
+};
+
+class AutoType : public Type {
+public:
+  explicit AutoType() : Type(TypeKind::Auto) {}
+
+  static bool classof(const Type *t) { return t->getKind() == TypeKind::Auto; }
 };
 
 class ArrayType : public Type {
@@ -340,6 +348,9 @@ inline bool Type::isVoid() const {
 }
 
 inline std::string Type::toString() const {
+  if (kind == TypeKind::Auto) {
+    return "auto";
+  }
   if (kind == TypeKind::Alias) {
     return std::string(static_cast<const AliasType *>(this)->getName());
   }
