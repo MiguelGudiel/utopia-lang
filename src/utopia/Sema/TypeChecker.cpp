@@ -1271,6 +1271,13 @@ SemaResult TypeCheckPass::visit(const UnaryOpNode *node) {
   if (node->op == "++" || node->op == "--" || node->op == "-" ||
       node->op == "+" || node->op == "~" || node->op == "!") {
     if (auto *opDecl = resolveOverloadedOperator(*exprType, node->op, {})) {
+      /* Enforce visibility constraint on unary overloaded operators */
+      if (!opDecl->isPublic(opDecl->name) &&
+          ctx->getCurrentRecordContext() != opDecl->parentRecord) {
+        return ctx->reportError(node->line, node->column, node->length,
+                                "Cannot call private overloaded operator '" +
+                                    std::string(opDecl->name) + "'.");
+      }
       if (!(opDecl->isMethod && !opDecl->isStatic)) {
         const_cast<UnaryOpNode *>(node)->expr =
             performImplicitConversion(node->expr, opDecl->params[0]->type);
@@ -1376,6 +1383,13 @@ SemaResult TypeCheckPass::visit(const BinaryOpNode *node) {
                                      "Invalid operands for binary operation"});
 
   if (auto *opDecl = resolveOverloadedOperator(*lhs, node->op, {node->right})) {
+    /* Enforce visibility constraint on binary overloaded operators */
+    if (!opDecl->isPublic(opDecl->name) &&
+        ctx->getCurrentRecordContext() != opDecl->parentRecord) {
+      return ctx->reportError(node->line, node->column, node->length,
+                              "Cannot call private overloaded operator '" +
+                                  std::string(opDecl->name) + "'.");
+    }
     if (opDecl->isMethod && !opDecl->isStatic) {
       const_cast<BinaryOpNode *>(node)->right =
           performImplicitConversion(node->right, opDecl->params[0]->type);
@@ -1730,6 +1744,15 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
               }
 
               if (copyCtor) {
+                /* Disallow bypassing privacy logic when invoking a copy
+                 * constructor */
+                if (!copyCtor->isPublic(copyCtor->name) &&
+                    ctx->getCurrentRecordContext() != recTy) {
+                  return ctx->reportError(node->line, node->column,
+                                          node->length,
+                                          "Cannot implicitly copy variable. "
+                                          "Copy constructor is private.");
+                }
                 const_cast<VarDeclNode *>(node)->copyCtor = copyCtor;
               } else {
                 const FunctionDeclNode *dtor = nullptr;
@@ -1781,6 +1804,14 @@ SemaResult TypeCheckPass::visit(const AssignNode *node) {
 
   if (auto *opDecl =
           resolveOverloadedOperator(*lhsType, node->op, {node->value})) {
+    /* Enforce visibility constraint on assignment and compound assignment
+     * operators */
+    if (!opDecl->isPublic(opDecl->name) &&
+        ctx->getCurrentRecordContext() != opDecl->parentRecord) {
+      return ctx->reportError(node->line, node->column, node->length,
+                              "Cannot call private overloaded operator '" +
+                                  std::string(opDecl->name) + "'.");
+    }
     if (opDecl->isMethod && !opDecl->isStatic) {
       const_cast<AssignNode *>(node)->value =
           performImplicitConversion(node->value, opDecl->params[0]->type);
@@ -3119,6 +3150,14 @@ SemaResult TypeCheckPass::visit(const CastNode *node) {
       for (auto *ctor : ctors) {
         if (ctor->params.size() == 1 &&
             canImplicitlyCast(*srcType, ctor->params[0]->type, false)) {
+          /* Enforce visibility constraint on conversion constructors */
+          if (!ctor->isPublic(ctor->name) &&
+              ctx->getCurrentRecordContext() != recTy) {
+            return ctx->reportError(
+                node->line, node->column, node->length,
+                "Cannot cast to '" + destType->toString() +
+                    "'. Conversion constructor is private.");
+          }
           const_cast<CastNode *>(node)->conversionConstructor = ctor;
           node->exprType = destType;
           node->isLValue = false;
@@ -3267,6 +3306,12 @@ SemaResult TypeCheckPass::visit(const ArraySubscriptNode *node) {
 
   if (auto *opDecl =
           resolveOverloadedOperator(*baseType, "[]", {node->index})) {
+    /* Enforce visibility constraint on array subscript operators */
+    if (!opDecl->isPublic(opDecl->name) &&
+        ctx->getCurrentRecordContext() != opDecl->parentRecord) {
+      return ctx->reportError(node->line, node->column, node->length,
+                              "Cannot call private overloaded operator '[]'.");
+    }
     if (opDecl->isMethod && !opDecl->isStatic) {
       const_cast<ArraySubscriptNode *>(node)->index =
           performImplicitConversion(node->index, opDecl->params[0]->type);

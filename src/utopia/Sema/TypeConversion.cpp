@@ -354,6 +354,17 @@ ExprNode *TypeCheckPass::performImplicitConversion(ExprNode *expr,
       for (auto *ctor : ctors) {
         if (ctor->params.size() == 1) {
           if (canImplicitlyCast(expr->exprType, ctor->params[0]->type, false)) {
+            /* Enforce visibility constraint on implicit conversions */
+            if (!ctor->isPublic(ctor->name) &&
+                ctx->getCurrentRecordContext() != recTy) {
+              ctx->diags.report({DiagLevel::Error, expr->line, expr->column,
+                                 expr->length,
+                                 "Implicit conversion failed. Conversion "
+                                 "constructor is private.",
+                                 std::string(ctx->currentFile), expr->endLine});
+              return expr;
+            }
+
             ExprNode *innerExpr = expr;
             if (expr->exprType->getUnqualifiedType() !=
                 ctor->params[0]->type->getUnqualifiedType()) {
