@@ -779,6 +779,12 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
         tokens[cursor - 1].value.data() + tokens[cursor - 1].value.length();
     std::string_view rawTypeStr(typeStart, typeEnd - typeStart);
 
+    if (currentToken().type == TokenType::LPAREN) {
+      reportError(currentToken().line, currentToken().column, 1,
+                  "Missing type for member '" + memType->toString() + "'.");
+      throw ParseException();
+    }
+
     std::string_view memName = currentToken().value;
     int memIdCol = currentToken().column;
     int memIdLen = memName.length();
@@ -1451,6 +1457,14 @@ ExprNode *Parser::parseUnary() {
             }
             argNames.push_back("");
             args.push_back(parseExpression());
+
+            if (currentToken().type == TokenType::IDENTIFIER) {
+              reportError(
+                  currentToken().line, currentToken().column,
+                  currentToken().value.length(),
+                  "Unexpected identifier in argument list. Missing comma?");
+              throw ParseException();
+            }
           }
 
         } while (match(TokenType::COMMA));
@@ -1630,7 +1644,7 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
 
       std::string_view dtorName = currentToken().value;
       int dtorIdCol = currentToken().column;
-      int dtorIdLen = dtorName.length() + 1; // account for ~ in LSP targeting
+      int dtorIdLen = dtorName.length() + 1;
       expect(TokenType::IDENTIFIER, "Expected record name after '~'");
 
       if (dtorName != name) {
@@ -1654,7 +1668,7 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
       destructor->annotations = memberAnnotations;
       destructor->hasPublicMod = isPub;
       destructor->hasPrivateMod = isPriv;
-      destructor->identifierColumn = dCol; // starts at ~
+      destructor->identifierColumn = dCol;
       destructor->identifierLength = dtorIdLen;
 
       if (!doc.empty())
@@ -1755,6 +1769,12 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
       memName = parseOperatorName();
       memIdLen = memName.length();
     } else {
+      if (currentToken().type == TokenType::LPAREN) {
+        reportError(currentToken().line, currentToken().column, 1,
+                    "Missing return type for method '" + memType->toString() +
+                        "'.");
+        throw ParseException();
+      }
       memName = currentToken().value;
       memIdLen = memName.length();
       expect(TokenType::IDENTIFIER, "Expected member name");
@@ -2127,6 +2147,12 @@ DeclNode *Parser::parseDeclarationOrFunction(
     id = parseOperatorName();
     idLen = id.length();
   } else {
+    if (currentToken().type == TokenType::LPAREN) {
+      reportError(currentToken().line, currentToken().column, 1,
+                  "Missing return type for function '" + nodeType->toString() +
+                      "'.");
+      throw ParseException();
+    }
     id = currentToken().value;
     idLen = id.length();
     expect(TokenType::IDENTIFIER, "Expected identifier after type");
@@ -2456,6 +2482,15 @@ ExprNode *Parser::parsePostfix() {
             }
             argNames.push_back("");
             args.push_back(parseExpression());
+
+            if (currentToken().type == TokenType::IDENTIFIER) {
+              reportError(
+                  currentToken().line, currentToken().column,
+                  currentToken().value.length(),
+                  "Unexpected identifier in argument list. If this is a "
+                  "function declaration, you are missing the return type.");
+              throw ParseException();
+            }
           }
 
         } while (match(TokenType::COMMA));
