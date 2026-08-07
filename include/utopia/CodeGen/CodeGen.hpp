@@ -117,7 +117,7 @@ private:
   llvm::AllocaInst *createEntryBlockAlloca(llvm::Type *type,
                                            const std::string &varName);
   void emitDefaultInitialization(llvm::Value *ptr, const Type *type);
-  void emitCleanupCall(llvm::Value *ptr, const FunctionDeclNode *dtor);
+  void emitCleanupCall(llvm::Value *ptr, const FunctionDeclNode *dtor, const Type *type = nullptr);
   void emitScopeCleanups();
 };
 

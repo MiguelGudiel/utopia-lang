@@ -1746,8 +1746,10 @@ class SemanticTokenVisitor : public ASTVisitor<SemanticTokenVisitor, void> {
 public:
   std::vector<SemanticToken> tokens;
   const std::string &docText;
+  ASTContext *astCtx;
 
-  SemanticTokenVisitor(const std::string &text) : docText(text) {}
+  SemanticTokenVisitor(const std::string &text, ASTContext *ctx)
+      : docText(text), astCtx(ctx) {}
 
   void addToken(int line, int col, int length, int type, int modifiers = 0) {
     if (line < 0 || col < 0 || length <= 0)
@@ -1755,16 +1757,79 @@ public:
     tokens.push_back({line, col, length, type, modifiers});
   }
 
-  void visit(const TypeLiteralNode *n) {
-    if (n->representedType &&
-        !n->representedType->getUnqualifiedType()->isBuiltinType()) {
-      auto typeLoc =
-          getExactNameLocation(docText, getTypeDeclaration(n->representedType));
-      if (typeLoc.length > 0 &&
-          n->representedType->getKind() != TypeKind::Builtin) {
-        addToken(n->line > 0 ? n->line - 1 : 0,
-                 n->column > 0 ? n->column - 1 : 0, typeLoc.length, 3, 0);
+  /*
+   * Tokenizes a raw type string directly from the source code and precisely
+   * targets valid type identifiers within it, ignoring generic brackets,
+   * pointers or references.
+   */
+  void highlightTypeString(std::string_view rawTypeStr, int nodeLine,
+                           int nodeCol) {
+    if (rawTypeStr.empty() || !astCtx)
+      return;
+
+    int currentLine = 1;
+    size_t searchStart = 0;
+    for (size_t i = 0; i < docText.length(); ++i) {
+      if (currentLine == nodeLine) {
+        searchStart = i + (nodeCol > 0 ? nodeCol - 1 : 0);
+        break;
       }
+      if (docText[i] == '\n')
+        currentLine++;
+    }
+
+    size_t foundIdx = docText.find(rawTypeStr, searchStart);
+    if (foundIdx == std::string::npos || foundIdx > searchStart + 150) {
+      foundIdx = searchStart;
+    }
+
+    Lexer lexer(rawTypeStr);
+    for (const auto &tok : lexer.tokenize()) {
+      if (tok.type == TokenType::IDENTIFIER) {
+        if (astCtx->getRecordType(tok.value) ||
+            astCtx->getTypeAlias(tok.value) ||
+            astCtx->getEnumTypeByName(tok.value) ||
+            astCtx->isTemplateName(tok.value)) {
+
+          size_t tokAbsIdx = foundIdx + (tok.value.data() - rawTypeStr.data());
+
+          int absLine = 1;
+          int absCol = 1;
+          for (size_t i = 0; i < tokAbsIdx; ++i) {
+            if (docText[i] == '\n') {
+              absLine++;
+              absCol = 1;
+            } else {
+              absCol++;
+            }
+          }
+
+          addToken(absLine - 1, absCol - 1, tok.value.length(), 3, 0);
+        }
+      }
+    }
+  }
+
+  void visit(const TypeLiteralNode *n) {
+    if (n->length <= 0)
+      return;
+
+    int currentLine = 1;
+    size_t startIdx = 0;
+    for (size_t i = 0; i < docText.length(); ++i) {
+      if (currentLine == n->line) {
+        startIdx = i + (n->column > 0 ? n->column - 1 : 0);
+        break;
+      }
+      if (docText[i] == '\n')
+        currentLine++;
+    }
+
+    if (startIdx < docText.length()) {
+      std::string_view raw = std::string_view(
+          docText.data() + startIdx,
+          std::min((size_t)n->length, docText.length() - startIdx));
+      highlightTypeString(raw, n->line, n->column);
     }
   }
 
@@ -1826,12 +1891,8 @@ public:
     auto loc = getExactNameLocation(docText, n);
     addToken(loc.line, loc.col, loc.length, 7, n->isStatic ? 2 : 0);
 
-    if (n->type && !n->type->getUnqualifiedType()->isBuiltinType()) {
-      auto typeLoc = getExactNameLocation(docText, getTypeDeclaration(n->type));
-      if (typeLoc.length > 0 && n->type->getKind() != TypeKind::Builtin) {
-        addToken(n->line > 0 ? n->line - 1 : 0,
-                 n->column > 0 ? n->column - 1 : 0, typeLoc.length, 3, 0);
-      }
+    if (!n->rawTypeStr.empty()) {
+      highlightTypeString(n->rawTypeStr, n->line, n->column);
     }
 
     if (n->initializer)
@@ -1842,12 +1903,8 @@ public:
     auto loc = getExactNameLocation(docText, n);
     addToken(loc.line, loc.col, loc.length, 8, 0); /* parameter */
 
-    if (n->type && !n->type->getUnqualifiedType()->isBuiltinType()) {
-      auto typeLoc = getExactNameLocation(docText, getTypeDeclaration(n->type));
-      if (typeLoc.length > 0 && n->type->getKind() != TypeKind::Builtin) {
-        addToken(n->line > 0 ? n->line - 1 : 0,
-                 n->column > 0 ? n->column - 1 : 0, typeLoc.length, 3, 0);
-      }
+    if (!n->rawTypeStr.empty()) {
+      highlightTypeString(n->rawTypeStr, n->line, n->column);
     }
 
     if (n->defaultValue)
@@ -1862,14 +1919,8 @@ public:
     addToken(loc.line, loc.col, loc.length, n->isMethod ? 5 : 4,
              n->isStatic ? 2 : 0);
 
-    if (n->returnType &&
-        !n->returnType->getUnqualifiedType()->isBuiltinType()) {
-      auto typeLoc =
-          getExactNameLocation(docText, getTypeDeclaration(n->returnType));
-      if (typeLoc.length > 0 && n->returnType->getKind() != TypeKind::Builtin) {
-        addToken(n->line > 0 ? n->line - 1 : 0,
-                 n->column > 0 ? n->column - 1 : 0, typeLoc.length, 3, 0);
-      }
+    if (!n->rawReturnTypeStr.empty()) {
+      highlightTypeString(n->rawReturnTypeStr, n->line, n->column);
     }
 
     for (auto *p : n->params)
@@ -1934,6 +1985,10 @@ public:
   void visit(const TypedefDeclNode *n) {
     auto loc = getExactNameLocation(docText, n);
     addToken(loc.line, loc.col, loc.length, 3, 0);
+
+    if (!n->rawTargetTypeStr.empty()) {
+      highlightTypeString(n->rawTargetTypeStr, n->line, n->column);
+    }
   }
 
   void visit(const AnnotationDeclNode *n) {
@@ -2003,7 +2058,12 @@ public:
     dispatch(n->trueExpr);
     dispatch(n->falseExpr);
   }
-  void visit(const CastNode *n) { dispatch(n->expr); }
+  void visit(const CastNode *n) {
+    dispatch(n->expr);
+    if (!n->rawTargetTypeStr.empty()) {
+      highlightTypeString(n->rawTargetTypeStr, n->line, n->column);
+    }
+  }
   void visit(const ImplicitCastNode *n) { dispatch(n->expr); }
   void visit(const ArraySubscriptNode *n) {
     dispatch(n->base);
@@ -2014,15 +2074,8 @@ public:
       dispatch(e);
   }
   void visit(const NewExprNode *n) {
-    if (n->allocatedType &&
-        !n->allocatedType->getUnqualifiedType()->isBuiltinType()) {
-      auto typeLoc =
-          getExactNameLocation(docText, getTypeDeclaration(n->allocatedType));
-      if (typeLoc.length > 0 &&
-          n->allocatedType->getKind() != TypeKind::Builtin) {
-        addToken(n->line > 0 ? n->line - 1 : 0,
-                 n->column > 0 ? n->column + 3 : 0, typeLoc.length, 3, 0);
-      }
+    if (!n->rawAllocatedTypeStr.empty()) {
+      highlightTypeString(n->rawAllocatedTypeStr, n->line, n->column);
     }
     if (n->arraySize)
       dispatch(n->arraySize);
@@ -2058,7 +2111,7 @@ void handleSemanticTokens(const json &req) {
   if (documents.contains(uri)) {
     auto &doc = documents[uri];
     if (doc.ast) {
-      SemanticTokenVisitor visitor(doc.text);
+      SemanticTokenVisitor visitor(doc.text, doc.astCtx.get());
       visitor.dispatch(doc.ast);
 
       /* Lexical pass to inject Semantic Tokens for primitive types.

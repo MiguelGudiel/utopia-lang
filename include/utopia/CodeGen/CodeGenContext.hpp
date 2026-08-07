@@ -18,6 +18,7 @@ struct SymbolInfo {
 struct CleanupInfo {
   llvm::Value *instancePtr = nullptr;
   const FunctionDeclNode *destructor = nullptr;
+  const Type *type = nullptr;
 };
 
 struct LifetimeInfo {
@@ -51,9 +52,10 @@ public:
   }
 
   /* Registers a dynamic object for later destruction upon exiting the block */
-  void addCleanup(llvm::Value *ptr, const FunctionDeclNode *dtor) {
+  void addCleanup(llvm::Value *ptr, const FunctionDeclNode *dtor,
+                  const Type *type = nullptr) {
     if (!scopes.empty()) {
-      scopes.back().cleanups.push_back({ptr, dtor});
+      scopes.back().cleanups.push_back({ptr, dtor, type});
     }
   }
 

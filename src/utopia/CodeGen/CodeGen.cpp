@@ -486,7 +486,8 @@ void CodeGen::emitLoopCleanups(size_t targetDepth) {
        ++scopeIt, --currentDepth) {
     for (auto cleanupIt = scopeIt->cleanups.rbegin();
          cleanupIt != scopeIt->cleanups.rend(); ++cleanupIt) {
-      emitCleanupCall(cleanupIt->instancePtr, cleanupIt->destructor);
+      emitCleanupCall(cleanupIt->instancePtr, cleanupIt->destructor,
+                      cleanupIt->type);
     }
     for (auto lifeIt = scopeIt->lifetimes.rbegin();
          lifeIt != scopeIt->lifetimes.rend(); ++lifeIt) {
@@ -1019,10 +1020,17 @@ llvm::Value *CodeGen::visit(const ImplicitCastNode *node) {
   emitDefaultInitialization(temp, objectType);
 
   const Type *unqual = objectType->getUnqualifiedType();
-  if (unqual->getKind() == TypeKind::Class ||
-      unqual->getKind() == TypeKind::Struct ||
-      unqual->getKind() == TypeKind::Union) {
-    auto *recTy = static_cast<const RecordType *>(unqual);
+  const Type *unqualForCleanup = unqual;
+  while (unqualForCleanup->getKind() == TypeKind::Array) {
+    unqualForCleanup = static_cast<const ArrayType *>(unqualForCleanup)
+                           ->getElementType()
+                           ->getUnqualifiedType();
+  }
+
+  if (unqualForCleanup->getKind() == TypeKind::Class ||
+      unqualForCleanup->getKind() == TypeKind::Struct ||
+      unqualForCleanup->getKind() == TypeKind::Union) {
+    auto *recTy = static_cast<const RecordType *>(unqualForCleanup);
     if (auto *decl = recTy->getDeclaration()) {
       const FunctionDeclNode *dtor = nullptr;
       if (decl->kind == NodeKind::ClassDecl)
@@ -1033,7 +1041,7 @@ llvm::Value *CodeGen::visit(const ImplicitCastNode *node) {
         dtor = static_cast<const UnionDeclNode *>(decl)->destructor;
 
       if (dtor) {
-        cgCtx.addCleanup(temp, dtor);
+        cgCtx.addCleanup(temp, dtor, objectType);
         lastTemporaryAlloca = temp;
       }
     }
@@ -2354,11 +2362,17 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
   emitLifetimeStart(alloca, allocSize);
   cgCtx.addLifetime(alloca, allocSize);
 
-  const auto *unqualTy = node->type->getUnqualifiedType();
-  if (unqualTy->getKind() == TypeKind::Class ||
-      unqualTy->getKind() == TypeKind::Struct ||
-      unqualTy->getKind() == TypeKind::Union) {
-    auto *recTy = static_cast<const RecordType *>(unqualTy);
+  const auto *unqualTyForCleanup = node->type->getUnqualifiedType();
+  while (unqualTyForCleanup->getKind() == TypeKind::Array) {
+    unqualTyForCleanup = static_cast<const ArrayType *>(unqualTyForCleanup)
+                             ->getElementType()
+                             ->getUnqualifiedType();
+  }
+
+  if (unqualTyForCleanup->getKind() == TypeKind::Class ||
+      unqualTyForCleanup->getKind() == TypeKind::Struct ||
+      unqualTyForCleanup->getKind() == TypeKind::Union) {
+    auto *recTy = static_cast<const RecordType *>(unqualTyForCleanup);
     auto *decl = recTy->getDeclaration();
     const FunctionDeclNode *dtor = nullptr;
     if (decl) {
@@ -2370,12 +2384,12 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
         dtor = static_cast<const UnionDeclNode *>(decl)->destructor;
     }
     if (dtor) {
-      cgCtx.addCleanup(alloca, dtor);
+      cgCtx.addCleanup(alloca, dtor, node->type);
     }
   }
 
   if (node->initializer) {
-    if (unqualTy->getKind() == TypeKind::Array) {
+    if (baseUnqualTy->getKind() == TypeKind::Array) {
       emitArrayLiteralInit(alloca, node->type, node->initializer);
     } else {
       bool isRVO = false;
@@ -2393,9 +2407,9 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
       }
 
       if (!isRVO) {
-        bool isAggregate = (unqualTy->getKind() == TypeKind::Struct ||
-                            unqualTy->getKind() == TypeKind::Class ||
-                            unqualTy->getKind() == TypeKind::Union);
+        bool isAggregate = (baseUnqualTy->getKind() == TypeKind::Struct ||
+                            baseUnqualTy->getKind() == TypeKind::Class ||
+                            baseUnqualTy->getKind() == TypeKind::Union);
 
         if (isAggregate && node->copyCtor) {
           llvm::Value *rvalAddr = getLValue(node->initializer);
@@ -2459,10 +2473,10 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
     if (node->type->getKind() != TypeKind::Array) {
       emitDefaultInitialization(alloca, node->type);
 
-      if (unqualTy->getKind() == TypeKind::Class ||
-          unqualTy->getKind() == TypeKind::Struct ||
-          unqualTy->getKind() == TypeKind::Union) {
-        auto *recTy = static_cast<const RecordType *>(unqualTy);
+      if (baseUnqualTy->getKind() == TypeKind::Class ||
+          baseUnqualTy->getKind() == TypeKind::Struct ||
+          baseUnqualTy->getKind() == TypeKind::Union) {
+        auto *recTy = static_cast<const RecordType *>(baseUnqualTy);
         auto *decl = recTy->getDeclaration();
         if (decl) {
           const FunctionDeclNode *emptyCtor = nullptr;
@@ -2752,6 +2766,53 @@ llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
     astParamIdx++;
   }
 
+  /* Automatically invoke destructors for aggregate fields inside destructors */
+  if (node->name == "~" && node->parentRecord) {
+    /* Explicitly exclude Unions from auto-destruction logic as their active
+     * state cannot be definitively resolved by the compiler. */
+    if (node->parentRecord->getKind() != TypeKind::Union) {
+      SymbolInfo thisSym = cgCtx.lookupDetailed("this");
+      if (thisSym.value) {
+        llvm::Value *thisAddr = thisSym.value;
+        llvm::Value *thisPtr =
+            builder.CreateLoad(builder.getPtrTy(), thisAddr, "this.val");
+        llvm::Type *llvmBaseTy = getLLVMType(node->parentRecord);
+
+        /* Because cleanups are executed in REVERSE order during
+         * `emitScopeCleanups`, adding fields sequentially causes them to be
+         * destructed top-down in code, but correctly executed bottom-up at
+         * runtime. */
+        for (const auto &f : node->parentRecord->getFields()) {
+          const Type *fBaseUnqual = f.type->getUnqualifiedType();
+          while (fBaseUnqual->getKind() == TypeKind::Array) {
+            fBaseUnqual = static_cast<const ArrayType *>(fBaseUnqual)
+                              ->getElementType()
+                              ->getUnqualifiedType();
+          }
+
+          if (fBaseUnqual->getKind() == TypeKind::Class ||
+              fBaseUnqual->getKind() == TypeKind::Struct) {
+            auto *recTy = static_cast<const RecordType *>(fBaseUnqual);
+            auto *decl = recTy->getDeclaration();
+            const FunctionDeclNode *fDtor = nullptr;
+            if (decl) {
+              if (decl->kind == NodeKind::ClassDecl)
+                fDtor = static_cast<const ClassDeclNode *>(decl)->destructor;
+              else if (decl->kind == NodeKind::StructDecl)
+                fDtor = static_cast<const StructDeclNode *>(decl)->destructor;
+            }
+
+            if (fDtor) {
+              llvm::Value *fieldGep =
+                  builder.CreateStructGEP(llvmBaseTy, thisPtr, f.index, f.name);
+              cgCtx.addCleanup(fieldGep, fDtor, f.type);
+            }
+          }
+        }
+      }
+    }
+  }
+
   dispatch(node->body);
 
   for (auto &bb : *func) {
@@ -2816,10 +2877,17 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
       argsArgs.push_back(instance);
 
       const auto *unqual = node->exprType->getUnqualifiedType();
-      if (unqual->getKind() == TypeKind::Class ||
-          unqual->getKind() == TypeKind::Struct ||
-          unqual->getKind() == TypeKind::Union) {
-        auto *recTy = static_cast<const RecordType *>(unqual);
+      const Type *unqualForCleanup = unqual;
+      while (unqualForCleanup->getKind() == TypeKind::Array) {
+        unqualForCleanup = static_cast<const ArrayType *>(unqualForCleanup)
+                               ->getElementType()
+                               ->getUnqualifiedType();
+      }
+
+      if (unqualForCleanup->getKind() == TypeKind::Class ||
+          unqualForCleanup->getKind() == TypeKind::Struct ||
+          unqualForCleanup->getKind() == TypeKind::Union) {
+        auto *recTy = static_cast<const RecordType *>(unqualForCleanup);
         auto *decl = recTy->getDeclaration();
         if (decl) {
           const FunctionDeclNode *dtor = nullptr;
@@ -2831,7 +2899,7 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
             dtor = static_cast<const UnionDeclNode *>(decl)->destructor;
 
           if (dtor) {
-            cgCtx.addCleanup(instance, dtor);
+            cgCtx.addCleanup(instance, dtor, node->exprType);
           }
         }
       }
@@ -2942,10 +3010,17 @@ llvm::Value *CodeGen::visit(const CastNode *node) {
     emitDefaultInitialization(temp, node->targetType);
 
     const Type *unqual = node->targetType->getUnqualifiedType();
-    if (unqual->getKind() == TypeKind::Class ||
-        unqual->getKind() == TypeKind::Struct ||
-        unqual->getKind() == TypeKind::Union) {
-      auto *recTy = static_cast<const RecordType *>(unqual);
+    const Type *unqualForCleanup = unqual;
+    while (unqualForCleanup->getKind() == TypeKind::Array) {
+      unqualForCleanup = static_cast<const ArrayType *>(unqualForCleanup)
+                             ->getElementType()
+                             ->getUnqualifiedType();
+    }
+
+    if (unqualForCleanup->getKind() == TypeKind::Class ||
+        unqualForCleanup->getKind() == TypeKind::Struct ||
+        unqualForCleanup->getKind() == TypeKind::Union) {
+      auto *recTy = static_cast<const RecordType *>(unqualForCleanup);
       if (auto *decl = recTy->getDeclaration()) {
         const FunctionDeclNode *dtor = nullptr;
         if (decl->kind == NodeKind::ClassDecl)
@@ -2956,7 +3031,7 @@ llvm::Value *CodeGen::visit(const CastNode *node) {
           dtor = static_cast<const UnionDeclNode *>(decl)->destructor;
 
         if (dtor) {
-          cgCtx.addCleanup(temp, dtor);
+          cgCtx.addCleanup(temp, dtor, node->targetType);
           lastTemporaryAlloca = temp;
         }
       }
@@ -3072,7 +3147,8 @@ llvm::Value *CodeGen::visit(const ReturnNode *node) {
        ++scopeIt) {
     for (auto cleanupIt = scopeIt->cleanups.rbegin();
          cleanupIt != scopeIt->cleanups.rend(); ++cleanupIt) {
-      emitCleanupCall(cleanupIt->instancePtr, cleanupIt->destructor);
+      emitCleanupCall(cleanupIt->instancePtr, cleanupIt->destructor,
+                      cleanupIt->type);
     }
 
     /* Ensure deterministic lifetime closure upon early returns */
@@ -3669,9 +3745,52 @@ void CodeGen::emitArrayLiteralInit(llvm::Value *targetAddr,
   }
 }
 
-void CodeGen::emitCleanupCall(llvm::Value *ptr, const FunctionDeclNode *dtor) {
+void CodeGen::emitCleanupCall(llvm::Value *ptr, const FunctionDeclNode *dtor,
+                              const Type *type) {
   if (!ptr || !dtor)
     return;
+
+  /* Dynamically unroll and destruct static arrays in reverse order */
+  if (type && type->getUnqualifiedType()->getKind() == TypeKind::Array) {
+    const ArrayType *arrTy =
+        static_cast<const ArrayType *>(type->getUnqualifiedType());
+    uint64_t count = arrTy->getSize();
+    if (count == 0)
+      return;
+
+    llvm::Function *theFunction = builder.GetInsertBlock()->getParent();
+    llvm::BasicBlock *condBB =
+        llvm::BasicBlock::Create(ctx, "dtor.array.cond", theFunction);
+    llvm::BasicBlock *bodyBB =
+        llvm::BasicBlock::Create(ctx, "dtor.array.body", theFunction);
+    llvm::BasicBlock *endBB =
+        llvm::BasicBlock::Create(ctx, "dtor.array.end", theFunction);
+
+    llvm::AllocaInst *idxAlloca =
+        createEntryBlockAlloca(builder.getInt64Ty(), "dtor.idx");
+    builder.CreateStore(builder.getInt64(count), idxAlloca);
+    builder.CreateBr(condBB);
+
+    builder.SetInsertPoint(condBB);
+    llvm::Value *idxVal = builder.CreateLoad(builder.getInt64Ty(), idxAlloca);
+    llvm::Value *cmp = builder.CreateICmpSGT(idxVal, builder.getInt64(0));
+    builder.CreateCondBr(cmp, bodyBB, endBB);
+
+    builder.SetInsertPoint(bodyBB);
+    llvm::Value *nextIdx = builder.CreateSub(idxVal, builder.getInt64(1));
+    builder.CreateStore(nextIdx, idxAlloca);
+
+    llvm::Type *llvmElemTy = getLLVMType(arrTy->getElementType());
+    llvm::Value *elemPtr = builder.CreateInBoundsGEP(
+        llvmElemTy, ptr, {builder.getInt32(0), nextIdx});
+
+    emitCleanupCall(elemPtr, dtor, arrTy->getElementType());
+    builder.CreateBr(condBB);
+
+    builder.SetInsertPoint(endBB);
+    return;
+  }
+
   llvm::Function *dtorFunc = getOrCreateFunction(dtor);
   builder.CreateCall(dtorFunc, {ptr});
 }
@@ -3679,7 +3798,7 @@ void CodeGen::emitCleanupCall(llvm::Value *ptr, const FunctionDeclNode *dtor) {
 void CodeGen::emitScopeCleanups() {
   const auto &scope = cgCtx.getCurrentScope();
   for (auto it = scope.cleanups.rbegin(); it != scope.cleanups.rend(); ++it) {
-    emitCleanupCall(it->instancePtr, it->destructor);
+    emitCleanupCall(it->instancePtr, it->destructor, it->type);
   }
 
   /* Flush lifetimes back to the execution environment upon natural closure */
