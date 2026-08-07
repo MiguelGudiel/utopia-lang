@@ -9,13 +9,24 @@ namespace utopia {
 
 class Piece;
 
+/*
+ * Persistent immutable linked list node representing a formatting state bound
+ * to a specific Piece.
+ */
+struct BoundStateNode {
+  const Piece *piece;
+  State state;
+  const BoundStateNode *parent;
+};
+
 class CodeWriter {
 public:
-  explicit CodeWriter(
-      int pageWidth = 80, int baseIndent = 0, bool measureOnly = false,
-      const std::unordered_map<const Piece *, State> *boundStates = nullptr)
-      : pageWidth(pageWidth), currentIndent(baseIndent),
-        measureOnly(measureOnly), boundStates(boundStates) {}
+  explicit CodeWriter(int pageWidth = 80, int baseIndent = 0,
+                      bool measureOnly = false,
+                      const BoundStateNode *boundStates = nullptr)
+      : pageWidth(pageWidth), baseIndent(baseIndent), currentIndent(baseIndent),
+        currentColumn(baseIndent), measureOnly(measureOnly),
+        boundStates(boundStates) {}
 
   void pushPiece(const Piece *p) { activePieces.push_back(p); }
   void popPiece() { activePieces.pop_back(); }
@@ -40,6 +51,8 @@ public:
   }
 
   int getCurrentLine() const { return currentLine; }
+  int getCurrentIndent() const { return currentIndent; }
+
   void markInvalid() { isValid = false; }
 
   void writeString(const std::string &text) { _writeInternal(text, true); }
@@ -107,6 +120,39 @@ public:
       } else {
         break;
       }
+    }
+  }
+
+  /**
+   * Directly injects pre-solved formatting text while properly adjusting
+   * internal line and column tracking metadata without re-triggering formatting
+   * logic.
+   */
+  void writePreformatted(const std::string &text) {
+    if (text.empty())
+      return;
+
+    flushWhitespace();
+
+    if (!measureOnly) {
+      buffer += text;
+    }
+
+    size_t lastNewline = text.find_last_of('\n');
+    if (lastNewline != std::string::npos) {
+      int newlines = 0;
+      for (char c : text) {
+        if (c == '\n')
+          newlines++;
+      }
+      currentLine += newlines;
+      currentColumn = text.length() - lastNewline - 1;
+    } else {
+      currentColumn += text.length();
+    }
+
+    if (currentColumn > pageWidth && !forgiveOverflow && !hasOverflowed) {
+      recordPotentialOverflow();
     }
   }
 
@@ -214,6 +260,7 @@ public:
 
 private:
   int pageWidth;
+  int baseIndent;
   int currentIndent;
   int currentColumn = 0;
   int totalOverflow = 0;
@@ -231,7 +278,7 @@ private:
   std::vector<const Piece *> firstOverflowPieces;
   bool hasOverflowed = false;
 
-  const std::unordered_map<const Piece *, State> *boundStates;
+  const BoundStateNode *boundStates;
 
   void recordPotentialOverflow();
 
@@ -272,7 +319,8 @@ private:
   }
 
   void recalculateIndent() {
-    currentIndent = 0;
+    /* Restore to baseIndent context instead of absolute 0 */
+    currentIndent = baseIndent;
     Indent lastSignificant = Indent::None;
 
     for (Indent ind : indentStack) {

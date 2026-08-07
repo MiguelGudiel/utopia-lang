@@ -2,13 +2,46 @@
 #include "utopia/Format/CodeWriter.hpp"
 #include "utopia/Format/FormatCore.hpp"
 #include <functional>
+#include <optional>
+#include <string>
 #include <vector>
 
 namespace utopia {
 
 class Piece {
+protected:
+  mutable int cachedTotalCharacters = -1;
+  mutable bool cachedContainsHardNewline = false;
+
+  void setMetadata(int chars, bool hn) const {
+    cachedTotalCharacters = chars;
+    cachedContainsHardNewline = hn;
+  }
+
 public:
   virtual ~Piece() = default;
+
+  void ensureMetadata() const {
+    if (cachedTotalCharacters == -1) {
+      computeMetadata();
+    }
+  }
+
+  int totalCharacters() const {
+    ensureMetadata();
+    return cachedTotalCharacters;
+  }
+
+  bool containsHardNewline() const {
+    ensureMetadata();
+    return cachedContainsHardNewline;
+  }
+
+  virtual void computeMetadata() const = 0;
+
+  virtual std::optional<State> fixedState(int pageWidth) const {
+    return std::nullopt;
+  }
 
   virtual std::vector<State> additionalStates() const { return {}; }
   virtual int stateCost(const State &state) const { return state.cost; }
@@ -31,6 +64,8 @@ class TextPiece : public Piece {
 public:
   explicit TextPiece(std::string text) : text(std::move(text)) {}
 
+  void computeMetadata() const override { setMetadata(text.length(), false); }
+
   void format(CodeWriter &writer, const State &state,
               const std::function<void(const Piece *, State)> &formatChild)
       const override {
@@ -44,6 +79,10 @@ private:
 class StringPiece : public Piece {
 public:
   explicit StringPiece(std::string text) : text(std::move(text)) {}
+
+  void computeMetadata() const override {
+    setMetadata(text.length(), text.find('\n') != std::string::npos);
+  }
 
   void format(CodeWriter &writer, const State &state,
               const std::function<void(const Piece *, State)> &formatChild)
@@ -59,6 +98,10 @@ class CommentPiece : public Piece {
 public:
   explicit CommentPiece(std::string text) : text(std::move(text)) {}
 
+  void computeMetadata() const override {
+    setMetadata(text.length(), text.find('\n') != std::string::npos);
+  }
+
   void format(CodeWriter &writer, const State &state,
               const std::function<void(const Piece *, State)> &formatChild)
       const override {
@@ -71,6 +114,8 @@ private:
 
 class BlankLinePiece : public Piece {
 public:
+  void computeMetadata() const override { setMetadata(0, true); }
+
   void
   format(CodeWriter &writer, const State &state,
          const std::function<void(const Piece *, State)> &) const override {
@@ -81,6 +126,8 @@ public:
 class NewlinesPiece : public Piece {
 public:
   explicit NewlinesPiece(int count) : count(count) {}
+
+  void computeMetadata() const override { setMetadata(0, true); }
 
   void
   format(CodeWriter &writer, const State &state,
@@ -96,6 +143,16 @@ class ConcatPiece : public Piece {
 public:
   explicit ConcatPiece(std::vector<Piece *> elements)
       : elements(std::move(elements)) {}
+
+  void computeMetadata() const override {
+    int chars = 0;
+    bool hn = false;
+    for (const auto &e : elements) {
+      chars += e->totalCharacters();
+      hn = hn || e->containsHardNewline();
+    }
+    setMetadata(chars, hn);
+  }
 
   bool isBlockLike() const override {
     return !elements.empty() && elements.back()->isBlockLike();
@@ -137,6 +194,23 @@ public:
              bool hasProperties)
       : target(target), links(std::move(links)), hasBlockFormat(hasBlockFormat),
         hasProperties(hasProperties) {}
+
+  void computeMetadata() const override {
+    int chars = target->totalCharacters();
+    bool hn = target->containsHardNewline();
+    for (const auto &link : links) {
+      chars += link.piece->totalCharacters();
+      hn = hn || link.piece->containsHardNewline();
+    }
+    setMetadata(chars, hn);
+  }
+
+  bool isBlockLike() const override {
+    if (!links.empty()) {
+      return links.back().piece->isBlockLike();
+    }
+    return target->isBlockLike();
+  }
 
   std::vector<State> additionalStates() const override {
     std::vector<State> st;
@@ -204,7 +278,24 @@ public:
   AssignPiece(Piece *left, std::string op, Piece *right)
       : left(left), op(std::move(op)), right(right) {}
 
+  void computeMetadata() const override {
+    int chars = left->totalCharacters() + 1 + op.length() + 1 +
+                right->totalCharacters();
+    bool hn = left->containsHardNewline() || right->containsHardNewline();
+    setMetadata(chars, hn);
+  }
+
   bool isBlockLike() const override { return right->isBlockLike(); }
+
+  std::optional<State> fixedState(int pageWidth) const override {
+    if (isBlockLike()) {
+      return std::nullopt;
+    }
+    if (containsHardNewline() || totalCharacters() > pageWidth) {
+      return State::Split;
+    }
+    return std::nullopt;
+  }
 
   std::vector<State> additionalStates() const override {
     return {State::Split};
@@ -212,7 +303,7 @@ public:
 
   int stateCost(const State &state) const override {
     if (state == State::Split) {
-      return Cost::Assign;
+      return isBlockLike() ? Cost::AssignBlock : Cost::Assign;
     }
     return state.cost;
   }
@@ -252,6 +343,19 @@ public:
   explicit SequencePiece(std::vector<Piece *> elements)
       : elements(std::move(elements)) {}
 
+  void computeMetadata() const override {
+    int chars = 0;
+    bool hn = false;
+    for (const auto &e : elements) {
+      chars += e->totalCharacters();
+      hn = hn || e->containsHardNewline();
+    }
+    if (elements.size() > 1) {
+      hn = true;
+    }
+    setMetadata(chars, hn);
+  }
+
   void format(CodeWriter &writer, const State &state,
               const std::function<void(const Piece *, State)> &formatChild)
       const override {
@@ -278,6 +382,19 @@ class BlockPiece : public Piece {
 public:
   explicit BlockPiece(std::vector<Piece *> statements, bool hasBraces = true)
       : statements(std::move(statements)), hasBraces(hasBraces) {}
+
+  void computeMetadata() const override {
+    int chars = hasBraces ? 2 : 0;
+    bool hn = false;
+    for (const auto &s : statements) {
+      chars += s->totalCharacters();
+      hn = hn || s->containsHardNewline();
+    }
+    if (!statements.empty()) {
+      hn = true;
+    }
+    setMetadata(chars, hn);
+  }
 
   bool isBlockLike() const override { return hasBraces; }
 
@@ -326,9 +443,42 @@ private:
 class ListPiece : public Piece {
 public:
   ListPiece(Piece *openBracket, std::vector<Piece *> elements,
-            Piece *closeBracket)
+            Piece *closeBracket, bool forceSplit = false)
       : openBracket(openBracket), elements(std::move(elements)),
-        closeBracket(closeBracket) {}
+        closeBracket(closeBracket), forceSplit(forceSplit) {}
+
+  void computeMetadata() const override {
+    int chars = 0;
+    bool hn = forceSplit;
+    if (openBracket) {
+      chars += openBracket->totalCharacters();
+      hn = hn || openBracket->containsHardNewline();
+    }
+    for (size_t i = 0; i < elements.size(); ++i) {
+      chars += elements[i]->totalCharacters();
+      hn = hn || elements[i]->containsHardNewline();
+      if (i < elements.size() - 1) {
+        chars += 2;
+      }
+    }
+    if (closeBracket) {
+      chars += closeBracket->totalCharacters();
+      hn = hn || closeBracket->containsHardNewline();
+    }
+    setMetadata(chars, hn);
+  }
+
+  std::optional<State> fixedState(int pageWidth) const override {
+    if (elements.empty()) {
+      if (forceSplit)
+        return State::Split;
+      return State::Unsplit;
+    }
+    if (forceSplit || containsHardNewline() || totalCharacters() > pageWidth) {
+      return State::Split;
+    }
+    return std::nullopt;
+  }
 
   bool isBlockLike() const override { return true; }
 
@@ -356,7 +506,6 @@ public:
       writer.newline();
       for (size_t i = 0; i < elements.size(); ++i) {
         formatChild(elements[i], State::Unsplit);
-        /* Enforce trailing commas for all elements to match Dart styling */
         writer.write(",");
         writer.newline();
       }
@@ -402,12 +551,21 @@ private:
   Piece *openBracket;
   std::vector<Piece *> elements;
   Piece *closeBracket;
+  bool forceSplit;
 };
 
 class CallPiece : public Piece {
 public:
   CallPiece(Piece *target, Piece *argsList)
       : target(target), argsList(argsList) {}
+
+  void computeMetadata() const override {
+    int chars = target->totalCharacters() + argsList->totalCharacters();
+    bool hn = target->containsHardNewline() || argsList->containsHardNewline();
+    setMetadata(chars, hn);
+  }
+
+  bool isBlockLike() const override { return argsList->isBlockLike(); }
 
   void format(CodeWriter &writer, const State &state,
               const std::function<void(const Piece *, State)> &formatChild)
@@ -432,8 +590,34 @@ public:
   InfixPiece(Piece *left, std::string op, Piece *right)
       : left(left), op(std::move(op)), right(right) {}
 
+  void computeMetadata() const override {
+    int chars = left->totalCharacters() + 1 + op.length() + 1 +
+                right->totalCharacters();
+    bool hn = left->containsHardNewline() || right->containsHardNewline();
+    setMetadata(chars, hn);
+  }
+
+  bool isBlockLike() const override { return right->isBlockLike(); }
+
+  std::optional<State> fixedState(int pageWidth) const override {
+    if (isBlockLike()) {
+      return std::nullopt;
+    }
+    if (containsHardNewline() || totalCharacters() > pageWidth) {
+      return State::Split;
+    }
+    return std::nullopt;
+  }
+
   std::vector<State> additionalStates() const override {
     return {State::Split};
+  }
+
+  int stateCost(const State &state) const override {
+    if (state == State::Split) {
+      return isBlockLike() ? Cost::AssignBlock : Cost::Normal;
+    }
+    return state.cost;
   }
 
   void format(CodeWriter &writer, const State &state,
@@ -474,6 +658,28 @@ public:
       : keyword(std::move(keyword)), condition(condition), body(body),
         elseBody(elseBody), bodyOnNewLine(bodyOnNewLine),
         elseBodyOnNewLine(elseBodyOnNewLine) {}
+
+  void computeMetadata() const override {
+    int chars = keyword.length();
+    bool hn = false;
+    if (condition) {
+      chars += 2 + condition->totalCharacters();
+      hn = hn || condition->containsHardNewline();
+    }
+    if (body) {
+      chars += 1 + body->totalCharacters();
+      hn = hn || body->containsHardNewline();
+      if (bodyOnNewLine)
+        hn = true;
+    }
+    if (elseBody) {
+      chars += 5 + elseBody->totalCharacters();
+      hn = hn || elseBody->containsHardNewline();
+      if (bodyOnNewLine || elseBodyOnNewLine)
+        hn = true;
+    }
+    setMetadata(chars, hn);
+  }
 
   void format(CodeWriter &writer, const State &state,
               const std::function<void(const Piece *, State)> &formatChild)
@@ -540,6 +746,18 @@ public:
   CasePiece(Piece *label, std::vector<Piece *> statements)
       : label(label), statements(std::move(statements)) {}
 
+  void computeMetadata() const override {
+    int chars = label->totalCharacters();
+    bool hn = label->containsHardNewline();
+    for (const auto &s : statements) {
+      chars += s->totalCharacters();
+      hn = hn || s->containsHardNewline();
+    }
+    if (!statements.empty())
+      hn = true;
+    setMetadata(chars, hn);
+  }
+
   bool isBlockLike() const override { return true; }
 
   void format(CodeWriter &writer, const State &state,
@@ -547,8 +765,6 @@ public:
       const override {
     formatChild(label, State::Unsplit);
     if (!statements.empty()) {
-      /* Create an isolated indentation context strictly for case block
-       * statements */
       writer.pushIndent(Indent::Block);
       writer.newline();
       for (size_t i = 0; i < statements.size(); ++i) {
@@ -571,6 +787,38 @@ public:
 private:
   Piece *label;
   std::vector<Piece *> statements;
+};
+
+/**
+ * Encapsulates a subtree as an atomic chunk that formats itself using an
+ * independent Solver. Hides child complexity from the outer Solver bounds to
+ * prevent combinatorial state explosion.
+ */
+class IndependentPiece : public Piece {
+public:
+  Piece *child;
+  int pageWidth;
+  mutable std::unordered_map<int, std::string> cache;
+
+  IndependentPiece(Piece *child, int pageWidth)
+      : child(child), pageWidth(pageWidth) {}
+
+  void computeMetadata() const override {
+    child->ensureMetadata();
+    setMetadata(child->totalCharacters(), child->containsHardNewline());
+  }
+
+  bool isBlockLike() const override { return child->isBlockLike(); }
+
+  void format(CodeWriter &writer, const State &state,
+              const std::function<void(const Piece *, State)> &formatChild)
+      const override;
+
+  void forEachChild(
+      const std::function<void(const Piece *)> &callback) const override {
+    /* Intentionally left blank to hide children from outer Solver permutations
+     */
+  }
 };
 
 } // namespace utopia

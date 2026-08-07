@@ -9,6 +9,7 @@ namespace utopia {
 class PieceFactory : public ASTVisitor<PieceFactory, Piece *> {
 public:
   std::vector<std::unique_ptr<Piece>> arena;
+  int pageWidth;
 
   template <typename T, typename... Args> T *create(Args &&...args) {
     auto ptr = std::make_unique<T>(std::forward<Args>(args)...);
@@ -16,6 +17,8 @@ public:
     arena.push_back(std::move(ptr));
     return raw;
   }
+
+  explicit PieceFactory(int pageWidth = 80) : pageWidth(pageWidth) {}
 
   Piece *extractChain(const ExprNode *node);
   Piece *dispatchExpr(const ExprNode *node);

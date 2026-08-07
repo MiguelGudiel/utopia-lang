@@ -29,7 +29,8 @@ public:
 
   DeclNode *
   parseDeclarationOrFunction(llvm::ArrayRef<AnnotationNode *> annotations = {});
-  std::vector<ParamDeclNode *> parseParameterList(bool &isVariadic);
+  std::vector<ParamDeclNode *> parseParameterList(bool &isVariadic,
+                                                  bool &hasTrailingComma);
 
 private:
   ASTContext &astCtx;

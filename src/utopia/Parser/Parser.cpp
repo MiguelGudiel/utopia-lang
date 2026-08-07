@@ -548,10 +548,16 @@ AnnotationNode *Parser::parseAnnotation() {
   }
 
   std::vector<ExprNode *> args;
+  bool hasTrailingComma = false;
+
   if (match(TokenType::LPAREN)) {
     if (currentToken().type != TokenType::RPAREN &&
         currentToken().type != TokenType::EOF_TOK) {
       do {
+        if (currentToken().type == TokenType::RPAREN) {
+          hasTrailingComma = true;
+          break;
+        }
         args.push_back(parseExpression());
       } while (match(TokenType::COMMA));
     }
@@ -559,8 +565,10 @@ AnnotationNode *Parser::parseAnnotation() {
   }
 
   int len = (currentToken().column - col);
-  return astCtx.create<AnnotationNode>(name, astCtx.copyArray<ExprNode *>(args),
-                                       line, col, len);
+  auto node = astCtx.create<AnnotationNode>(
+      name, astCtx.copyArray<ExprNode *>(args), line, col, len);
+  node->hasTrailingComma = hasTrailingComma;
+  return node;
 }
 
 const Type *Parser::applyArrayDeclarator(const Type *baseType) {
@@ -590,9 +598,11 @@ const Type *Parser::applyArrayDeclarator(const Type *baseType) {
   return result;
 }
 
-std::vector<ParamDeclNode *> Parser::parseParameterList(bool &isVariadic) {
+std::vector<ParamDeclNode *>
+Parser::parseParameterList(bool &isVariadic, bool &hasTrailingComma) {
   std::vector<ParamDeclNode *> params;
   isVariadic = false;
+  hasTrailingComma = false;
   bool inNamedBlock = false;
   bool optionalPositionalStarted = false;
 
@@ -601,7 +611,9 @@ std::vector<ParamDeclNode *> Parser::parseParameterList(bool &isVariadic) {
 
     if (match(TokenType::ELLIPSIS)) {
       isVariadic = true;
-      match(TokenType::COMMA);
+      if (match(TokenType::COMMA)) {
+        hasTrailingComma = true;
+      }
       break;
     }
 
@@ -614,7 +626,9 @@ std::vector<ParamDeclNode *> Parser::parseParameterList(bool &isVariadic) {
 
     if (inNamedBlock && currentToken().type == TokenType::RBRACE) {
       advance();
-      match(TokenType::COMMA);
+      if (match(TokenType::COMMA)) {
+        hasTrailingComma = true;
+      }
       break;
     }
 
@@ -694,16 +708,22 @@ std::vector<ParamDeclNode *> Parser::parseParameterList(bool &isVariadic) {
       if (inNamedBlock) {
         expect(TokenType::RBRACE,
                "Expected '}' to close named parameter list.");
-        match(TokenType::COMMA);
+        if (match(TokenType::COMMA)) {
+          hasTrailingComma = true;
+        }
       }
       break;
     } else {
       if (inNamedBlock && currentToken().type == TokenType::RBRACE) {
+        hasTrailingComma = true;
         advance();
-        match(TokenType::COMMA);
+        if (match(TokenType::COMMA)) {
+          hasTrailingComma = true;
+        }
         break;
       }
       if (currentToken().type == TokenType::RPAREN) {
+        hasTrailingComma = true;
         break;
       }
     }
@@ -849,8 +869,6 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
   while (currentToken().type != TokenType::RBRACE &&
          currentToken().type != TokenType::EOF_TOK) {
 
-    /* Metadata applies strictly recursively to annotation definitions as well
-     */
     std::string doc = consumeComments();
     auto memberAnnotations = parseAnnotations();
 
@@ -864,7 +882,6 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
       advance();
     }
 
-    /* Intercept floating metadata and comments guarding the scope closure */
     if (currentToken().type == TokenType::RBRACE ||
         currentToken().type == TokenType::EOF_TOK) {
       if (!memberAnnotations.empty()) {
@@ -875,7 +892,6 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
       break;
     }
 
-    /* Enforce compile-time invariant: const constructor requirement */
     if (currentToken().type == TokenType::CONST_KW &&
         peekToken().type == TokenType::IDENTIFIER &&
         peekToken().value == name) {
@@ -888,7 +904,8 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
       expect(TokenType::LPAREN, "Expected '('");
 
       bool isVariadic = false;
-      auto params = parseParameterList(isVariadic);
+      bool hasTrailingComma = false;
+      auto params = parseParameterList(isVariadic, hasTrailingComma);
       if (isVariadic) {
         reportError(cLine, cCol, name.length(),
                     "Annotation constructors cannot be variadic.");
@@ -911,6 +928,7 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
       constructor->hasPrivateMod = isPriv;
       constructor->identifierColumn = ctorIdCol;
       constructor->identifierLength = name.length();
+      constructor->hasTrailingComma = hasTrailingComma;
 
       if (!doc.empty())
         constructor->docString = astCtx.copyString(doc);
@@ -1711,14 +1729,17 @@ ExprNode *Parser::parseUnary() {
     std::vector<std::string_view> argNames;
     bool hasParens = false;
     bool namedStarted = false;
+    bool hasTrailingComma = false;
 
     if (match(TokenType::LPAREN)) {
       hasParens = true;
 
       if (currentToken().type != TokenType::RPAREN) {
         do {
-          if (currentToken().type == TokenType::RPAREN)
+          if (currentToken().type == TokenType::RPAREN) {
+            hasTrailingComma = true;
             break;
+          }
 
           if (currentToken().type == TokenType::IDENTIFIER &&
               peekToken().type == TokenType::COLON) {
@@ -1761,6 +1782,7 @@ ExprNode *Parser::parseUnary() {
     node->rawArgs = argsRef;
     node->rawArgNames = namesRef;
     node->hasRawArgs = true;
+    node->hasTrailingComma = hasTrailingComma;
     return node;
   }
 
@@ -1990,7 +2012,8 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
       advance();
 
       bool isVariadic = false;
-      auto params = parseParameterList(isVariadic);
+      bool hasTrailingComma = false;
+      auto params = parseParameterList(isVariadic, hasTrailingComma);
       expect(TokenType::RPAREN, "Expected ')'");
 
       auto constructor =
@@ -2003,6 +2026,7 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
       constructor->hasPrivateMod = isPriv;
       constructor->identifierColumn = ctorIdCol;
       constructor->identifierLength = name.length();
+      constructor->hasTrailingComma = hasTrailingComma;
 
       if (!doc.empty())
         constructor->docString = astCtx.copyString(doc);
@@ -2094,7 +2118,8 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
 
     if (match(TokenType::LPAREN)) {
       bool isVariadic = false;
-      auto params = parseParameterList(isVariadic);
+      bool hasTrailingComma = false;
+      auto params = parseParameterList(isVariadic, hasTrailingComma);
       expect(TokenType::RPAREN, "Expected ')'");
 
       auto method = astCtx.create<FunctionDeclNode>(
@@ -2108,6 +2133,7 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
       method->rawReturnTypeStr = rawTypeStr;
       method->identifierColumn = memIdCol;
       method->identifierLength = memIdLen;
+      method->hasTrailingComma = hasTrailingComma;
 
       if (!doc.empty())
         method->docString = astCtx.copyString(doc);
@@ -2310,6 +2336,8 @@ DeclNode *Parser::parseEnumDecl() {
   expect(TokenType::LBRACE, "Expected '{'");
 
   std::vector<EnumMemberNode *> members;
+  bool hasTrailingComma = false;
+
   while (currentToken().type != TokenType::RBRACE &&
          currentToken().type != TokenType::EOF_TOK) {
 
@@ -2370,6 +2398,9 @@ DeclNode *Parser::parseEnumDecl() {
 
     if (!match(TokenType::COMMA)) {
       break;
+    } else if (currentToken().type == TokenType::RBRACE) {
+      hasTrailingComma = true;
+      break;
     }
   }
 
@@ -2398,6 +2429,7 @@ DeclNode *Parser::parseEnumDecl() {
   node->endLine = endLine;
   node->identifierColumn = idCol;
   node->identifierLength = idLen;
+  node->hasTrailingComma = hasTrailingComma;
 
   return node;
 }
@@ -2505,7 +2537,8 @@ DeclNode *Parser::parseDeclarationOrFunction(
 
   if (match(TokenType::LPAREN)) {
     bool isVariadic = false;
-    auto params = parseParameterList(isVariadic);
+    bool hasTrailingComma = false;
+    auto params = parseParameterList(isVariadic, hasTrailingComma);
     expect(TokenType::RPAREN, "Expected ')' after parameters");
 
     bool isFuncConst = match(TokenType::CONST_KW);
@@ -2518,6 +2551,7 @@ DeclNode *Parser::parseDeclarationOrFunction(
     funcDecl->rawReturnTypeStr = rawTypeStr;
     funcDecl->identifierColumn = idCol;
     funcDecl->identifierLength = idLen;
+    funcDecl->hasTrailingComma = hasTrailingComma;
 
     if (isExtern || isIntrinsic) {
       int endLine = currentToken().line;
@@ -2675,10 +2709,12 @@ ExprNode *Parser::parseArrayLiteral() {
   advance(); /* Consume '[' */
 
   std::vector<ExprNode *> elements;
+  bool hasTrailingComma = false;
   if (currentToken().type != TokenType::RBRACKET &&
       currentToken().type != TokenType::EOF_TOK) {
     do {
       if (currentToken().type == TokenType::RBRACKET) {
+        hasTrailingComma = true;
         break;
       }
       elements.push_back(parseExpression());
@@ -2688,8 +2724,10 @@ ExprNode *Parser::parseArrayLiteral() {
   int endCol = currentToken().column + 1;
   expect(TokenType::RBRACKET, "Expected ']' at end of array literal");
 
-  return astCtx.create<ArrayLiteralNode>(astCtx.copyArray<ExprNode *>(elements),
-                                         line, col, endCol - col);
+  auto node = astCtx.create<ArrayLiteralNode>(
+      astCtx.copyArray<ExprNode *>(elements), line, col, endCol - col);
+  node->hasTrailingComma = hasTrailingComma;
+  return node;
 }
 
 ExprNode *Parser::parseTerm() {
@@ -2738,13 +2776,9 @@ ExprNode *Parser::parsePostfix() {
       std::string_view memberName = currentToken().value;
       int memLen = memberName.length();
 
-      /* Capture the exact column of the identifier before advancing the token
-       * stream */
       int memCol = currentToken().column;
       expect(TokenType::IDENTIFIER, "Expected member name after '.'");
 
-      /* Check for template invocation using semantic awareness rather than
-       * lookahead */
       bool isTemplateCall = false;
       if (currentToken().type == TokenType::LT &&
           astCtx.isTemplateName(memberName)) {
@@ -2786,11 +2820,14 @@ ExprNode *Parser::parsePostfix() {
       std::vector<ExprNode *> args;
       std::vector<std::string_view> argNames;
       bool namedStarted = false;
+      bool hasTrailingComma = false;
 
       if (currentToken().type != TokenType::RPAREN) {
         do {
-          if (currentToken().type == TokenType::RPAREN)
+          if (currentToken().type == TokenType::RPAREN) {
+            hasTrailingComma = true;
             break;
+          }
 
           if (currentToken().type == TokenType::IDENTIFIER &&
               peekToken().type == TokenType::COLON) {
@@ -2835,6 +2872,8 @@ ExprNode *Parser::parsePostfix() {
       static_cast<FunctionCallNode *>(expr)->rawArgs = argsRef;
       static_cast<FunctionCallNode *>(expr)->rawArgNames = namesRef;
       static_cast<FunctionCallNode *>(expr)->hasRawArgs = true;
+      static_cast<FunctionCallNode *>(expr)->hasTrailingComma =
+          hasTrailingComma;
     } else if (currentToken().type == TokenType::PLUS_PLUS ||
                currentToken().type == TokenType::MINUS_MINUS) {
       int line = expr->line;

@@ -142,6 +142,11 @@ struct TypeLiteralNode : public ExprNode {
 struct AnnotationNode : public ASTNode {
   std::string_view name;
   llvm::ArrayRef<ExprNode *> args;
+
+  /* Indicates whether the node was parsed with a trailing comma to force
+   * formatting splits. */
+  bool hasTrailingComma = false;
+
   AnnotationNode(std::string_view n, llvm::ArrayRef<ExprNode *> a, int l, int c,
                  int len)
       : ASTNode(NodeKind::Annotation, l, c, len), name(n), args(a) {}
@@ -229,6 +234,10 @@ struct EnumDeclNode : public DeclNode {
   const Type *underlyingType;
   llvm::ArrayRef<EnumMemberNode *> members;
   mutable const EnumType *enumType = nullptr;
+
+  /* Indicates whether the node was parsed with a trailing comma to force
+   * formatting splits. */
+  bool hasTrailingComma = false;
 
   EnumDeclNode(std::string_view n, const Type *u, int l, int c, int len)
       : DeclNode(NodeKind::EnumDecl, l, c, len), name(n), underlyingType(u) {}
@@ -495,6 +504,10 @@ struct FunctionDeclNode : public DeclNode {
   mutable bool isWillReturn = false;
   mutable bool isMustProgress = false;
 
+  /* Indicates whether the node was parsed with a trailing comma to force
+   * formatting splits. */
+  bool hasTrailingComma = false;
+
   FunctionDeclNode(const Type *ret, std::string_view n, int l, int c,
                    bool isC = false, bool isMeth = false, bool isExt = false,
                    bool isVar = false, bool isImpl = false)
@@ -515,6 +528,10 @@ struct FunctionCallNode : public ExprNode {
   llvm::ArrayRef<ExprNode *> rawArgs;
   llvm::ArrayRef<std::string_view> rawArgNames;
   bool hasRawArgs = false;
+
+  /* Indicates whether the node was parsed with a trailing comma to force
+   * formatting splits. */
+  bool hasTrailingComma = false;
 
   FunctionCallNode(ExprNode *t, llvm::ArrayRef<ExprNode *> a,
                    llvm::ArrayRef<std::string_view> n, int l, int c, int len)
@@ -763,6 +780,11 @@ struct ArraySubscriptNode : public ExprNode {
 
 struct ArrayLiteralNode : public ExprNode {
   llvm::ArrayRef<ExprNode *> elements;
+
+  /* Indicates whether the node was parsed with a trailing comma to force
+   * formatting splits. */
+  bool hasTrailingComma = false;
+
   ArrayLiteralNode(llvm::ArrayRef<ExprNode *> elems, int l, int c, int len)
       : ExprNode(NodeKind::ArrayLiteral, l, c, len), elements(elems) {}
 
@@ -782,6 +804,10 @@ struct NewExprNode : public ExprNode {
   llvm::ArrayRef<ExprNode *> rawArgs;
   llvm::ArrayRef<std::string_view> rawArgNames;
   bool hasRawArgs = false;
+
+  /* Indicates whether the node was parsed with a trailing comma to force
+   * formatting splits. */
+  bool hasTrailingComma = false;
 
   NewExprNode(const Type *allocTy, ExprNode *arrSize,
               llvm::ArrayRef<ExprNode *> a, llvm::ArrayRef<std::string_view> n,

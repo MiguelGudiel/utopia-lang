@@ -130,8 +130,10 @@ ASTNode *ASTCloner::visit(const AssignNode *n) {
 }
 
 ASTNode *ASTCloner::visit(const ArrayLiteralNode *n) {
-  return ctx.create<ArrayLiteralNode>(cloneArray(n->elements), n->line,
-                                      n->column, n->length);
+  auto *node = ctx.create<ArrayLiteralNode>(cloneArray(n->elements), n->line,
+                                            n->column, n->length);
+  node->hasTrailingComma = n->hasTrailingComma;
+  return node;
 }
 
 ASTNode *ASTCloner::visit(const ArraySubscriptNode *n) {
@@ -160,6 +162,7 @@ ASTNode *ASTCloner::visit(const FunctionCallNode *n) {
   node->rawArgs = cloneArray(n->rawArgs);
   node->rawArgNames = ctx.copyArray<std::string_view>(n->rawArgNames);
   node->hasRawArgs = n->hasRawArgs;
+  node->hasTrailingComma = n->hasTrailingComma;
   return node;
 }
 
@@ -182,6 +185,7 @@ ASTNode *ASTCloner::visit(const NewExprNode *n) {
   node->rawArgs = cloneArray(n->rawArgs);
   node->rawArgNames = ctx.copyArray<std::string_view>(n->rawArgNames);
   node->hasRawArgs = n->hasRawArgs;
+  node->hasTrailingComma = n->hasTrailingComma;
   return node;
 }
 
@@ -324,6 +328,7 @@ ASTNode *ASTCloner::visit(const FunctionDeclNode *n) {
   node->endLine = n->endLine;
   node->alignment = n->alignment;
   node->isPacked = n->isPacked;
+  node->hasTrailingComma = n->hasTrailingComma;
   return node;
 }
 

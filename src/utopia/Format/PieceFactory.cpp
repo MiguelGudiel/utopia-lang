@@ -1,4 +1,5 @@
 #include "utopia/Format/PieceFactory.hpp"
+#include "utopia/Format/Solver.hpp"
 #include <algorithm>
 #include <string>
 
@@ -10,6 +11,40 @@ static bool isExpressionStatement(NodeKind kind) {
          kind == NodeKind::TernaryOp || kind == NodeKind::Variable ||
          kind == NodeKind::Number || kind == NodeKind::String ||
          kind == NodeKind::Delete || kind == NodeKind::New;
+}
+
+void IndependentPiece::format(
+    CodeWriter &writer, const State &state,
+    const std::function<void(const Piece *, State)> &) const {
+  int indent = writer.getCurrentIndent();
+  auto it = cache.find(indent);
+
+  if (it == cache.end()) {
+    Solver solver;
+    Solution optimal = solver.solve(child, pageWidth, indent);
+    CodeWriter tempWriter(pageWidth, indent, false, optimal.boundStates);
+
+    std::function<void(const Piece *, State)> tempFormatTree =
+        [&](const Piece *p, State inheritedState) {
+          tempWriter.pushPiece(p);
+          State s = inheritedState;
+          for (const BoundStateNode *n = optimal.boundStates; n != nullptr;
+               n = n->parent) {
+            if (n->piece == p) {
+              s = n->state;
+              break;
+            }
+          }
+          p->format(tempWriter, s, tempFormatTree);
+          tempWriter.popPiece();
+        };
+
+    tempFormatTree(child, State::Unsplit);
+    tempWriter.finish();
+    cache[indent] = tempWriter.getOutput();
+  }
+
+  writer.writePreformatted(cache.at(indent));
 }
 
 static int getActualStartLine(const ASTNode *node) {
@@ -189,8 +224,9 @@ Piece *PieceFactory::extractChain(const ExprNode *node) {
         args.push_back(argPiece);
       }
 
-      Piece *listPiece = create<ListPiece>(
-          create<TextPiece>("("), std::move(args), create<TextPiece>(")"));
+      Piece *listPiece =
+          create<ListPiece>(create<TextPiece>("("), std::move(args),
+                            create<TextPiece>(")"), call->hasTrailingComma);
       linkPiece = create<ConcatPiece>(
           std::vector<Piece *>{create<TextPiece>(memberStr), listPiece});
     }
@@ -246,6 +282,8 @@ Piece *PieceFactory::visit(const NamespaceDeclNode *node) {
           p = create<ConcatPiece>(
               std::vector<Piece *>{p, create<TextPiece>(";")});
         }
+
+        p = create<IndependentPiece>(p, pageWidth);
         parts.push_back(p);
 
         if (i < node->statements.size() - 1) {
@@ -275,6 +313,8 @@ Piece *PieceFactory::visit(const NamespaceDeclNode *node) {
     if (isExpressionStatement(s->kind)) {
       p = create<ConcatPiece>(std::vector<Piece *>{p, create<TextPiece>(";")});
     }
+
+    p = create<IndependentPiece>(p, pageWidth);
     stmts.push_back(p);
 
     if (i < node->statements.size() - 1) {
@@ -455,6 +495,8 @@ Piece *PieceFactory::visit(const BlockNode *node) {
     if (isExpressionStatement(stmt->kind)) {
       p = create<ConcatPiece>(std::vector<Piece *>{p, create<TextPiece>(";")});
     }
+
+    p = create<IndependentPiece>(p, pageWidth);
     stmts.push_back(p);
 
     if (i < node->statements.size() - 1) {
@@ -562,8 +604,9 @@ Piece *PieceFactory::visit(const FunctionCallNode *node) {
     }
     args.push_back(argPiece);
   }
-  Piece *listPiece = create<ListPiece>(create<TextPiece>("("), std::move(args),
-                                       create<TextPiece>(")"));
+  Piece *listPiece =
+      create<ListPiece>(create<TextPiece>("("), std::move(args),
+                        create<TextPiece>(")"), node->hasTrailingComma);
   return create<CallPiece>(target, listPiece);
 }
 
@@ -573,7 +616,7 @@ Piece *PieceFactory::visit(const ArrayLiteralNode *node) {
     elements.push_back(dispatchExpr(elem));
   }
   return create<ListPiece>(create<TextPiece>("["), std::move(elements),
-                           create<TextPiece>("]"));
+                           create<TextPiece>("]"), node->hasTrailingComma);
 }
 
 Piece *PieceFactory::visit(const ArraySubscriptNode *node) {
@@ -717,8 +760,9 @@ Piece *PieceFactory::visit(const FunctionDeclNode *node) {
     params.push_back(create<TextPiece>("..."));
   }
 
-  signature.push_back(create<ListPiece>(
-      create<TextPiece>("("), std::move(params), create<TextPiece>(")")));
+  signature.push_back(
+      create<ListPiece>(create<TextPiece>("("), std::move(params),
+                        create<TextPiece>(")"), node->hasTrailingComma));
 
   Piece *mainSig = create<ConcatPiece>(std::move(signature));
 
@@ -799,7 +843,8 @@ Piece *PieceFactory::visit(const NewExprNode *node) {
       args.push_back(argPiece);
     }
     parts.push_back(create<ListPiece>(create<TextPiece>("("), std::move(args),
-                                      create<TextPiece>(")")));
+                                      create<TextPiece>(")"),
+                                      node->hasTrailingComma));
   }
   return create<ConcatPiece>(std::move(parts));
 }
@@ -889,6 +934,7 @@ Piece *PieceFactory::visit(const ModuleNode *node) {
       p = create<ConcatPiece>(std::vector<Piece *>{headerDoc, p});
     }
 
+    p = create<IndependentPiece>(p, pageWidth);
     stmts.push_back(p);
 
     if (i < node->statements.size() - 1) {
@@ -913,8 +959,9 @@ Piece *PieceFactory::visit(const EnumDeclNode *node) {
   for (auto *m : node->members)
     members.push_back(dispatchStmt(m));
 
-  Piece *body = create<ListPiece>(create<TextPiece>("{ "), std::move(members),
-                                  create<TextPiece>(" }"));
+  Piece *body =
+      create<ListPiece>(create<TextPiece>("{ "), std::move(members),
+                        create<TextPiece>(" }"), node->hasTrailingComma);
   Piece *mainEnum = create<ConcatPiece>(std::vector<Piece *>{
       create<TextPiece>(pfx), create<TextPiece>(" "), body});
 
@@ -987,7 +1034,10 @@ Piece *createRecord(PieceFactory *factory, const T *node, const char *kw) {
     }
 
     for (size_t i = 0; i < allMembers.size(); ++i) {
-      stmts.push_back(factory->dispatchStmt(allMembers[i]));
+      Piece *p = factory->dispatchStmt(allMembers[i]);
+      p = factory->create<IndependentPiece>(p, factory->pageWidth);
+      stmts.push_back(p);
+
       if (i < allMembers.size() - 1) {
         auto *nextStmt = allMembers[i + 1];
         int diff =
@@ -1103,7 +1153,8 @@ Piece *PieceFactory::visit(const AnnotationNode *node) {
     for (auto *a : node->args)
       args.push_back(dispatchExpr(a));
     parts.push_back(create<ListPiece>(create<TextPiece>("("), std::move(args),
-                                      create<TextPiece>(")")));
+                                      create<TextPiece>(")"),
+                                      node->hasTrailingComma));
   }
   return create<ConcatPiece>(std::move(parts));
 }
@@ -1163,6 +1214,8 @@ Piece *PieceFactory::visit(const CaseNode *node) {
     if (isExpressionStatement(s->kind)) {
       p = create<ConcatPiece>(std::vector<Piece *>{p, create<TextPiece>(";")});
     }
+
+    p = create<IndependentPiece>(p, pageWidth);
     stmts.push_back(p);
 
     if (i < node->statements.size() - 1) {
