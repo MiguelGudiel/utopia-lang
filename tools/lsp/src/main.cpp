@@ -298,6 +298,8 @@ SourceLocation getExactNameLocation(const std::string &text,
     name = enumMem->name;
   else if (auto *annDecl = llvm::dyn_cast<AnnotationDeclNode>(decl))
     name = annDecl->name;
+  else if (auto *nsDecl = llvm::dyn_cast<NamespaceDeclNode>(decl))
+    name = nsDecl->name;
 
   if (name.empty())
     return loc;
@@ -404,6 +406,10 @@ std::string getHoverTextForDecl(const DeclNode *decl) {
         "```utopia\ntypedef " + std::string(typedefDecl->aliasName) + "\n```";
   } else if (auto *annDecl = llvm::dyn_cast<AnnotationDeclNode>(decl)) {
     text = "```utopia\nannotation " + std::string(annDecl->name) + "\n```";
+  } else if (auto *nsDecl = llvm::dyn_cast<NamespaceDeclNode>(decl)) {
+    /* Provide clear tooltip documentation for namespaces, including fully
+     * qualified names */
+    text = "```utopia\nnamespace " + std::string(nsDecl->fqName) + "\n```";
   }
 
   if (!decl->docString.empty())
@@ -637,6 +643,16 @@ void handleHover(const json &req) {
               "```utopia\n" + std::string(ma->enumMember->name) + "\n```";
           if (!ma->enumMember->docString.empty())
             hoverText += "\n---\n" + std::string(ma->enumMember->docString);
+        } else if (ma->resolvedDecl) {
+          /* Extract resolved target to handle namespaces, types, and standard
+           * functions */
+          declTarget = ma->resolvedDecl;
+          if (auto *funcDecl =
+                  llvm::dyn_cast<FunctionDeclNode>(ma->resolvedDecl)) {
+            hoverText = buildFunctionHover(funcDecl);
+          } else {
+            hoverText = getHoverTextForDecl(ma->resolvedDecl);
+          }
         }
       } else if (node->kind == NodeKind::Cast) {
         auto castNode = static_cast<const CastNode *>(node);
@@ -658,7 +674,8 @@ void handleHover(const json &req) {
                  node->kind == NodeKind::EnumDecl ||
                  node->kind == NodeKind::EnumMember ||
                  node->kind == NodeKind::TypedefDecl ||
-                 node->kind == NodeKind::AnnotationDecl) {
+                 node->kind == NodeKind::AnnotationDecl ||
+                 node->kind == NodeKind::NamespaceDecl) {
 
         declTarget = static_cast<const DeclNode *>(node);
         auto loc = getExactNameLocation(doc.text, declTarget);
@@ -715,7 +732,8 @@ void handleHover(const json &req) {
             node->kind == NodeKind::UnionDecl ||
             node->kind == NodeKind::EnumDecl ||
             node->kind == NodeKind::TypedefDecl ||
-            node->kind == NodeKind::AnnotationDecl) {
+            node->kind == NodeKind::AnnotationDecl ||
+            node->kind == NodeKind::NamespaceDecl) {
 
           if (declTarget == node) {
             auto loc = getExactNameLocation(
@@ -767,6 +785,12 @@ void handleSignatureHelp(const json &req) {
         auto maNode = static_cast<const MemberAccessNode *>(callNode->target);
         if (maNode->resolvedMethod) {
           targetFunc = maNode->resolvedMethod;
+        } else if (maNode->resolvedDecl &&
+                   maNode->resolvedDecl->kind == NodeKind::FunctionDecl) {
+          /* Fallback to gracefully retrieve functions accessed externally via
+           * namespace resolution */
+          targetFunc =
+              static_cast<const FunctionDeclNode *>(maNode->resolvedDecl);
         }
       }
 
@@ -879,6 +903,10 @@ void handleDefinition(const json &req) {
           targetDecl = ma->resolvedDecl;
         } else if (ma->isEnumMember) {
           targetDecl = ma->enumMember;
+        } else if (ma->resolvedDecl) {
+          /* Support direct go-to-definition resolution for entities scoped
+           * within namespaces */
+          targetDecl = ma->resolvedDecl;
         } else {
           const Type *baseTy = ma->object->exprType;
           if (baseTy) {
