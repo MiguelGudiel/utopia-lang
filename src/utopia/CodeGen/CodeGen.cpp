@@ -106,8 +106,7 @@ llvm::Type *CodeGen::getLLVMType(const Type *type) {
   if (auto *bTy = llvm::dyn_cast<BuiltinType>(type)) {
     switch (bTy->getBuiltinKind()) {
     case BuiltinKind::TypeVal:
-      return builder.getInt8Ty(); /* Dummy representation. Handled internally by
-                                     intrinsics */
+      return builder.getInt8Ty();
     case BuiltinKind::Int8:
     case BuiltinKind::UInt8:
       return builder.getInt8Ty();
@@ -148,6 +147,16 @@ llvm::Type *CodeGen::getLLVMType(const Type *type) {
     }
 
     if (structTy->isOpaque() && !rec->isOpaque()) {
+      if (generatingRecords.contains(rec)) {
+        diags.report({DiagLevel::Error, 0, 0, 0,
+                      "Infinite size detected due to recursive value type '" +
+                          std::string(rec->getName()) +
+                          "'. Use a pointer or reference instead.",
+                      currentFilePath});
+        return structTy;
+      }
+      generatingRecords.insert(rec);
+
       std::vector<llvm::Type *> elements;
 
       if (llvm::isa<UnionType>(type)) {
@@ -188,6 +197,8 @@ llvm::Type *CodeGen::getLLVMType(const Type *type) {
         }
         structTy->setBody(elements, isPacked);
       }
+
+      generatingRecords.erase(rec);
     }
 
     return structTy;
@@ -2199,6 +2210,7 @@ llvm::Value *CodeGen::visit(const TernaryOpNode *node) {
 
 llvm::Value *CodeGen::visit(const VarDeclNode *node) {
   bool isGlobal = !builder.GetInsertBlock();
+  bool isStaticLocal = !isGlobal && node->isStatic && !node->isExtern;
 
   uint64_t customAlign = 0;
 
@@ -2242,9 +2254,9 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
       builder.CreateStore(val, initAddr);
     }
 
-    if (isGlobal) {
+    if (isGlobal || isStaticLocal) {
       diags.report({DiagLevel::Error, node->line, node->column, node->length,
-                    "Dynamic global references are not supported.",
+                    "Dynamic global or static references are not supported.",
                     currentFilePath});
       return nullptr;
     }
@@ -2271,8 +2283,10 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
 
   llvm::Type *ty = getLLVMType(node->type);
 
-  if (isGlobal || node->isExtern) {
+  if (isGlobal || node->isExtern || node->isStatic) {
     llvm::Constant *initConst = nullptr;
+    bool requiresDynamicInit = false;
+
     if (node->initializer) {
       initConst = evaluateAsConstant(node->initializer);
       if (initConst && initConst->getType() != ty) {
@@ -2304,11 +2318,16 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
       }
 
       if (!initConst) {
-        diags.report(
-            {DiagLevel::Error, node->initializer->line,
-             node->initializer->column, node->initializer->length,
-             "Global variable requires a compile-time constant initializer.",
-             currentFilePath});
+        /* Local statics natively permit runtime initialization via guards */
+        if (isStaticLocal) {
+          requiresDynamicInit = true;
+        } else {
+          diags.report({DiagLevel::Error, node->initializer->line,
+                        node->initializer->column, node->initializer->length,
+                        "Global variable requires a compile-time "
+                        "constant initializer.",
+                        currentFilePath});
+        }
       }
     }
 
@@ -2321,10 +2340,18 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
                                ? std::string(node->varName)
                                : node->mangledName;
 
-    /* Apply weak linkage if the global variable is annotated with @weak */
+    /* Generate a unique collision-free symbol name for local statics */
+    if (isStaticLocal) {
+      bindName = currentFunc ? (std::string(currentFunc->name) + "." +
+                                std::string(node->varName))
+                             : bindName;
+    }
+
+    /* Keep static locals strictly private to the translation unit */
     llvm::GlobalValue::LinkageTypes linkage =
-        node->isWeak ? llvm::GlobalValue::WeakAnyLinkage
-                     : llvm::GlobalValue::ExternalLinkage;
+        isStaticLocal ? llvm::GlobalValue::PrivateLinkage
+                      : (node->isWeak ? llvm::GlobalValue::WeakAnyLinkage
+                                      : llvm::GlobalValue::ExternalLinkage);
 
     llvm::GlobalVariable *gvar = mod.getGlobalVariable(bindName);
     if (!gvar) {
@@ -2342,6 +2369,138 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
       cgCtx.bind(bindName, gvar, true);
     } else {
       cgCtx.bind(node->varName, gvar, true);
+    }
+
+    /* Implements dynamic initialization block for local static variables.
+     * Thread-safety is deferred to standard ABI guard acquisition in the
+     * future. */
+    if (requiresDynamicInit) {
+      std::string guardName = bindName + ".guard";
+
+      // Guard status: 0 = Not initialized, 1 = Initializing (Lock), 2 =
+      // Initialized
+      llvm::GlobalVariable *guardVar = new llvm::GlobalVariable(
+          mod, builder.getInt8Ty(), false, llvm::GlobalValue::PrivateLinkage,
+          llvm::ConstantInt::get(builder.getInt8Ty(), 0), guardName);
+
+      llvm::Function *theFunction = builder.GetInsertBlock()->getParent();
+
+      llvm::BasicBlock *checkBB =
+          llvm::BasicBlock::Create(ctx, "static.check", theFunction);
+      llvm::BasicBlock *spinBB =
+          llvm::BasicBlock::Create(ctx, "static.spin", theFunction);
+      llvm::BasicBlock *initBB =
+          llvm::BasicBlock::Create(ctx, "static.init", theFunction);
+      llvm::BasicBlock *contBB =
+          llvm::BasicBlock::Create(ctx, "static.cont", theFunction);
+
+      builder.CreateBr(checkBB);
+
+      builder.SetInsertPoint(checkBB);
+      llvm::LoadInst *guardLoad =
+          builder.CreateLoad(builder.getInt8Ty(), guardVar);
+      guardLoad->setAtomic(llvm::AtomicOrdering::Acquire);
+
+      llvm::Value *isInit = builder.CreateICmpEQ(guardLoad, builder.getInt8(2));
+      builder.CreateCondBr(isInit, contBB, spinBB);
+
+      builder.SetInsertPoint(spinBB);
+      llvm::Value *cmpXchg = builder.CreateAtomicCmpXchg(
+          guardVar, builder.getInt8(0), builder.getInt8(1), llvm::MaybeAlign(1),
+          llvm::AtomicOrdering::AcquireRelease, llvm::AtomicOrdering::Acquire);
+
+      llvm::Value *success = builder.CreateExtractValue(cmpXchg, 1);
+
+      builder.CreateCondBr(success, initBB, checkBB);
+
+      builder.SetInsertPoint(initBB);
+
+      if (baseUnqualTy->getKind() == TypeKind::Array) {
+        emitArrayLiteralInit(gvar, node->type, node->initializer);
+      } else {
+        bool isRVO = false;
+
+        if (node->initializer->kind == NodeKind::FunctionCall) {
+          auto *callNode =
+              static_cast<const FunctionCallNode *>(node->initializer);
+          if (callNode->target->kind == NodeKind::Variable) {
+            if (callNode->resolvedFunc && callNode->resolvedFunc->isMethod &&
+                callNode->resolvedFunc->returnType->isVoid()) {
+              isRVO = true;
+              emitConstructorCall(callNode, gvar);
+            }
+          }
+        }
+
+        if (!isRVO) {
+          bool isAggregate = (baseUnqualTy->getKind() == TypeKind::Struct ||
+                              baseUnqualTy->getKind() == TypeKind::Class ||
+                              baseUnqualTy->getKind() == TypeKind::Union);
+
+          if (isAggregate && node->copyCtor) {
+            llvm::Value *rvalAddr = getLValue(node->initializer);
+            if (!rvalAddr) {
+              lastTemporaryAlloca = nullptr;
+              llvm::Value *initVal = dispatch(node->initializer);
+              if (lastTemporaryAlloca) {
+                rvalAddr = lastTemporaryAlloca;
+                lastTemporaryAlloca = nullptr;
+              } else if (initVal) {
+                rvalAddr = createEntryBlockAlloca(ty, "tmp.copy.src");
+                createTBAAStore(initVal, rvalAddr, node->type);
+              }
+            }
+
+            if (rvalAddr) {
+              llvm::Function *ctorFunc = getOrCreateFunction(node->copyCtor);
+              builder.CreateCall(ctorFunc, {gvar, rvalAddr});
+            } else {
+              diags.report({DiagLevel::Error, node->line, node->column,
+                            node->length,
+                            "Failed to resolve source for copy constructor.",
+                            currentFilePath});
+            }
+          } else if (isAggregate) {
+            llvm::Value *rvalAddr = getLValue(node->initializer);
+            if (rvalAddr) {
+              llvm::Align align = mod.getDataLayout().getABITypeAlign(ty);
+              uint64_t allocSize = mod.getDataLayout().getTypeAllocSize(ty);
+              builder.CreateMemCpy(gvar, align, rvalAddr, align, allocSize);
+            } else {
+              lastTemporaryAlloca = nullptr;
+              llvm::Value *initVal = dispatch(node->initializer);
+              lastTemporaryAlloca = nullptr;
+              if (initVal) {
+                createTBAAStore(initVal, gvar, node->type);
+              } else {
+                diags.report(
+                    {DiagLevel::Error, node->line, node->column, node->length,
+                     "Initialization failed for variable.", currentFilePath});
+              }
+            }
+          } else {
+            lastTemporaryAlloca = nullptr;
+            llvm::Value *initVal = dispatch(node->initializer);
+            lastTemporaryAlloca = nullptr;
+            if (initVal) {
+              initVal = createImplicitCast(initVal, ty);
+              createTBAAStore(initVal, gvar, node->type);
+            } else {
+              diags.report({DiagLevel::Error, node->line, node->column,
+                            node->length, "Initialization failed for variable.",
+                            currentFilePath});
+            }
+          }
+        }
+      }
+
+      llvm::StoreInst *guardStore =
+          builder.CreateStore(builder.getInt8(2), guardVar);
+      guardStore->setAtomic(llvm::AtomicOrdering::Release);
+
+      builder.CreateBr(contBB);
+
+      builder.SetInsertPoint(contBB);
     }
 
     return gvar;

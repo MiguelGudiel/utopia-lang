@@ -1574,6 +1574,19 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
       baseUnqualTy->getKind() == TypeKind::Class ||
       baseUnqualTy->getKind() == TypeKind::Union) {
     auto *recTy = static_cast<const RecordType *>(baseUnqualTy);
+
+    if (!node->isStatic && !node->isExtern && !node->isGlobal) {
+      bool isField = ctx->getScopeDepth() == 1;
+      if (isField && ctx->getCurrentRecordContext() == recTy) {
+        return ctx->reportError(node->line, node->column, node->length,
+                                "Field '" + std::string(node->varName) +
+                                    "' has incomplete type '" +
+                                    std::string(recTy->getName()) +
+                                    "' (recursive value type). Use a pointer "
+                                    "or reference instead.");
+      }
+    }
+
     if (recTy->isOpaque()) {
       return ctx->reportError(
           node->line, node->column, node->length,
@@ -1610,7 +1623,7 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
 
   /* Mark variables defined at module scope to enable accurate side-effect
    * analysis */
-  if (ctx->getScopeDepth() == 1) {
+  if (ctx->getScopeDepth() == 1 && ctx->getCurrentRecordContext() == nullptr) {
     const_cast<VarDeclNode *>(node)->isGlobal = true;
   }
 
@@ -3360,7 +3373,11 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
 
   if (node->arraySize) {
     auto szType = dispatch(node->arraySize);
-    if (!szType || !(*szType)->isInteger()) {
+    if (!szType) {
+      return std::unexpected(ErrorInfo{node->line, node->column, node->length,
+                                       "Cascading error in new array size"});
+    }
+    if (!(*szType)->isInteger()) {
       return ctx->reportError(node->line, node->column, node->length,
                               "Array size in 'new' must be an integer type");
     }
@@ -3493,55 +3510,6 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
           continue;
         }
 
-        for (size_t p = 0; p < expectedParams; ++p) {
-          if (!resolvedArgs[p]) {
-            if (ctor->params[p]->defaultValue) {
-              auto defNode = ctor->params[p]->defaultValue;
-              if (!defNode->exprType) {
-                dispatch(defNode);
-              }
-              resolvedArgs[p] = defNode;
-              resolvedTypes[p] = defNode->exprType;
-            } else {
-              auto pName = std::string(ctor->params[p]->name);
-              if (ctor->params[p]->isRequired) {
-                errors.push_back("Missing required named parameter '" + pName +
-                                 "'.");
-              } else if (!ctor->params[p]->isNamed) {
-                errors.push_back("Missing mandatory positional parameter '" +
-                                 pName + "'.");
-              } else {
-                const Type *pType = ctor->params[p]->type;
-                const Type *unqual = pType->getUnqualifiedType();
-                if (unqual->isNumeric()) {
-                  auto num = ctx->astCtx.create<NumberNode>(
-                      "0", unqual->isFloat(), 0, 0, 0);
-                  num->exprType = pType;
-                  resolvedArgs[p] = num;
-                  resolvedTypes[p] = pType;
-                } else if (unqual->isBuiltinType() &&
-                           static_cast<const BuiltinType *>(unqual)
-                                   ->getBuiltinKind() == BuiltinKind::Bool) {
-                  auto bNode = ctx->astCtx.create<BoolNode>(false, 0, 0, 0);
-                  bNode->exprType = pType;
-                  resolvedArgs[p] = bNode;
-                  resolvedTypes[p] = pType;
-                } else {
-                  auto nNode = ctx->astCtx.create<NullNode>(0, 0, 0);
-                  nNode->exprType = pType;
-                  resolvedArgs[p] = nNode;
-                  resolvedTypes[p] = pType;
-                }
-              }
-            }
-          }
-        }
-
-        if (!errors.empty()) {
-          overloadErrors.push_back(errors);
-          continue;
-        }
-
         int currentScore = 0;
         bool match = true;
 
@@ -3645,7 +3613,11 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
 
 SemaResult TypeCheckPass::visit(const DeleteExprNode *node) {
   auto ptrTy = dispatch(node->ptr);
-  if (!ptrTy || !(*ptrTy)->getUnqualifiedType()->isPointerType()) {
+  if (!ptrTy) {
+    return std::unexpected(ErrorInfo{node->line, node->column, node->length,
+                                     "Cascading error in delete"});
+  }
+  if (!(*ptrTy)->getUnqualifiedType()->isPointerType()) {
     return ctx->reportError(node->line, node->column, node->length,
                             "Cannot delete non-pointer type");
   }

@@ -2227,11 +2227,6 @@ DeclNode *Parser::parseDeclarationOrFunction(
     throw ParseException();
   }
 
-  if (isStatic) {
-    reportError(line, col, idLen, "Variables cannot be declared as static.");
-    throw ParseException();
-  }
-
   ExprNode *init = nullptr;
   if (match(TokenType::ASSIGN)) {
     init = parseExpression();
@@ -2246,6 +2241,7 @@ DeclNode *Parser::parseDeclarationOrFunction(
   varDecl->endLine = endLine;
   varDecl->identifierColumn = idCol;
   varDecl->identifierLength = idLen;
+  varDecl->isStatic = isStatic;
 
   return varDecl;
 }

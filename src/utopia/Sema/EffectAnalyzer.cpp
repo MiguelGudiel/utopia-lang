@@ -148,8 +148,12 @@ void EffectAnalyzer::visit(const MemberAccessNode *n) {
 void EffectAnalyzer::visit(const TypeLiteralNode *n) {}
 
 void EffectAnalyzer::visit(const VariableNode *n) {
+  if (n->isField) {
+    readsMem = true;
+  }
   if (n->resolvedDecl && n->resolvedDecl->kind == NodeKind::VarDecl) {
-    if (static_cast<const VarDeclNode *>(n->resolvedDecl)->isGlobal)
+    auto *varDecl = static_cast<const VarDeclNode *>(n->resolvedDecl);
+    if (varDecl->isGlobal || varDecl->isStatic)
       readsMem = true;
   }
 }

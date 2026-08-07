@@ -81,6 +81,8 @@ private:
   llvm::AllocaInst *lastTemporaryAlloca = nullptr;
   std::string currentFilePath;
 
+  std::unordered_set<const RecordType*> generatingRecords;
+
   DebugInfoEmitter diEmitter;
   TBAAManager tbaaManager;
 
