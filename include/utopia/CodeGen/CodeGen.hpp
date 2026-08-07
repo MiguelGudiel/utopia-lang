@@ -25,6 +25,8 @@ public:
 
   llvm::Value *dispatch(const ASTNode *node);
 
+  llvm::Value *visit(const NamespaceDeclNode *node);
+  llvm::Value *visit(const UsingNode *node);
   llvm::Value *visit(const NumberNode *node);
   llvm::Value *visit(const BoolNode *node);
   llvm::Value *visit(const CharNode *node);
@@ -81,7 +83,7 @@ private:
   llvm::AllocaInst *lastTemporaryAlloca = nullptr;
   std::string currentFilePath;
 
-  std::unordered_set<const RecordType*> generatingRecords;
+  std::unordered_set<const RecordType *> generatingRecords;
 
   DebugInfoEmitter diEmitter;
   TBAAManager tbaaManager;
@@ -119,7 +121,8 @@ private:
   llvm::AllocaInst *createEntryBlockAlloca(llvm::Type *type,
                                            const std::string &varName);
   void emitDefaultInitialization(llvm::Value *ptr, const Type *type);
-  void emitCleanupCall(llvm::Value *ptr, const FunctionDeclNode *dtor, const Type *type = nullptr);
+  void emitCleanupCall(llvm::Value *ptr, const FunctionDeclNode *dtor,
+                       const Type *type = nullptr);
   void emitScopeCleanups();
 };
 

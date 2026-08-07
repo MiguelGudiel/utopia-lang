@@ -67,9 +67,9 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
 
     auto declIt = ctx->templateRegistry.find(instTy->getBaseName());
     if (declIt == ctx->templateRegistry.end()) {
-      ctx->reportError(0, 0, 0,
-                       "Template declaration not found: " +
-                           std::string(instTy->getBaseName()));
+      (void)ctx->reportError(0, 0, 0,
+                             "Template declaration not found: " +
+                                 std::string(instTy->getBaseName()));
       return ctx->astCtx.VoidTy;
     }
 
@@ -77,9 +77,9 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
 
     if (ctx->currentModule &&
         !ctx->currentModule->canSee(tmplDecl->declFilePath)) {
-      ctx->reportError(0, 0, 0,
-                       "Template '" + std::string(instTy->getBaseName()) +
-                           "' is not visible in this module.");
+      (void)ctx->reportError(0, 0, 0,
+                             "Template '" + std::string(instTy->getBaseName()) +
+                                 "' is not visible in this module.");
       return ctx->astCtx.VoidTy;
     }
 
@@ -127,6 +127,16 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
       instDecl->declFilePath = tmplDecl->declFilePath;
       instDecl->alignment = tmplDecl->alignment;
       instDecl->isPacked = tmplDecl->isPacked;
+
+      std::string originalFq = std::string(tmplDecl->fqName);
+      size_t lastDot = originalFq.find_last_of('.');
+      std::string newFq;
+      if (lastDot != std::string::npos) {
+        newFq = originalFq.substr(0, lastDot + 1) + std::string(mangledView);
+      } else {
+        newFq = std::string(mangledView);
+      }
+      instDecl->fqName = ctx->astCtx.copyString(newFq);
 
       if (auto *clsDecl = llvm::dyn_cast<ClassDeclNode>(instDecl)) {
         clsDecl->name = mangledView;
@@ -270,16 +280,17 @@ bool TypeCheckPass::checkTypeVisibility(const Type *type, const ASTNode *node) {
 
   if (decl) {
     if (!decl->isPublic(typeName) && decl->declFilePath != ctx->currentFile) {
-      ctx->reportError(node->line, node->column, node->length,
-                       "Cannot access private type '" + std::string(typeName) +
-                           "' from outside its file.");
+      (void)ctx->reportError(node->line, node->column, node->length,
+                             "Cannot access private type '" +
+                                 std::string(typeName) +
+                                 "' from outside its file.");
       return false;
     }
 
     if (ctx->currentModule && !ctx->currentModule->canSee(decl->declFilePath)) {
-      ctx->reportError(node->line, node->column, node->length,
-                       "Type '" + std::string(typeName) +
-                           "' is not visible in this module.");
+      (void)ctx->reportError(node->line, node->column, node->length,
+                             "Type '" + std::string(typeName) +
+                                 "' is not visible in this module.");
       return false;
     }
   }
@@ -359,11 +370,11 @@ void TypeCheckPass::checkNodiscard(const ASTNode *node) {
   }
 
   if (isNodiscardFunc) {
-    ctx->diags.report({DiagLevel::Warning, node->line, node->column,
-                       node->length,
-                       "Ignoring return value of function '" + funcName +
-                           "', declared with '@nodiscard' annotation.",
-                       std::string(ctx->currentFile), node->endLine});
+    (void)ctx->diags.report({DiagLevel::Warning, node->line, node->column,
+                             node->length,
+                             "Ignoring return value of function '" + funcName +
+                                 "', declared with '@nodiscard' annotation.",
+                             std::string(ctx->currentFile), node->endLine});
     return;
   }
 
@@ -391,7 +402,7 @@ void TypeCheckPass::checkNodiscard(const ASTNode *node) {
         if (typeDecl) {
           for (const auto *ann : typeDecl->annotations) {
             if (ann->name == "nodiscard") {
-              ctx->diags.report(
+              (void)ctx->diags.report(
                   {DiagLevel::Warning, node->line, node->column, node->length,
                    "Ignoring return value of type '" + typeName +
                        "', declared with '@nodiscard' annotation.",
@@ -452,9 +463,9 @@ void TypeCheckPass::checkDeprecated(const DeclNode *decl, const ASTNode *node) {
         }
       }
 
-      ctx->diags.report({DiagLevel::Warning, node->line, node->column,
-                         node->length, msg, std::string(ctx->currentFile),
-                         node->endLine});
+      (void)ctx->diags.report({DiagLevel::Warning, node->line, node->column,
+                               node->length, msg, std::string(ctx->currentFile),
+                               node->endLine});
     }
   }
 }
@@ -1038,7 +1049,16 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
 
   if (llvm::isa<StructDeclNode>(target) || llvm::isa<ClassDeclNode>(target) ||
       llvm::isa<UnionDeclNode>(target) || llvm::isa<EnumDeclNode>(target) ||
-      llvm::isa<TypedefDeclNode>(target)) {
+      llvm::isa<TypedefDeclNode>(target) ||
+      llvm::isa<NamespaceDeclNode>(target)) {
+
+    if (auto *nsDecl = llvm::dyn_cast<NamespaceDeclNode>(target)) {
+      const_cast<VariableNode *>(node)->resolvedDecl = target;
+      node->exprType = ctx->astCtx.NamespaceTy;
+      node->isLValue = false;
+      checkDeprecated(target, node);
+      return node->exprType;
+    }
 
     const Type *repTy = nullptr;
     if (auto *structDecl = llvm::dyn_cast<StructDeclNode>(target))
@@ -1219,7 +1239,7 @@ SemaResult TypeCheckPass::visit(const SwitchNode *node) {
         hasErrors = true;
       } else {
         if (!canImplicitlyCast(*valRes, condTy)) {
-          ctx->reportError(
+          (void)ctx->reportError(
               c->value->line, c->value->column, c->value->length,
               "Case value type does not match switch condition type.");
           hasErrors = true;
@@ -2013,41 +2033,133 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
   const DeclNode *staticAccessDecl = nullptr;
   const RecordType *recordTy = nullptr;
 
-  if (auto *varNode = llvm::dyn_cast<VariableNode>(node->object)) {
-    if (varNode->resolvedDecl) {
-      if (auto *enumDecl =
-              llvm::dyn_cast<EnumDeclNode>(varNode->resolvedDecl)) {
-        for (auto *mem : enumDecl->members) {
-          if (mem->name == node->memberName) {
-            if (!mem->isPublic(mem->name) &&
-                enumDecl->declFilePath != ctx->currentFile) {
-              return ctx->reportError(node->line, node->column, node->length,
-                                      "Cannot access private enum member '" +
-                                          std::string(mem->name) +
-                                          "' from outside its file.");
-            }
-            const_cast<MemberAccessNode *>(node)->isEnumMember = true;
-            const_cast<MemberAccessNode *>(node)->enumMember = mem;
-            node->exprType = enumDecl->enumType;
-            checkDeprecated(mem, node);
-            return node->exprType;
-          }
-        }
-        return ctx->reportError(node->line, node->column, node->length,
-                                "Enum '" + std::string(enumDecl->name) +
-                                    "' does not contain member '" +
-                                    std::string(node->memberName) + "'");
-      } else if (llvm::isa<ClassDeclNode>(varNode->resolvedDecl) ||
-                 llvm::isa<StructDeclNode>(varNode->resolvedDecl) ||
-                 llvm::isa<UnionDeclNode>(varNode->resolvedDecl)) {
-        staticAccessDecl = varNode->resolvedDecl;
-        if (auto *cDecl = llvm::dyn_cast<ClassDeclNode>(staticAccessDecl))
-          recordTy = cDecl->recordType;
-        else if (auto *sDecl = llvm::dyn_cast<StructDeclNode>(staticAccessDecl))
-          recordTy = sDecl->recordType;
-        else if (auto *uDecl = llvm::dyn_cast<UnionDeclNode>(staticAccessDecl))
-          recordTy = uDecl->recordType;
+  if (objType && *objType == ctx->astCtx.NamespaceTy) {
+    const DeclNode *nsDecl = nullptr;
+    if (auto *varNode = llvm::dyn_cast<VariableNode>(node->object)) {
+      nsDecl = varNode->resolvedDecl;
+    } else if (auto *maNode = llvm::dyn_cast<MemberAccessNode>(node->object)) {
+      nsDecl = maNode->resolvedDecl;
+    }
+
+    if (nsDecl && llvm::isa<NamespaceDeclNode>(nsDecl)) {
+      auto *nsNode = static_cast<const NamespaceDeclNode *>(nsDecl);
+      std::string targetFQName =
+          std::string(nsNode->fqName) + "." + std::string(node->memberName);
+
+      auto decls = ctx->symTable.lookupExact(targetFQName, ctx->currentModule);
+      if (decls.empty()) {
+        return ctx->reportError(
+            node->line, node->column, node->length,
+            "No member named '" + std::string(node->memberName) +
+                "' in namespace '" + std::string(nsNode->fqName) + "'");
       }
+      const DeclNode *target = decls.front();
+
+      if (llvm::isa<NamespaceDeclNode>(target)) {
+        const_cast<MemberAccessNode *>(node)->resolvedDecl = target;
+        node->exprType = ctx->astCtx.NamespaceTy;
+        node->isLValue = false;
+        return node->exprType;
+      }
+
+      if (llvm::isa<StructDeclNode>(target) ||
+          llvm::isa<ClassDeclNode>(target) ||
+          llvm::isa<UnionDeclNode>(target) || llvm::isa<EnumDeclNode>(target) ||
+          llvm::isa<TypedefDeclNode>(target)) {
+        const Type *repTy = nullptr;
+        if (auto *structDecl = llvm::dyn_cast<StructDeclNode>(target))
+          repTy = structDecl->recordType;
+        else if (auto *classDecl = llvm::dyn_cast<ClassDeclNode>(target))
+          repTy = classDecl->recordType;
+        else if (auto *unionDecl = llvm::dyn_cast<UnionDeclNode>(target))
+          repTy = unionDecl->recordType;
+        else if (auto *enumDecl = llvm::dyn_cast<EnumDeclNode>(target))
+          repTy = enumDecl->enumType;
+        else if (auto *typedefDecl = llvm::dyn_cast<TypedefDeclNode>(target))
+          repTy = typedefDecl->aliasType;
+
+        const_cast<MemberAccessNode *>(node)->resolvedDecl = target;
+        const_cast<MemberAccessNode *>(node)->representedType = repTy;
+        node->exprType = ctx->astCtx.TypeValTy;
+        node->isLValue = false;
+        checkDeprecated(target, node);
+        return node->exprType;
+      }
+
+      if (auto *varTarget = llvm::dyn_cast<VarDeclNode>(target)) {
+        if (!target->isPublic(varTarget->varName) &&
+            target->declFilePath != ctx->currentFile) {
+          return ctx->reportError(node->line, node->column, node->length,
+                                  "Cannot access private variable.");
+        }
+        const_cast<MemberAccessNode *>(node)->resolvedDecl = target;
+        const_cast<MemberAccessNode *>(node)->isStaticFieldRef = true;
+        node->exprType = varTarget->type;
+        node->isLValue = true;
+        checkDeprecated(target, node);
+        return node->exprType;
+      }
+
+      if (auto *fDecl = llvm::dyn_cast<FunctionDeclNode>(target)) {
+        if (!target->isPublic(fDecl->name) &&
+            target->declFilePath != ctx->currentFile) {
+          return ctx->reportError(node->line, node->column, node->length,
+                                  "Cannot access private function.");
+        }
+        const_cast<MemberAccessNode *>(node)->resolvedDecl = target;
+
+        std::vector<const Type *> pTypes;
+        for (auto *p : fDecl->params)
+          pTypes.push_back(p->type);
+        const Type *funcTy = ctx->astCtx.getFunctionType(
+            fDecl->returnType, ctx->astCtx.copyArray<const Type *>(pTypes));
+        node->exprType = ctx->astCtx.getPointerType(funcTy);
+        node->isLValue = true;
+        checkDeprecated(target, node);
+        return node->exprType;
+      }
+    }
+  }
+
+  const DeclNode *objDecl = nullptr;
+  if (auto *varNode = llvm::dyn_cast<VariableNode>(node->object)) {
+    objDecl = varNode->resolvedDecl;
+  } else if (auto *maObj = llvm::dyn_cast<MemberAccessNode>(node->object)) {
+    objDecl = maObj->resolvedDecl;
+  }
+
+  if (objDecl) {
+    if (auto *enumDecl = llvm::dyn_cast<EnumDeclNode>(objDecl)) {
+      for (auto *mem : enumDecl->members) {
+        if (mem->name == node->memberName) {
+          if (!mem->isPublic(mem->name) &&
+              enumDecl->declFilePath != ctx->currentFile) {
+            return ctx->reportError(node->line, node->column, node->length,
+                                    "Cannot access private enum member '" +
+                                        std::string(mem->name) +
+                                        "' from outside its file.");
+          }
+          const_cast<MemberAccessNode *>(node)->isEnumMember = true;
+          const_cast<MemberAccessNode *>(node)->enumMember = mem;
+          node->exprType = enumDecl->enumType;
+          checkDeprecated(mem, node);
+          return node->exprType;
+        }
+      }
+      return ctx->reportError(node->line, node->column, node->length,
+                              "Enum '" + std::string(enumDecl->name) +
+                                  "' does not contain member '" +
+                                  std::string(node->memberName) + "'");
+    } else if (llvm::isa<ClassDeclNode>(objDecl) ||
+               llvm::isa<StructDeclNode>(objDecl) ||
+               llvm::isa<UnionDeclNode>(objDecl)) {
+      staticAccessDecl = objDecl;
+      if (auto *cDecl = llvm::dyn_cast<ClassDeclNode>(staticAccessDecl))
+        recordTy = cDecl->recordType;
+      else if (auto *sDecl = llvm::dyn_cast<StructDeclNode>(staticAccessDecl))
+        recordTy = sDecl->recordType;
+      else if (auto *uDecl = llvm::dyn_cast<UnionDeclNode>(staticAccessDecl))
+        recordTy = uDecl->recordType;
     }
   }
 
@@ -2144,7 +2256,7 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
                                           std::string(f->varName) + "'.");
             }
             const_cast<MemberAccessNode *>(node)->isStaticFieldRef = true;
-            const_cast<MemberAccessNode *>(node)->resolvedVar = f;
+            const_cast<MemberAccessNode *>(node)->resolvedDecl = f;
             node->exprType = f->type;
             checkDeprecated(f, node);
             return f->type;
@@ -2204,6 +2316,18 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
             if (instDecl && instDecl->kind == NodeKind::FunctionDecl) {
               auto *fnDecl = static_cast<FunctionDeclNode *>(instDecl);
               fnDecl->name = mangledView;
+
+              std::string originalFq = std::string(tmplDecl->fqName);
+              size_t lastDot = originalFq.find_last_of('.');
+              std::string newFq;
+              if (lastDot != std::string::npos) {
+                newFq = originalFq.substr(0, lastDot + 1) +
+                        std::string(mangledView);
+              } else {
+                newFq = std::string(mangledView);
+              }
+              fnDecl->fqName = ctx->astCtx.copyString(newFq);
+
               fnDecl->isMethod = true;
               fnDecl->isStatic = tmplDecl->isStatic;
               fnDecl->hasPublicMod = tmplDecl->hasPublicMod;
@@ -2211,8 +2335,6 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
               fnDecl->annotations = tmplDecl->annotations;
               fnDecl->declFilePath = tmplDecl->declFilePath;
 
-              /* Prevent duplicate 'this' pointers from being injected.
-               * Instead, safely reinterpret the existing cloned pointer. */
               if (!fnDecl->isStatic && !fnDecl->params.empty() &&
                   fnDecl->params.front()->name == "this") {
                 const_cast<ParamDeclNode *>(fnDecl->params.front())->type =
@@ -2432,6 +2554,37 @@ static bool guaranteesReturn(const ASTNode *node) {
   }
 
   return false;
+}
+
+SemaResult TypeCheckPass::visit(const NamespaceDeclNode *node) {
+  ctx->pushNamespace(node->name);
+
+  /* Snapshot using directives to prevent leaking from this namespace block */
+  size_t prevUsings = ctx->getUsingsCount();
+
+  bool hasErrors = false;
+  for (const auto *stmt : node->statements) {
+    auto res = dispatch(stmt);
+    if (!res)
+      hasErrors = true;
+    checkNodiscard(stmt);
+  }
+
+  /* Restore previous using directives count */
+  ctx->resizeUsings(prevUsings);
+  ctx->popNamespace();
+
+  if (hasErrors) {
+    return std::unexpected(ErrorInfo{node->line, node->column, node->length,
+                                     "Errors in namespace declaration"});
+  }
+  return ctx->astCtx.VoidTy;
+}
+
+SemaResult TypeCheckPass::visit(const UsingNode *node) {
+  /* Register the using directive within the current active lexical scope */
+  ctx->addUsing(node->name);
+  return ctx->astCtx.VoidTy;
 }
 
 SemaResult TypeCheckPass::visit(const FunctionDeclNode *node) {
@@ -2861,13 +3014,27 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
         auto varNode = static_cast<const VariableNode *>(ma->object);
         if (varNode->resolvedDecl &&
             (varNode->resolvedDecl->kind == NodeKind::ClassDecl ||
-             varNode->resolvedDecl->kind == NodeKind::StructDecl)) {
+             varNode->resolvedDecl->kind == NodeKind::StructDecl ||
+             varNode->resolvedDecl->kind == NodeKind::UnionDecl)) {
           recDecl = varNode->resolvedDecl;
-          if (recDecl->kind == NodeKind::ClassDecl)
-            recordTy = static_cast<const ClassDeclNode *>(recDecl)->recordType;
-          else
-            recordTy = static_cast<const StructDeclNode *>(recDecl)->recordType;
         }
+      } else if (ma->object->kind == NodeKind::MemberAccess) {
+        auto maObj = static_cast<const MemberAccessNode *>(ma->object);
+        if (maObj->resolvedDecl &&
+            (maObj->resolvedDecl->kind == NodeKind::ClassDecl ||
+             maObj->resolvedDecl->kind == NodeKind::StructDecl ||
+             maObj->resolvedDecl->kind == NodeKind::UnionDecl)) {
+          recDecl = maObj->resolvedDecl;
+        }
+      }
+
+      if (recDecl) {
+        if (recDecl->kind == NodeKind::ClassDecl)
+          recordTy = static_cast<const ClassDeclNode *>(recDecl)->recordType;
+        else if (recDecl->kind == NodeKind::StructDecl)
+          recordTy = static_cast<const StructDeclNode *>(recDecl)->recordType;
+        else if (recDecl->kind == NodeKind::UnionDecl)
+          recordTy = static_cast<const UnionDeclNode *>(recDecl)->recordType;
       }
 
       if (!recordTy) {
@@ -2887,13 +3054,15 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
         const Type *unqualBaseTy = baseTy->getUnqualifiedType();
 
         if (unqualBaseTy->getKind() == TypeKind::Struct ||
-            unqualBaseTy->getKind() == TypeKind::Class) {
+            unqualBaseTy->getKind() == TypeKind::Class ||
+            unqualBaseTy->getKind() == TypeKind::Union) {
           recordTy = static_cast<const RecordType *>(unqualBaseTy);
           auto recordDecls = ctx->lookup(recordTy->getName());
 
           for (auto *d : recordDecls) {
             if (d->kind == NodeKind::ClassDecl ||
-                d->kind == NodeKind::StructDecl) {
+                d->kind == NodeKind::StructDecl ||
+                d->kind == NodeKind::UnionDecl) {
               recDecl = d;
               break;
             }
@@ -2910,8 +3079,10 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
         llvm::ArrayRef<FunctionDeclNode *> methods;
         if (recDecl->kind == NodeKind::ClassDecl)
           methods = static_cast<const ClassDeclNode *>(recDecl)->methods;
-        else
+        else if (recDecl->kind == NodeKind::StructDecl)
           methods = static_cast<const StructDeclNode *>(recDecl)->methods;
+        else
+          methods = static_cast<const UnionDeclNode *>(recDecl)->methods;
 
         for (const auto *method : methods) {
           if (method->name == ma->memberName) {
@@ -2975,6 +3146,90 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
                                   finalErr);
         }
       }
+    } else if (ma->resolvedDecl &&
+               (ma->resolvedDecl->kind == NodeKind::ClassDecl ||
+                ma->resolvedDecl->kind == NodeKind::StructDecl ||
+                ma->resolvedDecl->kind == NodeKind::UnionDecl)) {
+      const RecordType *recordTy = nullptr;
+      if (ma->resolvedDecl->kind == NodeKind::ClassDecl)
+        recordTy =
+            static_cast<const ClassDeclNode *>(ma->resolvedDecl)->recordType;
+      else if (ma->resolvedDecl->kind == NodeKind::StructDecl)
+        recordTy =
+            static_cast<const StructDeclNode *>(ma->resolvedDecl)->recordType;
+      else
+        recordTy =
+            static_cast<const UnionDeclNode *>(ma->resolvedDecl)->recordType;
+
+      llvm::ArrayRef<FunctionDeclNode *> ctors;
+      if (ma->resolvedDecl->kind == NodeKind::ClassDecl)
+        ctors =
+            static_cast<const ClassDeclNode *>(ma->resolvedDecl)->constructors;
+      else if (ma->resolvedDecl->kind == NodeKind::StructDecl)
+        ctors =
+            static_cast<const StructDeclNode *>(ma->resolvedDecl)->constructors;
+      else
+        ctors =
+            static_cast<const UnionDeclNode *>(ma->resolvedDecl)->constructors;
+
+      const FunctionDeclNode *bestMatch = nullptr;
+      int bestScore = std::numeric_limits<int>::min();
+      std::vector<std::vector<std::string>> overloadErrors;
+      std::vector<ExprNode *> bestResolvedArgs;
+
+      for (const auto *ctor : ctors) {
+        if (!ctor->isPublic(ctor->name) &&
+            ctx->getCurrentRecordContext() != recordTy) {
+          overloadErrors.push_back({"Constructor is private."});
+          continue;
+        }
+
+        int score = 0;
+        std::vector<ExprNode *> resolvedArgs;
+        auto errs = checkMatch(ctor, score, resolvedArgs);
+        if (errs.empty()) {
+          if (score > bestScore) {
+            bestScore = score;
+            bestMatch = ctor;
+            bestResolvedArgs = resolvedArgs;
+            overloadErrors.clear();
+          }
+        } else {
+          overloadErrors.push_back(errs);
+        }
+      }
+
+      if (bestMatch) {
+        const_cast<FunctionCallNode *>(node)->resolvedFunc = bestMatch;
+        const_cast<FunctionCallNode *>(node)->args =
+            ctx->astCtx.copyArray<ExprNode *>(bestResolvedArgs);
+        const_cast<FunctionCallNode *>(node)->argNames = {};
+
+        node->exprType = recordTy;
+        node->isLValue = false;
+        checkDeprecated(bestMatch, node);
+        return node->exprType;
+      }
+
+      std::string finalErr = "No matching constructor found for '" +
+                             std::string(recordTy->getName()) + "'.";
+      if (!overloadErrors.empty()) {
+        finalErr += " Candidates failed with:\n";
+        for (const auto &errList : overloadErrors) {
+          finalErr += "- ";
+          for (size_t i = 0; i < errList.size(); ++i) {
+            finalErr += errList[i];
+            if (i < errList.size() - 1)
+              finalErr += ", ";
+          }
+          finalErr += "\n";
+        }
+      }
+      return ctx->reportError(node->line, node->column, node->length, finalErr);
+    } else if (ma->resolvedDecl &&
+               ma->resolvedDecl->kind == NodeKind::FunctionDecl) {
+      const_cast<FunctionCallNode *>(node)->resolvedFunc =
+          static_cast<const FunctionDeclNode *>(ma->resolvedDecl);
     }
   } else if (node->target->kind == NodeKind::Variable) {
     std::string_view name =
@@ -3002,7 +3257,8 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
 
     bool hasCallable = false;
     for (auto *d : decls) {
-      if (d->kind == NodeKind::FunctionDecl) {
+      if (d->kind == NodeKind::FunctionDecl || d->kind == NodeKind::ClassDecl ||
+          d->kind == NodeKind::StructDecl || d->kind == NodeKind::UnionDecl) {
         hasCallable = true;
         break;
       }
@@ -3012,18 +3268,70 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
       const FunctionDeclNode *bestMatch = nullptr;
       int bestScore = std::numeric_limits<int>::min();
       bool isConstructorCall = false;
+      const RecordType *constructorRecTy = nullptr;
       std::vector<std::vector<std::string>> overloadErrors;
       std::vector<ExprNode *> bestResolvedArgs;
 
       for (auto targetDecl : decls) {
-        if (targetDecl->kind == NodeKind::FunctionDecl) {
+        if (targetDecl->kind == NodeKind::ClassDecl ||
+            targetDecl->kind == NodeKind::StructDecl ||
+            targetDecl->kind == NodeKind::UnionDecl) {
+          const RecordType *recTy = nullptr;
+          if (targetDecl->kind == NodeKind::ClassDecl)
+            recTy = static_cast<const ClassDeclNode *>(targetDecl)->recordType;
+          else if (targetDecl->kind == NodeKind::StructDecl)
+            recTy = static_cast<const StructDeclNode *>(targetDecl)->recordType;
+          else
+            recTy = static_cast<const UnionDeclNode *>(targetDecl)->recordType;
+
+          llvm::ArrayRef<FunctionDeclNode *> ctors;
+          if (targetDecl->kind == NodeKind::ClassDecl)
+            ctors =
+                static_cast<const ClassDeclNode *>(targetDecl)->constructors;
+          else if (targetDecl->kind == NodeKind::StructDecl)
+            ctors =
+                static_cast<const StructDeclNode *>(targetDecl)->constructors;
+          else
+            ctors =
+                static_cast<const UnionDeclNode *>(targetDecl)->constructors;
+
+          for (auto *ctor : ctors) {
+            if (!ctor->isPublic(ctor->name) &&
+                ctx->getCurrentRecordContext() != recTy) {
+              overloadErrors.push_back({"Constructor is private."});
+              continue;
+            }
+
+            int score = 0;
+            std::vector<ExprNode *> resolvedArgs;
+            auto errs = checkMatch(ctor, score, resolvedArgs);
+            if (errs.empty()) {
+              if (score > bestScore) {
+                bestScore = score;
+                bestMatch = ctor;
+                bestResolvedArgs = resolvedArgs;
+                isConstructorCall = true;
+                constructorRecTy = recTy;
+                overloadErrors.clear();
+              }
+            } else {
+              overloadErrors.push_back(errs);
+            }
+          }
+        } else if (targetDecl->kind == NodeKind::FunctionDecl) {
           auto fDecl = static_cast<const FunctionDeclNode *>(targetDecl);
 
           if (!fDecl->isPublic(fDecl->name)) {
             if (fDecl->isMethod && !fDecl->isExtern) {
-              const RecordType *recTy = ctx->astCtx.getRecordType(name);
+              /* Ensure accurate fallback visibility validations */
+              const RecordType *recTy = nullptr;
+              if (fDecl->parentRecord) {
+                recTy = fDecl->parentRecord;
+              } else {
+                recTy = ctx->astCtx.getRecordType(name);
+              }
               if (recTy && ctx->getCurrentRecordContext() != recTy) {
-                overloadErrors.push_back({"Constructor is private."});
+                overloadErrors.push_back({"Method is private."});
                 continue;
               }
             } else {
@@ -3042,9 +3350,23 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
               bestScore = score;
               bestMatch = fDecl;
               bestResolvedArgs = resolvedArgs;
-              if (fDecl->isMethod &&
-                  ctx->astCtx.getRecordType(name) != nullptr) {
-                isConstructorCall = true;
+
+              isConstructorCall = false;
+              constructorRecTy = nullptr;
+
+              /* Accurately flag Constructor definitions utilizing strictly
+               * identical internal naming schemas */
+              if (fDecl->isMethod && fDecl->parentRecord) {
+                std::string_view recName = fDecl->parentRecord->getName();
+                size_t dotPos = recName.find_last_of('.');
+                std::string_view simpleRecName =
+                    (dotPos != std::string_view::npos)
+                        ? recName.substr(dotPos + 1)
+                        : recName;
+                if (fDecl->name == simpleRecName) {
+                  isConstructorCall = true;
+                  constructorRecTy = fDecl->parentRecord;
+                }
               }
               overloadErrors.clear();
             }
@@ -3061,7 +3383,7 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
         const_cast<FunctionCallNode *>(node)->argNames = {};
 
         if (isConstructorCall) {
-          node->exprType = ctx->astCtx.getRecordType(name);
+          node->exprType = constructorRecTy;
           node->isLValue = false;
         } else {
           node->exprType = bestMatch->returnType;
@@ -3136,7 +3458,7 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
         std::vector<ExprNode *> resolvedArgs;
         for (size_t i = 0; i < node->args.size(); ++i) {
           resolvedArgs.push_back(performImplicitConversion(
-              node->args[i], fTy->getParamTypes()[i]));
+              const_cast<ExprNode *>(node->args[i]), fTy->getParamTypes()[i]));
         }
 
         const_cast<FunctionCallNode *>(node)->args =
@@ -3286,8 +3608,8 @@ SemaResult TypeCheckPass::visit(const ArrayLiteralNode *node) {
       if (canImplicitlyCast(elemType, *res)) {
         elemType = *res;
       } else {
-        ctx->reportError(elem->line, elem->column, elem->length,
-                         "Array literal element type mismatch.");
+        (void)ctx->reportError(elem->line, elem->column, elem->length,
+                               "Array literal element type mismatch.");
         hasErrors = true;
       }
     }
@@ -3321,6 +3643,9 @@ SemaResult TypeCheckPass::visit(const ModuleNode *node) {
     return ctx->astCtx.VoidTy;
   visitedModules.insert(node);
 
+  /* Snapshot using directives to prevent leaking from this module context */
+  size_t prevUsings = ctx->getUsingsCount();
+
   bool hasErrors = false;
 
   for (const auto *imp : node->importedModules) {
@@ -3349,6 +3674,9 @@ SemaResult TypeCheckPass::visit(const ModuleNode *node) {
 
   ctx->setCurrentFile(prevFile);
   ctx->currentModule = prevMod;
+
+  /* Restore using directives to cleanly separate module dependencies */
+  ctx->resizeUsings(prevUsings);
 
   if (hasErrors) {
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,

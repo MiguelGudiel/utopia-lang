@@ -17,6 +17,7 @@ enum class ScopeKind { Regular, FunctionParams, ControlFlowInit };
 class Scope {
 public:
   llvm::StringMap<llvm::SmallVector<const DeclNode *, 2>> symbols;
+  std::vector<std::string> usings;
   ScopeKind kind = ScopeKind::Regular;
 };
 
@@ -42,14 +43,13 @@ public:
    * checks.
    */
   const Scope &getCurrentScope() const { return scopes.back(); }
-
   const std::vector<Scope> &getScopes() const { return scopes; }
 
   /* Performs a top-down search across scopes. Hides outer scope symbols on
    * collision. */
   llvm::SmallVector<const DeclNode *, 2>
-  lookup(std::string_view name,
-         const ModuleNode *currentModule = nullptr) const {
+  lookupExact(std::string_view name,
+              const ModuleNode *currentModule = nullptr) const {
     for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
       auto found = it->symbols.find(name);
       if (found != it->symbols.end()) {

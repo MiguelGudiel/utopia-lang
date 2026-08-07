@@ -305,6 +305,15 @@ public:
     return isHit(n) ? n : nullptr;
   }
 
+  const ASTNode *visit(const NamespaceDeclNode *n) {
+    for (auto *s : n->statements)
+      if (auto found = find(s))
+        return found;
+    return isHit(n) ? n : nullptr;
+  }
+
+  const ASTNode *visit(const UsingNode *n) { return isHit(n) ? n : nullptr; }
+
   const ASTNode *visit(const AnnotationDeclNode *n) {
     for (auto *f : n->fields)
       if (auto found = find(f))

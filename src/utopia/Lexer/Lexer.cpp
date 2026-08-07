@@ -252,6 +252,10 @@ Token Lexer::parseToken() {
       return {TokenType::UNION_KW, id, startLine, startCol};
     if (id == "class")
       return {TokenType::CLASS_KW, id, startLine, startCol};
+    if (id == "namespace")
+      return {TokenType::NAMESPACE_KW, id, startLine, startCol};
+    if (id == "using")
+      return {TokenType::USING_KW, id, startLine, startCol};
     if (id == "this")
       return {TokenType::THIS_KW, id, startLine, startCol};
     if (id == "new")

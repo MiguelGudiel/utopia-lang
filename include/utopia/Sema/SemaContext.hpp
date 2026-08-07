@@ -18,11 +18,27 @@ public:
   std::unordered_map<std::string_view, const DeclNode *> templateRegistry;
   DiagnosticsEngine &diags;
   bool isAssignTarget = false;
+  std::vector<std::string> namespaceStack;
 
   explicit SemaContext(ASTContext &ast, DiagnosticsEngine &de,
                        std::string_view path)
       : astCtx(ast), currentFile(path), diags(de) {
     currentFunctionReturn = astCtx.VoidTy;
+  }
+
+  void pushNamespace(std::string_view ns) {
+    namespaceStack.push_back(std::string(ns));
+  }
+  void popNamespace() { namespaceStack.pop_back(); }
+
+  std::string getCurrentNamespace() const {
+    std::string ns;
+    for (size_t i = 0; i < namespaceStack.size(); ++i) {
+      ns += namespaceStack[i];
+      if (i < namespaceStack.size() - 1)
+        ns += ".";
+    }
+    return ns;
   }
 
   void pushScope(ScopeKind kind = ScopeKind::Regular) {
@@ -40,6 +56,41 @@ public:
     if (!a || !b)
       return false;
     return a->toString() == b->toString();
+  }
+
+  void addUsing(std::string_view ns) {
+    if (!symTable.getScopes().empty()) {
+      auto &usings = const_cast<Scope &>(symTable.getCurrentScope()).usings;
+      std::string nsStr(ns);
+
+      /* Prevent duplicate using directives within the same scope */
+      bool exists = false;
+      for (const auto &u : usings) {
+        if (u == nsStr) {
+          exists = true;
+          break;
+        }
+      }
+
+      if (!exists) {
+        usings.push_back(nsStr);
+      }
+    }
+  }
+
+  /* Retrieves the current number of using directives to snapshot the scope */
+  size_t getUsingsCount() const {
+    if (symTable.getScopes().empty())
+      return 0;
+    return symTable.getCurrentScope().usings.size();
+  }
+
+  /* Restores the using directives count to drop local usages from outer scopes
+   */
+  void resizeUsings(size_t count) {
+    if (!symTable.getScopes().empty()) {
+      const_cast<Scope &>(symTable.getCurrentScope()).usings.resize(count);
+    }
   }
 
   void addDecl(std::string_view name, const DeclNode *decl) {
@@ -100,6 +151,11 @@ public:
                             "' with the same signature.");
             return;
           }
+        } else if (decl->kind == NodeKind::NamespaceDecl &&
+                   existing->kind == NodeKind::NamespaceDecl) {
+          /* Allow namespace reopening safely by skipping duplicate registration
+           */
+          return;
         } else if (!isRecordAndCtor) {
           reportError(decl->line, decl->column, decl->length,
                       "Redefinition of '" + std::string(name) + "'.");
@@ -129,7 +185,33 @@ public:
   }
 
   llvm::SmallVector<const DeclNode *, 2> lookup(std::string_view name) const {
-    return symTable.lookup(name, currentModule);
+    auto res = symTable.lookupExact(name, currentModule);
+    if (!res.empty())
+      return res;
+
+    std::string ns = getCurrentNamespace();
+    while (!ns.empty()) {
+      res = symTable.lookupExact(ns + "." + std::string(name), currentModule);
+      if (!res.empty())
+        return res;
+
+      size_t pos = ns.find_last_of('.');
+      if (pos != std::string::npos) {
+        ns = ns.substr(0, pos);
+      } else {
+        break;
+      }
+    }
+
+    for (auto it = symTable.getScopes().rbegin();
+         it != symTable.getScopes().rend(); ++it) {
+      for (const auto &u : it->usings) {
+        res = symTable.lookupExact(u + "." + std::string(name), currentModule);
+        if (!res.empty())
+          return res;
+      }
+    }
+    return {};
   }
 
   SemaResult reportError(int line, int col, int len, const std::string &msg) {

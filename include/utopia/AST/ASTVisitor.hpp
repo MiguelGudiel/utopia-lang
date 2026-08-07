@@ -64,6 +64,12 @@ public:
     case NodeKind::EnumMember:
       return static_cast<Derived *>(this)->visit(
           static_cast<const EnumMemberNode *>(node));
+    case NodeKind::NamespaceDecl:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const NamespaceDeclNode *>(node));
+    case NodeKind::Using:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const UsingNode *>(node));
     case NodeKind::Assign:
       return static_cast<Derived *>(this)->visit(
           static_cast<const AssignNode *>(node));

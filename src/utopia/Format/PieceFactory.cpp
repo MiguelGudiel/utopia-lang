@@ -221,6 +221,54 @@ Piece *PieceFactory::dispatchExpr(const ExprNode *node) {
   return p;
 }
 
+Piece *PieceFactory::visit(const NamespaceDeclNode *node) {
+  std::vector<Piece *> parts;
+  for (auto *ann : node->annotations) {
+    parts.push_back(dispatch(ann));
+  }
+
+  std::string pfx = "namespace " + std::string(node->name);
+
+  if (node->isFileScoped) {
+    Piece *mainNs = create<TextPiece>(pfx + ";");
+    if (parts.empty())
+      return mainNs;
+    parts.push_back(mainNs);
+    return create<SequencePiece>(std::move(parts));
+  }
+
+  std::vector<Piece *> stmts;
+  for (size_t i = 0; i < node->statements.size(); ++i) {
+    auto *s = node->statements[i];
+    Piece *p = dispatchStmt(s);
+    if (isExpressionStatement(s->kind)) {
+      p = create<ConcatPiece>(std::vector<Piece *>{p, create<TextPiece>(";")});
+    }
+    stmts.push_back(p);
+
+    if (i < node->statements.size() - 1) {
+      auto *nextStmt = node->statements[i + 1];
+      int diff = getActualStartLine(nextStmt) - getActualEndLine(s);
+      if (diff > 1) {
+        stmts.push_back(create<NewlinesPiece>(diff));
+      }
+    }
+  }
+
+  Piece *body = create<BlockPiece>(std::move(stmts));
+  Piece *mainNs = create<ConcatPiece>(std::vector<Piece *>{
+      create<TextPiece>(pfx), create<TextPiece>(" "), body});
+
+  if (parts.empty())
+    return mainNs;
+  parts.push_back(mainNs);
+  return create<SequencePiece>(std::move(parts));
+}
+
+Piece *PieceFactory::visit(const UsingNode *node) {
+  return create<TextPiece>("using " + std::string(node->name) + ";");
+}
+
 Piece *PieceFactory::visit(const AssignNode *node) {
   Piece *left = dispatchExpr(node->target);
   Piece *right = dispatchExpr(node->value);

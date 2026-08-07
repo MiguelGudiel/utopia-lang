@@ -47,7 +47,8 @@ enum class BuiltinKind {
   Float64,
   Bool,
   Void,
-  TypeVal
+  TypeVal,
+  Namespace
 };
 
 class Type {

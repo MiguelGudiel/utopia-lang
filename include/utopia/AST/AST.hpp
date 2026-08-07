@@ -49,7 +49,9 @@ enum class NodeKind : uint8_t {
   EnumMember,
   ImplicitCast,
   TypeLiteral,
-  TernaryOp
+  TernaryOp,
+  NamespaceDecl,
+  Using
 };
 
 struct ASTNode {
@@ -80,6 +82,7 @@ struct StmtNode : public ASTNode {
     case NodeKind::Break:
     case NodeKind::Continue:
     case NodeKind::Return:
+    case NodeKind::Using:
       return true;
     default:
       return false;
@@ -155,6 +158,7 @@ struct DeclNode : public ASTNode {
   bool hasPublicMod = false;
   bool hasPrivateMod = false;
   std::string_view declFilePath;
+  std::string_view fqName; // Fully Qualified Name (ej. mi.name.space.Class)
 
   /* Exact token location for LSP tooling */
   int identifierColumn = 0;
@@ -179,6 +183,11 @@ struct DeclNode : public ASTNode {
       return false;
     if (hasPublicMod)
       return true;
+
+    size_t pos = declName.find_last_of('.');
+    if (pos != std::string_view::npos) {
+      declName = declName.substr(pos + 1);
+    }
     return !declName.starts_with("_");
   }
 
@@ -194,6 +203,7 @@ struct DeclNode : public ASTNode {
     case NodeKind::ClassDecl:
     case NodeKind::EnumDecl:
     case NodeKind::EnumMember:
+    case NodeKind::NamespaceDecl:
       return true;
     default:
       return false;
@@ -724,7 +734,7 @@ struct MemberAccessNode : public ExprNode {
   const EnumMemberNode *enumMember = nullptr;
 
   bool isStaticFieldRef = false;
-  const VarDeclNode *resolvedVar = nullptr;
+  const DeclNode *resolvedDecl = nullptr;
 
   /* Storage for explicit template arguments applied to method access */
   llvm::ArrayRef<const Type *> templateArgs;
@@ -811,4 +821,27 @@ struct ImplicitCastNode : public ExprNode {
   }
 };
 
+struct NamespaceDeclNode : public DeclNode {
+  std::string_view name;
+  llvm::ArrayRef<ASTNode *> statements;
+  bool isFileScoped = false;
+
+  NamespaceDeclNode(std::string_view n, int l, int c, int len)
+      : DeclNode(NodeKind::NamespaceDecl, l, c, len), name(n) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::NamespaceDecl;
+  }
+};
+
+struct UsingNode : public StmtNode {
+  std::string_view name;
+
+  UsingNode(std::string_view n, int l, int c, int len)
+      : StmtNode(NodeKind::Using, l, c, len), name(n) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Using;
+  }
+};
 } // namespace utopia

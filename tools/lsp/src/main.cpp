@@ -82,6 +82,12 @@ public:
 
   LocalVarCollector(int line) : targetLine(line) {}
 
+  void visit(const NamespaceDeclNode *n) {
+    for (auto *s : n->statements)
+      dispatch(s);
+  }
+  void visit(const UsingNode *) {}
+
   void visit(const VarDeclNode *n) {
     if (n->line <= targetLine)
       locals.push_back(n);
@@ -571,12 +577,14 @@ void handleHover(const json &req) {
         if (ma->isMethodRef && ma->resolvedMethod) {
           declTarget = ma->resolvedMethod;
           hoverText = buildFunctionHover(ma->resolvedMethod);
-        } else if (ma->isStaticFieldRef && ma->resolvedVar) {
-          declTarget = ma->resolvedVar;
-          hoverText = "```utopia\n" + ma->resolvedVar->type->toString() + " " +
-                      std::string(ma->resolvedVar->varName) + "\n```";
-          if (!ma->resolvedVar->docString.empty())
-            hoverText += "\n---\n" + std::string(ma->resolvedVar->docString);
+        } else if (ma->isStaticFieldRef && ma->resolvedDecl) {
+          declTarget = ma->resolvedDecl;
+          if (auto *varDecl = llvm::dyn_cast<VarDeclNode>(ma->resolvedDecl)) {
+            hoverText = "```utopia\n" + varDecl->type->toString() + " " +
+                        std::string(varDecl->varName) + "\n```";
+            if (!varDecl->docString.empty())
+              hoverText += "\n---\n" + std::string(varDecl->docString);
+          }
         } else if (ma->isEnumMember && ma->enumMember) {
           declTarget = ma->enumMember;
           hoverText =
@@ -822,7 +830,7 @@ void handleDefinition(const json &req) {
         if (ma->isMethodRef) {
           targetDecl = ma->resolvedMethod;
         } else if (ma->isStaticFieldRef) {
-          targetDecl = ma->resolvedVar;
+          targetDecl = ma->resolvedDecl;
         } else if (ma->isEnumMember) {
           targetDecl = ma->enumMember;
         } else {
@@ -1810,6 +1818,17 @@ public:
     }
   }
 
+  void visit(const NamespaceDeclNode *n) {
+    auto loc = getExactNameLocation(docText, n);
+    addToken(loc.line, loc.col, loc.length, 3, 0);
+    for (auto *s : n->statements)
+      dispatch(s);
+  }
+
+  void visit(const UsingNode *n) {
+    highlightTypeString(n->name, n->line, n->column);
+  }
+
   void visit(const TypeLiteralNode *n) {
     if (n->length <= 0)
       return;
@@ -2236,6 +2255,10 @@ int main() {
           utopia::lsp::hasPendingChange = true;
         }
         utopia::lsp::workerCV.notify_one();
+      } else if (method == "shutdown") {
+        /* Client asks to shut down, server must return a null result */
+        utopia::lsp::sendResponse(
+            {{"jsonrpc", "2.0"}, {"id", req["id"]}, {"result", nullptr}});
       } else if (method == "exit") {
         utopia::lsp::isRunning = false;
         utopia::lsp::workerCV.notify_one();

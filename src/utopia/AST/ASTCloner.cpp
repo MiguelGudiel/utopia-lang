@@ -393,6 +393,19 @@ ASTNode *ASTCloner::visit(const StructDeclNode *n) {
   return node;
 }
 
+ASTNode *ASTCloner::visit(const NamespaceDeclNode *n) {
+  auto *node =
+      ctx.create<NamespaceDeclNode>(n->name, n->line, n->column, n->length);
+  node->fqName = n->fqName;
+  node->isFileScoped = n->isFileScoped;
+  node->statements = cloneArray(n->statements);
+  return node;
+}
+
+ASTNode *ASTCloner::visit(const UsingNode *n) {
+  return ctx.create<UsingNode>(n->name, n->line, n->column, n->length);
+}
+
 ASTNode *ASTCloner::visit(const ModuleNode *n) { return nullptr; }
 ASTNode *ASTCloner::visit(const TypedefDeclNode *n) { return nullptr; }
 ASTNode *ASTCloner::visit(const EnumDeclNode *n) { return nullptr; }

@@ -1,8 +1,46 @@
 #include "utopia/CodeGen/Mangler.hpp"
-#include "utopia/Common/Logger.hpp"
 #include "utopia/Sema/Sema.hpp"
 
 namespace utopia {
+
+void DeclCollectorPass::visit(const NamespaceDeclNode *node) {
+  std::string currentNs = ctx->getCurrentNamespace();
+  std::string fullNs = currentNs.empty()
+                           ? std::string(node->name)
+                           : currentNs + "." + std::string(node->name);
+
+  size_t start = 0;
+  while (true) {
+    size_t dot = fullNs.find('.', start);
+    std::string part =
+        (dot == std::string::npos) ? fullNs : fullNs.substr(0, dot);
+
+    auto *nsNode =
+        ctx->astCtx.getOrCreateNamespace(ctx->astCtx.copyString(part));
+    ctx->addDecl(part, nsNode);
+
+    if (dot == std::string::npos)
+      break;
+    start = dot + 1;
+  }
+
+  ctx->pushNamespace(node->name);
+
+  /* Snapshot using directives to prevent leaking from this namespace block */
+  size_t prevUsings = ctx->getUsingsCount();
+
+  for (auto *stmt : node->statements) {
+    dispatch(stmt);
+  }
+
+  /* Restore previous using directives count */
+  ctx->resizeUsings(prevUsings);
+  ctx->popNamespace();
+}
+
+void DeclCollectorPass::visit(const UsingNode *node) {
+  ctx->addUsing(node->name);
+}
 
 bool DeclCollectorPass::run(const ModuleNode *module, SemaContext &context) {
   ctx = &context;
@@ -14,6 +52,9 @@ void DeclCollectorPass::visit(const ModuleNode *node) {
   if (visitedModules.contains(node))
     return;
   visitedModules.insert(node);
+
+  /* Snapshot using directives to prevent leaking imports from this module */
+  size_t prevUsings = ctx->getUsingsCount();
 
   for (const auto *imp : node->importedModules) {
     dispatch(imp);
@@ -34,17 +75,22 @@ void DeclCollectorPass::visit(const ModuleNode *node) {
         stmt->kind == NodeKind::ClassDecl ||
         stmt->kind == NodeKind::AnnotationDecl ||
         stmt->kind == NodeKind::TypedefDecl ||
-        stmt->kind == NodeKind::EnumDecl) {
+        stmt->kind == NodeKind::EnumDecl ||
+        stmt->kind == NodeKind::NamespaceDecl ||
+        stmt->kind == NodeKind::Using) {
       dispatch(stmt);
     }
   }
 
   ctx->setCurrentFile(prevFile);
   ctx->currentModule = prevMod;
+
+  /* Restore using directives to avoid polluting the global context */
+  ctx->resizeUsings(prevUsings);
 }
 
 void DeclCollectorPass::visit(const TypedefDeclNode *node) {
-  ctx->addDecl(node->aliasName, node);
+  ctx->addDecl(node->fqName, node);
   if (node->aliasType) {
     node->aliasType->setDeclaration(node);
   }
@@ -54,8 +100,9 @@ void DeclCollectorPass::visit(const AnnotationDeclNode *node) {
   if (node->declFilePath.empty()) {
     const_cast<AnnotationDeclNode *>(node)->declFilePath = ctx->currentFile;
   }
-  ctx->addDecl(node->name, node);
-  auto *recTy = ctx->astCtx.getRecordType(node->name);
+  ctx->addDecl(node->fqName, node);
+
+  auto *recTy = ctx->astCtx.getRecordType(node->fqName);
   const_cast<AnnotationDeclNode *>(node)->recordType = recTy;
   recTy->setDeclaration(node);
 
@@ -71,8 +118,8 @@ void DeclCollectorPass::visit(const AnnotationDeclNode *node) {
           ctx->currentFile;
     }
     const_cast<FunctionDeclNode *>(node->constructor)->mangledName =
-        Mangler::mangle(node->constructor, std::string(node->name));
-    ctx->addDecl(node->name, node->constructor);
+        Mangler::mangle(node->constructor, std::string(node->fqName));
+    ctx->addDecl(node->fqName, node->constructor);
   }
 }
 
@@ -160,7 +207,7 @@ void DeclCollectorPass::visit(const FunctionDeclNode *node) {
     const_cast<FunctionDeclNode *>(node)->mangledName = Mangler::mangle(node);
   }
 
-  ctx->addDecl(node->name, node);
+  ctx->addDecl(node->fqName, node);
 }
 
 void DeclCollectorPass::visit(const IfNode *node) {
@@ -222,7 +269,7 @@ void DeclCollectorPass::visit(const VarDeclNode *node) {
         std::string(node->externAlias);
   }
 
-  ctx->addDecl(node->varName, node);
+  ctx->addDecl(node->fqName, node);
 }
 
 void DeclCollectorPass::visit(const UnionDeclNode *node) {
@@ -238,9 +285,9 @@ void DeclCollectorPass::visit(const UnionDeclNode *node) {
     const_cast<UnionDeclNode *>(node)->declFilePath = ctx->currentFile;
   }
 
-  ctx->addDecl(node->name, node);
+  ctx->addDecl(node->fqName, node);
 
-  auto *recTy = ctx->astCtx.getRecordType(node->name);
+  auto *recTy = ctx->astCtx.getRecordType(node->fqName);
   const_cast<UnionDeclNode *>(node)->recordType = recTy;
   recTy->setDeclaration(node);
 
@@ -253,7 +300,7 @@ void DeclCollectorPass::visit(const UnionDeclNode *node) {
     }
     if (field->isStatic) {
       const_cast<VarDeclNode *>(field)->mangledName =
-          Mangler::mangle(field, std::string(node->name));
+          Mangler::mangle(field, std::string(node->fqName));
     }
   }
 
@@ -273,8 +320,8 @@ void DeclCollectorPass::visit(const UnionDeclNode *node) {
       const_cast<FunctionDeclNode *>(ctor)->hasPrivateMod = node->hasPrivateMod;
     }
     const_cast<FunctionDeclNode *>(ctor)->mangledName =
-        Mangler::mangle(ctor, std::string(node->name));
-    ctx->addDecl(node->name, ctor);
+        Mangler::mangle(ctor, std::string(node->fqName));
+    ctx->addDecl(node->fqName, ctor);
   }
 
   if (node->destructor) {
@@ -283,7 +330,7 @@ void DeclCollectorPass::visit(const UnionDeclNode *node) {
           ctx->currentFile;
     }
     const_cast<FunctionDeclNode *>(node->destructor)->mangledName =
-        Mangler::mangle(node->destructor, std::string(node->name));
+        Mangler::mangle(node->destructor, std::string(node->fqName));
   }
 
   for (auto *method : node->methods) {
@@ -351,7 +398,7 @@ void DeclCollectorPass::visit(const UnionDeclNode *node) {
           std::string(method->name);
     } else {
       const_cast<FunctionDeclNode *>(method)->mangledName =
-          Mangler::mangle(method, std::string(node->name));
+          Mangler::mangle(method, std::string(node->fqName));
     }
   }
 }
@@ -369,9 +416,9 @@ void DeclCollectorPass::visit(const StructDeclNode *node) {
     const_cast<StructDeclNode *>(node)->declFilePath = ctx->currentFile;
   }
 
-  ctx->addDecl(node->name, node);
+  ctx->addDecl(node->fqName, node);
 
-  auto *recTy = ctx->astCtx.getRecordType(node->name);
+  auto *recTy = ctx->astCtx.getRecordType(node->fqName);
   const_cast<StructDeclNode *>(node)->recordType = recTy;
   recTy->setDeclaration(node);
 
@@ -384,7 +431,7 @@ void DeclCollectorPass::visit(const StructDeclNode *node) {
     }
     if (field->isStatic) {
       const_cast<VarDeclNode *>(field)->mangledName =
-          Mangler::mangle(field, std::string(node->name));
+          Mangler::mangle(field, std::string(node->fqName));
     }
   }
 
@@ -404,8 +451,8 @@ void DeclCollectorPass::visit(const StructDeclNode *node) {
       const_cast<FunctionDeclNode *>(ctor)->hasPrivateMod = node->hasPrivateMod;
     }
     const_cast<FunctionDeclNode *>(ctor)->mangledName =
-        Mangler::mangle(ctor, std::string(node->name));
-    ctx->addDecl(node->name, ctor);
+        Mangler::mangle(ctor, std::string(node->fqName));
+    ctx->addDecl(node->fqName, ctor);
   }
 
   if (node->destructor) {
@@ -414,7 +461,7 @@ void DeclCollectorPass::visit(const StructDeclNode *node) {
           ctx->currentFile;
     }
     const_cast<FunctionDeclNode *>(node->destructor)->mangledName =
-        Mangler::mangle(node->destructor, std::string(node->name));
+        Mangler::mangle(node->destructor, std::string(node->fqName));
   }
 
   for (auto *method : node->methods) {
@@ -482,7 +529,7 @@ void DeclCollectorPass::visit(const StructDeclNode *node) {
           std::string(method->name);
     } else {
       const_cast<FunctionDeclNode *>(method)->mangledName =
-          Mangler::mangle(method, std::string(node->name));
+          Mangler::mangle(method, std::string(node->fqName));
     }
   }
 }
@@ -500,9 +547,9 @@ void DeclCollectorPass::visit(const ClassDeclNode *node) {
     const_cast<ClassDeclNode *>(node)->declFilePath = ctx->currentFile;
   }
 
-  ctx->addDecl(node->name, node);
+  ctx->addDecl(node->fqName, node);
 
-  auto *recTy = ctx->astCtx.getRecordType(node->name);
+  auto *recTy = ctx->astCtx.getRecordType(node->fqName);
   const_cast<ClassDeclNode *>(node)->recordType = recTy;
   recTy->setDeclaration(node);
 
@@ -515,7 +562,7 @@ void DeclCollectorPass::visit(const ClassDeclNode *node) {
     }
     if (field->isStatic) {
       const_cast<VarDeclNode *>(field)->mangledName =
-          Mangler::mangle(field, std::string(node->name));
+          Mangler::mangle(field, std::string(node->fqName));
     }
   }
 
@@ -535,8 +582,8 @@ void DeclCollectorPass::visit(const ClassDeclNode *node) {
       const_cast<FunctionDeclNode *>(ctor)->hasPrivateMod = node->hasPrivateMod;
     }
     const_cast<FunctionDeclNode *>(ctor)->mangledName =
-        Mangler::mangle(ctor, std::string(node->name));
-    ctx->addDecl(node->name, ctor);
+        Mangler::mangle(ctor, std::string(node->fqName));
+    ctx->addDecl(node->fqName, ctor);
   }
   if (node->destructor) {
     if (node->destructor->declFilePath.empty()) {
@@ -544,7 +591,7 @@ void DeclCollectorPass::visit(const ClassDeclNode *node) {
           ctx->currentFile;
     }
     const_cast<FunctionDeclNode *>(node->destructor)->mangledName =
-        Mangler::mangle(node->destructor, std::string(node->name));
+        Mangler::mangle(node->destructor, std::string(node->fqName));
   }
   for (auto *method : node->methods) {
     if (method->declFilePath.empty()) {
@@ -611,7 +658,7 @@ void DeclCollectorPass::visit(const ClassDeclNode *node) {
           std::string(method->name);
     } else {
       const_cast<FunctionDeclNode *>(method)->mangledName =
-          Mangler::mangle(method, std::string(node->name));
+          Mangler::mangle(method, std::string(node->fqName));
     }
   }
 }
@@ -620,9 +667,10 @@ void DeclCollectorPass::visit(const EnumDeclNode *node) {
   if (node->declFilePath.empty()) {
     const_cast<EnumDeclNode *>(node)->declFilePath = ctx->currentFile;
   }
-  ctx->addDecl(node->name, node);
+  ctx->addDecl(node->fqName, node);
+
   const_cast<EnumDeclNode *>(node)->enumType =
-      ctx->astCtx.getEnumType(node->name, node->underlyingType);
+      ctx->astCtx.getEnumType(node->fqName, node->underlyingType);
   const_cast<EnumType *>(node->enumType)->setDeclaration(node);
 
   for (auto *mem : node->members) {

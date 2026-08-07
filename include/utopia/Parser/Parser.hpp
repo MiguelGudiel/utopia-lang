@@ -5,7 +5,6 @@
 #include "utopia/Common/Types.hpp"
 #include "utopia/Lexer/Token.hpp"
 #include <exception>
-#include <span>
 
 namespace utopia {
 
@@ -42,6 +41,11 @@ private:
   ModuleLoader *moduleLoader;
 
   std::vector<std::string_view> currentTemplateParams;
+  std::vector<std::string> namespaceStack;
+  std::vector<std::string> activeUsings;
+
+  std::string getCurrentNamespace() const;
+  std::string getFQName(std::string_view name) const;
 
   const Token &currentToken() const;
   const Token &peekToken(size_t offset = 1) const;
@@ -84,9 +88,12 @@ private:
   const Type *parseType(bool inNewExpr = false);
   const Type *applyArrayDeclarator(const Type *baseType);
   const Type *parseTypeModifiers(const Type *baseType, bool inNewExpr);
-  
+
   std::string consumeComments();
   ExprNode *parseArrayLiteral();
+  NamespaceDeclNode *parseNamespaceDecl(bool &isFileScoped);
+  UsingNode *parseUsing();
+  bool isDeclaration();
   ASTNode *parseStatement();
   IfNode *parseIfStatement();
   llvm::ArrayRef<AnnotationNode *> parseAnnotations();

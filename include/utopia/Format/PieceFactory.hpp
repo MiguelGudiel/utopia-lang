@@ -22,6 +22,8 @@ public:
 
   Piece *dispatchStmt(const ASTNode *node);
 
+  Piece *visit(const NamespaceDeclNode *node);
+  Piece *visit(const UsingNode *node);
   Piece *visit(const NumberNode *node);
   Piece *visit(const BoolNode *node);
   Piece *visit(const CharNode *node);
