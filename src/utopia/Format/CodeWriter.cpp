@@ -5,7 +5,14 @@ namespace utopia {
 void CodeWriter::recordPotentialOverflow() {
   bool canBeSplit = false;
   for (const Piece *p : currentLinePieces) {
-    if (boundStates && boundStates->find(p) != boundStates->end()) {
+    bool found = false;
+    for (const BoundStateNode *n = boundStates; n != nullptr; n = n->parent) {
+      if (n->piece == p) {
+        found = true;
+        break;
+      }
+    }
+    if (found) {
       continue;
     }
     if (!p->additionalStates().empty()) {

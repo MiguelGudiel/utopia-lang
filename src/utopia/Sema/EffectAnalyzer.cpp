@@ -2,6 +2,14 @@
 
 namespace utopia {
 
+void EffectAnalyzer::visit(const NamespaceDeclNode *n) {
+  for (const auto *stmt : n->statements) {
+    dispatch(stmt);
+  }
+}
+
+void EffectAnalyzer::visit(const UsingNode *n) {}
+
 void EffectAnalyzer::visit(const AssignNode *n) {
   writesMem = true;
   dispatch(n->target);

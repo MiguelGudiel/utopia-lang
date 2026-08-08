@@ -1,15 +1,16 @@
 #pragma once
 #include "utopia/Format/Piece.hpp"
+#include <optional>
 #include <queue>
-#include <unordered_map>
 
 namespace utopia {
 
 struct Solution {
-  std::unordered_map<const Piece *, State> boundStates;
+  const BoundStateNode *boundStates = nullptr;
   int cost = 0;
   int overflow = 0;
   bool isValid = true;
+  std::vector<const Piece *> overflowPieces;
 
   bool operator>(const Solution &other) const {
     if (cost != other.cost)
@@ -20,15 +21,29 @@ struct Solution {
 
 class Solver {
 public:
-  static constexpr int MaxAttempts = 100000;
+  static constexpr int MaxAttempts = 10000;
 
-  Solution solve(const Piece *root, int pageWidth = 80) {
+  Solution solve(const Piece *root, int pageWidth = 80, int baseIndent = 0) {
+    nodeArena.clear();
+
+    const BoundStateNode *pinnedStates = nullptr;
+
+    auto pinPieces = [&](auto &self, const Piece *p) -> void {
+      if (auto stateOpt = p->fixedState(pageWidth)) {
+        nodeArena.push_back({p, *stateOpt, pinnedStates});
+        pinnedStates = &nodeArena.back();
+      }
+      p->forEachChild([&](const Piece *child) { self(self, child); });
+    };
+
+    pinPieces(pinPieces, root);
+
     std::priority_queue<Solution, std::vector<Solution>, std::greater<Solution>>
         queue;
 
     Solution initial;
-    std::vector<const Piece *> initialOverflow =
-        evaluateSolution(initial, root, pageWidth);
+    initial.boundStates = pinnedStates;
+    evaluateSolution(initial, root, pageWidth, baseIndent);
     queue.push(initial);
 
     Solution best = initial;
@@ -49,13 +64,19 @@ public:
         best = current;
       }
 
-      std::vector<const Piece *> overflowPieces =
-          evaluateSolution(current, root, pageWidth);
       std::vector<const Piece *> unbound;
 
-      for (const Piece *p : overflowPieces) {
-        if (current.boundStates.find(p) == current.boundStates.end() &&
-            !p->additionalStates().empty()) {
+      for (const Piece *p : current.overflowPieces) {
+        bool found = false;
+        for (const BoundStateNode *n = current.boundStates; n != nullptr;
+             n = n->parent) {
+          if (n->piece == p) {
+            found = true;
+            break;
+          }
+        }
+
+        if (!found && !p->additionalStates().empty()) {
           unbound.push_back(p);
         }
       }
@@ -69,16 +90,19 @@ public:
           for (const Piece *earlier : unbound) {
             if (earlier == p)
               break;
-            nextOpt.boundStates[earlier] = State::Unsplit;
+            nodeArena.push_back({earlier, State::Unsplit, nextOpt.boundStates});
+            nextOpt.boundStates = &nodeArena.back();
           }
 
-          nextOpt.boundStates[p] = s;
+          nodeArena.push_back({p, s, nextOpt.boundStates});
+          nextOpt.boundStates = &nodeArena.back();
 
           p->applyConstraints(s, [&](const Piece *child, State childState) {
-            nextOpt.boundStates[child] = childState;
+            nodeArena.push_back({child, childState, nextOpt.boundStates});
+            nextOpt.boundStates = &nodeArena.back();
           });
 
-          evaluateSolution(nextOpt, root, pageWidth);
+          evaluateSolution(nextOpt, root, pageWidth, baseIndent);
           queue.push(nextOpt);
         }
       }
@@ -89,18 +113,28 @@ public:
   }
 
 private:
-  std::vector<const Piece *> evaluateSolution(Solution &sol, const Piece *root,
-                                              int pageWidth) {
-    CodeWriter writer(pageWidth, 0, true, &sol.boundStates);
+  /* Linear allocator mimicking a memory arena. References to elements inside
+   * std::deque are guaranteed not to be invalidated upon push_back. */
+  std::deque<BoundStateNode> nodeArena;
+
+  void evaluateSolution(Solution &sol, const Piece *root, int pageWidth,
+                        int baseIndent) {
+    CodeWriter writer(pageWidth, baseIndent, true, sol.boundStates);
     sol.cost = 0;
 
     std::function<void(const Piece *, State)> formatTree =
         [&](const Piece *p, State inheritedState) {
           writer.pushPiece(p);
           State s = inheritedState;
-          if (sol.boundStates.find(p) != sol.boundStates.end()) {
-            s = sol.boundStates[p];
+
+          for (const BoundStateNode *n = sol.boundStates; n != nullptr;
+               n = n->parent) {
+            if (n->piece == p) {
+              s = n->state;
+              break;
+            }
           }
+
           sol.cost += p->stateCost(s);
           p->format(writer, s, formatTree);
           writer.popPiece();
@@ -111,7 +145,7 @@ private:
 
     sol.overflow = writer.getOverflow();
     sol.isValid = writer.isValid;
-    return writer.getFirstOverflowPieces();
+    sol.overflowPieces = writer.getFirstOverflowPieces();
   }
 };
 

@@ -34,6 +34,7 @@ public:
   const BuiltinType *Float32Ty;
   const BuiltinType *Float64Ty;
   const BuiltinType *TypeValTy;
+  const BuiltinType *NamespaceTy;
   const AutoType *AutoTy;
 
   ASTContext() {
@@ -51,6 +52,7 @@ public:
     Float32Ty = create<BuiltinType>(BuiltinKind::Float32);
     Float64Ty = create<BuiltinType>(BuiltinKind::Float64);
     TypeValTy = create<BuiltinType>(BuiltinKind::TypeVal);
+    NamespaceTy = create<BuiltinType>(BuiltinKind::Namespace);
     AutoTy = create<AutoType>();
   }
   ~ASTContext() = default;
@@ -346,6 +348,24 @@ public:
     return it != typeAliases.end() ? it->second : nullptr;
   }
 
+  NamespaceDeclNode *getOrCreateNamespace(std::string_view fqName) {
+    auto it = namespaces.find(fqName);
+    if (it != namespaces.end())
+      return it->second;
+
+    /* Extract the simple name from the fully qualified name to ensure
+     * IDE completions and hover tooltips only display the relevant component.
+     */
+    size_t dot = fqName.find_last_of('.');
+    std::string_view simpleName =
+        (dot == std::string_view::npos) ? fqName : fqName.substr(dot + 1);
+
+    auto *ns = create<NamespaceDeclNode>(simpleName, 0, 0, 0);
+    ns->fqName = fqName;
+    namespaces[fqName] = ns;
+    return ns;
+  }
+
 private:
   llvm::BumpPtrAllocator allocator;
   std::vector<const ArrayType *> arrayTypes;
@@ -359,6 +379,8 @@ private:
   std::unordered_map<std::string_view, const EnumType *> enumTypes;
 
   std::unordered_set<std::string_view> registeredTemplates;
+
+  std::unordered_map<std::string_view, NamespaceDeclNode *> namespaces;
 };
 
 } // namespace utopia

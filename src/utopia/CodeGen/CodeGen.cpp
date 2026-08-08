@@ -107,6 +107,8 @@ llvm::Type *CodeGen::getLLVMType(const Type *type) {
     switch (bTy->getBuiltinKind()) {
     case BuiltinKind::TypeVal:
       return builder.getInt8Ty();
+    case BuiltinKind::Namespace:
+      return builder.getVoidTy();
     case BuiltinKind::Int8:
     case BuiltinKind::UInt8:
       return builder.getInt8Ty();
@@ -506,6 +508,15 @@ void CodeGen::emitLoopCleanups(size_t targetDepth) {
     }
   }
 }
+
+llvm::Value *CodeGen::visit(const NamespaceDeclNode *node) {
+  for (const auto *stmt : node->statements) {
+    dispatch(stmt);
+  }
+  return nullptr;
+}
+
+llvm::Value *CodeGen::visit(const UsingNode *node) { return nullptr; }
 
 llvm::Value *CodeGen::visit(const AnnotationDeclNode *node) {
   if (node->recordType) {
@@ -1253,9 +1264,10 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
       return nullptr;
 
     if (maNode->isStaticFieldRef) {
-      std::string gName = maNode->resolvedVar->mangledName.empty()
-                              ? std::string(maNode->resolvedVar->varName)
-                              : maNode->resolvedVar->mangledName;
+      auto *varDecl = static_cast<const VarDeclNode *>(maNode->resolvedDecl);
+      std::string gName = varDecl->mangledName.empty()
+                              ? std::string(varDecl->varName)
+                              : varDecl->mangledName;
       SymbolInfo sym = cgCtx.lookupDetailed(gName);
       if (!sym.value) {
         diags.report({DiagLevel::Error, node->line, node->column, node->length,
@@ -1496,14 +1508,14 @@ llvm::Value *CodeGen::visit(const VariableNode *node) {
     llvm::Value *thisAddr = sym.value;
     llvm::Value *thisPtr =
         builder.CreateLoad(builder.getPtrTy(), thisAddr, "this.val");
-
     llvm::Type *llvmBaseTy = getLLVMType(node->parentType);
-    llvm::Value *gep = thisPtr;
 
-    if (node->parentType->getKind() != TypeKind::Union) {
-      gep = builder.CreateStructGEP(llvmBaseTy, thisPtr, node->fieldIndex,
-                                    node->name);
+    if (node->parentType->getKind() == TypeKind::Union) {
+      return thisPtr;
     }
+
+    llvm::Value *gep = builder.CreateStructGEP(llvmBaseTy, thisPtr,
+                                               node->fieldIndex, node->name);
     return createTBAALoad(getLLVMType(node->exprType), gep,
                           tbaaManager.getTBAATagForExpr(*this, node),
                           node->name);
@@ -1548,9 +1560,10 @@ llvm::Value *CodeGen::visit(const MemberAccessNode *node) {
     return nullptr;
 
   if (node->isStaticFieldRef) {
-    std::string gName = node->resolvedVar->mangledName.empty()
-                            ? std::string(node->resolvedVar->varName)
-                            : node->resolvedVar->mangledName;
+    auto *varDecl = static_cast<const VarDeclNode *>(node->resolvedDecl);
+    std::string gName = varDecl->mangledName.empty()
+                            ? std::string(varDecl->varName)
+                            : varDecl->mangledName;
     SymbolInfo sym = cgCtx.lookupDetailed(gName);
     if (!sym.value)
       return nullptr;
@@ -1560,7 +1573,7 @@ llvm::Value *CodeGen::visit(const MemberAccessNode *node) {
   }
 
   llvm::Value *objPtr = nullptr;
-  if (node->object->exprType->isPointerType()) {
+  if (node->object->exprType && node->object->exprType->isPointerType()) {
     objPtr = dispatch(node->object);
   } else {
     objPtr = getLValue(node->object);
@@ -3015,7 +3028,8 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
 
     if (node->target->kind == NodeKind::MemberAccess) {
       auto ma = static_cast<const MemberAccessNode *>(node->target);
-      if (!node->resolvedFunc->isExtern && !node->resolvedFunc->isStatic) {
+      if (node->resolvedFunc->isMethod && !node->resolvedFunc->isExtern &&
+          !node->resolvedFunc->isStatic && node->resolvedFunc->parentRecord) {
         llvm::Value *objPtr = nullptr;
         if (ma->object->exprType->isPointerType()) {
           objPtr = dispatch(ma->object);
@@ -3025,7 +3039,8 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
         argsArgs.push_back(objPtr);
       }
     } else if (node->resolvedFunc->isMethod && !node->resolvedFunc->isExtern &&
-               !node->resolvedFunc->isStatic) {
+               !node->resolvedFunc->isStatic &&
+               node->resolvedFunc->parentRecord) {
       llvm::Type *allocTy = getLLVMType(node->exprType);
       llvm::AllocaInst *instance = createEntryBlockAlloca(allocTy, "instance");
 
@@ -3939,9 +3954,9 @@ void CodeGen::emitCleanupCall(llvm::Value *ptr, const FunctionDeclNode *dtor,
     llvm::Value *nextIdx = builder.CreateSub(idxVal, builder.getInt64(1));
     builder.CreateStore(nextIdx, idxAlloca);
 
-    llvm::Type *llvmElemTy = getLLVMType(arrTy->getElementType());
+    llvm::Type *llvmArrTy = getLLVMType(arrTy);
     llvm::Value *elemPtr = builder.CreateInBoundsGEP(
-        llvmElemTy, ptr, {builder.getInt32(0), nextIdx});
+        llvmArrTy, ptr, {builder.getInt32(0), nextIdx});
 
     emitCleanupCall(elemPtr, dtor, arrTy->getElementType());
     builder.CreateBr(condBB);

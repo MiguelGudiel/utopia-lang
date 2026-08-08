@@ -41,6 +41,8 @@ public:
   void visit(const AnnotationDeclNode *node);
   void visit(const EnumDeclNode *node);
   void visit(const EnumMemberNode *node) {}
+  void visit(const NamespaceDeclNode *node);
+  void visit(const UsingNode *node);
 
   void visit(const AnnotationNode *node) {}
   void visit(const NumberNode *) {}
@@ -141,6 +143,8 @@ public:
   SemaResult visit(const EnumDeclNode *node);
   SemaResult visit(const EnumMemberNode *node);
   SemaResult visit(const ImplicitCastNode *node);
+  SemaResult visit(const NamespaceDeclNode *node);
+  SemaResult visit(const UsingNode *node);
 };
 
 class ControlFlowPass : public SemaPass,
@@ -180,6 +184,8 @@ public:
   void visit(const ArrayLiteralNode *node);
   void visit(const NewExprNode *node);
   void visit(const DeleteExprNode *node);
+  void visit(const NamespaceDeclNode *node);
+  void visit(const UsingNode *node);
   void visit(const ImplicitCastNode *node);
 
   void visit(const NumberNode *) {}

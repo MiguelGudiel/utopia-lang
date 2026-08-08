@@ -49,7 +49,9 @@ enum class NodeKind : uint8_t {
   EnumMember,
   ImplicitCast,
   TypeLiteral,
-  TernaryOp
+  TernaryOp,
+  NamespaceDecl,
+  Using
 };
 
 struct ASTNode {
@@ -80,6 +82,7 @@ struct StmtNode : public ASTNode {
     case NodeKind::Break:
     case NodeKind::Continue:
     case NodeKind::Return:
+    case NodeKind::Using:
       return true;
     default:
       return false;
@@ -139,6 +142,11 @@ struct TypeLiteralNode : public ExprNode {
 struct AnnotationNode : public ASTNode {
   std::string_view name;
   llvm::ArrayRef<ExprNode *> args;
+
+  /* Indicates whether the node was parsed with a trailing comma to force
+   * formatting splits. */
+  bool hasTrailingComma = false;
+
   AnnotationNode(std::string_view n, llvm::ArrayRef<ExprNode *> a, int l, int c,
                  int len)
       : ASTNode(NodeKind::Annotation, l, c, len), name(n), args(a) {}
@@ -155,6 +163,7 @@ struct DeclNode : public ASTNode {
   bool hasPublicMod = false;
   bool hasPrivateMod = false;
   std::string_view declFilePath;
+  std::string_view fqName; // Fully Qualified Name (ej. mi.name.space.Class)
 
   /* Exact token location for LSP tooling */
   int identifierColumn = 0;
@@ -179,6 +188,11 @@ struct DeclNode : public ASTNode {
       return false;
     if (hasPublicMod)
       return true;
+
+    size_t pos = declName.find_last_of('.');
+    if (pos != std::string_view::npos) {
+      declName = declName.substr(pos + 1);
+    }
     return !declName.starts_with("_");
   }
 
@@ -194,6 +208,7 @@ struct DeclNode : public ASTNode {
     case NodeKind::ClassDecl:
     case NodeKind::EnumDecl:
     case NodeKind::EnumMember:
+    case NodeKind::NamespaceDecl:
       return true;
     default:
       return false;
@@ -219,6 +234,10 @@ struct EnumDeclNode : public DeclNode {
   const Type *underlyingType;
   llvm::ArrayRef<EnumMemberNode *> members;
   mutable const EnumType *enumType = nullptr;
+
+  /* Indicates whether the node was parsed with a trailing comma to force
+   * formatting splits. */
+  bool hasTrailingComma = false;
 
   EnumDeclNode(std::string_view n, const Type *u, int l, int c, int len)
       : DeclNode(NodeKind::EnumDecl, l, c, len), name(n), underlyingType(u) {}
@@ -485,6 +504,10 @@ struct FunctionDeclNode : public DeclNode {
   mutable bool isWillReturn = false;
   mutable bool isMustProgress = false;
 
+  /* Indicates whether the node was parsed with a trailing comma to force
+   * formatting splits. */
+  bool hasTrailingComma = false;
+
   FunctionDeclNode(const Type *ret, std::string_view n, int l, int c,
                    bool isC = false, bool isMeth = false, bool isExt = false,
                    bool isVar = false, bool isImpl = false)
@@ -505,6 +528,10 @@ struct FunctionCallNode : public ExprNode {
   llvm::ArrayRef<ExprNode *> rawArgs;
   llvm::ArrayRef<std::string_view> rawArgNames;
   bool hasRawArgs = false;
+
+  /* Indicates whether the node was parsed with a trailing comma to force
+   * formatting splits. */
+  bool hasTrailingComma = false;
 
   FunctionCallNode(ExprNode *t, llvm::ArrayRef<ExprNode *> a,
                    llvm::ArrayRef<std::string_view> n, int l, int c, int len)
@@ -724,7 +751,7 @@ struct MemberAccessNode : public ExprNode {
   const EnumMemberNode *enumMember = nullptr;
 
   bool isStaticFieldRef = false;
-  const VarDeclNode *resolvedVar = nullptr;
+  const DeclNode *resolvedDecl = nullptr;
 
   /* Storage for explicit template arguments applied to method access */
   llvm::ArrayRef<const Type *> templateArgs;
@@ -753,6 +780,11 @@ struct ArraySubscriptNode : public ExprNode {
 
 struct ArrayLiteralNode : public ExprNode {
   llvm::ArrayRef<ExprNode *> elements;
+
+  /* Indicates whether the node was parsed with a trailing comma to force
+   * formatting splits. */
+  bool hasTrailingComma = false;
+
   ArrayLiteralNode(llvm::ArrayRef<ExprNode *> elems, int l, int c, int len)
       : ExprNode(NodeKind::ArrayLiteral, l, c, len), elements(elems) {}
 
@@ -772,6 +804,10 @@ struct NewExprNode : public ExprNode {
   llvm::ArrayRef<ExprNode *> rawArgs;
   llvm::ArrayRef<std::string_view> rawArgNames;
   bool hasRawArgs = false;
+
+  /* Indicates whether the node was parsed with a trailing comma to force
+   * formatting splits. */
+  bool hasTrailingComma = false;
 
   NewExprNode(const Type *allocTy, ExprNode *arrSize,
               llvm::ArrayRef<ExprNode *> a, llvm::ArrayRef<std::string_view> n,
@@ -811,4 +847,27 @@ struct ImplicitCastNode : public ExprNode {
   }
 };
 
+struct NamespaceDeclNode : public DeclNode {
+  std::string_view name;
+  llvm::ArrayRef<ASTNode *> statements;
+  bool isFileScoped = false;
+
+  NamespaceDeclNode(std::string_view n, int l, int c, int len)
+      : DeclNode(NodeKind::NamespaceDecl, l, c, len), name(n) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::NamespaceDecl;
+  }
+};
+
+struct UsingNode : public StmtNode {
+  std::string_view name;
+
+  UsingNode(std::string_view n, int l, int c, int len)
+      : StmtNode(NodeKind::Using, l, c, len), name(n) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Using;
+  }
+};
 } // namespace utopia

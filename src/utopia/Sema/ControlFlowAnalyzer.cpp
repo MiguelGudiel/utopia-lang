@@ -2,6 +2,14 @@
 
 namespace utopia {
 
+void ControlFlowPass::visit(const NamespaceDeclNode *node) {
+  for (const auto *stmt : node->statements) {
+    dispatch(stmt);
+  }
+}
+
+void ControlFlowPass::visit(const UsingNode *node) {}
+
 bool ControlFlowPass::run(const ModuleNode *module, SemaContext &context) {
   ctx = &context;
   dispatch(module);
