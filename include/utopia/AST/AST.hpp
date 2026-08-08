@@ -162,6 +162,7 @@ struct DeclNode : public ASTNode {
   llvm::ArrayRef<AnnotationNode *> annotations;
   bool hasPublicMod = false;
   bool hasPrivateMod = false;
+  bool hasProtectedMod = false;
   std::string_view declFilePath;
   std::string_view fqName; // Fully Qualified Name (ej. mi.name.space.Class)
 
@@ -194,6 +195,27 @@ struct DeclNode : public ASTNode {
       declName = declName.substr(pos + 1);
     }
     return !declName.starts_with("_");
+  }
+
+  bool isProtected(std::string_view declName) const {
+    if (hasPrivateMod || hasPublicMod)
+      return false;
+    if (hasProtectedMod)
+      return true;
+    return false;
+  }
+
+  bool isPrivate(std::string_view declName) const {
+    if (hasPublicMod || hasProtectedMod)
+      return false;
+    if (hasPrivateMod)
+      return true;
+
+    size_t pos = declName.find_last_of('.');
+    if (pos != std::string_view::npos) {
+      declName = declName.substr(pos + 1);
+    }
+    return declName.starts_with("_");
   }
 
   static bool classof(const ASTNode *node) {

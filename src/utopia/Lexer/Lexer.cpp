@@ -242,6 +242,8 @@ Token Lexer::parseToken() {
       return {TokenType::PUBLIC_KW, id, startLine, startCol};
     if (id == "private")
       return {TokenType::PRIVATE_KW, id, startLine, startCol};
+    if (id == "protected")
+      return {TokenType::PROTECTED_KW, id, startLine, startCol};
     if (id == "true")
       return {TokenType::TRUE_KW, id, startLine, startCol};
     if (id == "false")

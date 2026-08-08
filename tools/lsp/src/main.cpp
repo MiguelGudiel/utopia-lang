@@ -1103,12 +1103,14 @@ void handleCompletion(const json &req) {
     addBuiltInAnnotations();
   } else if (!isDotCompletion) {
     std::vector<std::string> keywords = {
-        "if",      "else",     "while",      "for",       "switch", "case",
-        "default", "break",    "continue",   "return",    "import", "export",
-        "as",      "new",      "delete",     "struct",    "union",  "class",
-        "enum",    "typedef",  "annotation", "Function",  "this",   "null",
-        "true",    "false",    "public",     "private",   "const",  "static",
-        "extern",  "required", "operator",   "namespace", "using"};
+        "if",        "else",      "while",      "for",      "switch",
+        "case",      "default",   "break",      "continue", "return",
+        "import",    "export",    "as",         "new",      "delete",
+        "struct",    "union",     "class",      "extends",  "implements",
+        "enum",      "typedef",   "annotation", "Function", "this",
+        "null",      "true",      "false",      "public",   "private",
+        "protected", "const",     "static",     "extern",   "required",
+        "operator",  "namespace", "using"};
 
     std::vector<std::string> primitives = {
         "int8",   "int16",   "int32",   "int64",  "uint8", "uint16", "uint32",
@@ -2499,8 +2501,11 @@ void handleSemanticTokens(const json &req) {
                    tok.type == TokenType::STATIC_KW ||
                    tok.type == TokenType::PUBLIC_KW ||
                    tok.type == TokenType::PRIVATE_KW ||
+                   tok.type == TokenType::PROTECTED_KW ||
                    tok.type == TokenType::REQUIRED_KW ||
                    tok.type == TokenType::NAMESPACE_KW ||
+                   tok.type == TokenType::EXTENDS_KW ||
+                   tok.type == TokenType::IMPLEMENTS_KW ||
                    tok.type == TokenType::USING_KW) {
           visitor.addToken(tok.line > 0 ? tok.line - 1 : 0,
                            tok.column > 0 ? tok.column - 1 : 0,

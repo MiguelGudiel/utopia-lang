@@ -80,6 +80,7 @@ struct FieldInfo {
   const Type *type;
   uint32_t index;
   bool isPublic;
+  bool isProtected;
 };
 
 class BuiltinType : public Type {

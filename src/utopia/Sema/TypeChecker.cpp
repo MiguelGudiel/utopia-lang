@@ -123,6 +123,7 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
     if (instDecl) {
       instDecl->hasPublicMod = tmplDecl->hasPublicMod;
       instDecl->hasPrivateMod = tmplDecl->hasPrivateMod;
+      instDecl->hasProtectedMod = tmplDecl->hasProtectedMod;
       instDecl->annotations = tmplDecl->annotations;
       instDecl->declFilePath = tmplDecl->declFilePath;
       instDecl->alignment = tmplDecl->alignment;
@@ -170,7 +171,8 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
             continue;
           fInfos.push_back({fields[i]->varName, fields[i]->type,
                             instanceFieldIndex++,
-                            fields[i]->isPublic(fields[i]->varName)});
+                            fields[i]->isPublic(fields[i]->varName),
+                            fields[i]->isProtected(fields[i]->varName)});
         }
         recTy->setFields(ctx->astCtx.copyArray<FieldInfo>(fInfos));
 
@@ -837,8 +839,12 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
     for (auto *f : cDecl->fields) {
       if (f->isStatic)
         continue;
-      fInfos.push_back(
-          {f->varName, f->type, instanceFieldIndex++, f->isPublic(f->varName)});
+      bool isPub = f->isPublic(f->varName);
+      bool isProt = f->isProtected(f->varName);
+      std::string_view fname =
+          (!isPub && !isProt) ? "" : f->varName; // Privates are visually
+                                                 // omitted from inheritance map
+      fInfos.push_back({fname, f->type, instanceFieldIndex++, isPub, isProt});
     }
   };
 
@@ -854,8 +860,8 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
   for (auto *f : node->fields) {
     if (f->isStatic)
       continue;
-    fInfos.push_back(
-        {f->varName, f->type, instanceFieldIndex++, f->isPublic(f->varName)});
+    fInfos.push_back({f->varName, f->type, instanceFieldIndex++,
+                      f->isPublic(f->varName), f->isProtected(f->varName)});
   }
 
   // VTable Layout & Method Override checking
@@ -1120,6 +1126,7 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
           llvm::cast<FunctionDeclNode>(instDecl)->name = mangledView;
           instDecl->hasPublicMod = tmplDecl->hasPublicMod;
           instDecl->hasPrivateMod = tmplDecl->hasPrivateMod;
+          instDecl->hasProtectedMod = tmplDecl->hasProtectedMod;
           instDecl->annotations = tmplDecl->annotations;
           instDecl->declFilePath = tmplDecl->declFilePath;
 
@@ -1155,10 +1162,42 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
           const Type *unqualPointee = pointee->getUnqualifiedType();
           if (auto *clsTy = llvm::dyn_cast<RecordType>(unqualPointee)) {
             if (auto field = clsTy->getField(node->name)) {
-              if (!field->isPublic && ctx->getCurrentRecordContext() != clsTy) {
-                return ctx->reportError(node->line, node->column, node->length,
-                                        "Cannot access private field '" +
-                                            std::string(node->name) + "'");
+              bool isPub = field->isPublic;
+              bool isProt = field->isProtected;
+              bool canAccess = false;
+              auto *currCtx = ctx->getCurrentRecordContext();
+
+              if (isPub) {
+                canAccess = true;
+              } else if (isProt) {
+                if (currCtx == clsTy)
+                  canAccess = true;
+                else if (currCtx) {
+                  const ClassType *currClass =
+                      llvm::dyn_cast<ClassType>(currCtx);
+                  while (currClass) {
+                    if (currClass == clsTy) {
+                      canAccess = true;
+                      break;
+                    }
+                    if (currClass->getBaseClass()) {
+                      currClass = llvm::dyn_cast<ClassType>(
+                          currClass->getBaseClass()->getUnqualifiedType());
+                    } else
+                      break;
+                  }
+                }
+              } else {
+                if (currCtx == clsTy) {
+                  canAccess = true;
+                }
+              }
+
+              if (!canAccess) {
+                return ctx->reportError(
+                    node->line, node->column, node->length,
+                    "Cannot access private/protected field '" +
+                        std::string(node->name) + "'");
               }
               const_cast<VariableNode *>(node)->isField = true;
               const_cast<VariableNode *>(node)->fieldIndex = field->index;
@@ -1294,6 +1333,7 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
 
   if (auto *varTarget = llvm::dyn_cast<VarDeclNode>(target)) {
     if (!target->isPublic(varTarget->varName) &&
+        !target->isProtected(varTarget->varName) &&
         target->declFilePath != ctx->currentFile) {
       return ctx->reportError(node->line, node->column, node->length,
                               "Cannot access private variable '" +
@@ -2403,11 +2443,42 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
     }
 
     if (auto field = recordTy->getField(node->memberName)) {
-      if (!field->isPublic && ctx->getCurrentRecordContext() != recordTy) {
+      bool isPub = field->isPublic;
+      bool isProt = field->isProtected;
+      bool canAccess = false;
+      auto *currCtx = ctx->getCurrentRecordContext();
+
+      if (isPub) {
+        canAccess = true;
+      } else if (isProt) {
+        if (currCtx == recordTy)
+          canAccess = true;
+        else if (currCtx) {
+          const ClassType *currClass = llvm::dyn_cast<ClassType>(currCtx);
+          while (currClass) {
+            if (currClass == recordTy) {
+              canAccess = true;
+              break;
+            }
+            if (currClass->getBaseClass()) {
+              currClass = llvm::dyn_cast<ClassType>(
+                  currClass->getBaseClass()->getUnqualifiedType());
+            } else
+              break;
+          }
+        }
+      } else {
+        if (currCtx == recordTy) {
+          canAccess = true;
+        }
+      }
+
+      if (!canAccess) {
         return ctx->reportError(node->line, node->column, node->length,
-                                "Cannot access private field '" +
+                                "Cannot access private/protected field '" +
                                     std::string(node->memberName) + "'");
       }
+
       const_cast<MemberAccessNode *>(node)->fieldIndex = field->index;
       node->exprType = field->type;
       node->isLValue = true;
@@ -2462,11 +2533,42 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
                                           std::string(f->varName) +
                                           "' without an instance.");
             }
-            if (!f->isPublic(f->varName) &&
-                ctx->getCurrentRecordContext() != recordTy) {
-              return ctx->reportError(node->line, node->column, node->length,
-                                      "Cannot access private static field '" +
-                                          std::string(f->varName) + "'.");
+
+            bool isPub = f->isPublic(f->varName);
+            bool isProt = f->isProtected(f->varName);
+            bool canAccess = false;
+            auto *currCtx = ctx->getCurrentRecordContext();
+
+            if (isPub) {
+              canAccess = true;
+            } else if (isProt) {
+              if (currCtx == recordTy)
+                canAccess = true;
+              else if (currCtx) {
+                const ClassType *currClass = llvm::dyn_cast<ClassType>(currCtx);
+                while (currClass) {
+                  if (currClass == recordTy) {
+                    canAccess = true;
+                    break;
+                  }
+                  if (currClass->getBaseClass()) {
+                    currClass = llvm::dyn_cast<ClassType>(
+                        currClass->getBaseClass()->getUnqualifiedType());
+                  } else
+                    break;
+                }
+              }
+            } else {
+              if (currCtx && currCtx->getDeclaration() == staticAccessDecl) {
+                canAccess = true;
+              }
+            }
+
+            if (!canAccess) {
+              return ctx->reportError(
+                  node->line, node->column, node->length,
+                  "Cannot access private/protected static field '" +
+                      std::string(f->varName) + "'.");
             }
             const_cast<MemberAccessNode *>(node)->isStaticFieldRef = true;
             const_cast<MemberAccessNode *>(node)->resolvedDecl = f;
@@ -2554,6 +2656,7 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
                 fnDecl->isStatic = tmplDecl->isStatic;
                 fnDecl->hasPublicMod = tmplDecl->hasPublicMod;
                 fnDecl->hasPrivateMod = tmplDecl->hasPrivateMod;
+                fnDecl->hasProtectedMod = tmplDecl->hasProtectedMod;
                 fnDecl->annotations = tmplDecl->annotations;
                 fnDecl->declFilePath = tmplDecl->declFilePath;
 
@@ -2623,11 +2726,42 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
                                           std::string(method->name) +
                                           "' via an instance.");
             }
-            if (!method->isPublic(method->name) &&
-                ctx->getCurrentRecordContext() != recordTy) {
-              return ctx->reportError(node->line, node->column, node->length,
-                                      "Cannot access private method '" +
-                                          std::string(method->name) + "'");
+
+            bool isPub = method->isPublic(method->name);
+            bool isProt = method->isProtected(method->name);
+            bool canAccess = false;
+            auto *currCtx = ctx->getCurrentRecordContext();
+
+            if (isPub) {
+              canAccess = true;
+            } else if (isProt) {
+              if (currCtx == recordTy)
+                canAccess = true;
+              else if (currCtx) {
+                const ClassType *currClass = llvm::dyn_cast<ClassType>(currCtx);
+                while (currClass) {
+                  if (currClass == recordTy) {
+                    canAccess = true;
+                    break;
+                  }
+                  if (currClass->getBaseClass()) {
+                    currClass = llvm::dyn_cast<ClassType>(
+                        currClass->getBaseClass()->getUnqualifiedType());
+                  } else
+                    break;
+                }
+              }
+            } else {
+              if (currCtx && currCtx->getDeclaration() == currentRecDecl) {
+                canAccess = true;
+              }
+            }
+
+            if (!canAccess) {
+              return ctx->reportError(
+                  node->line, node->column, node->length,
+                  "Cannot access private/protected method '" +
+                      std::string(method->name) + "'");
             }
 
             const_cast<MemberAccessNode *>(node)->isMethodRef = true;

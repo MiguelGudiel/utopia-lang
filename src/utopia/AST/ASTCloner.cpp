@@ -276,6 +276,7 @@ ASTNode *ASTCloner::visit(const VarDeclNode *n) {
   node->externAlias = n->externAlias;
   node->hasPublicMod = n->hasPublicMod;
   node->hasPrivateMod = n->hasPrivateMod;
+  node->hasProtectedMod = n->hasProtectedMod;
   node->annotations = n->annotations;
   node->docString = n->docString;
   node->trailingComment = n->trailingComment;
@@ -295,6 +296,7 @@ ASTNode *ASTCloner::visit(const ParamDeclNode *n) {
       n->isNamed, n->isRequired, n->line, n->column, n->length);
   node->hasPublicMod = n->hasPublicMod;
   node->hasPrivateMod = n->hasPrivateMod;
+  node->hasProtectedMod = n->hasProtectedMod;
   node->annotations = n->annotations;
   node->docString = n->docString;
   node->trailingComment = n->trailingComment;
@@ -317,6 +319,7 @@ ASTNode *ASTCloner::visit(const FunctionDeclNode *n) {
   node->callingConv = n->callingConv;
   node->hasPublicMod = n->hasPublicMod;
   node->hasPrivateMod = n->hasPrivateMod;
+  node->hasProtectedMod = n->hasProtectedMod;
   node->annotations = n->annotations;
   node->docString = n->docString;
   node->trailingComment = n->trailingComment;
@@ -347,6 +350,7 @@ ASTNode *ASTCloner::visit(const UnionDeclNode *n) {
     node->destructor = static_cast<FunctionDeclNode *>(dispatch(n->destructor));
   node->hasPublicMod = n->hasPublicMod;
   node->hasPrivateMod = n->hasPrivateMod;
+  node->hasProtectedMod = n->hasProtectedMod;
   node->annotations = n->annotations;
   node->docString = n->docString;
   node->trailingComment = n->trailingComment;
@@ -378,6 +382,7 @@ ASTNode *ASTCloner::visit(const ClassDeclNode *n) {
 
   node->hasPublicMod = n->hasPublicMod;
   node->hasPrivateMod = n->hasPrivateMod;
+  node->hasProtectedMod = n->hasProtectedMod;
   node->annotations = n->annotations;
   node->docString = n->docString;
   node->trailingComment = n->trailingComment;
@@ -400,6 +405,7 @@ ASTNode *ASTCloner::visit(const StructDeclNode *n) {
     node->destructor = static_cast<FunctionDeclNode *>(dispatch(n->destructor));
   node->hasPublicMod = n->hasPublicMod;
   node->hasPrivateMod = n->hasPrivateMod;
+  node->hasProtectedMod = n->hasProtectedMod;
   node->annotations = n->annotations;
   node->docString = n->docString;
   node->trailingComment = n->trailingComment;

@@ -651,6 +651,8 @@ Piece *PieceFactory::visit(const VarDeclNode *node) {
     pfx += "public ";
   if (node->hasPrivateMod)
     pfx += "private ";
+  if (node->hasProtectedMod)
+    pfx += "protected ";
   if (node->isStatic)
     pfx += "static ";
   if (node->type) {
@@ -708,6 +710,8 @@ Piece *PieceFactory::visit(const FunctionDeclNode *node) {
     pfx += "public ";
   if (node->hasPrivateMod)
     pfx += "private ";
+  if (node->hasProtectedMod)
+    pfx += "protected ";
   if (node->isStatic)
     pfx += "static ";
   if (node->isConst)

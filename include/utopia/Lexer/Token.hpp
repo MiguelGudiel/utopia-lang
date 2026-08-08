@@ -17,9 +17,10 @@ enum class TokenType : uint8_t {
   ANNOTATION_KW,
   STATIC_KW,
   REQUIRED_KW,
-  PUBLIC_KW,  /* public */
-  PRIVATE_KW, /* private */
-  VAR_KW,     /* var */
+  PUBLIC_KW,    /* public */
+  PRIVATE_KW,   /* private */
+  PROTECTED_KW, /* protected */
+  VAR_KW,       /* var */
   FOR_KW,
   WHILE_KW,
   IF_KW,

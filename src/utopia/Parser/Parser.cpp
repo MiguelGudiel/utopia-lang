@@ -872,13 +872,16 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
     std::string doc = consumeComments();
     auto memberAnnotations = parseAnnotations();
 
-    bool isPub = false, isPriv = false;
+    bool isPub = false, isPriv = false, isProt = false;
     while (currentToken().type == TokenType::PUBLIC_KW ||
-           currentToken().type == TokenType::PRIVATE_KW) {
+           currentToken().type == TokenType::PRIVATE_KW ||
+           currentToken().type == TokenType::PROTECTED_KW) {
       if (currentToken().type == TokenType::PUBLIC_KW)
         isPub = true;
       if (currentToken().type == TokenType::PRIVATE_KW)
         isPriv = true;
+      if (currentToken().type == TokenType::PROTECTED_KW)
+        isProt = true;
       advance();
     }
 
@@ -926,6 +929,7 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
       constructor->annotations = memberAnnotations;
       constructor->hasPublicMod = isPub;
       constructor->hasPrivateMod = isPriv;
+      constructor->hasProtectedMod = isProt;
       constructor->identifierColumn = ctorIdCol;
       constructor->identifierLength = name.length();
       constructor->hasTrailingComma = hasTrailingComma;
@@ -976,6 +980,7 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
     field->annotations = memberAnnotations;
     field->hasPublicMod = isPub;
     field->hasPrivateMod = isPriv;
+    field->hasProtectedMod = isProt;
     field->rawTypeStr = rawTypeStr;
     field->endLine = endLine;
     field->identifierColumn = memIdCol;
@@ -1019,7 +1024,8 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
   std::vector<FieldInfo> fInfos;
   for (size_t i = 0; i < fields.size(); ++i) {
     fInfos.push_back({fields[i]->varName, fields[i]->type, (uint32_t)i,
-                      fields[i]->isPublic(fields[i]->varName)});
+                      fields[i]->isPublic(fields[i]->varName),
+                      fields[i]->isProtected(fields[i]->varName)});
   }
   classTy->setFields(astCtx.copyArray<FieldInfo>(fInfos));
 
@@ -1148,13 +1154,16 @@ ASTNode *Parser::parseStatement() {
   std::string doc = consumeComments();
   auto annotations = parseAnnotations();
 
-  bool isPub = false, isPriv = false;
+  bool isPub = false, isPriv = false, isProt = false;
   while (currentToken().type == TokenType::PUBLIC_KW ||
-         currentToken().type == TokenType::PRIVATE_KW) {
+         currentToken().type == TokenType::PRIVATE_KW ||
+         currentToken().type == TokenType::PROTECTED_KW) {
     if (currentToken().type == TokenType::PUBLIC_KW)
       isPub = true;
     if (currentToken().type == TokenType::PRIVATE_KW)
       isPriv = true;
+    if (currentToken().type == TokenType::PROTECTED_KW)
+      isProt = true;
     advance();
   }
 
@@ -1165,7 +1174,7 @@ ASTNode *Parser::parseStatement() {
                   (int)currentToken().value.length(),
                   "Annotations are strictly permitted on declarations only.");
     }
-    if (isPub || isPriv) {
+    if (isPub || isPriv || isProt) {
       reportError(
           currentToken().line, currentToken().column,
           (int)currentToken().value.length(),
@@ -1242,7 +1251,7 @@ ASTNode *Parser::parseStatement() {
     }
   }
 
-  if (isPub || isPriv) {
+  if (isPub || isPriv || isProt) {
     if (node && (node->kind == NodeKind::VarDecl ||
                  node->kind == NodeKind::FunctionDecl ||
                  node->kind == NodeKind::StructDecl ||
@@ -1253,6 +1262,7 @@ ASTNode *Parser::parseStatement() {
       auto decl = static_cast<DeclNode *>(node);
       decl->hasPublicMod = isPub;
       decl->hasPrivateMod = isPriv;
+      decl->hasProtectedMod = isProt;
     } else {
       reportError(
           node ? node->line : currentToken().line,
@@ -1939,13 +1949,16 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
     std::string doc = consumeComments();
     auto memberAnnotations = parseAnnotations();
 
-    bool isPub = false, isPriv = false;
+    bool isPub = false, isPriv = false, isProt = false;
     while (currentToken().type == TokenType::PUBLIC_KW ||
-           currentToken().type == TokenType::PRIVATE_KW) {
+           currentToken().type == TokenType::PRIVATE_KW ||
+           currentToken().type == TokenType::PROTECTED_KW) {
       if (currentToken().type == TokenType::PUBLIC_KW)
         isPub = true;
       if (currentToken().type == TokenType::PRIVATE_KW)
         isPriv = true;
+      if (currentToken().type == TokenType::PROTECTED_KW)
+        isProt = true;
       advance();
     }
 
@@ -1991,6 +2004,7 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
       destructor->annotations = memberAnnotations;
       destructor->hasPublicMod = isPub;
       destructor->hasPrivateMod = isPriv;
+      destructor->hasProtectedMod = isProt;
       destructor->identifierColumn = dCol;
       destructor->identifierLength = dtorIdLen;
 
@@ -2040,6 +2054,7 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
       constructor->annotations = memberAnnotations;
       constructor->hasPublicMod = isPub;
       constructor->hasPrivateMod = isPriv;
+      constructor->hasProtectedMod = isProt;
       constructor->identifierColumn = ctorIdCol;
       constructor->identifierLength = name.length();
       constructor->hasTrailingComma = hasTrailingComma;
@@ -2146,6 +2161,7 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
       method->annotations = memberAnnotations;
       method->hasPublicMod = isPub;
       method->hasPrivateMod = isPriv;
+      method->hasProtectedMod = isProt;
       method->rawReturnTypeStr = rawTypeStr;
       method->identifierColumn = memIdCol;
       method->identifierLength = memIdLen;
@@ -2215,6 +2231,7 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
       field->annotations = memberAnnotations;
       field->hasPublicMod = isPub;
       field->hasPrivateMod = isPriv;
+      field->hasProtectedMod = isProt;
       field->rawTypeStr = rawTypeStr;
       field->endLine = endLine;
       field->identifierColumn = memIdCol;
@@ -2264,7 +2281,8 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
     if (fields[i]->isStatic)
       continue;
     fInfos.push_back({fields[i]->varName, fields[i]->type, instanceFieldIndex++,
-                      fields[i]->isPublic(fields[i]->varName)});
+                      fields[i]->isPublic(fields[i]->varName),
+                      fields[i]->isProtected(fields[i]->varName)});
   }
   recordTy->setFields(astCtx.copyArray<FieldInfo>(fInfos));
 
@@ -2362,13 +2380,16 @@ DeclNode *Parser::parseEnumDecl() {
     if (currentToken().type == TokenType::RBRACE)
       break;
 
-    bool isPub = false, isPriv = false;
+    bool isPub = false, isPriv = false, isProt = false;
     while (currentToken().type == TokenType::PUBLIC_KW ||
-           currentToken().type == TokenType::PRIVATE_KW) {
+           currentToken().type == TokenType::PRIVATE_KW ||
+           currentToken().type == TokenType::PROTECTED_KW) {
       if (currentToken().type == TokenType::PUBLIC_KW)
         isPub = true;
       if (currentToken().type == TokenType::PRIVATE_KW)
         isPriv = true;
+      if (currentToken().type == TokenType::PROTECTED_KW)
+        isProt = true;
       advance();
     }
 
@@ -2403,6 +2424,7 @@ DeclNode *Parser::parseEnumDecl() {
     memberNode->endLine = endLine;
     memberNode->hasPublicMod = isPub;
     memberNode->hasPrivateMod = isPriv;
+    memberNode->hasProtectedMod = isProt;
     memberNode->identifierColumn = midCol;
     memberNode->identifierLength = midLen;
 
