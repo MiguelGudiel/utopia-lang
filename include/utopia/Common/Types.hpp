@@ -213,8 +213,21 @@ public:
 };
 
 class ClassType : public RecordType {
+  const Type *baseClass = nullptr;
+  llvm::ArrayRef<const Type *> interfaces;
+  bool isPolymorphic = false;
+
 public:
   explicit ClassType(std::string_view n) : RecordType(TypeKind::Class, n) {}
+
+  const Type *getBaseClass() const { return baseClass; }
+  void setBaseClass(const Type *b) { baseClass = b; }
+
+  llvm::ArrayRef<const Type *> getInterfaces() const { return interfaces; }
+  void setInterfaces(llvm::ArrayRef<const Type *> i) { interfaces = i; }
+
+  bool getIsPolymorphic() const { return isPolymorphic; }
+  void setIsPolymorphic(bool p) { isPolymorphic = p; }
 
   static bool classof(const Type *t) { return t->getKind() == TypeKind::Class; }
 };

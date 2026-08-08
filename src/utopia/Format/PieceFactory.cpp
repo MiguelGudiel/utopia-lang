@@ -999,6 +999,20 @@ Piece *createRecord(PieceFactory *factory, const T *node, const char *kw) {
     pfx += ">";
   }
 
+  if (auto *cls = llvm::dyn_cast<ClassDeclNode>(node)) {
+    if (cls->baseClass) {
+      pfx += " extends " + cls->baseClass->toString();
+    }
+    if (!cls->interfaces.empty()) {
+      pfx += " implements ";
+      for (size_t i = 0; i < cls->interfaces.size(); ++i) {
+        pfx += cls->interfaces[i]->toString();
+        if (i < cls->interfaces.size() - 1)
+          pfx += ", ";
+      }
+    }
+  }
+
   Piece *mainRecord;
 
   if (node->isOpaque) {

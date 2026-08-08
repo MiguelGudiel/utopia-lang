@@ -56,6 +56,8 @@ enum class TokenType : uint8_t {
   STRUCT_KW,
   UNION_KW, /* union */
   CLASS_KW,
+  EXTENDS_KW,    /* extends */
+  IMPLEMENTS_KW, /* implements */
   THIS_KW,
   DOT,
   TILDE,

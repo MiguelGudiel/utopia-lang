@@ -1,4 +1,3 @@
-#include "utopia/Common/Logger.hpp"
 #include "utopia/Sema/Sema.hpp"
 #include <string>
 
@@ -33,6 +32,23 @@ bool canImplicitlyCast(const Type *from, const Type *to,
    * qualifiers */
   const Type *unqualFrom = baseFrom->getUnqualifiedType();
   const Type *unqualTo = baseTo->getUnqualifiedType();
+
+  /* Subclass to Base Class Upcasting */
+  if (unqualFrom->getKind() == TypeKind::Class &&
+      unqualTo->getKind() == TypeKind::Class) {
+    const ClassType *cFrom = static_cast<const ClassType *>(unqualFrom);
+    const ClassType *cTo = static_cast<const ClassType *>(unqualTo);
+    while (cFrom) {
+      if (cFrom == cTo)
+        return true;
+      if (cFrom->getBaseClass()) {
+        cFrom = static_cast<const ClassType *>(
+            cFrom->getBaseClass()->getUnqualifiedType());
+      } else {
+        break;
+      }
+    }
+  }
 
   /* Implicit Array to ListLiteralView intrinsic resolution */
   if (auto *arrFrom = llvm::dyn_cast<ArrayType>(unqualFrom)) {
@@ -129,6 +145,25 @@ bool canImplicitlyCast(const Type *from, const Type *to,
       /* Universal null pointer interoperability */
       if (toPointee->isVoid() || fromPointee->isVoid())
         return true;
+
+      /* Subclass to Base Class Pointer Upcasting */
+      if (fromPointee->getUnqualifiedType()->getKind() == TypeKind::Class &&
+          toPointee->getUnqualifiedType()->getKind() == TypeKind::Class) {
+        const ClassType *cFrom =
+            static_cast<const ClassType *>(fromPointee->getUnqualifiedType());
+        const ClassType *cTo =
+            static_cast<const ClassType *>(toPointee->getUnqualifiedType());
+        while (cFrom) {
+          if (cFrom == cTo)
+            return true;
+          if (cFrom->getBaseClass()) {
+            cFrom = static_cast<const ClassType *>(
+                cFrom->getBaseClass()->getUnqualifiedType());
+          } else {
+            break;
+          }
+        }
+      }
 
       /* Enforce strict parameter structural equality for function pointer
        * assignments */

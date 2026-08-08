@@ -196,17 +196,20 @@ public:
         return res;
 
       size_t pos = ns.find_last_of('.');
-      if (pos != std::string::npos) {
+      if (pos != std::string_view::npos) {
         ns = ns.substr(0, pos);
       } else {
         break;
       }
     }
 
+    /* Search active using directives in reverse scope order to resolve
+     * qualified namespace symbols. */
     for (auto it = symTable.getScopes().rbegin();
          it != symTable.getScopes().rend(); ++it) {
       for (const auto &u : it->usings) {
-        res = symTable.lookupExact(u + "." + std::string(name), currentModule);
+        std::string qualifiedName = u + "." + std::string(name);
+        res = symTable.lookupExact(qualifiedName, currentModule);
         if (!res.empty())
           return res;
       }

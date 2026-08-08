@@ -490,6 +490,8 @@ struct FunctionDeclNode : public DeclNode {
   bool isStatic = false;
   bool isWeak = false;
   bool isIntrinsic = false;
+  bool isVirtual = false;
+  bool isOverride = false;
   std::string_view intrinsicName;
   mutable std::string_view externAlias;
   std::string_view callingConv = "cdecl";
@@ -503,6 +505,9 @@ struct FunctionDeclNode : public DeclNode {
   mutable bool isNoSync = false;
   mutable bool isWillReturn = false;
   mutable bool isMustProgress = false;
+
+  /* Virtual method resolution offset */
+  uint32_t vtableIndex = 0;
 
   /* Indicates whether the node was parsed with a trailing comma to force
    * formatting splits. */
@@ -727,6 +732,9 @@ struct ClassDeclNode : public DeclNode {
   llvm::ArrayRef<FunctionDeclNode *> methods;
   llvm::ArrayRef<FunctionDeclNode *> constructors;
   FunctionDeclNode *destructor;
+
+  const Type *baseClass = nullptr;
+  llvm::ArrayRef<const Type *> interfaces;
 
   mutable const RecordType *recordType = nullptr;
   bool isOpaque = false;

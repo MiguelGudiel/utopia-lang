@@ -329,6 +329,11 @@ ASTNode *ASTCloner::visit(const FunctionDeclNode *n) {
   node->alignment = n->alignment;
   node->isPacked = n->isPacked;
   node->hasTrailingComma = n->hasTrailingComma;
+
+  node->isIntrinsic = n->isIntrinsic;
+  node->isVirtual = n->isVirtual;
+  node->isOverride = n->isOverride;
+
   return node;
 }
 
@@ -362,6 +367,15 @@ ASTNode *ASTCloner::visit(const ClassDeclNode *n) {
   node->constructors = cloneArray(n->constructors);
   if (n->destructor)
     node->destructor = static_cast<FunctionDeclNode *>(dispatch(n->destructor));
+
+  if (n->baseClass)
+    node->baseClass = cloneType(n->baseClass);
+
+  std::vector<const Type *> clonedInterfaces;
+  for (auto *i : n->interfaces)
+    clonedInterfaces.push_back(cloneType(i));
+  node->interfaces = ctx.copyArray<const Type *>(clonedInterfaces);
+
   node->hasPublicMod = n->hasPublicMod;
   node->hasPrivateMod = n->hasPrivateMod;
   node->annotations = n->annotations;

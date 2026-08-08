@@ -1874,6 +1874,20 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
     }
   }
 
+  const Type *baseClass = nullptr;
+  std::vector<const Type *> interfaces;
+
+  if (kind == TypeKind::Class) {
+    if (match(TokenType::EXTENDS_KW)) {
+      baseClass = parseType();
+    }
+    if (match(TokenType::IMPLEMENTS_KW)) {
+      do {
+        interfaces.push_back(parseType());
+      } while (match(TokenType::COMMA));
+    }
+  }
+
   std::string fqNameStr = getFQName(name);
   std::string_view fqName = astCtx.copyString(fqNameStr);
   RecordType *recordTy = astCtx.createRecordType(kind, fqName);
@@ -1887,6 +1901,8 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
       cNode->fqName = fqName;
       cNode->isOpaque = true;
       cNode->recordType = recordTy;
+      cNode->baseClass = baseClass;
+      cNode->interfaces = astCtx.copyArray<const Type *>(interfaces);
       node = cNode;
     } else if (kind == TypeKind::Struct) {
       auto sNode = astCtx.create<StructDeclNode>(name, line, col, len);
@@ -2262,6 +2278,8 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
     cNode->methods = astCtx.copyArray<FunctionDeclNode *>(methods);
     cNode->constructors = astCtx.copyArray<FunctionDeclNode *>(constructors);
     cNode->destructor = destructor;
+    cNode->baseClass = baseClass;
+    cNode->interfaces = astCtx.copyArray<const Type *>(interfaces);
     cNode->endLine = endLine;
     cNode->recordType = recordTy;
     if (!tParams.empty()) {
