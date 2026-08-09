@@ -394,7 +394,8 @@ std::string getHoverTextForDecl(const DeclNode *decl) {
   std::string text;
 
   if (auto *classDecl = llvm::dyn_cast<ClassDeclNode>(decl)) {
-    text = "```utopia\nclass " + std::string(classDecl->name) + "\n```";
+    std::string prefix = classDecl->isAbstract ? "abstract class " : "class ";
+    text = "```utopia\n" + prefix + std::string(classDecl->name) + "\n```";
   } else if (auto *structDecl = llvm::dyn_cast<StructDeclNode>(decl)) {
     text = "```utopia\nstruct " + std::string(structDecl->name) + "\n```";
   } else if (auto *unionDecl = llvm::dyn_cast<UnionDeclNode>(decl)) {
@@ -577,6 +578,56 @@ std::string buildFunctionHover(const FunctionDeclNode *targetFunc) {
   return res;
 }
 
+std::string getHoveredTypeComponent(const std::string &docText,
+                                    std::string_view rawTypeStr, int nodeLine,
+                                    int nodeCol, int cursorLine,
+                                    int cursorCol) {
+  int currentLine = 1;
+  size_t searchStart = 0;
+  for (size_t i = 0; i < docText.length(); ++i) {
+    if (currentLine == nodeLine) {
+      searchStart = i + (nodeCol > 0 ? nodeCol - 1 : 0);
+      break;
+    }
+    if (docText[i] == '\n')
+      currentLine++;
+  }
+
+  size_t foundIdx = docText.find(rawTypeStr, searchStart);
+  if (foundIdx == std::string::npos || foundIdx > searchStart + 150) {
+    foundIdx = searchStart;
+  }
+
+  Lexer lexer(rawTypeStr);
+  auto toks = lexer.tokenize();
+  std::string chain = "";
+  for (auto &tok : toks) {
+    if (tok.type == TokenType::IDENTIFIER) {
+      if (!chain.empty())
+        chain += ".";
+      chain += tok.value;
+
+      size_t tokAbsIdx = foundIdx + (tok.value.data() - rawTypeStr.data());
+      int absLine = 1;
+      int absCol = 1;
+      for (size_t j = 0; j < tokAbsIdx; ++j) {
+        if (docText[j] == '\n') {
+          absLine++;
+          absCol = 1;
+        } else {
+          absCol++;
+        }
+      }
+
+      if (cursorLine == absLine && cursorCol >= absCol &&
+          cursorCol < absCol + (int)tok.value.length()) {
+        return chain;
+      }
+    }
+  }
+  return "";
+}
+
 void handleHover(const json &req) {
   syncWorker();
   std::string uri = req["params"]["textDocument"]["uri"];
@@ -594,6 +645,35 @@ void handleHover(const json &req) {
     if (node) {
       std::string hoverText;
       const DeclNode *declTarget = nullptr;
+
+      LocalVarCollector collector(line);
+      collector.dispatch(doc.ast);
+
+      auto resolveWithCollector =
+          [&](const std::string &name) -> const DeclNode * {
+        auto decls = doc.sema->symTable.lookupExact(name, doc.ast);
+        if (!decls.empty())
+          return decls.front();
+
+        std::string ns = collector.currentNamespace;
+        while (!ns.empty()) {
+          decls = doc.sema->symTable.lookupExact(ns + "." + name, doc.ast);
+          if (!decls.empty())
+            return decls.front();
+          size_t pos = ns.find_last_of('.');
+          if (pos != std::string::npos)
+            ns = ns.substr(0, pos);
+          else
+            break;
+        }
+
+        for (const auto &u : collector.activeUsings) {
+          decls = doc.sema->symTable.lookupExact(u + "." + name, doc.ast);
+          if (!decls.empty())
+            return decls.front();
+        }
+        return nullptr;
+      };
 
       if (node->kind == NodeKind::Variable) {
         auto varNode = static_cast<const VariableNode *>(node);
@@ -657,39 +737,95 @@ void handleHover(const json &req) {
       } else if (node->kind == NodeKind::Cast) {
         auto castNode = static_cast<const CastNode *>(node);
         if (castNode->targetType) {
-          if (auto typeDecl = getTypeDeclaration(castNode->targetType)) {
-            declTarget = typeDecl;
-            hoverText = getHoverTextForDecl(typeDecl);
-          } else {
-            hoverText =
-                "```utopia\n" + castNode->targetType->toString() + "\n```";
+          std::string hoveredChain;
+          if (!castNode->rawTargetTypeStr.empty()) {
+            hoveredChain = getHoveredTypeComponent(
+                doc.text, castNode->rawTargetTypeStr, castNode->line,
+                castNode->column, line, col);
+          }
+          if (!hoveredChain.empty() && doc.sema) {
+            declTarget = resolveWithCollector(hoveredChain);
+            if (declTarget)
+              hoverText = getHoverTextForDecl(declTarget);
+          }
+          if (hoverText.empty()) {
+            if (auto typeDecl = getTypeDeclaration(castNode->targetType)) {
+              declTarget = typeDecl;
+              hoverText = getHoverTextForDecl(typeDecl);
+            } else {
+              hoverText =
+                  "```utopia\n" + castNode->targetType->toString() + "\n```";
+            }
           }
         }
-      } else if (node->kind == NodeKind::FunctionDecl ||
-                 node->kind == NodeKind::VarDecl ||
-                 node->kind == NodeKind::ParamDecl ||
-                 node->kind == NodeKind::ClassDecl ||
-                 node->kind == NodeKind::StructDecl ||
-                 node->kind == NodeKind::UnionDecl ||
-                 node->kind == NodeKind::EnumDecl ||
-                 node->kind == NodeKind::EnumMember ||
-                 node->kind == NodeKind::TypedefDecl ||
-                 node->kind == NodeKind::AnnotationDecl ||
-                 node->kind == NodeKind::NamespaceDecl) {
+      } else if (auto *newNode = llvm::dyn_cast<NewExprNode>(node)) {
+        declTarget = newNode->resolvedConstructor;
+        std::string hoveredChain;
+        if (!newNode->rawAllocatedTypeStr.empty()) {
+          hoveredChain = getHoveredTypeComponent(
+              doc.text, newNode->rawAllocatedTypeStr, newNode->line,
+              newNode->column, line, col);
+        }
+        if (!hoveredChain.empty() && doc.sema) {
+          auto *chainDecl = resolveWithCollector(hoveredChain);
+          if (chainDecl && chainDecl->kind != NodeKind::FunctionDecl) {
+            declTarget = chainDecl;
+            hoverText = getHoverTextForDecl(declTarget);
+          }
+        }
+      }
+
+      if (hoverText.empty() && (node->kind == NodeKind::FunctionDecl ||
+                                node->kind == NodeKind::VarDecl ||
+                                node->kind == NodeKind::ParamDecl ||
+                                node->kind == NodeKind::ClassDecl ||
+                                node->kind == NodeKind::StructDecl ||
+                                node->kind == NodeKind::UnionDecl ||
+                                node->kind == NodeKind::EnumDecl ||
+                                node->kind == NodeKind::EnumMember ||
+                                node->kind == NodeKind::TypedefDecl ||
+                                node->kind == NodeKind::AnnotationDecl ||
+                                node->kind == NodeKind::NamespaceDecl)) {
 
         declTarget = static_cast<const DeclNode *>(node);
         auto loc = getExactNameLocation(doc.text, declTarget);
 
         if (col - 1 < loc.col) {
           const Type *t = nullptr;
-          if (declTarget->kind == NodeKind::VarDecl)
-            t = static_cast<const VarDeclNode *>(declTarget)->type;
-          else if (declTarget->kind == NodeKind::FunctionDecl)
-            t = static_cast<const FunctionDeclNode *>(declTarget)->returnType;
-          else if (declTarget->kind == NodeKind::ParamDecl)
-            t = static_cast<const ParamDeclNode *>(declTarget)->type;
+          std::string_view rawTypeStr;
+          if (auto *varDecl = llvm::dyn_cast<VarDeclNode>(declTarget)) {
+            t = varDecl->type;
+            rawTypeStr = varDecl->rawTypeStr;
+          } else if (auto *funcDecl =
+                         llvm::dyn_cast<FunctionDeclNode>(declTarget)) {
+            t = funcDecl->returnType;
+            rawTypeStr = funcDecl->rawReturnTypeStr;
+          } else if (auto *paramDecl =
+                         llvm::dyn_cast<ParamDeclNode>(declTarget)) {
+            t = paramDecl->type;
+            rawTypeStr = paramDecl->rawTypeStr;
+          }
 
-          if (t) {
+          std::string hoveredChain;
+          if (!rawTypeStr.empty()) {
+            hoveredChain =
+                getHoveredTypeComponent(doc.text, rawTypeStr, declTarget->line,
+                                        declTarget->column, line, col);
+          }
+
+          if (!hoveredChain.empty() && doc.sema) {
+            declTarget = resolveWithCollector(hoveredChain);
+            if (declTarget) {
+              if (auto *funcDecl =
+                      llvm::dyn_cast<FunctionDeclNode>(declTarget)) {
+                hoverText = buildFunctionHover(funcDecl);
+              } else {
+                hoverText = getHoverTextForDecl(declTarget);
+              }
+            }
+          }
+
+          if (hoverText.empty() && t) {
             if (auto typeDecl = getTypeDeclaration(t)) {
               declTarget = typeDecl;
               hoverText = getHoverTextForDecl(typeDecl);
@@ -1110,7 +1246,7 @@ void handleCompletion(const json &req) {
         "enum",      "typedef",   "annotation", "Function", "this",
         "null",      "true",      "false",      "public",   "private",
         "protected", "const",     "static",     "extern",   "required",
-        "operator",  "namespace", "using"};
+        "operator",  "namespace", "using",      "abstract"};
 
     std::vector<std::string> primitives = {
         "int8",   "int16",   "int32",   "int64",  "uint8", "uint16", "uint32",
@@ -2144,35 +2280,73 @@ public:
     }
 
     Lexer lexer(rawTypeStr);
-    for (const auto &tok : lexer.tokenize()) {
+    auto tokensList = lexer.tokenize();
+    for (size_t i = 0; i < tokensList.size(); ++i) {
+      const auto &tok = tokensList[i];
       if (tok.type == TokenType::IDENTIFIER) {
-        if (astCtx->getRecordType(tok.value) ||
-            astCtx->getTypeAlias(tok.value) ||
-            astCtx->getEnumTypeByName(tok.value) ||
-            astCtx->isTemplateName(tok.value)) {
+        size_t tokAbsIdx = foundIdx + (tok.value.data() - rawTypeStr.data());
 
-          size_t tokAbsIdx = foundIdx + (tok.value.data() - rawTypeStr.data());
+        int absLine = 1;
+        int absCol = 1;
+        for (size_t j = 0; j < tokAbsIdx; ++j) {
+          if (docText[j] == '\n') {
+            absLine++;
+            absCol = 1;
+          } else {
+            absCol++;
+          }
+        }
 
-          int absLine = 1;
-          int absCol = 1;
-          for (size_t i = 0; i < tokAbsIdx; ++i) {
-            if (docText[i] == '\n') {
-              absLine++;
-              absCol = 1;
-            } else {
-              absCol++;
+        int tokenClass = 3;
+        bool isNamespace = false;
+        if (i + 1 < tokensList.size() &&
+            tokensList[i + 1].type == TokenType::DOT) {
+          isNamespace = true;
+        }
+
+        if (isNamespace) {
+          tokenClass = 12;
+        } else {
+          std::string chain = "";
+          for (size_t k = 0; k <= i; ++k) {
+            if (tokensList[k].type == TokenType::IDENTIFIER) {
+              if (!chain.empty())
+                chain += ".";
+              chain += tokensList[k].value;
             }
           }
 
-          addToken(absLine - 1, absCol - 1, tok.value.length(), 3, 0);
+          if (astCtx->getRecordType(chain)) {
+            auto *recTy = astCtx->getRecordType(chain);
+            if (recTy->getKind() == TypeKind::Struct)
+              tokenClass = 1;
+            else
+              tokenClass = 0;
+          } else if (astCtx->getEnumTypeByName(chain)) {
+            tokenClass = 2;
+          } else if (astCtx->getNamespace(chain)) {
+            tokenClass = 12;
+          } else if (astCtx->getRecordType(tok.value)) {
+            auto *recTy = astCtx->getRecordType(tok.value);
+            if (recTy->getKind() == TypeKind::Struct)
+              tokenClass = 1;
+            else
+              tokenClass = 0;
+          } else if (astCtx->getEnumTypeByName(tok.value)) {
+            tokenClass = 2;
+          } else if (astCtx->getNamespace(tok.value)) {
+            tokenClass = 12;
+          }
         }
+
+        addToken(absLine - 1, absCol - 1, tok.value.length(), tokenClass, 0);
       }
     }
   }
 
   void visit(const NamespaceDeclNode *n) {
     auto loc = getExactNameLocation(docText, n);
-    addToken(loc.line, loc.col, loc.length, 3, 0);
+    addToken(loc.line, loc.col, loc.length, 12, 0);
     for (auto *s : n->statements)
       dispatch(s);
   }
@@ -2216,11 +2390,31 @@ public:
       else if (n->resolvedDecl->kind == NodeKind::EnumDecl)
         type = 2;
       else if (n->resolvedDecl->kind == NodeKind::UnionDecl ||
-               n->resolvedDecl->kind == NodeKind::TypedefDecl)
+               n->resolvedDecl->kind == NodeKind::TypedefDecl ||
+               n->resolvedDecl->kind == NodeKind::AnnotationDecl)
         type = 3;
-      else if (n->resolvedDecl->kind == NodeKind::FunctionDecl)
-        type = 4;
-      else if (n->resolvedDecl->kind == NodeKind::ParamDecl)
+      else if (n->resolvedDecl->kind == NodeKind::NamespaceDecl)
+        type = 12;
+      else if (n->resolvedDecl->kind == NodeKind::FunctionDecl) {
+        auto fn = static_cast<const FunctionDeclNode *>(n->resolvedDecl);
+        if (fn->parentRecord && fn->name == fn->parentRecord->getName()) {
+          const DeclNode *recDecl = fn->parentRecord->getDeclaration();
+          if (recDecl) {
+            if (recDecl->kind == NodeKind::ClassDecl)
+              type = 0;
+            else if (recDecl->kind == NodeKind::StructDecl)
+              type = 1;
+            else if (recDecl->kind == NodeKind::UnionDecl)
+              type = 3;
+            else
+              type = 0;
+          } else {
+            type = 0;
+          }
+        } else {
+          type = 4;
+        }
+      } else if (n->resolvedDecl->kind == NodeKind::ParamDecl)
         type = 8;
       else if (n->resolvedDecl->kind == NodeKind::VarDecl) {
         if (static_cast<const VarDeclNode *>(n->resolvedDecl)->isStatic)
@@ -2244,6 +2438,39 @@ public:
     else if (n->isStaticFieldRef) {
       type = 6;
       mods |= 2; /* static */
+    } else if (n->resolvedDecl) {
+      if (n->resolvedDecl->kind == NodeKind::ClassDecl)
+        type = 0;
+      else if (n->resolvedDecl->kind == NodeKind::StructDecl)
+        type = 1;
+      else if (n->resolvedDecl->kind == NodeKind::EnumDecl)
+        type = 2;
+      else if (n->resolvedDecl->kind == NodeKind::UnionDecl ||
+               n->resolvedDecl->kind == NodeKind::TypedefDecl ||
+               n->resolvedDecl->kind == NodeKind::AnnotationDecl)
+        type = 3;
+      else if (n->resolvedDecl->kind == NodeKind::NamespaceDecl)
+        type = 12;
+      else if (n->resolvedDecl->kind == NodeKind::FunctionDecl) {
+        auto fn = static_cast<const FunctionDeclNode *>(n->resolvedDecl);
+        if (fn->parentRecord && fn->name == fn->parentRecord->getName()) {
+          const DeclNode *recDecl = fn->parentRecord->getDeclaration();
+          if (recDecl) {
+            if (recDecl->kind == NodeKind::ClassDecl)
+              type = 0;
+            else if (recDecl->kind == NodeKind::StructDecl)
+              type = 1;
+            else if (recDecl->kind == NodeKind::UnionDecl)
+              type = 3;
+            else
+              type = 0;
+          } else {
+            type = 0;
+          }
+        } else {
+          type = 4;
+        }
+      }
     }
 
     int memberCol = (n->column > 0 ? n->column - 1 : 0) + n->length -
@@ -2580,7 +2807,7 @@ int main() {
                     {{"tokenTypes",
                       {"class", "struct", "enum", "type", "function", "method",
                        "property", "variable", "parameter", "enumMember",
-                       "macro", "keyword"}},
+                       "macro", "keyword", "namespace"}},
                      {"tokenModifiers",
                       {"declaration", "static", "readonly"}}}},
                    {"range", false},

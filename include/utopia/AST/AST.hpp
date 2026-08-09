@@ -514,6 +514,7 @@ struct FunctionDeclNode : public DeclNode {
   bool isIntrinsic = false;
   bool isVirtual = false;
   bool isOverride = false;
+  bool isAbstract = false;
   std::string_view intrinsicName;
   mutable std::string_view externAlias;
   std::string_view callingConv = "cdecl";
@@ -760,6 +761,7 @@ struct ClassDeclNode : public DeclNode {
 
   mutable const RecordType *recordType = nullptr;
   bool isOpaque = false;
+  bool isAbstract = false;
 
   ClassDeclNode(std::string_view n, int l, int c, int len)
       : DeclNode(NodeKind::ClassDecl, l, c, len), name(n), destructor(nullptr) {

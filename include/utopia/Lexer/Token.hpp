@@ -54,9 +54,10 @@ enum class TokenType : uint8_t {
   GE,
   BANG,
   AT,
-  STRUCT_KW,
-  UNION_KW, /* union */
-  CLASS_KW,
+  STRUCT_KW,     /* struct */
+  UNION_KW,      /* union */
+  CLASS_KW,      /* class */
+  ABSTRACT_KW,   /* abstract */
   EXTENDS_KW,    /* extends */
   IMPLEMENTS_KW, /* implements */
   THIS_KW,

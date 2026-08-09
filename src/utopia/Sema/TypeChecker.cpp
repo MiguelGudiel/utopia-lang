@@ -811,6 +811,9 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
       isPolymorphic = true;
   }
   for (auto *method : node->methods) {
+    if (method->isAbstract) {
+      isPolymorphic = true;
+    }
     for (auto *ann : method->annotations) {
       if (ann->name == "virtual" || ann->name == "override") {
         isPolymorphic = true;
@@ -895,7 +898,14 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
   }
 
   for (auto *method : node->methods) {
-    bool isVirtual = false;
+    if (method->isAbstract && !node->isAbstract) {
+      ctx->reportError(
+          method->line, method->column, method->length,
+          "Abstract methods can only be declared within abstract classes.");
+      hasErrors = true;
+    }
+
+    bool isVirtual = method->isAbstract;
     bool isOverride = false;
     for (auto *ann : method->annotations) {
       if (ann->name == "virtual")
@@ -965,6 +975,7 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
       static_cast<ClassType *>(const_cast<RecordType *>(node->recordType));
   classTy->setBaseClass(node->baseClass);
   classTy->setIsPolymorphic(isPolymorphic);
+  classTy->setIsAbstract(node->isAbstract);
   classTy->setFields(ctx->astCtx.copyArray<FieldInfo>(fInfos));
 
   // Interface Validation and Resolution
@@ -1831,6 +1842,9 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
   if (node->initializer) {
     auto initRes = dispatch(node->initializer);
     if (!initRes) {
+      if (ctx->getScopeDepth() > 1) {
+        ctx->addDecl(node->varName, node);
+      }
       return initRes;
     }
 
@@ -1867,19 +1881,52 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
 
   /* Core Type Validations */
   if (declType->getKind() == TypeKind::TemplateParam) {
-    return ctx->reportError(node->line, node->column, node->length,
-                            "Unknown type: '" + declType->toString() + "'");
+    auto err = ctx->reportError(node->line, node->column, node->length,
+                                "Unknown type: '" + declType->toString() + "'");
+    if (ctx->getScopeDepth() > 1) {
+      ctx->addDecl(node->varName, node);
+    }
+    return err;
   }
 
   if (!checkTypeVisibility(declType, node)) {
-    return std::unexpected(ErrorInfo{node->line, node->column, node->length,
-                                     "Type visibility error"});
+    auto err = std::unexpected(ErrorInfo{node->line, node->column, node->length,
+                                         "Type visibility error"});
+    if (ctx->getScopeDepth() > 1) {
+      ctx->addDecl(node->varName, node);
+    }
+    return err;
   }
 
-  // Prevent variables of type 'void'
   if (declType->isVoid()) {
-    return ctx->reportError(node->line, node->column, node->length,
-                            "Variables cannot be of type 'void'");
+    auto err = ctx->reportError(node->line, node->column, node->length,
+                                "Variables cannot be of type 'void'");
+    if (ctx->getScopeDepth() > 1) {
+      ctx->addDecl(node->varName, node);
+    }
+    return err;
+  }
+
+  const Type *checkTy = declType;
+  while (checkTy->getKind() == TypeKind::Array) {
+    checkTy = static_cast<const ArrayType *>(checkTy)->getElementType();
+  }
+
+  if (!checkTy->isPointerType() && !checkTy->isReferenceType() &&
+      checkTy->getKind() != TypeKind::RValueReference) {
+    if (checkTy->getUnqualifiedType()->getKind() == TypeKind::Class) {
+      auto *classTy =
+          static_cast<const ClassType *>(checkTy->getUnqualifiedType());
+      if (classTy->getIsAbstract()) {
+        auto err = ctx->reportError(node->line, node->column, node->length,
+                                    "Cannot instantiate abstract class '" +
+                                        std::string(classTy->getName()) + "'.");
+        if (ctx->getScopeDepth() > 1) {
+          ctx->addDecl(node->varName, node);
+        }
+        return err;
+      }
+    }
   }
 
   const Type *baseUnqualTy = declType->getUnqualifiedType();
@@ -1897,19 +1944,27 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
     if (!node->isStatic && !node->isExtern && !node->isGlobal) {
       bool isField = ctx->getScopeDepth() == 1;
       if (isField && ctx->getCurrentRecordContext() == recTy) {
-        return ctx->reportError(node->line, node->column, node->length,
-                                "Field '" + std::string(node->varName) +
-                                    "' has incomplete type '" +
-                                    std::string(recTy->getName()) +
-                                    "' (recursive value type). Use a pointer "
-                                    "or reference instead.");
+        auto err = ctx->reportError(
+            node->line, node->column, node->length,
+            "Field '" + std::string(node->varName) + "' has incomplete type '" +
+                std::string(recTy->getName()) +
+                "' (recursive value type). Use a pointer "
+                "or reference instead.");
+        if (ctx->getScopeDepth() > 1) {
+          ctx->addDecl(node->varName, node);
+        }
+        return err;
       }
     }
 
     if (recTy->isOpaque()) {
-      return ctx->reportError(
+      auto err = ctx->reportError(
           node->line, node->column, node->length,
           "Cannot declare variable of incomplete (opaque) type.");
+      if (ctx->getScopeDepth() > 1) {
+        ctx->addDecl(node->varName, node);
+      }
+      return err;
     }
   }
 
@@ -1918,26 +1973,29 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
     if (ann->name == "weak") {
       const_cast<VarDeclNode *>(node)->isWeak = true;
     } else if (ann->name == "align") {
-      if (ann->args.size() != 1 || ann->args[0]->kind != NodeKind::Number ||
-          static_cast<const NumberNode *>(ann->args[0])->isFloat) {
-        SemaResult err = ctx->reportError(
+      if (ann->args.size() != 1 || !llvm::isa<NumberNode>(ann->args[0]) ||
+          llvm::cast<NumberNode>(ann->args[0])->isFloat) {
+        (void)ctx->reportError(
             ann->line, ann->column, ann->length,
             "The @align annotation requires a single integer constant.");
       } else {
         uint64_t alignVal = std::stoull(
-            std::string(static_cast<const NumberNode *>(ann->args[0])->raw));
+            std::string(llvm::cast<NumberNode>(ann->args[0])->raw), nullptr, 0);
         if (alignVal == 0 || (alignVal & (alignVal - 1)) != 0) {
-          SemaResult err = ctx->reportError(ann->line, ann->column, ann->length,
-                                            "Alignment must be a power of 2.");
+          (void)ctx->reportError(ann->line, ann->column, ann->length,
+                                 "Alignment must be a power of 2.");
         } else {
           const_cast<VarDeclNode *>(node)->alignment = alignVal;
         }
       }
     } else if (ann->name == "packed") {
-      SemaResult err =
-          ctx->reportError(ann->line, ann->column, ann->length,
-                           "The @packed annotation can only be applied to "
-                           "record declarations (struct/class).");
+      if (!ann->args.empty()) {
+        (void)ctx->reportError(
+            ann->line, ann->column, ann->length,
+            "The @packed annotation does not take arguments.");
+      } else {
+        const_cast<VarDeclNode *>(node)->isPacked = true;
+      }
     }
   }
 
@@ -1951,23 +2009,21 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
   if (declType->isConstQualified() && !node->initializer &&
       !declType->isReferenceType() &&
       declType->getKind() != TypeKind::RValueReference && !node->isExtern) {
-    SemaResult err =
-        ctx->reportError(node->line, node->column, node->length,
-                         "Constant variables must be initialized.");
+    (void)ctx->reportError(node->line, node->column, node->length,
+                           "Constant variables must be initialized.");
   }
 
   if (node->isExtern && node->initializer) {
-    SemaResult err =
-        ctx->reportError(node->line, node->column, node->length,
-                         "Extern variables cannot have an initializer.");
+    (void)ctx->reportError(node->line, node->column, node->length,
+                           "Extern variables cannot have an initializer.");
   }
 
   if (declType->isReferenceType() ||
       declType->getKind() == TypeKind::RValueReference) {
     if (!node->initializer && !node->isExtern) {
-      SemaResult err =
-          ctx->reportError(node->line, node->column, node->length,
-                           "References must be initialized upon declaration.");
+      (void)ctx->reportError(
+          node->line, node->column, node->length,
+          "References must be initialized upon declaration.");
     }
   }
 
@@ -1982,23 +2038,22 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
           node->initializer->kind != NodeKind::FunctionCall &&
           node->initializer->kind != NodeKind::MemberAccess &&
           node->initializer->kind != NodeKind::ArraySubscript) {
-        SemaResult err =
-            ctx->reportError(node->line, node->column, node->length,
-                             "Cannot bind a non-lvalue to a reference.");
+        (void)ctx->reportError(node->line, node->column, node->length,
+                               "Cannot bind a non-lvalue to a reference.");
       }
     } else if (declType->getKind() == TypeKind::RValueReference) {
       if (node->initializer->isLValue) {
-        SemaResult err =
-            ctx->reportError(node->line, node->column, node->length,
-                             "Cannot bind an l-value to an r-value reference.");
+        (void)ctx->reportError(
+            node->line, node->column, node->length,
+            "Cannot bind an l-value to an r-value reference.");
       }
     } else {
       if (!canImplicitlyCast(initTy, declType)) {
         std::string initTypeStr = initTy ? initTy->toString() : "unknown";
-        SemaResult err = ctx->reportError(
-            node->line, node->column, node->length,
-            "Cannot initialize variable of type '" + declType->toString() +
-                "' with type '" + initTypeStr + "'");
+        (void)ctx->reportError(node->line, node->column, node->length,
+                               "Cannot initialize variable of type '" +
+                                   declType->toString() + "' with type '" +
+                                   initTypeStr + "'");
       } else {
         checkImplicitCastWarning(initTy, declType, node->initializer);
         const_cast<VarDeclNode *>(node)->initializer =
@@ -2087,10 +2142,9 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
                  * constructor */
                 if (!copyCtor->isPublic(copyCtor->name) &&
                     ctx->getCurrentRecordContext() != recTy) {
-                  return ctx->reportError(node->line, node->column,
-                                          node->length,
-                                          "Cannot implicitly copy variable. "
-                                          "Copy constructor is private.");
+                  (void)ctx->reportError(node->line, node->column, node->length,
+                                         "Cannot implicitly copy variable. "
+                                         "Copy constructor is private.");
                 }
                 const_cast<VarDeclNode *>(node)->copyCtor = copyCtor;
               } else {
@@ -2103,7 +2157,7 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
                   dtor = static_cast<const UnionDeclNode *>(decl)->destructor;
 
                 if (dtor && !dtor->isImplicit) {
-                  return ctx->reportError(
+                  (void)ctx->reportError(
                       node->line, node->column, node->length,
                       "Cannot implicitly copy a record with a custom "
                       "destructor. A copy constructor is required.");
@@ -2119,6 +2173,7 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
   if (ctx->getScopeDepth() > 1) {
     ctx->addDecl(node->varName, node);
   }
+
   return declType;
 }
 
@@ -4138,6 +4193,16 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
   }
 
   const Type *unqual = node->allocatedType->getUnqualifiedType();
+
+  if (unqual->getKind() == TypeKind::Class) {
+    auto *classTy = static_cast<const ClassType *>(unqual);
+    if (classTy->getIsAbstract()) {
+      return ctx->reportError(node->line, node->column, node->length,
+                              "Cannot instantiate abstract class '" +
+                                  std::string(classTy->getName()) + "'.");
+    }
+  }
+
   const Type *baseUnqualTy = unqual;
   while (baseUnqualTy->getKind() == TypeKind::Array) {
     baseUnqualTy = static_cast<const ArrayType *>(baseUnqualTy)

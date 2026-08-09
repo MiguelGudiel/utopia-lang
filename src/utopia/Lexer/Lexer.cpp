@@ -206,6 +206,8 @@ Token Lexer::parseToken() {
       return {TokenType::RETURN, id, startLine, startCol};
     if (id == "typedef")
       return {TokenType::TYPEDEF_KW, id, startLine, startCol};
+    if (id == "abstract")
+      return {TokenType::ABSTRACT_KW, id, startLine, startCol};
     if (id == "enum")
       return {TokenType::ENUM_KW, id, startLine, startCol};
     if (id == "for")

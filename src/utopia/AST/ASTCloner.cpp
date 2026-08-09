@@ -336,6 +336,7 @@ ASTNode *ASTCloner::visit(const FunctionDeclNode *n) {
   node->isIntrinsic = n->isIntrinsic;
   node->isVirtual = n->isVirtual;
   node->isOverride = n->isOverride;
+  node->isAbstract = n->isAbstract;
 
   return node;
 }
@@ -389,6 +390,7 @@ ASTNode *ASTCloner::visit(const ClassDeclNode *n) {
   node->declFilePath = n->declFilePath;
   node->isOpaque = n->isOpaque;
   node->isTemplate = false;
+  node->isAbstract = n->isAbstract;
   node->endLine = n->endLine;
   node->alignment = n->alignment;
   node->isPacked = n->isPacked;

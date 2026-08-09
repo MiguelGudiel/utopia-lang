@@ -217,6 +217,7 @@ class ClassType : public RecordType {
   const Type *baseClass = nullptr;
   llvm::ArrayRef<const Type *> interfaces;
   bool isPolymorphic = false;
+  bool isAbstract = false;
 
 public:
   explicit ClassType(std::string_view n) : RecordType(TypeKind::Class, n) {}
@@ -229,6 +230,9 @@ public:
 
   bool getIsPolymorphic() const { return isPolymorphic; }
   void setIsPolymorphic(bool p) { isPolymorphic = p; }
+
+  bool getIsAbstract() const { return isAbstract; }
+  void setIsAbstract(bool a) { isAbstract = a; }
 
   static bool classof(const Type *t) { return t->getKind() == TypeKind::Class; }
 };

@@ -3567,21 +3567,20 @@ llvm::Value *CodeGen::visit(const NewExprNode *node) {
                                         builder.getInt64(8));
   }
 
-  if (node->hasParens) {
-    llvm::Value *memsetSize = sizeVal;
-    if (node->arraySize) {
-      memsetSize = builder.CreateSub(sizeVal, builder.getInt64(8));
-    }
-    builder.CreateMemSet(userMem, builder.getInt8(0), memsetSize,
-                         llvm::Align(1));
+  llvm::Value *typedMem =
+      builder.CreateBitCast(userMem, getLLVMType(node->exprType));
 
-    if (!node->arraySize) {
+  if (node->hasParens) {
+    if (node->arraySize) {
+      llvm::Value *memsetSize = builder.CreateSub(sizeVal, builder.getInt64(8));
+      builder.CreateMemSet(userMem, builder.getInt8(0), memsetSize,
+                           llvm::Align(1));
+    } else {
+      emitDefaultInitialization(typedMem, node->allocatedType);
+
       if (node->resolvedConstructor) {
         llvm::Function *ctorFunc =
             getOrCreateFunction(node->resolvedConstructor);
-        llvm::Value *typedMem =
-            builder.CreateBitCast(userMem, getLLVMType(node->exprType));
-
         std::vector<llvm::Value *> argsArgs;
         argsArgs.push_back(typedMem);
 
@@ -3641,7 +3640,7 @@ llvm::Value *CodeGen::visit(const NewExprNode *node) {
     }
   }
 
-  return builder.CreateBitCast(userMem, getLLVMType(node->exprType));
+  return typedMem;
 }
 
 llvm::Value *CodeGen::visit(const DeleteExprNode *node) {
@@ -3869,8 +3868,13 @@ llvm::Constant *CodeGen::getOrCreateVTable(const ClassType *classTy) {
   std::vector<llvm::Constant *> vtablePointers;
   for (auto *m : vtableMethods) {
     if (m) {
-      llvm::Function *func = getOrCreateFunction(m);
-      vtablePointers.push_back(func);
+      if (m->isAbstract) {
+        vtablePointers.push_back(
+            llvm::ConstantPointerNull::get(builder.getPtrTy()));
+      } else {
+        llvm::Function *func = getOrCreateFunction(m);
+        vtablePointers.push_back(func);
+      }
     } else {
       vtablePointers.push_back(
           llvm::ConstantPointerNull::get(builder.getPtrTy()));

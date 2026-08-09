@@ -1154,16 +1154,19 @@ ASTNode *Parser::parseStatement() {
   std::string doc = consumeComments();
   auto annotations = parseAnnotations();
 
-  bool isPub = false, isPriv = false, isProt = false;
+  bool isPub = false, isPriv = false, isProt = false, isAbstract = false;
   while (currentToken().type == TokenType::PUBLIC_KW ||
          currentToken().type == TokenType::PRIVATE_KW ||
-         currentToken().type == TokenType::PROTECTED_KW) {
+         currentToken().type == TokenType::PROTECTED_KW ||
+         currentToken().type == TokenType::ABSTRACT_KW) {
     if (currentToken().type == TokenType::PUBLIC_KW)
       isPub = true;
     if (currentToken().type == TokenType::PRIVATE_KW)
       isPriv = true;
     if (currentToken().type == TokenType::PROTECTED_KW)
       isProt = true;
+    if (currentToken().type == TokenType::ABSTRACT_KW)
+      isAbstract = true;
     advance();
   }
 
@@ -1174,7 +1177,7 @@ ASTNode *Parser::parseStatement() {
                   (int)currentToken().value.length(),
                   "Annotations are strictly permitted on declarations only.");
     }
-    if (isPub || isPriv || isProt) {
+    if (isPub || isPriv || isProt || isAbstract) {
       reportError(
           currentToken().line, currentToken().column,
           (int)currentToken().value.length(),
@@ -1206,7 +1209,7 @@ ASTNode *Parser::parseStatement() {
   } else if (currentToken().type == TokenType::STRUCT_KW) {
     node = parseRecordDecl(TypeKind::Struct);
   } else if (currentToken().type == TokenType::CLASS_KW) {
-    node = parseRecordDecl(TypeKind::Class);
+    node = parseRecordDecl(TypeKind::Class, isAbstract);
   } else if (currentToken().type == TokenType::IF_KW) {
     node = parseIfStatement();
   } else if (currentToken().type == TokenType::FOR_KW) {
@@ -1227,6 +1230,14 @@ ASTNode *Parser::parseStatement() {
     node = parseBlock();
   } else {
     node = parseExpressionStatement();
+  }
+
+  if (isAbstract && (!node || node->kind != NodeKind::ClassDecl)) {
+    reportError(node ? node->line : currentToken().line,
+                node ? node->column : currentToken().column,
+                node ? node->length : currentToken().value.length(),
+                "The 'abstract' modifier is strictly permitted on class "
+                "declarations only.");
   }
 
   if (node) {
@@ -1847,7 +1858,7 @@ ExprNode *Parser::parseTernary() {
   return expr;
 }
 
-DeclNode *Parser::parseRecordDecl(TypeKind kind) {
+DeclNode *Parser::parseRecordDecl(TypeKind kind, bool isAbstract) {
   int line = currentToken().line;
   int col = currentToken().column;
   advance();
@@ -1910,6 +1921,7 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
       auto cNode = astCtx.create<ClassDeclNode>(name, line, col, len);
       cNode->fqName = fqName;
       cNode->isOpaque = true;
+      cNode->isAbstract = isAbstract;
       cNode->recordType = recordTy;
       cNode->baseClass = baseClass;
       cNode->interfaces = astCtx.copyArray<const Type *>(interfaces);
@@ -2177,6 +2189,14 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
                "Expected ';' after extern or intrinsic method declaration");
         method->length = endCol - mCol;
         method->endLine = endLine;
+      } else if (isAbstract && currentToken().type == TokenType::SEMICOLON) {
+        int endLine = currentToken().line;
+        int endCol = currentToken().column + 1;
+        advance(); /* consume ';' */
+        method->length = endCol - mCol;
+        method->endLine = endLine;
+        method->isAbstract = true;
+        method->body = nullptr;
       } else {
         method->body = parseFunctionBody(memType);
         method->length = method->body->column + method->body->length - mCol;
@@ -2300,6 +2320,7 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
     cNode->interfaces = astCtx.copyArray<const Type *>(interfaces);
     cNode->endLine = endLine;
     cNode->recordType = recordTy;
+    cNode->isAbstract = isAbstract;
     if (!tParams.empty()) {
       cNode->isTemplate = true;
       cNode->templateParams = astCtx.copyArray<std::string_view>(tParams);

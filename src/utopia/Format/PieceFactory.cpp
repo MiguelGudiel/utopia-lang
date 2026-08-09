@@ -990,7 +990,13 @@ Piece *createRecord(PieceFactory *factory, const T *node, const char *kw) {
     parts.push_back(factory->dispatch(ann));
   }
 
-  std::string pfx = std::string(kw) + " " + std::string(node->name);
+  std::string pfx = "";
+  if (auto *cls = llvm::dyn_cast<ClassDeclNode>(node)) {
+    if (cls->isAbstract) {
+      pfx += "abstract ";
+    }
+  }
+  pfx += std::string(kw) + " " + std::string(node->name);
 
   if (node->isTemplate) {
     pfx += "<";
