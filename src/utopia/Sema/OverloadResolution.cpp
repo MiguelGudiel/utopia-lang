@@ -119,10 +119,10 @@ TypeCheckPass::resolveOverloadedOperator(const Type *lhsType,
                         ->getPointeeType();
                 if (!pointee->isConstQualified()) {
                   if (!isLValue) {
-                    match = false;
-                    break;
+                    currentScore += 1;
+                  } else {
+                    currentScore += 3;
                   }
-                  currentScore += 3;
                 } else {
                   currentScore += 2;
                 }
@@ -187,10 +187,10 @@ TypeCheckPass::resolveOverloadedOperator(const Type *lhsType,
                 static_cast<const ReferenceType *>(paramType)->getPointeeType();
             if (!pointee->isConstQualified()) {
               if (!isLValue) {
-                match = false;
-                break;
+                currentScore += 1;
+              } else {
+                currentScore += 3;
               }
-              currentScore += 3;
             } else {
               currentScore += 2;
             }
@@ -202,6 +202,26 @@ TypeCheckPass::resolveOverloadedOperator(const Type *lhsType,
         if (match && currentScore > bestScore) {
           bestScore = currentScore;
           bestMatch = fDecl;
+        }
+      }
+    }
+  }
+
+  if (bestMatch) {
+    size_t argsStartIdx = bestMatch->params.size() - args.size();
+    for (size_t i = 0; i < args.size(); ++i) {
+      const Type *paramType = bestMatch->params[argsStartIdx + i]->type;
+      if (paramType->isReferenceType() && !args[i]->isLValue) {
+        const Type *pointee =
+            static_cast<const ReferenceType *>(paramType)->getPointeeType();
+        if (!pointee->isConstQualified()) {
+          (void)ctx->diags.report(
+              {DiagLevel::Warning, args[i]->line, args[i]->column,
+               args[i]->length,
+               "Binding an r-value to non-const reference parameter '" +
+                   std::string(bestMatch->params[argsStartIdx + i]->name) +
+                   "' will implicitly create a stack-allocated temporary.",
+               std::string(ctx->currentFile), args[i]->endLine});
         }
       }
     }

@@ -2032,14 +2032,17 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
     const Type *initTy = node->initializer->exprType;
 
     if (declType->isReferenceType()) {
-      /* Allow binding references to array subscript elements */
-      if (node->initializer->kind != NodeKind::Variable &&
-          node->initializer->kind != NodeKind::UnaryOp &&
-          node->initializer->kind != NodeKind::FunctionCall &&
-          node->initializer->kind != NodeKind::MemberAccess &&
-          node->initializer->kind != NodeKind::ArraySubscript) {
-        (void)ctx->reportError(node->line, node->column, node->length,
-                               "Cannot bind a non-lvalue to a reference.");
+      if (!node->initializer->isLValue) {
+        const Type *pointee =
+            static_cast<const ReferenceType *>(declType)->getPointeeType();
+        if (!pointee->isConstQualified()) {
+          (void)ctx->diags.report(
+              {DiagLevel::Warning, node->initializer->line,
+               node->initializer->column, node->initializer->length,
+               "Binding an r-value to a non-const reference will implicitly "
+               "create a stack-allocated temporary.",
+               std::string(ctx->currentFile), node->initializer->endLine});
+        }
       }
     } else if (declType->getKind() == TypeKind::RValueReference) {
       if (node->initializer->isLValue) {
@@ -2118,7 +2121,7 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
                     } else if (pType->isReferenceType()) {
                       if (!pointee->isConstQualified()) {
                         if (!isLValue) {
-                          match = false;
+                          currentScore = 1;
                         } else {
                           currentScore = 3;
                         }
@@ -3243,6 +3246,28 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
                                      "Argument evaluation failed."});
   }
 
+  auto emitRValueRefWarnings =
+      [&](const FunctionDeclNode *func,
+          const std::vector<ExprNode *> &resolvedArgs) {
+        for (size_t p = 0; p < func->params.size() && p < resolvedArgs.size();
+             ++p) {
+          const Type *paramType = func->params[p]->type;
+          if (paramType->isReferenceType() && !resolvedArgs[p]->isLValue) {
+            const Type *pointee =
+                static_cast<const ReferenceType *>(paramType)->getPointeeType();
+            if (!pointee->isConstQualified()) {
+              (void)ctx->diags.report(
+                  {DiagLevel::Warning, resolvedArgs[p]->line,
+                   resolvedArgs[p]->column, resolvedArgs[p]->length,
+                   "Binding an r-value to non-const reference parameter '" +
+                       std::string(func->params[p]->name) +
+                       "' will implicitly create a stack-allocated temporary.",
+                   std::string(ctx->currentFile), resolvedArgs[p]->endLine});
+            }
+          }
+        }
+      };
+
   auto checkMatch = [&](const FunctionDeclNode *fDecl, int &outScore,
                         std::vector<ExprNode *> &outResolvedArgs)
       -> std::vector<std::string> {
@@ -3392,9 +3417,9 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
               static_cast<const ReferenceType *>(paramType)->getPointeeType();
           if (!pointee->isConstQualified()) {
             if (!isLValue) {
-              errors.push_back(
-                  "Cannot bind an r-value to non-const reference parameter '" +
-                  std::string(fDecl->params[p]->name) + "'.");
+              if (explicitlyProvided[p]) {
+                outScore += 1;
+              }
             } else if (explicitlyProvided[p]) {
               outScore += 3;
             }
@@ -3543,6 +3568,7 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
           node->isLValue = (node->exprType->isReferenceType());
 
           checkDeprecated(bestMatch, node);
+          emitRValueRefWarnings(bestMatch, bestResolvedArgs);
 
           return node->exprType;
         }
@@ -3638,6 +3664,8 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
         node->exprType = recordTy;
         node->isLValue = false;
         checkDeprecated(bestMatch, node);
+        emitRValueRefWarnings(bestMatch, bestResolvedArgs);
+
         return node->exprType;
       }
 
@@ -3827,6 +3855,7 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
         }
 
         checkDeprecated(bestMatch, node);
+        emitRValueRefWarnings(bestMatch, bestResolvedArgs);
 
         return node->exprType;
       }
@@ -4361,8 +4390,9 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
                 static_cast<const ReferenceType *>(paramType)->getPointeeType();
             if (!pointee->isConstQualified()) {
               if (!isLValue) {
-                match = false;
-                break;
+                if (explicitlyProvided[p]) {
+                  currentScore += 1;
+                }
               } else if (explicitlyProvided[p]) {
                 currentScore += 3;
               }
@@ -4409,6 +4439,22 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
 
         for (size_t p = 0; p < bestResolvedArgs.size(); ++p) {
           const Type *paramType = bestMatch->params[p]->type;
+
+          if (paramType->isReferenceType() && !bestResolvedArgs[p]->isLValue) {
+            const Type *pointee =
+                static_cast<const ReferenceType *>(paramType)->getPointeeType();
+            if (!pointee->isConstQualified()) {
+              (void)ctx->diags.report(
+                  {DiagLevel::Warning, bestResolvedArgs[p]->line,
+                   bestResolvedArgs[p]->column, bestResolvedArgs[p]->length,
+                   "Binding an r-value to non-const reference parameter '" +
+                       std::string(bestMatch->params[p]->name) +
+                       "' will implicitly create a stack-allocated temporary.",
+                   std::string(ctx->currentFile),
+                   bestResolvedArgs[p]->endLine});
+            }
+          }
+
           if (paramType->getKind() == TypeKind::Array) {
             paramType = ctx->astCtx.getPointerType(
                 static_cast<const ArrayType *>(paramType)->getElementType());
