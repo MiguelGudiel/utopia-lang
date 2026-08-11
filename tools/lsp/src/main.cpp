@@ -2729,6 +2729,7 @@ void handleSemanticTokens(const json &req) {
                    tok.type == TokenType::PUBLIC_KW ||
                    tok.type == TokenType::PRIVATE_KW ||
                    tok.type == TokenType::PROTECTED_KW ||
+                   tok.type == TokenType::ABSTRACT_KW ||
                    tok.type == TokenType::REQUIRED_KW ||
                    tok.type == TokenType::NAMESPACE_KW ||
                    tok.type == TokenType::EXTENDS_KW ||

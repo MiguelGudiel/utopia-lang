@@ -2,6 +2,11 @@ set(CLI_SOURCES
     src/main.cpp
     src/ProjectManager.cpp
     src/BuildScriptRunner.cpp
+    src/Core/ProjectBuilder.cpp
+    src/CLI/OptionsParser.cpp
+    src/Commands/Build/BuildCommand.cpp
+    src/Commands/Run/RunCommand.cpp
+    src/Commands/Fmt/FmtCommand.cpp
 )
 
 add_executable(utopia ${CLI_SOURCES})
