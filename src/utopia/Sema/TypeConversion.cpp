@@ -43,17 +43,19 @@ bool canImplicitlyCast(const Type *from, const Type *to,
       return true;
 
     if (cFrom->getBaseClass()) {
-      const ClassType *pBase = static_cast<const ClassType *>(
-          cFrom->getBaseClass()->getUnqualifiedType());
-      if (self(pBase, cTo, self))
-        return true;
+      if (auto *pBase = llvm::dyn_cast<ClassType>(
+              cFrom->getBaseClass()->getUnqualifiedType())) {
+        if (self(pBase, cTo, self))
+          return true;
+      }
     }
 
     for (const Type *iface : cFrom->getInterfaces()) {
-      const ClassType *pIface =
-          static_cast<const ClassType *>(iface->getUnqualifiedType());
-      if (self(pIface, cTo, self))
-        return true;
+      if (auto *pIface =
+              llvm::dyn_cast<ClassType>(iface->getUnqualifiedType())) {
+        if (self(pIface, cTo, self))
+          return true;
+      }
     }
 
     return false;

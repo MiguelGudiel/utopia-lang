@@ -3846,11 +3846,12 @@ llvm::Constant *CodeGen::getOrCreateVTable(const ClassType *classTy) {
 
   auto collectMethods = [&](const ClassDeclNode *node, auto &self) -> void {
     if (node->baseClass) {
-      const ClassType *pType =
-          static_cast<const ClassType *>(node->baseClass->getUnqualifiedType());
-      if (auto *pDecl =
-              llvm::dyn_cast_or_null<ClassDeclNode>(pType->getDeclaration())) {
-        self(pDecl, self);
+      if (auto *pType = llvm::dyn_cast<ClassType>(
+              node->baseClass->getUnqualifiedType())) {
+        if (auto *pDecl = llvm::dyn_cast_or_null<ClassDeclNode>(
+                pType->getDeclaration())) {
+          self(pDecl, self);
+        }
       }
     }
     for (auto *m : node->methods) {

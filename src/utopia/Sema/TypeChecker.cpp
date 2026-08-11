@@ -750,11 +750,16 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
           cycle = true;
           break;
         }
-        if (current->getBaseClass())
-          current = static_cast<const ClassType *>(
-              current->getBaseClass()->getUnqualifiedType());
-        else
+        if (current->getBaseClass()) {
+          if (auto *nextBase = llvm::dyn_cast<ClassType>(
+                  current->getBaseClass()->getUnqualifiedType())) {
+            current = nextBase;
+          } else {
+            break;
+          }
+        } else {
           break;
+        }
       }
       if (cycle) {
         ctx->reportError(node->line, node->column, node->length,
@@ -821,10 +826,11 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
   bool isPolymorphic = false;
 
   if (node->baseClass && !hasErrors) {
-    const ClassType *pType =
-        static_cast<const ClassType *>(node->baseClass->getUnqualifiedType());
-    if (pType->getIsPolymorphic())
-      isPolymorphic = true;
+    if (auto *pType =
+            llvm::dyn_cast<ClassType>(node->baseClass->getUnqualifiedType())) {
+      if (pType->getIsPolymorphic())
+        isPolymorphic = true;
+    }
   }
   if (!resolvedInterfaces.empty()) {
     isPolymorphic = true;
@@ -849,13 +855,13 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
   auto collectBaseFields = [&](const ClassDeclNode *cDecl, auto &self) -> void {
     if (!cDecl)
       return;
-    if (cDecl->baseClass &&
-        cDecl->baseClass->getUnqualifiedType()->getKind() == TypeKind::Class) {
-      const ClassType *pType = static_cast<const ClassType *>(
-          cDecl->baseClass->getUnqualifiedType());
-      if (auto *pDecl =
-              llvm::dyn_cast_or_null<ClassDeclNode>(pType->getDeclaration())) {
-        self(pDecl, self);
+    if (cDecl->baseClass) {
+      if (auto *pType = llvm::dyn_cast<ClassType>(
+              cDecl->baseClass->getUnqualifiedType())) {
+        if (auto *pDecl = llvm::dyn_cast_or_null<ClassDeclNode>(
+                pType->getDeclaration())) {
+          self(pDecl, self);
+        }
       }
     }
     for (auto *f : cDecl->fields) {
@@ -869,11 +875,12 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
   };
 
   if (node->baseClass && !hasErrors) {
-    const ClassType *pType =
-        static_cast<const ClassType *>(node->baseClass->getUnqualifiedType());
-    if (auto *pDecl =
-            llvm::dyn_cast_or_null<ClassDeclNode>(pType->getDeclaration())) {
-      collectBaseFields(pDecl, collectBaseFields);
+    if (auto *pType =
+            llvm::dyn_cast<ClassType>(node->baseClass->getUnqualifiedType())) {
+      if (auto *pDecl =
+              llvm::dyn_cast_or_null<ClassDeclNode>(pType->getDeclaration())) {
+        collectBaseFields(pDecl, collectBaseFields);
+      }
     }
   }
 
@@ -889,28 +896,30 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
   std::unordered_map<std::string_view, uint32_t> vtableLayout;
 
   if (node->baseClass && !hasErrors) {
-    const ClassType *pType =
-        static_cast<const ClassType *>(node->baseClass->getUnqualifiedType());
-    if (auto *pDecl =
-            llvm::dyn_cast_or_null<ClassDeclNode>(pType->getDeclaration())) {
-      auto collectVTable = [&](const ClassDeclNode *cd, auto &self) -> void {
-        if (cd->baseClass) {
-          const ClassType *pt = static_cast<const ClassType *>(
-              cd->baseClass->getUnqualifiedType());
-          if (auto *pd =
-                  llvm::dyn_cast_or_null<ClassDeclNode>(pt->getDeclaration())) {
-            self(pd, self);
-          }
-        }
-        for (auto *m : cd->methods) {
-          if (m->isVirtual || m->isOverride) {
-            if (!vtableLayout.contains(m->name)) {
-              vtableLayout[m->name] = currentVTableIdx++;
+    if (auto *pType =
+            llvm::dyn_cast<ClassType>(node->baseClass->getUnqualifiedType())) {
+      if (auto *pDecl =
+              llvm::dyn_cast_or_null<ClassDeclNode>(pType->getDeclaration())) {
+        auto collectVTable = [&](const ClassDeclNode *cd, auto &self) -> void {
+          if (cd->baseClass) {
+            if (auto *pt = llvm::dyn_cast<ClassType>(
+                    cd->baseClass->getUnqualifiedType())) {
+              if (auto *pd = llvm::dyn_cast_or_null<ClassDeclNode>(
+                      pt->getDeclaration())) {
+                self(pd, self);
+              }
             }
           }
-        }
-      };
-      collectVTable(pDecl, collectVTable);
+          for (auto *m : cd->methods) {
+            if (m->isVirtual || m->isOverride) {
+              if (!vtableLayout.contains(m->name)) {
+                vtableLayout[m->name] = currentVTableIdx++;
+              }
+            }
+          }
+        };
+        collectVTable(pDecl, collectVTable);
+      }
     }
   }
 
@@ -955,8 +964,7 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
         return;
       for (auto *pm : cDecl->methods) {
         if (signaturesMatch(method, pm)) {
-          if (!pm->isVirtual && !pm->isOverride &&
-              !pm->isAbstract) {
+          if (!pm->isVirtual && !pm->isOverride && !pm->isAbstract) {
             ctx->reportError(
                 method->line, method->column, method->length,
                 "Method '" + std::string(method->name) +
@@ -968,33 +976,37 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
         }
       }
       if (cDecl->baseClass) {
-        const ClassType *pType = static_cast<const ClassType *>(
-            cDecl->baseClass->getUnqualifiedType());
-        self(static_cast<const ClassDeclNode *>(pType->getDeclaration()),
-             fromInterface, self);
+        if (auto *pType = llvm::dyn_cast<ClassType>(
+                cDecl->baseClass->getUnqualifiedType())) {
+          self(llvm::dyn_cast_or_null<ClassDeclNode>(pType->getDeclaration()),
+               fromInterface, self);
+        }
       }
       for (auto *iface : cDecl->interfaces) {
-        const ClassType *iType =
-            static_cast<const ClassType *>(iface->getUnqualifiedType());
-        self(static_cast<const ClassDeclNode *>(iType->getDeclaration()), true,
-             self);
+        if (auto *iType =
+                llvm::dyn_cast<ClassType>(iface->getUnqualifiedType())) {
+          self(llvm::dyn_cast_or_null<ClassDeclNode>(iType->getDeclaration()),
+               true, self);
+        }
       }
     };
 
     if (node->baseClass) {
-      const ClassType *pType =
-          static_cast<const ClassType *>(node->baseClass->getUnqualifiedType());
-      checkBaseHierarchy(
-          static_cast<const ClassDeclNode *>(pType->getDeclaration()), false,
-          checkBaseHierarchy);
+      if (auto *pType = llvm::dyn_cast<ClassType>(
+              node->baseClass->getUnqualifiedType())) {
+        checkBaseHierarchy(
+            llvm::dyn_cast_or_null<ClassDeclNode>(pType->getDeclaration()),
+            false, checkBaseHierarchy);
+      }
     }
     if (!foundInBaseOrIface) {
       for (auto *iface : resolvedInterfaces) {
-        const ClassType *iType =
-            static_cast<const ClassType *>(iface->getUnqualifiedType());
-        checkBaseHierarchy(
-            static_cast<const ClassDeclNode *>(iType->getDeclaration()), true,
-            checkBaseHierarchy);
+        if (auto *iType =
+                llvm::dyn_cast<ClassType>(iface->getUnqualifiedType())) {
+          checkBaseHierarchy(
+              llvm::dyn_cast_or_null<ClassDeclNode>(iType->getDeclaration()),
+              true, checkBaseHierarchy);
+        }
         if (foundInBaseOrIface)
           break;
       }
@@ -1037,9 +1049,13 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
           }
         }
         if (current->baseClass) {
-          const ClassType *pType = static_cast<const ClassType *>(
-              current->baseClass->getUnqualifiedType());
-          current = static_cast<const ClassDeclNode *>(pType->getDeclaration());
+          if (auto *pType = llvm::dyn_cast<ClassType>(
+                  current->baseClass->getUnqualifiedType())) {
+            current =
+                llvm::dyn_cast_or_null<ClassDeclNode>(pType->getDeclaration());
+          } else {
+            current = nullptr;
+          }
         } else {
           current = nullptr;
         }
@@ -1067,23 +1083,28 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
         }
       }
       if (ifaceDecl->baseClass) {
-        const ClassType *pType = static_cast<const ClassType *>(
-            ifaceDecl->baseClass->getUnqualifiedType());
-        self(static_cast<const ClassDeclNode *>(pType->getDeclaration()), self);
+        if (auto *pType = llvm::dyn_cast<ClassType>(
+                ifaceDecl->baseClass->getUnqualifiedType())) {
+          self(llvm::dyn_cast_or_null<ClassDeclNode>(pType->getDeclaration()),
+               self);
+        }
       }
       for (const auto *superIface : ifaceDecl->interfaces) {
-        const ClassType *pType =
-            static_cast<const ClassType *>(superIface->getUnqualifiedType());
-        self(static_cast<const ClassDeclNode *>(pType->getDeclaration()), self);
+        if (auto *pType =
+                llvm::dyn_cast<ClassType>(superIface->getUnqualifiedType())) {
+          self(llvm::dyn_cast_or_null<ClassDeclNode>(pType->getDeclaration()),
+               self);
+        }
       }
     };
 
     for (const auto *iface : resolvedInterfaces) {
-      const ClassType *iType =
-          static_cast<const ClassType *>(iface->getUnqualifiedType());
-      if (auto *iDecl =
-              llvm::dyn_cast_or_null<ClassDeclNode>(iType->getDeclaration())) {
-        collectRequiredMethods(iDecl, collectRequiredMethods);
+      if (auto *iType =
+              llvm::dyn_cast<ClassType>(iface->getUnqualifiedType())) {
+        if (auto *iDecl = llvm::dyn_cast_or_null<ClassDeclNode>(
+                iType->getDeclaration())) {
+          collectRequiredMethods(iDecl, collectRequiredMethods);
+        }
       }
     }
   }
@@ -2632,8 +2653,12 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
               break;
             }
             if (currClass->getBaseClass()) {
-              currClass = llvm::dyn_cast<ClassType>(
-                  currClass->getBaseClass()->getUnqualifiedType());
+              if (auto *pType = llvm::dyn_cast<ClassType>(
+                      currClass->getBaseClass()->getUnqualifiedType())) {
+                currClass = pType;
+              } else {
+                break;
+              }
             } else
               break;
           }
@@ -2723,8 +2748,12 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
                     break;
                   }
                   if (currClass->getBaseClass()) {
-                    currClass = llvm::dyn_cast<ClassType>(
-                        currClass->getBaseClass()->getUnqualifiedType());
+                    if (auto *pType = llvm::dyn_cast<ClassType>(
+                            currClass->getBaseClass()->getUnqualifiedType())) {
+                      currClass = pType;
+                    } else {
+                      break;
+                    }
                   } else
                     break;
                 }
@@ -2916,8 +2945,12 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
                     break;
                   }
                   if (currClass->getBaseClass()) {
-                    currClass = llvm::dyn_cast<ClassType>(
-                        currClass->getBaseClass()->getUnqualifiedType());
+                    if (auto *pType = llvm::dyn_cast<ClassType>(
+                            currClass->getBaseClass()->getUnqualifiedType())) {
+                      currClass = pType;
+                    } else {
+                      break;
+                    }
                   } else
                     break;
                 }
@@ -2947,9 +2980,12 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
           const ClassDeclNode *cDecl =
               static_cast<const ClassDeclNode *>(currentRecDecl);
           if (cDecl->baseClass) {
-            const ClassType *pType = static_cast<const ClassType *>(
-                cDecl->baseClass->getUnqualifiedType());
-            currentRecDecl = pType->getDeclaration();
+            if (auto *pType = llvm::dyn_cast<ClassType>(
+                    cDecl->baseClass->getUnqualifiedType())) {
+              currentRecDecl = pType->getDeclaration();
+            } else {
+              break;
+            }
           } else {
             break;
           }
@@ -3626,9 +3662,12 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
             const ClassDeclNode *cDecl =
                 static_cast<const ClassDeclNode *>(currentRecDecl);
             if (cDecl->baseClass) {
-              const ClassType *pType = static_cast<const ClassType *>(
-                  cDecl->baseClass->getUnqualifiedType());
-              currentRecDecl = pType->getDeclaration();
+              if (auto *pType = llvm::dyn_cast<ClassType>(
+                      cDecl->baseClass->getUnqualifiedType())) {
+                currentRecDecl = pType->getDeclaration();
+              } else {
+                break;
+              }
             } else {
               break;
             }
