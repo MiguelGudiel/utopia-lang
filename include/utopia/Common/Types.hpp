@@ -80,6 +80,7 @@ struct FieldInfo {
   const Type *type;
   uint32_t index;
   bool isPublic;
+  bool isProtected;
 };
 
 class BuiltinType : public Type {
@@ -213,8 +214,25 @@ public:
 };
 
 class ClassType : public RecordType {
+  const Type *baseClass = nullptr;
+  llvm::ArrayRef<const Type *> interfaces;
+  bool isPolymorphic = false;
+  bool isAbstract = false;
+
 public:
   explicit ClassType(std::string_view n) : RecordType(TypeKind::Class, n) {}
+
+  const Type *getBaseClass() const { return baseClass; }
+  void setBaseClass(const Type *b) { baseClass = b; }
+
+  llvm::ArrayRef<const Type *> getInterfaces() const { return interfaces; }
+  void setInterfaces(llvm::ArrayRef<const Type *> i) { interfaces = i; }
+
+  bool getIsPolymorphic() const { return isPolymorphic; }
+  void setIsPolymorphic(bool p) { isPolymorphic = p; }
+
+  bool getIsAbstract() const { return isAbstract; }
+  void setIsAbstract(bool a) { isAbstract = a; }
 
   static bool classof(const Type *t) { return t->getKind() == TypeKind::Class; }
 };

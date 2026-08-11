@@ -132,6 +132,11 @@ public:
     return constTy;
   }
 
+  NamespaceDeclNode *getNamespace(std::string_view fqName) const {
+    auto it = namespaces.find(fqName);
+    return it != namespaces.end() ? it->second : nullptr;
+  }
+
   RecordType *createRecordType(TypeKind kind, std::string_view name) {
     auto it = recordTypes.find(name);
     if (it != recordTypes.end()) {

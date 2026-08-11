@@ -110,6 +110,8 @@ private:
   llvm::Constant *createTypeReflectionConstant(const Type *t,
                                                llvm::StructType *structTy);
 
+  llvm::Constant *getOrCreateVTable(const ClassType *classTy);
+
   /* Lifetime Intrinsic Emission */
   void emitLifetimeStart(llvm::AllocaInst *allocaInst, uint64_t size);
   void emitLifetimeEnd(llvm::AllocaInst *allocaInst, uint64_t size);

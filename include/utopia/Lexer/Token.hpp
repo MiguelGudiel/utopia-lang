@@ -17,9 +17,10 @@ enum class TokenType : uint8_t {
   ANNOTATION_KW,
   STATIC_KW,
   REQUIRED_KW,
-  PUBLIC_KW,  /* public */
-  PRIVATE_KW, /* private */
-  VAR_KW,     /* var */
+  PUBLIC_KW,    /* public */
+  PRIVATE_KW,   /* private */
+  PROTECTED_KW, /* protected */
+  VAR_KW,       /* var */
   FOR_KW,
   WHILE_KW,
   IF_KW,
@@ -53,9 +54,12 @@ enum class TokenType : uint8_t {
   GE,
   BANG,
   AT,
-  STRUCT_KW,
-  UNION_KW, /* union */
-  CLASS_KW,
+  STRUCT_KW,     /* struct */
+  UNION_KW,      /* union */
+  CLASS_KW,      /* class */
+  ABSTRACT_KW,   /* abstract */
+  EXTENDS_KW,    /* extends */
+  IMPLEMENTS_KW, /* implements */
   THIS_KW,
   DOT,
   TILDE,

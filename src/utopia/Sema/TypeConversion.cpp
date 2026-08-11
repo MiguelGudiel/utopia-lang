@@ -1,4 +1,3 @@
-#include "utopia/Common/Logger.hpp"
 #include "utopia/Sema/Sema.hpp"
 #include <string>
 
@@ -33,6 +32,44 @@ bool canImplicitlyCast(const Type *from, const Type *to,
    * qualifiers */
   const Type *unqualFrom = baseFrom->getUnqualifiedType();
   const Type *unqualTo = baseTo->getUnqualifiedType();
+
+  /* Recursive evaluation of both direct inheritance and interface
+   * implementations */
+  auto isSubclassOrImplements = [&](const ClassType *cFrom,
+                                    const ClassType *cTo, auto &self) -> bool {
+    if (!cFrom || !cTo)
+      return false;
+    if (cFrom == cTo)
+      return true;
+
+    if (cFrom->getBaseClass()) {
+      if (auto *pBase = llvm::dyn_cast<ClassType>(
+              cFrom->getBaseClass()->getUnqualifiedType())) {
+        if (self(pBase, cTo, self))
+          return true;
+      }
+    }
+
+    for (const Type *iface : cFrom->getInterfaces()) {
+      if (auto *pIface =
+              llvm::dyn_cast<ClassType>(iface->getUnqualifiedType())) {
+        if (self(pIface, cTo, self))
+          return true;
+      }
+    }
+
+    return false;
+  };
+
+  /* Subclass or Interface to Base Class Upcasting */
+  if (unqualFrom->getKind() == TypeKind::Class &&
+      unqualTo->getKind() == TypeKind::Class) {
+    const ClassType *cFrom = static_cast<const ClassType *>(unqualFrom);
+    const ClassType *cTo = static_cast<const ClassType *>(unqualTo);
+    if (isSubclassOrImplements(cFrom, cTo, isSubclassOrImplements)) {
+      return true;
+    }
+  }
 
   /* Implicit Array to ListLiteralView intrinsic resolution */
   if (auto *arrFrom = llvm::dyn_cast<ArrayType>(unqualFrom)) {
@@ -129,6 +166,18 @@ bool canImplicitlyCast(const Type *from, const Type *to,
       /* Universal null pointer interoperability */
       if (toPointee->isVoid() || fromPointee->isVoid())
         return true;
+
+      /* Subclass to Base Class Pointer Upcasting */
+      if (fromPointee->getUnqualifiedType()->getKind() == TypeKind::Class &&
+          toPointee->getUnqualifiedType()->getKind() == TypeKind::Class) {
+        const ClassType *cFrom =
+            static_cast<const ClassType *>(fromPointee->getUnqualifiedType());
+        const ClassType *cTo =
+            static_cast<const ClassType *>(toPointee->getUnqualifiedType());
+        if (isSubclassOrImplements(cFrom, cTo, isSubclassOrImplements)) {
+          return true;
+        }
+      }
 
       /* Enforce strict parameter structural equality for function pointer
        * assignments */

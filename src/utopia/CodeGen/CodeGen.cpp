@@ -189,6 +189,11 @@ llvm::Type *CodeGen::getLLVMType(const Type *type) {
         }
         structTy->setBody(elements, false);
       } else {
+        if (llvm::isa<ClassType>(type) &&
+            static_cast<const ClassType *>(type)->getIsPolymorphic()) {
+          elements.push_back(builder.getPtrTy()); /* Virtual Pointer */
+        }
+
         for (const auto &f : rec->getFields()) {
           elements.push_back(getLLVMType(f.type));
         }
@@ -3025,8 +3030,22 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
     }
 
     func = getOrCreateFunction(node->resolvedFunc);
+    llvm::Value *callee = func;
+    llvm::FunctionType *calleeTy = func->getFunctionType();
 
+    /* Identify if the member access is strictly a constructor invocation
+     * by resolving its structural declaration target. */
+    bool isConstructorViaMA = false;
     if (node->target->kind == NodeKind::MemberAccess) {
+      auto ma = static_cast<const MemberAccessNode *>(node->target);
+      if (ma->resolvedDecl && (ma->resolvedDecl->kind == NodeKind::ClassDecl ||
+                               ma->resolvedDecl->kind == NodeKind::StructDecl ||
+                               ma->resolvedDecl->kind == NodeKind::UnionDecl)) {
+        isConstructorViaMA = true;
+      }
+    }
+
+    if (node->target->kind == NodeKind::MemberAccess && !isConstructorViaMA) {
       auto ma = static_cast<const MemberAccessNode *>(node->target);
       if (node->resolvedFunc->isMethod && !node->resolvedFunc->isExtern &&
           !node->resolvedFunc->isStatic && node->resolvedFunc->parentRecord) {
@@ -3037,6 +3056,33 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
           objPtr = getLValue(ma->object);
         }
         argsArgs.push_back(objPtr);
+
+        if (node->resolvedFunc->isVirtual || node->resolvedFunc->isOverride) {
+          const Type *baseTy = ma->object->exprType;
+          if (baseTy->isPointerType()) {
+            baseTy = static_cast<const PointerType *>(baseTy)->getPointeeType();
+          } else if (baseTy->isReferenceType() ||
+                     baseTy->getKind() == TypeKind::RValueReference) {
+            if (baseTy->isReferenceType()) {
+              baseTy =
+                  static_cast<const ReferenceType *>(baseTy)->getPointeeType();
+            } else {
+              baseTy = static_cast<const RValueReferenceType *>(baseTy)
+                           ->getPointeeType();
+            }
+          }
+
+          llvm::Type *structLlTy = getLLVMType(baseTy);
+          llvm::Value *vptrGep =
+              builder.CreateStructGEP(structLlTy, objPtr, 0, "vptr.gep");
+          llvm::Value *vptr =
+              builder.CreateLoad(builder.getPtrTy(), vptrGep, "vptr");
+          llvm::Value *methodGep = builder.CreateInBoundsGEP(
+              builder.getPtrTy(), vptr,
+              builder.getInt32(node->resolvedFunc->vtableIndex), "method.gep");
+          callee =
+              builder.CreateLoad(builder.getPtrTy(), methodGep, "method.ptr");
+        }
       }
     } else if (node->resolvedFunc->isMethod && !node->resolvedFunc->isExtern &&
                !node->resolvedFunc->isStatic &&
@@ -3113,9 +3159,8 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
         lastTemporaryAlloca = nullptr;
 
         if (func && argVal) {
-          if (llArgIdx < func->arg_size()) {
-            llvm::Type *paramTy =
-                func->getFunctionType()->getParamType(llArgIdx);
+          if (llArgIdx < calleeTy->getNumParams()) {
+            llvm::Type *paramTy = calleeTy->getParamType(llArgIdx);
             argVal = createImplicitCast(argVal, paramTy);
           } else if (func->isVarArg()) {
             if (argVal->getType()->isFloatTy()) {
@@ -3136,7 +3181,7 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
       astParamIdx++;
     }
 
-    auto callRes = builder.CreateCall(func, argsArgs);
+    auto callRes = builder.CreateCall(calleeTy, callee, argsArgs);
     lastTemporaryAlloca = nullptr;
 
     if (node->resolvedFunc->isMethod &&
@@ -3522,21 +3567,20 @@ llvm::Value *CodeGen::visit(const NewExprNode *node) {
                                         builder.getInt64(8));
   }
 
-  if (node->hasParens) {
-    llvm::Value *memsetSize = sizeVal;
-    if (node->arraySize) {
-      memsetSize = builder.CreateSub(sizeVal, builder.getInt64(8));
-    }
-    builder.CreateMemSet(userMem, builder.getInt8(0), memsetSize,
-                         llvm::Align(1));
+  llvm::Value *typedMem =
+      builder.CreateBitCast(userMem, getLLVMType(node->exprType));
 
-    if (!node->arraySize) {
+  if (node->hasParens) {
+    if (node->arraySize) {
+      llvm::Value *memsetSize = builder.CreateSub(sizeVal, builder.getInt64(8));
+      builder.CreateMemSet(userMem, builder.getInt8(0), memsetSize,
+                           llvm::Align(1));
+    } else {
+      emitDefaultInitialization(typedMem, node->allocatedType);
+
       if (node->resolvedConstructor) {
         llvm::Function *ctorFunc =
             getOrCreateFunction(node->resolvedConstructor);
-        llvm::Value *typedMem =
-            builder.CreateBitCast(userMem, getLLVMType(node->exprType));
-
         std::vector<llvm::Value *> argsArgs;
         argsArgs.push_back(typedMem);
 
@@ -3596,7 +3640,7 @@ llvm::Value *CodeGen::visit(const NewExprNode *node) {
     }
   }
 
-  return builder.CreateBitCast(userMem, getLLVMType(node->exprType));
+  return typedMem;
 }
 
 llvm::Value *CodeGen::visit(const DeleteExprNode *node) {
@@ -3789,6 +3833,66 @@ llvm::AllocaInst *CodeGen::createEntryBlockAlloca(llvm::Type *type,
   return TmpB.CreateAlloca(type, nullptr, varName);
 }
 
+llvm::Constant *CodeGen::getOrCreateVTable(const ClassType *classTy) {
+  std::string vtableName = "_ZTV" + std::string(classTy->getName());
+  std::replace(vtableName.begin(), vtableName.end(), '.', '_');
+
+  if (llvm::GlobalVariable *gv = mod.getGlobalVariable(vtableName)) {
+    return gv;
+  }
+
+  auto *cDecl = llvm::cast<ClassDeclNode>(classTy->getDeclaration());
+  std::vector<const FunctionDeclNode *> vtableMethods;
+
+  auto collectMethods = [&](const ClassDeclNode *node, auto &self) -> void {
+    if (node->baseClass) {
+      if (auto *pType = llvm::dyn_cast<ClassType>(
+              node->baseClass->getUnqualifiedType())) {
+        if (auto *pDecl = llvm::dyn_cast_or_null<ClassDeclNode>(
+                pType->getDeclaration())) {
+          self(pDecl, self);
+        }
+      }
+    }
+    for (auto *m : node->methods) {
+      if (m->isVirtual || m->isOverride) {
+        if (m->vtableIndex >= vtableMethods.size()) {
+          vtableMethods.resize(m->vtableIndex + 1, nullptr);
+        }
+        vtableMethods[m->vtableIndex] = m;
+      }
+    }
+  };
+
+  collectMethods(cDecl, collectMethods);
+
+  std::vector<llvm::Constant *> vtablePointers;
+  for (auto *m : vtableMethods) {
+    if (m) {
+      if (m->isAbstract) {
+        vtablePointers.push_back(
+            llvm::ConstantPointerNull::get(builder.getPtrTy()));
+      } else {
+        llvm::Function *func = getOrCreateFunction(m);
+        vtablePointers.push_back(func);
+      }
+    } else {
+      vtablePointers.push_back(
+          llvm::ConstantPointerNull::get(builder.getPtrTy()));
+    }
+  }
+
+  llvm::ArrayType *vtableTy =
+      llvm::ArrayType::get(builder.getPtrTy(), vtablePointers.size());
+  llvm::Constant *vtableInit =
+      llvm::ConstantArray::get(vtableTy, vtablePointers);
+
+  auto *gv = new llvm::GlobalVariable(mod, vtableTy, true,
+                                      llvm::GlobalValue::LinkOnceODRLinkage,
+                                      vtableInit, vtableName);
+  return gv;
+}
+
 void CodeGen::emitDefaultInitialization(llvm::Value *ptr, const Type *type) {
   llvm::Type *llTy = getLLVMType(type);
   uint64_t size = mod.getDataLayout().getTypeAllocSize(llTy);
@@ -3808,6 +3912,16 @@ void CodeGen::emitDefaultInitialization(llvm::Value *ptr, const Type *type) {
   }
 
   const auto *unqual = type->getUnqualifiedType();
+
+  if (unqual->getKind() == TypeKind::Class) {
+    auto *classTy = static_cast<const ClassType *>(unqual);
+    if (classTy->getIsPolymorphic()) {
+      llvm::Constant *vtable = getOrCreateVTable(classTy);
+      llvm::Value *vptrGep = builder.CreateStructGEP(llTy, ptr, 0, "vptr");
+      builder.CreateStore(vtable, vptrGep);
+    }
+  }
+
   if (unqual->getKind() == TypeKind::Struct ||
       unqual->getKind() == TypeKind::Class ||
       unqual->getKind() == TypeKind::Union) {
@@ -3831,7 +3945,6 @@ void CodeGen::emitDefaultInitialization(llvm::Value *ptr, const Type *type) {
       layout = mod.getDataLayout().getStructLayout(llRecTy);
     }
 
-    unsigned instanceIdx = 0;
     for (size_t i = 0; i < fields.size(); ++i) {
       auto *fieldDecl = fields[i];
 
@@ -3849,9 +3962,11 @@ void CodeGen::emitDefaultInitialization(llvm::Value *ptr, const Type *type) {
           uint64_t offset = 0;
 
           if (type->getKind() != TypeKind::Union) {
-            gep = builder.CreateStructGEP(llTy, ptr, instanceIdx,
+            auto *fInfo = recTy->getField(fieldDecl->varName);
+            uint32_t fIdx = fInfo ? fInfo->index : 0;
+            gep = builder.CreateStructGEP(llTy, ptr, fIdx,
                                           std::string(fieldDecl->varName));
-            offset = layout->getElementOffset(instanceIdx);
+            offset = layout->getElementOffset(fIdx);
           }
 
           llvm::MDNode *tbaaTag = tbaaManager.getTBAAStructAccessTag(
@@ -3860,8 +3975,6 @@ void CodeGen::emitDefaultInitialization(llvm::Value *ptr, const Type *type) {
           createTBAAStore(initVal, gep, tbaaTag);
         }
       }
-
-      instanceIdx++;
     }
   }
 }

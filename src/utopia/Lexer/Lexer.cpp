@@ -206,6 +206,8 @@ Token Lexer::parseToken() {
       return {TokenType::RETURN, id, startLine, startCol};
     if (id == "typedef")
       return {TokenType::TYPEDEF_KW, id, startLine, startCol};
+    if (id == "abstract")
+      return {TokenType::ABSTRACT_KW, id, startLine, startCol};
     if (id == "enum")
       return {TokenType::ENUM_KW, id, startLine, startCol};
     if (id == "for")
@@ -242,6 +244,8 @@ Token Lexer::parseToken() {
       return {TokenType::PUBLIC_KW, id, startLine, startCol};
     if (id == "private")
       return {TokenType::PRIVATE_KW, id, startLine, startCol};
+    if (id == "protected")
+      return {TokenType::PROTECTED_KW, id, startLine, startCol};
     if (id == "true")
       return {TokenType::TRUE_KW, id, startLine, startCol};
     if (id == "false")
@@ -252,6 +256,10 @@ Token Lexer::parseToken() {
       return {TokenType::UNION_KW, id, startLine, startCol};
     if (id == "class")
       return {TokenType::CLASS_KW, id, startLine, startCol};
+    if (id == "extends")
+      return {TokenType::EXTENDS_KW, id, startLine, startCol};
+    if (id == "implements")
+      return {TokenType::IMPLEMENTS_KW, id, startLine, startCol};
     if (id == "namespace")
       return {TokenType::NAMESPACE_KW, id, startLine, startCol};
     if (id == "using")

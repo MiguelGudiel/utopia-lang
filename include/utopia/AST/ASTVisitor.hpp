@@ -1,6 +1,7 @@
 #pragma once
 #include "utopia/AST/AST.hpp"
 #include <iostream>
+#include <type_traits>
 
 namespace utopia {
 
@@ -10,9 +11,11 @@ public:
     /* Trap null pointers at the traversal boundary to prevent silent
      * propagation of unhandled expected types across the pipeline */
     if (!node) [[unlikely]] {
-      std::cerr << "[Fatal] ASTVisitor dispatch encountered a null AST node.\n";
-      throw std::runtime_error(
-          "ASTVisitor: ASTVisitor dispatch encountered a null AST node.");
+      if constexpr (std::is_void_v<R>) {
+        return;
+      } else {
+        return R{};
+      }
     }
 
     switch (node->kind) {

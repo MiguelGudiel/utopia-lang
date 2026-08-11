@@ -276,6 +276,7 @@ ASTNode *ASTCloner::visit(const VarDeclNode *n) {
   node->externAlias = n->externAlias;
   node->hasPublicMod = n->hasPublicMod;
   node->hasPrivateMod = n->hasPrivateMod;
+  node->hasProtectedMod = n->hasProtectedMod;
   node->annotations = n->annotations;
   node->docString = n->docString;
   node->trailingComment = n->trailingComment;
@@ -295,6 +296,7 @@ ASTNode *ASTCloner::visit(const ParamDeclNode *n) {
       n->isNamed, n->isRequired, n->line, n->column, n->length);
   node->hasPublicMod = n->hasPublicMod;
   node->hasPrivateMod = n->hasPrivateMod;
+  node->hasProtectedMod = n->hasProtectedMod;
   node->annotations = n->annotations;
   node->docString = n->docString;
   node->trailingComment = n->trailingComment;
@@ -317,6 +319,7 @@ ASTNode *ASTCloner::visit(const FunctionDeclNode *n) {
   node->callingConv = n->callingConv;
   node->hasPublicMod = n->hasPublicMod;
   node->hasPrivateMod = n->hasPrivateMod;
+  node->hasProtectedMod = n->hasProtectedMod;
   node->annotations = n->annotations;
   node->docString = n->docString;
   node->trailingComment = n->trailingComment;
@@ -329,6 +332,12 @@ ASTNode *ASTCloner::visit(const FunctionDeclNode *n) {
   node->alignment = n->alignment;
   node->isPacked = n->isPacked;
   node->hasTrailingComma = n->hasTrailingComma;
+
+  node->isIntrinsic = n->isIntrinsic;
+  node->isVirtual = n->isVirtual;
+  node->isOverride = n->isOverride;
+  node->isAbstract = n->isAbstract;
+
   return node;
 }
 
@@ -342,6 +351,7 @@ ASTNode *ASTCloner::visit(const UnionDeclNode *n) {
     node->destructor = static_cast<FunctionDeclNode *>(dispatch(n->destructor));
   node->hasPublicMod = n->hasPublicMod;
   node->hasPrivateMod = n->hasPrivateMod;
+  node->hasProtectedMod = n->hasProtectedMod;
   node->annotations = n->annotations;
   node->docString = n->docString;
   node->trailingComment = n->trailingComment;
@@ -362,14 +372,25 @@ ASTNode *ASTCloner::visit(const ClassDeclNode *n) {
   node->constructors = cloneArray(n->constructors);
   if (n->destructor)
     node->destructor = static_cast<FunctionDeclNode *>(dispatch(n->destructor));
+
+  if (n->baseClass)
+    node->baseClass = cloneType(n->baseClass);
+
+  std::vector<const Type *> clonedInterfaces;
+  for (auto *i : n->interfaces)
+    clonedInterfaces.push_back(cloneType(i));
+  node->interfaces = ctx.copyArray<const Type *>(clonedInterfaces);
+
   node->hasPublicMod = n->hasPublicMod;
   node->hasPrivateMod = n->hasPrivateMod;
+  node->hasProtectedMod = n->hasProtectedMod;
   node->annotations = n->annotations;
   node->docString = n->docString;
   node->trailingComment = n->trailingComment;
   node->declFilePath = n->declFilePath;
   node->isOpaque = n->isOpaque;
   node->isTemplate = false;
+  node->isAbstract = n->isAbstract;
   node->endLine = n->endLine;
   node->alignment = n->alignment;
   node->isPacked = n->isPacked;
@@ -386,6 +407,7 @@ ASTNode *ASTCloner::visit(const StructDeclNode *n) {
     node->destructor = static_cast<FunctionDeclNode *>(dispatch(n->destructor));
   node->hasPublicMod = n->hasPublicMod;
   node->hasPrivateMod = n->hasPrivateMod;
+  node->hasProtectedMod = n->hasProtectedMod;
   node->annotations = n->annotations;
   node->docString = n->docString;
   node->trailingComment = n->trailingComment;
