@@ -799,16 +799,35 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
   auto prevContext = ctx->getCurrentRecordContext();
   ctx->setCurrentRecordContext(node->recordType);
 
+  auto *classTy =
+      static_cast<ClassType *>(const_cast<RecordType *>(node->recordType));
+
+  std::vector<const Type *> resolvedInterfaces;
+  for (const auto *iface : node->interfaces) {
+    const Type *resolved = resolveIfTemplate(iface);
+    if (resolved->getUnqualifiedType()->getKind() != TypeKind::Class) {
+      ctx->reportError(node->line, node->column, node->length,
+                       "Interfaces must be of class type.");
+      hasErrors = true;
+    }
+    resolvedInterfaces.push_back(resolved);
+  }
+  classTy->setInterfaces(
+      ctx->astCtx.copyArray<const Type *>(resolvedInterfaces));
+  const_cast<ClassDeclNode *>(node)->interfaces = classTy->getInterfaces();
+
   std::vector<FieldInfo> fInfos;
   uint32_t instanceFieldIndex = 0;
   bool isPolymorphic = false;
 
-  // Detect Polymorphism
   if (node->baseClass && !hasErrors) {
     const ClassType *pType =
         static_cast<const ClassType *>(node->baseClass->getUnqualifiedType());
     if (pType->getIsPolymorphic())
       isPolymorphic = true;
+  }
+  if (!resolvedInterfaces.empty()) {
+    isPolymorphic = true;
   }
   for (auto *method : node->methods) {
     if (method->isAbstract) {
@@ -823,7 +842,7 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
   }
 
   if (isPolymorphic) {
-    instanceFieldIndex = 1; /* Reserve index 0 for the vptr */
+    instanceFieldIndex = 1;
   }
 
   // Collection and flattening of base fields for slicing in LLVM
@@ -844,9 +863,7 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
         continue;
       bool isPub = f->isPublic(f->varName);
       bool isProt = f->isProtected(f->varName);
-      std::string_view fname =
-          (!isPub && !isProt) ? "" : f->varName; // Privates are visually
-                                                 // omitted from inheritance map
+      std::string_view fname = (!isPub && !isProt) ? "" : f->varName;
       fInfos.push_back({fname, f->type, instanceFieldIndex++, isPub, isProt});
     }
   };
@@ -897,6 +914,23 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
     }
   }
 
+  auto signaturesMatch = [&](const FunctionDeclNode *a,
+                             const FunctionDeclNode *b) {
+    if (a->name != b->name)
+      return false;
+    if (a->isConst != b->isConst)
+      return false;
+    if (!ctx->isSameType(a->returnType, b->returnType))
+      return false;
+    if (a->params.size() != b->params.size())
+      return false;
+    for (size_t i = 0; i < a->params.size(); ++i) {
+      if (!ctx->isSameType(a->params[i]->type, b->params[i]->type))
+        return false;
+    }
+    return true;
+  };
+
   for (auto *method : node->methods) {
     if (method->isAbstract && !node->isAbstract) {
       ctx->reportError(
@@ -906,17 +940,83 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
     }
 
     bool isVirtual = method->isAbstract;
-    bool isOverride = false;
+    bool explicitOverride = false;
     for (auto *ann : method->annotations) {
       if (ann->name == "virtual")
         isVirtual = true;
       if (ann->name == "override")
-        isOverride = true;
+        explicitOverride = true;
     }
-    const_cast<FunctionDeclNode *>(method)->isVirtual = isVirtual;
-    const_cast<FunctionDeclNode *>(method)->isOverride = isOverride;
 
-    if (isOverride || isVirtual) {
+    bool foundInBaseOrIface = false;
+    auto checkBaseHierarchy = [&](const ClassDeclNode *cDecl,
+                                  bool fromInterface, auto &self) -> void {
+      if (!cDecl || foundInBaseOrIface)
+        return;
+      for (auto *pm : cDecl->methods) {
+        if (signaturesMatch(method, pm)) {
+          if (!pm->isVirtual && !pm->isOverride &&
+              !pm->isAbstract) {
+            ctx->reportError(
+                method->line, method->column, method->length,
+                "Method '" + std::string(method->name) +
+                    "' marked @override but base method is not virtual.");
+            hasErrors = true;
+          }
+          foundInBaseOrIface = true;
+          return;
+        }
+      }
+      if (cDecl->baseClass) {
+        const ClassType *pType = static_cast<const ClassType *>(
+            cDecl->baseClass->getUnqualifiedType());
+        self(static_cast<const ClassDeclNode *>(pType->getDeclaration()),
+             fromInterface, self);
+      }
+      for (auto *iface : cDecl->interfaces) {
+        const ClassType *iType =
+            static_cast<const ClassType *>(iface->getUnqualifiedType());
+        self(static_cast<const ClassDeclNode *>(iType->getDeclaration()), true,
+             self);
+      }
+    };
+
+    if (node->baseClass) {
+      const ClassType *pType =
+          static_cast<const ClassType *>(node->baseClass->getUnqualifiedType());
+      checkBaseHierarchy(
+          static_cast<const ClassDeclNode *>(pType->getDeclaration()), false,
+          checkBaseHierarchy);
+    }
+    if (!foundInBaseOrIface) {
+      for (auto *iface : resolvedInterfaces) {
+        const ClassType *iType =
+            static_cast<const ClassType *>(iface->getUnqualifiedType());
+        checkBaseHierarchy(
+            static_cast<const ClassDeclNode *>(iType->getDeclaration()), true,
+            checkBaseHierarchy);
+        if (foundInBaseOrIface)
+          break;
+      }
+    }
+
+    if (foundInBaseOrIface) {
+      isVirtual = true;
+    }
+
+    if (explicitOverride && !foundInBaseOrIface) {
+      ctx->reportError(method->line, method->column, method->length,
+                       "Method '" + std::string(method->name) +
+                           "' marked @override but no matching method found "
+                           "in base classes or interfaces.");
+      hasErrors = true;
+    }
+
+    const_cast<FunctionDeclNode *>(method)->isVirtual = isVirtual;
+    const_cast<FunctionDeclNode *>(method)->isOverride =
+        foundInBaseOrIface || explicitOverride;
+
+    if (method->isOverride || method->isVirtual) {
       if (vtableLayout.contains(method->name)) {
         const_cast<FunctionDeclNode *>(method)->vtableIndex =
             vtableLayout[method->name];
@@ -925,73 +1025,73 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
         vtableLayout[method->name] = currentVTableIdx++;
       }
     }
+  }
 
-    if (isOverride) {
-      bool foundBase = false;
-      const ClassDeclNode *pDecl = nullptr;
-      if (node->baseClass) {
-        const ClassType *pType = static_cast<const ClassType *>(
-            node->baseClass->getUnqualifiedType());
-        pDecl = static_cast<const ClassDeclNode *>(pType->getDeclaration());
-      }
-
-      while (pDecl) {
-        for (auto *pm : pDecl->methods) {
-          if (pm->name == method->name) {
-            if (!pm->isVirtual && !pm->isOverride) {
-              ctx->reportError(
-                  method->line, method->column, method->length,
-                  "Method '" + std::string(method->name) +
-                      "' marked @override but base method is not virtual.");
-              hasErrors = true;
-            }
-            foundBase = true;
-            break;
+  if (!node->isAbstract && !hasErrors) {
+    auto hasImplementation = [&](const FunctionDeclNode *reqMethod) {
+      const ClassDeclNode *current = node;
+      while (current) {
+        for (const auto *m : current->methods) {
+          if (!m->isAbstract && signaturesMatch(m, reqMethod)) {
+            return true;
           }
         }
-        if (foundBase)
-          break;
-
-        if (pDecl->baseClass) {
+        if (current->baseClass) {
           const ClassType *pType = static_cast<const ClassType *>(
-              pDecl->baseClass->getUnqualifiedType());
-          pDecl = static_cast<const ClassDeclNode *>(pType->getDeclaration());
+              current->baseClass->getUnqualifiedType());
+          current = static_cast<const ClassDeclNode *>(pType->getDeclaration());
         } else {
-          break;
+          current = nullptr;
         }
       }
+      return false;
+    };
 
-      if (!foundBase) {
-        ctx->reportError(method->line, method->column, method->length,
-                         "Method '" + std::string(method->name) +
-                             "' marked @override but no matching method found "
-                             "in base classes.");
-        hasErrors = true;
+    auto collectRequiredMethods = [&](const ClassDeclNode *ifaceDecl,
+                                      auto &self) -> void {
+      if (!ifaceDecl)
+        return;
+      for (const auto *m : ifaceDecl->methods) {
+        if (m->isStatic || m->name == ifaceDecl->name || m->name == "~")
+          continue;
+        if (!m->isPublic(m->name) && !m->isProtected(m->name))
+          continue;
+
+        if (!hasImplementation(m)) {
+          ctx->reportError(node->line, node->column, node->length,
+                           "Class '" + std::string(node->name) +
+                               "' must implement method '" +
+                               std::string(m->name) + "' from interface '" +
+                               std::string(ifaceDecl->name) + "'.");
+          hasErrors = true;
+        }
+      }
+      if (ifaceDecl->baseClass) {
+        const ClassType *pType = static_cast<const ClassType *>(
+            ifaceDecl->baseClass->getUnqualifiedType());
+        self(static_cast<const ClassDeclNode *>(pType->getDeclaration()), self);
+      }
+      for (const auto *superIface : ifaceDecl->interfaces) {
+        const ClassType *pType =
+            static_cast<const ClassType *>(superIface->getUnqualifiedType());
+        self(static_cast<const ClassDeclNode *>(pType->getDeclaration()), self);
+      }
+    };
+
+    for (const auto *iface : resolvedInterfaces) {
+      const ClassType *iType =
+          static_cast<const ClassType *>(iface->getUnqualifiedType());
+      if (auto *iDecl =
+              llvm::dyn_cast_or_null<ClassDeclNode>(iType->getDeclaration())) {
+        collectRequiredMethods(iDecl, collectRequiredMethods);
       }
     }
   }
 
-  auto *classTy =
-      static_cast<ClassType *>(const_cast<RecordType *>(node->recordType));
   classTy->setBaseClass(node->baseClass);
   classTy->setIsPolymorphic(isPolymorphic);
   classTy->setIsAbstract(node->isAbstract);
   classTy->setFields(ctx->astCtx.copyArray<FieldInfo>(fInfos));
-
-  // Interface Validation and Resolution
-  std::vector<const Type *> resolvedInterfaces;
-  for (const auto *iface : node->interfaces) {
-    const Type *resolved = resolveIfTemplate(iface);
-    if (resolved->getUnqualifiedType()->getKind() != TypeKind::Class) {
-      ctx->reportError(node->line, node->column, node->length,
-                       "Interfaces must be of class type.");
-      hasErrors = true;
-    }
-    resolvedInterfaces.push_back(resolved);
-  }
-  classTy->setInterfaces(
-      ctx->astCtx.copyArray<const Type *>(resolvedInterfaces));
-  const_cast<ClassDeclNode *>(node)->interfaces = classTy->getInterfaces();
 
   for (const auto *field : node->fields) {
     auto res = dispatch(field);
@@ -3473,7 +3573,8 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
     bool isLocal = false;
     for (auto *d : decls) {
       if (d->kind == NodeKind::ParamDecl ||
-          (d->kind == NodeKind::VarDecl && !static_cast<const VarDeclNode*>(d)->isGlobal)) {
+          (d->kind == NodeKind::VarDecl &&
+           !static_cast<const VarDeclNode *>(d)->isGlobal)) {
         isLocal = true;
         break;
       }
@@ -3483,9 +3584,11 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
       const RecordType *thisRecTy = nullptr;
       auto thisDecls = ctx->lookup("this");
       if (!thisDecls.empty()) {
-        if (auto *paramDecl = llvm::dyn_cast<ParamDeclNode>(thisDecls.front())) {
+        if (auto *paramDecl =
+                llvm::dyn_cast<ParamDeclNode>(thisDecls.front())) {
           if (auto *ptrTy = llvm::dyn_cast<PointerType>(paramDecl->type)) {
-            if (auto *clsTy = llvm::dyn_cast<RecordType>(ptrTy->getPointeeType()->getUnqualifiedType())) {
+            if (auto *clsTy = llvm::dyn_cast<RecordType>(
+                    ptrTy->getPointeeType()->getUnqualifiedType())) {
               thisRecTy = clsTy;
             }
           }
@@ -3499,9 +3602,15 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
 
         while (currentRecDecl) {
           llvm::ArrayRef<FunctionDeclNode *> methods;
-          if (currentRecDecl->kind == NodeKind::ClassDecl) methods = static_cast<const ClassDeclNode *>(currentRecDecl)->methods;
-          else if (currentRecDecl->kind == NodeKind::StructDecl) methods = static_cast<const StructDeclNode *>(currentRecDecl)->methods;
-          else if (currentRecDecl->kind == NodeKind::UnionDecl) methods = static_cast<const UnionDeclNode *>(currentRecDecl)->methods;
+          if (currentRecDecl->kind == NodeKind::ClassDecl)
+            methods =
+                static_cast<const ClassDeclNode *>(currentRecDecl)->methods;
+          else if (currentRecDecl->kind == NodeKind::StructDecl)
+            methods =
+                static_cast<const StructDeclNode *>(currentRecDecl)->methods;
+          else if (currentRecDecl->kind == NodeKind::UnionDecl)
+            methods =
+                static_cast<const UnionDeclNode *>(currentRecDecl)->methods;
 
           for (const auto *m : methods) {
             if (m->name == name && !m->isStatic) {
@@ -3510,12 +3619,15 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
             }
           }
 
-          if (isMethod) break;
+          if (isMethod)
+            break;
 
           if (currentRecDecl->kind == NodeKind::ClassDecl) {
-            const ClassDeclNode *cDecl = static_cast<const ClassDeclNode *>(currentRecDecl);
+            const ClassDeclNode *cDecl =
+                static_cast<const ClassDeclNode *>(currentRecDecl);
             if (cDecl->baseClass) {
-              const ClassType *pType = static_cast<const ClassType *>(cDecl->baseClass->getUnqualifiedType());
+              const ClassType *pType = static_cast<const ClassType *>(
+                  cDecl->baseClass->getUnqualifiedType());
               currentRecDecl = pType->getDeclaration();
             } else {
               break;
@@ -3526,10 +3638,13 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
         }
 
         if (isMethod) {
-          auto *thisVar = ctx->astCtx.create<VariableNode>("this", varTarget->line, varTarget->column, 4);
+          auto *thisVar = ctx->astCtx.create<VariableNode>(
+              "this", varTarget->line, varTarget->column, 4);
           auto thisRes = dispatch(thisVar);
           if (thisRes) {
-            auto *maNode = ctx->astCtx.create<MemberAccessNode>(thisVar, name, varTarget->line, varTarget->column, varTarget->length);
+            auto *maNode = ctx->astCtx.create<MemberAccessNode>(
+                thisVar, name, varTarget->line, varTarget->column,
+                varTarget->length);
             maNode->templateArgs = varTarget->templateArgs;
             const_cast<FunctionCallNode *>(node)->target = maNode;
           }
@@ -3543,9 +3658,12 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
           const DeclNode *recDecl = recTy->getDeclaration();
           if (recDecl) {
             llvm::ArrayRef<FunctionDeclNode *> cMethods;
-            if (auto *cDecl = llvm::dyn_cast<ClassDeclNode>(recDecl)) cMethods = cDecl->methods;
-            else if (auto *sDecl = llvm::dyn_cast<StructDeclNode>(recDecl)) cMethods = sDecl->methods;
-            else if (auto *uDecl = llvm::dyn_cast<UnionDeclNode>(recDecl)) cMethods = uDecl->methods;
+            if (auto *cDecl = llvm::dyn_cast<ClassDeclNode>(recDecl))
+              cMethods = cDecl->methods;
+            else if (auto *sDecl = llvm::dyn_cast<StructDeclNode>(recDecl))
+              cMethods = sDecl->methods;
+            else if (auto *uDecl = llvm::dyn_cast<UnionDeclNode>(recDecl))
+              cMethods = uDecl->methods;
 
             llvm::SmallVector<const DeclNode *, 2> staticDecls;
             for (auto *m : cMethods) {
@@ -3554,7 +3672,8 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
               }
             }
             if (!staticDecls.empty()) {
-              for (auto *d : decls) staticDecls.push_back(d);
+              for (auto *d : decls)
+                staticDecls.push_back(d);
               decls = staticDecls;
             }
           }
@@ -3581,8 +3700,9 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
 
       bool hasCallable = false;
       for (auto *d : decls) {
-        if (d->kind == NodeKind::FunctionDecl || d->kind == NodeKind::ClassDecl ||
-            d->kind == NodeKind::StructDecl || d->kind == NodeKind::UnionDecl) {
+        if (d->kind == NodeKind::FunctionDecl ||
+            d->kind == NodeKind::ClassDecl || d->kind == NodeKind::StructDecl ||
+            d->kind == NodeKind::UnionDecl) {
           hasCallable = true;
           break;
         }
@@ -3602,11 +3722,14 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
               targetDecl->kind == NodeKind::UnionDecl) {
             const RecordType *recTy = nullptr;
             if (targetDecl->kind == NodeKind::ClassDecl)
-              recTy = static_cast<const ClassDeclNode *>(targetDecl)->recordType;
+              recTy =
+                  static_cast<const ClassDeclNode *>(targetDecl)->recordType;
             else if (targetDecl->kind == NodeKind::StructDecl)
-              recTy = static_cast<const StructDeclNode *>(targetDecl)->recordType;
+              recTy =
+                  static_cast<const StructDeclNode *>(targetDecl)->recordType;
             else
-              recTy = static_cast<const UnionDeclNode *>(targetDecl)->recordType;
+              recTy =
+                  static_cast<const UnionDeclNode *>(targetDecl)->recordType;
 
             llvm::ArrayRef<FunctionDeclNode *> ctors;
             if (targetDecl->kind == NodeKind::ClassDecl)
@@ -3659,7 +3782,8 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
                 }
               } else {
                 if (fDecl->declFilePath != ctx->currentFile) {
-                  overloadErrors.push_back({"Function is private to its file."});
+                  overloadErrors.push_back(
+                      {"Function is private to its file."});
                   continue;
                 }
               }

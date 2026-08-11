@@ -33,20 +33,39 @@ bool canImplicitlyCast(const Type *from, const Type *to,
   const Type *unqualFrom = baseFrom->getUnqualifiedType();
   const Type *unqualTo = baseTo->getUnqualifiedType();
 
-  /* Subclass to Base Class Upcasting */
+  /* Recursive evaluation of both direct inheritance and interface
+   * implementations */
+  auto isSubclassOrImplements = [&](const ClassType *cFrom,
+                                    const ClassType *cTo, auto &self) -> bool {
+    if (!cFrom || !cTo)
+      return false;
+    if (cFrom == cTo)
+      return true;
+
+    if (cFrom->getBaseClass()) {
+      const ClassType *pBase = static_cast<const ClassType *>(
+          cFrom->getBaseClass()->getUnqualifiedType());
+      if (self(pBase, cTo, self))
+        return true;
+    }
+
+    for (const Type *iface : cFrom->getInterfaces()) {
+      const ClassType *pIface =
+          static_cast<const ClassType *>(iface->getUnqualifiedType());
+      if (self(pIface, cTo, self))
+        return true;
+    }
+
+    return false;
+  };
+
+  /* Subclass or Interface to Base Class Upcasting */
   if (unqualFrom->getKind() == TypeKind::Class &&
       unqualTo->getKind() == TypeKind::Class) {
     const ClassType *cFrom = static_cast<const ClassType *>(unqualFrom);
     const ClassType *cTo = static_cast<const ClassType *>(unqualTo);
-    while (cFrom) {
-      if (cFrom == cTo)
-        return true;
-      if (cFrom->getBaseClass()) {
-        cFrom = static_cast<const ClassType *>(
-            cFrom->getBaseClass()->getUnqualifiedType());
-      } else {
-        break;
-      }
+    if (isSubclassOrImplements(cFrom, cTo, isSubclassOrImplements)) {
+      return true;
     }
   }
 
@@ -153,15 +172,8 @@ bool canImplicitlyCast(const Type *from, const Type *to,
             static_cast<const ClassType *>(fromPointee->getUnqualifiedType());
         const ClassType *cTo =
             static_cast<const ClassType *>(toPointee->getUnqualifiedType());
-        while (cFrom) {
-          if (cFrom == cTo)
-            return true;
-          if (cFrom->getBaseClass()) {
-            cFrom = static_cast<const ClassType *>(
-                cFrom->getBaseClass()->getUnqualifiedType());
-          } else {
-            break;
-          }
+        if (isSubclassOrImplements(cFrom, cTo, isSubclassOrImplements)) {
+          return true;
         }
       }
 
