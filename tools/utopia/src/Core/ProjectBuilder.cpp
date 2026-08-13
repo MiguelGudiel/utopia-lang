@@ -3,6 +3,7 @@
 #include "utopia/Common/Logger.hpp"
 #include <algorithm>
 #include <iostream>
+#include "Core/EnvLoader.hpp"
 
 namespace utopia {
 
@@ -11,9 +12,19 @@ namespace fs = std::filesystem;
 bool buildProject(const fs::path &projRoot, CompileOptions &parentOptions,
                   bool isSubproject, const std::string &linkType,
                   const GlobalOptions &globalOpts) {
+  fs::path manifestPath = projRoot / "build.yaml";
+  if (!fs::exists(manifestPath)) {
+    std::cerr << "Fatal: build.yaml not found at " << projRoot << ".\n";
+    if (isSubproject) {
+      std::cerr << "Hint: A dependency seems to be missing. Did you forget to "
+                   "run 'utopia yip get'?\n";
+    }
+    return false;
+  }
+
   ProjectConfig config;
   try {
-    config = parseBuildManifest(projRoot / "build.yaml");
+    config = parseBuildManifest(manifestPath);
   } catch (const std::exception &e) {
     std::cerr << "Manifest Error in " << projRoot << ": " << e.what() << "\n";
     return false;
@@ -86,7 +97,39 @@ bool buildProject(const fs::path &projRoot, CompileOptions &parentOptions,
   }
 
   for (const auto &dep : config.dependencies) {
-    fs::path depPath = projRoot / dep.path;
+    fs::path depPath;
+    if (!dep.path.empty()) {
+      depPath = projRoot / dep.path;
+    } else if (!dep.name.empty()) {
+      std::string homeDir = EnvLoader::get("HOME");
+      if (homeDir.empty()) {
+        homeDir = EnvLoader::get("USERPROFILE");
+      }
+
+      fs::path cacheRoot =
+          fs::path(homeDir) / ".utopia" / "cache" / "yip" / "packages";
+      fs::path pkgCacheDir = cacheRoot / dep.name;
+      std::string targetVersion = dep.version;
+      fs::path resolvedPath = pkgCacheDir / targetVersion;
+
+      if (targetVersion.empty() || targetVersion == "latest" ||
+          targetVersion == "any" || !fs::exists(resolvedPath)) {
+        if (fs::exists(pkgCacheDir) && fs::is_directory(pkgCacheDir)) {
+          for (const auto &entry : fs::directory_iterator(pkgCacheDir)) {
+            if (entry.is_directory()) {
+              targetVersion = entry.path().filename().string();
+              resolvedPath = entry.path();
+              break;
+            }
+          }
+        }
+      }
+
+      depPath = resolvedPath;
+    } else {
+      continue;
+    }
+
     if (!buildProject(depPath, options, true, dep.linkType, globalOpts)) {
       return false;
     }

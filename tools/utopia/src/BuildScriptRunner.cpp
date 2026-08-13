@@ -6,7 +6,9 @@
 #include <llvm/ExecutionEngine/Orc/ExecutionUtils.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
+#include <llvm/Support/Error.h>
 #include <llvm/Support/TargetSelect.h>
+#include <unordered_set>
 
 namespace utopia {
 
@@ -97,9 +99,36 @@ bool BuildScriptRunner::run(const std::filesystem::path &scriptPath,
   }
 
   BackendContext backendCtx;
-  llvm::Module *llvmMod = Compiler::compileToIR(
-      root, backendCtx, "build_script", diagEngine, options.isDebug);
-  if (!llvmMod || diagEngine.hasErrors()) {
+  std::unordered_set<const ModuleNode *> compiledModules;
+
+  auto compileTU = [&](const ModuleNode *modNode, auto &self) -> bool {
+    if (compiledModules.contains(modNode))
+      return true;
+    compiledModules.insert(modNode);
+
+    for (const auto *imp : modNode->importedModules) {
+      if (!self(imp, self))
+        return false;
+    }
+    for (const auto *exp : modNode->exportedModules) {
+      if (!self(exp, self))
+        return false;
+    }
+
+    std::string unitStr =
+        std::filesystem::absolute(std::string(modNode->filePath)).string();
+
+    llvm::Module *llvmMod =
+        Compiler::compileToIR(const_cast<ModuleNode *>(modNode), backendCtx,
+                              unitStr, diagEngine, options.isDebug);
+
+    if (!llvmMod || diagEngine.hasErrors()) {
+      return false;
+    }
+    return true;
+  };
+
+  if (!compileTU(root, compileTU)) {
     g_CurrentBuildOptions = nullptr;
     return false;
   }
@@ -137,31 +166,62 @@ bool BuildScriptRunner::run(const std::filesystem::path &scriptPath,
   addSym("UtopiaBuild_addCacheDefine", (void *)UtopiaBuild_addCacheDefine);
 
   if (auto err = jd.define(llvm::orc::absoluteSymbols(symbols))) {
+    llvm::consumeError(std::move(err));
     g_CurrentBuildOptions = nullptr;
     return false;
   }
 
   auto uniqueCtx = backendCtx.takeContext();
   llvm::orc::ThreadSafeContext tsc(std::move(uniqueCtx));
-  auto uniqueMod = backendCtx.takeModule("build_script");
-  auto tsm = llvm::orc::ThreadSafeModule(std::move(uniqueMod), tsc);
 
-  if (auto err = jit->addIRModule(std::move(tsm))) {
-    g_CurrentBuildOptions = nullptr;
-    return false;
+  for (const auto *modNode : compiledModules) {
+    std::string unitStr =
+        std::filesystem::absolute(std::string(modNode->filePath)).string();
+    auto uniqueMod = backendCtx.takeModule(unitStr);
+
+    if (uniqueMod) {
+      auto tsm = llvm::orc::ThreadSafeModule(std::move(uniqueMod), tsc);
+      if (auto err = jit->addIRModule(std::move(tsm))) {
+        llvm::handleAllErrors(
+            std::move(err), [&](const llvm::ErrorInfoBase &EI) {
+              std::cerr << "[JIT Add Module Error] " << EI.message() << "\n";
+            });
+        g_CurrentBuildOptions = nullptr;
+        return false;
+      }
+    }
   }
 
   auto mainSym = jit->lookup("main");
   if (!mainSym) {
-    std::cerr << "[Build Script] Entry point 'main' not found in build.utp.\n";
+    llvm::handleAllErrors(
+        mainSym.takeError(), [&](const llvm::ErrorInfoBase &EI) {
+          std::cerr << "[Build Script JIT Error] " << EI.message() << "\n";
+        });
+    std::cerr << "Fatal: Entry point 'main' not found or failed to compile in "
+                 "build.utp.\n";
     g_CurrentBuildOptions = nullptr;
     return false;
   }
 
   int (*mainFn)() = mainSym->toPtr<int (*)()>();
-  mainFn();
+
+  /* Temporarily shift the working directory to the project root to ensure
+     any relative paths within the build script execute predictably. */
+  std::filesystem::path previousPath = std::filesystem::current_path();
+  std::filesystem::current_path(projRoot);
+
+  int exitCode = mainFn();
+
+  std::filesystem::current_path(previousPath);
 
   g_CurrentBuildOptions = nullptr;
+
+  if (exitCode != 0) {
+    std::cerr << "Fatal: build script exited with code " << exitCode << ".\n";
+    return false;
+  }
+
   return true;
 }
 

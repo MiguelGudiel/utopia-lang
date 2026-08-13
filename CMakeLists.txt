@@ -19,6 +19,9 @@ find_package(LLVM REQUIRED CONFIG)
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
 message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
 
+find_package(CURL REQUIRED)
+message(STATUS "Found CURL ${CURL_VERSION_STRING}")
+
 llvm_map_components_to_libnames(llvm_libs 
     core 
     support 
