@@ -498,6 +498,8 @@ struct ParamDeclNode : public DeclNode {
   }
 };
 
+struct FunctionCallNode;
+
 struct FunctionDeclNode : public DeclNode {
   const Type *returnType;
   std::string_view name;
@@ -521,7 +523,8 @@ struct FunctionDeclNode : public DeclNode {
   const RecordType *parentRecord = nullptr;
   std::string_view rawReturnTypeStr;
 
-  /* Intrinsic function attributes inferred during semantic analysis */
+  FunctionCallNode *superCall = nullptr;
+
   mutable bool isReadNone = false;
   mutable bool isReadOnly = false;
   mutable bool isNoFree = false;
@@ -556,6 +559,7 @@ struct FunctionCallNode : public ExprNode {
   llvm::ArrayRef<ExprNode *> rawArgs;
   llvm::ArrayRef<std::string_view> rawArgNames;
   bool hasRawArgs = false;
+  bool isSuperCall = false;
 
   /* Indicates whether the node was parsed with a trailing comma to force
    * formatting splits. */
@@ -784,6 +788,8 @@ struct MemberAccessNode : public ExprNode {
 
   bool isStaticFieldRef = false;
   const DeclNode *resolvedDecl = nullptr;
+
+  bool isSuperAccess = false;
 
   /* Storage for explicit template arguments applied to method access */
   llvm::ArrayRef<const Type *> templateArgs;

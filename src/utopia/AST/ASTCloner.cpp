@@ -151,6 +151,7 @@ ASTNode *ASTCloner::visit(const MemberAccessNode *n) {
   for (auto *ta : n->templateArgs)
     tArgs.push_back(cloneType(ta));
   node->templateArgs = ctx.copyArray<const Type *>(tArgs);
+  node->isSuperAccess = n->isSuperAccess;
   return node;
 }
 
@@ -163,6 +164,7 @@ ASTNode *ASTCloner::visit(const FunctionCallNode *n) {
   node->rawArgNames = ctx.copyArray<std::string_view>(n->rawArgNames);
   node->hasRawArgs = n->hasRawArgs;
   node->hasTrailingComma = n->hasTrailingComma;
+  node->isSuperCall = n->isSuperCall;
   return node;
 }
 
@@ -311,6 +313,8 @@ ASTNode *ASTCloner::visit(const FunctionDeclNode *n) {
       cloneType(n->returnType), n->name, n->line, n->column, n->isConst,
       n->isMethod, n->isExtern, n->isVariadic, n->isImplicit);
   node->params = cloneArray(n->params);
+  if (n->superCall)
+    node->superCall = static_cast<FunctionCallNode *>(dispatch(n->superCall));
   if (n->body)
     node->body = static_cast<BlockNode *>(dispatch(n->body));
   node->isStatic = n->isStatic;

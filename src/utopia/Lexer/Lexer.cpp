@@ -264,6 +264,8 @@ Token Lexer::parseToken() {
       return {TokenType::NAMESPACE_KW, id, startLine, startCol};
     if (id == "using")
       return {TokenType::USING_KW, id, startLine, startCol};
+    if (id == "super")
+      return {TokenType::SUPER_KW, id, startLine, startCol};
     if (id == "this")
       return {TokenType::THIS_KW, id, startLine, startCol};
     if (id == "new")

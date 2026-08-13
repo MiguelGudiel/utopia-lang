@@ -60,6 +60,7 @@ enum class TokenType : uint8_t {
   ABSTRACT_KW,   /* abstract */
   EXTENDS_KW,    /* extends */
   IMPLEMENTS_KW, /* implements */
+  SUPER_KW,      /* super */
   THIS_KW,
   DOT,
   TILDE,

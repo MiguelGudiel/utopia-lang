@@ -19,12 +19,16 @@ public:
   DiagnosticsEngine &diags;
   bool isAssignTarget = false;
   std::vector<std::string> namespaceStack;
+  const FunctionDeclNode *currentFunction = nullptr;
 
   explicit SemaContext(ASTContext &ast, DiagnosticsEngine &de,
                        std::string_view path)
       : astCtx(ast), currentFile(path), diags(de) {
     currentFunctionReturn = astCtx.VoidTy;
   }
+
+  void setCurrentFunction(const FunctionDeclNode *f) { currentFunction = f; }
+  const FunctionDeclNode *getCurrentFunction() const { return currentFunction; }
 
   void pushNamespace(std::string_view ns) {
     namespaceStack.push_back(std::string(ns));

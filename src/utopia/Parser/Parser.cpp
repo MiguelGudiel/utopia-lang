@@ -2058,9 +2058,69 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind, bool isAbstract) {
       auto params = parseParameterList(isVariadic, hasTrailingComma);
       expect(TokenType::RPAREN, "Expected ')'");
 
+      FunctionCallNode *superCall = nullptr;
+      if (match(TokenType::COLON)) {
+        int superLine = currentToken().line;
+        int superCol = currentToken().column;
+        expect(TokenType::SUPER_KW, "Expected 'super' after ':'");
+        auto superVar =
+            astCtx.create<VariableNode>("super", superLine, superCol, 5);
+
+        expect(TokenType::LPAREN, "Expected '(' after 'super'");
+
+        std::vector<ExprNode *> args;
+        std::vector<std::string_view> argNames;
+        bool namedStarted = false;
+        bool superTrailingComma = false;
+
+        if (currentToken().type != TokenType::RPAREN) {
+          do {
+            if (currentToken().type == TokenType::RPAREN) {
+              superTrailingComma = true;
+              break;
+            }
+
+            if (currentToken().type == TokenType::IDENTIFIER &&
+                peekToken().type == TokenType::COLON) {
+              namedStarted = true;
+              argNames.push_back(currentToken().value);
+              advance();
+              advance();
+              args.push_back(parseExpression());
+            } else {
+              if (namedStarted) {
+                reportError(currentToken().line, currentToken().column,
+                            currentToken().value.length(),
+                            "Positional arguments cannot appear after named "
+                            "arguments.");
+                throw ParseException();
+              }
+              argNames.push_back("");
+              args.push_back(parseExpression());
+            }
+
+          } while (match(TokenType::COMMA));
+        }
+
+        int endCol = currentToken().column + (int)currentToken().value.length();
+        expect(TokenType::RPAREN, "Expected ')'");
+
+        auto argsRef = astCtx.copyArray<ExprNode *>(args);
+        auto namesRef = astCtx.copyArray<std::string_view>(argNames);
+        superCall = astCtx.create<FunctionCallNode>(superVar, argsRef, namesRef,
+                                                    superLine, superCol,
+                                                    endCol - superCol);
+        superCall->rawArgs = argsRef;
+        superCall->rawArgNames = namesRef;
+        superCall->hasRawArgs = true;
+        superCall->hasTrailingComma = superTrailingComma;
+        superCall->isSuperCall = true;
+      }
+
       auto constructor =
           astCtx.create<FunctionDeclNode>(astCtx.VoidTy, name, cLine, cCol,
                                           isConstCtor, true, false, isVariadic);
+      constructor->superCall = superCall;
       constructor->parentRecord = recordTy;
       constructor->params = astCtx.copyArray<ParamDeclNode *>(params);
       constructor->annotations = memberAnnotations;
@@ -2849,6 +2909,11 @@ ExprNode *Parser::parsePostfix() {
       auto maNode = astCtx.create<MemberAccessNode>(expr, memberName, line, col,
                                                     (memCol + memLen) - col);
 
+      if (expr->kind == NodeKind::Variable &&
+          static_cast<VariableNode *>(expr)->name == "super") {
+        maNode->isSuperAccess = true;
+      }
+
       if (isTemplateCall) {
         advance(); /* Consume '<' */
         std::vector<const Type *> tArgs;
@@ -2927,14 +2992,20 @@ ExprNode *Parser::parsePostfix() {
 
       auto argsRef = astCtx.copyArray<ExprNode *>(args);
       auto namesRef = astCtx.copyArray<std::string_view>(argNames);
-      expr = astCtx.create<FunctionCallNode>(expr, argsRef, namesRef, line, col,
-                                             endCol - col);
-      expr->endLine = endLine;
-      static_cast<FunctionCallNode *>(expr)->rawArgs = argsRef;
-      static_cast<FunctionCallNode *>(expr)->rawArgNames = namesRef;
-      static_cast<FunctionCallNode *>(expr)->hasRawArgs = true;
-      static_cast<FunctionCallNode *>(expr)->hasTrailingComma =
-          hasTrailingComma;
+      auto callNode = astCtx.create<FunctionCallNode>(expr, argsRef, namesRef,
+                                                      line, col, endCol - col);
+      callNode->endLine = endLine;
+      callNode->rawArgs = argsRef;
+      callNode->rawArgNames = namesRef;
+      callNode->hasRawArgs = true;
+      callNode->hasTrailingComma = hasTrailingComma;
+
+      if (expr->kind == NodeKind::Variable &&
+          static_cast<VariableNode *>(expr)->name == "super") {
+        callNode->isSuperCall = true;
+      }
+
+      expr = callNode;
     } else if (currentToken().type == TokenType::PLUS_PLUS ||
                currentToken().type == TokenType::MINUS_MINUS) {
       int line = expr->line;
@@ -2977,7 +3048,8 @@ ExprNode *Parser::parsePrimary() {
     return expr;
   }
 
-  if (currentToken().type == TokenType::THIS_KW) {
+  if (currentToken().type == TokenType::THIS_KW ||
+      currentToken().type == TokenType::SUPER_KW) {
     std::string_view name = currentToken().value;
     int len = name.length();
     advance();

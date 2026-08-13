@@ -770,6 +770,12 @@ Piece *PieceFactory::visit(const FunctionDeclNode *node) {
 
   Piece *mainSig = create<ConcatPiece>(std::move(signature));
 
+  if (node->superCall) {
+    Piece *superCallPiece = dispatchExpr(node->superCall);
+    mainSig = create<ConcatPiece>(std::vector<Piece *>{
+        mainSig, create<TextPiece>(" : "), superCallPiece});
+  }
+
   if (node->body) {
     if (node->body->isExpressionBody && !node->body->statements.empty()) {
       Piece *bodyPiece = nullptr;

@@ -1207,6 +1207,25 @@ SemaResult TypeCheckPass::visit(const TypeLiteralNode *node) {
 }
 
 SemaResult TypeCheckPass::visit(const VariableNode *node) {
+  if (node->name == "super") {
+    const RecordType *currRec = ctx->getCurrentRecordContext();
+    if (!currRec || currRec->getKind() != TypeKind::Class) {
+      return ctx->reportError(node->line, node->column, node->length,
+                              "Use of 'super' outside of a class method.");
+    }
+    auto *classTy = static_cast<const ClassType *>(currRec);
+    if (!classTy->getBaseClass()) {
+      return ctx->reportError(node->line, node->column, node->length,
+                              "Class '" + std::string(classTy->getName()) +
+                                  "' has no base class.");
+    }
+    const Type *baseTy = classTy->getBaseClass()->getUnqualifiedType();
+    const_cast<VariableNode *>(node)->representedType = baseTy;
+    node->exprType = ctx->astCtx.getPointerType(baseTy);
+    node->isLValue = false;
+    return node->exprType;
+  }
+
   if (!node->templateArgs.empty()) {
     auto decls = ctx->lookup(node->name);
     DeclNode *tmplDecl = nullptr;
@@ -2469,6 +2488,68 @@ SemaResult TypeCheckPass::visit(const BlockNode *node) {
 }
 
 SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
+  if (node->isSuperAccess ||
+      (node->object->kind == NodeKind::Variable &&
+       static_cast<const VariableNode *>(node->object)->name == "super")) {
+    const RecordType *currRec = ctx->getCurrentRecordContext();
+    if (!currRec || currRec->getKind() != TypeKind::Class) {
+      return ctx->reportError(node->line, node->column, node->length,
+                              "Use of 'super' outside of a class method.");
+    }
+    auto *classTy = static_cast<const ClassType *>(currRec);
+    if (!classTy->getBaseClass()) {
+      return ctx->reportError(node->line, node->column, node->length,
+                              "Class '" + std::string(classTy->getName()) +
+                                  "' has no base class.");
+    }
+
+    const Type *baseTy = classTy->getBaseClass()->getUnqualifiedType();
+    if (!llvm::isa<ClassType>(baseTy)) {
+      return ctx->reportError(node->line, node->column, node->length,
+                              "Base type is not a class.");
+    }
+    auto *baseClassTy = static_cast<const ClassType *>(baseTy);
+
+    if (auto field = baseClassTy->getField(node->memberName)) {
+      if (!field->isPublic && !field->isProtected) {
+        return ctx->reportError(node->line, node->column, node->length,
+                                "Cannot access private field '" +
+                                    std::string(node->memberName) +
+                                    "' of base class.");
+      }
+      const_cast<MemberAccessNode *>(node)->isSuperAccess = true;
+      const_cast<MemberAccessNode *>(node)->fieldIndex = field->index;
+      node->exprType = field->type;
+      node->isLValue = true;
+      return field->type;
+    }
+
+    const DeclNode *baseDecl = baseClassTy->getDeclaration();
+    if (baseDecl && llvm::isa<ClassDeclNode>(baseDecl)) {
+      auto *cDecl = static_cast<const ClassDeclNode *>(baseDecl);
+      for (auto *m : cDecl->methods) {
+        if (m->name == node->memberName) {
+          if (!m->isPublic(m->name) && !m->isProtected(m->name)) {
+            return ctx->reportError(node->line, node->column, node->length,
+                                    "Cannot access private method '" +
+                                        std::string(node->memberName) +
+                                        "' of base class.");
+          }
+          const_cast<MemberAccessNode *>(node)->isSuperAccess = true;
+          const_cast<MemberAccessNode *>(node)->isMethodRef = true;
+          const_cast<MemberAccessNode *>(node)->resolvedMethod = m;
+          node->exprType = ctx->astCtx.VoidTy;
+          return ctx->astCtx.VoidTy;
+        }
+      }
+    }
+
+    return ctx->reportError(node->line, node->column, node->length,
+                            "No member named '" +
+                                std::string(node->memberName) +
+                                "' in base class.");
+  }
+
   auto objType = dispatch(node->object);
   if (!objType)
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,
@@ -3173,16 +3254,21 @@ SemaResult TypeCheckPass::visit(const FunctionDeclNode *node) {
   if (node->isTemplate)
     return ctx->astCtx.VoidTy;
 
+  const FunctionDeclNode *prevFunc = ctx->getCurrentFunction();
+  ctx->setCurrentFunction(node);
+
   const_cast<FunctionDeclNode *>(node)->returnType =
       resolveIfTemplate(node->returnType);
 
   if (node->returnType->getKind() == TypeKind::TemplateParam) {
+    ctx->setCurrentFunction(prevFunc);
     return ctx->reportError(node->line, node->column, node->length,
                             "Unknown return type: '" +
                                 node->returnType->toString() + "'");
   }
 
   if (!checkTypeVisibility(node->returnType, node)) {
+    ctx->setCurrentFunction(prevFunc);
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,
                                      "Type visibility error"});
   }
@@ -3294,6 +3380,13 @@ SemaResult TypeCheckPass::visit(const FunctionDeclNode *node) {
     ctx->addDecl(param->name, param);
   }
 
+  if (node->superCall) {
+    auto superRes = dispatch(node->superCall);
+    if (!superRes) {
+      hasErrors = true;
+    }
+  }
+
   if (node->body) {
     auto bodyRes = dispatch(node->body);
     if (!bodyRes) {
@@ -3310,6 +3403,8 @@ SemaResult TypeCheckPass::visit(const FunctionDeclNode *node) {
     }
 
     EffectAnalyzer ea;
+    if (node->superCall)
+      ea.dispatch(node->superCall);
     ea.dispatch(node->body);
 
     node->isReadNone = !ea.readsMem && !ea.writesMem;
@@ -3321,6 +3416,7 @@ SemaResult TypeCheckPass::visit(const FunctionDeclNode *node) {
   }
 
   ctx->setFunctionReturnType(prevRet);
+  ctx->setCurrentFunction(prevFunc);
 
   if (hasErrors) {
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,
@@ -3600,6 +3696,129 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
     outResolvedArgs = resolvedArgs;
     return errors;
   };
+
+  if (node->isSuperCall ||
+      (node->target->kind == NodeKind::Variable &&
+       static_cast<const VariableNode *>(node->target)->name == "super")) {
+    const RecordType *currRec = ctx->getCurrentRecordContext();
+    if (!currRec || currRec->getKind() != TypeKind::Class) {
+      return ctx->reportError(node->line, node->column, node->length,
+                              "Use of 'super()' outside of a class method.");
+    }
+    auto *classTy = static_cast<const ClassType *>(currRec);
+    if (!classTy->getBaseClass()) {
+      return ctx->reportError(node->line, node->column, node->length,
+                              "Class '" + std::string(classTy->getName()) +
+                                  "' has no base class.");
+    }
+
+    const FunctionDeclNode *currFunc = ctx->getCurrentFunction();
+    if (!currFunc) {
+      return ctx->reportError(node->line, node->column, node->length,
+                              "super() can only be called inside a method.");
+    }
+
+    const Type *baseTy = classTy->getBaseClass()->getUnqualifiedType();
+    auto *baseClassTy = static_cast<const ClassType *>(baseTy);
+    const DeclNode *baseDecl = baseClassTy->getDeclaration();
+
+    if (!baseDecl || !llvm::isa<ClassDeclNode>(baseDecl)) {
+      return ctx->reportError(node->line, node->column, node->length,
+                              "Invalid base class declaration.");
+    }
+
+    auto *baseCDecl = static_cast<const ClassDeclNode *>(baseDecl);
+    std::string_view targetMethodName = currFunc->name;
+    bool isConstructorCall =
+        (currFunc->parentRecord &&
+         currFunc->name == currFunc->parentRecord->getName());
+
+    std::vector<const FunctionDeclNode *> candidates;
+    if (isConstructorCall) {
+      for (auto *c : baseCDecl->constructors) {
+        if (!c->isImplicit &&
+            (c->isPublic(c->name) || c->isProtected(c->name))) {
+          candidates.push_back(c);
+        }
+      }
+    } else {
+      for (auto *m : baseCDecl->methods) {
+        if (m->name == targetMethodName) {
+          if (m->isPublic(m->name) || m->isProtected(m->name)) {
+            candidates.push_back(m);
+          }
+        }
+      }
+    }
+
+    if (candidates.empty()) {
+      if (isConstructorCall) {
+        return ctx->reportError(
+            node->line, node->column, node->length,
+            "Base class '" + std::string(baseClassTy->getName()) +
+                "' does not define any accessible constructors.");
+      } else {
+        return ctx->reportError(node->line, node->column, node->length,
+                                "Base class '" +
+                                    std::string(baseClassTy->getName()) +
+                                    "' does not define method '" +
+                                    std::string(targetMethodName) + "'.");
+      }
+    }
+
+    const FunctionDeclNode *bestMatch = nullptr;
+    int bestScore = std::numeric_limits<int>::min();
+    std::vector<std::vector<std::string>> overloadErrors;
+    std::vector<ExprNode *> bestResolvedArgs;
+
+    for (const auto *cand : candidates) {
+      int score = 0;
+      std::vector<ExprNode *> resolvedArgs;
+      auto errs = checkMatch(cand, score, resolvedArgs);
+      if (errs.empty()) {
+        if (score > bestScore) {
+          bestScore = score;
+          bestMatch = cand;
+          bestResolvedArgs = resolvedArgs;
+          overloadErrors.clear();
+        }
+      } else {
+        overloadErrors.push_back(errs);
+      }
+    }
+
+    if (!bestMatch) {
+      std::string finalErr =
+          "No matching overload for 'super" +
+          (isConstructorCall ? std::string("")
+                             : "." + std::string(targetMethodName)) +
+          "()' call.";
+      if (!overloadErrors.empty()) {
+        finalErr += " Candidates failed with:\n";
+        for (const auto &errList : overloadErrors) {
+          finalErr += "- ";
+          for (size_t i = 0; i < errList.size(); ++i) {
+            finalErr += errList[i];
+            if (i < errList.size() - 1)
+              finalErr += ", ";
+          }
+          finalErr += "\n";
+        }
+      }
+      return ctx->reportError(node->line, node->column, node->length, finalErr);
+    }
+
+    const_cast<FunctionCallNode *>(node)->resolvedFunc = bestMatch;
+    const_cast<FunctionCallNode *>(node)->args =
+        ctx->astCtx.copyArray<ExprNode *>(bestResolvedArgs);
+    const_cast<FunctionCallNode *>(node)->argNames = {};
+    emitRValueRefWarnings(bestMatch, bestResolvedArgs);
+
+    const_cast<FunctionCallNode *>(node)->isSuperCall = true;
+    node->exprType = bestMatch->returnType;
+    node->isLValue = bestMatch->returnType->isReferenceType();
+    return node->exprType;
+  }
 
   if (node->target->kind == NodeKind::Variable) {
     auto *varTarget = static_cast<const VariableNode *>(node->target);

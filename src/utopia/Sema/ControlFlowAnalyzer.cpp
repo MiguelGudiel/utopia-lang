@@ -36,6 +36,9 @@ void ControlFlowPass::visit(const ModuleNode *node) {
 }
 
 void ControlFlowPass::visit(const FunctionDeclNode *node) {
+  if (node->superCall) {
+    dispatch(node->superCall);
+  }
   if (node->body) {
     bool prevReachable = isReachable;
     bool prevAlready = alreadyInUnreachable;

@@ -1119,6 +1119,75 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
   if (!node)
     return nullptr;
 
+  if (node->kind == NodeKind::MemberAccess) {
+    auto *maNode = static_cast<const MemberAccessNode *>(node);
+    if (maNode->isMethodRef)
+      return nullptr;
+
+    if (maNode->isSuperAccess) {
+      SymbolInfo sym = cgCtx.lookupDetailed("this");
+      llvm::Value *thisPtr =
+          builder.CreateLoad(builder.getPtrTy(), sym.value, "this.val");
+      const RecordType *currRec =
+          currentFunc ? currentFunc->parentRecord : nullptr;
+      if (auto *classTy = llvm::dyn_cast_or_null<ClassType>(currRec)) {
+        if (classTy->getBaseClass()) {
+          const Type *baseTy = classTy->getBaseClass()->getUnqualifiedType();
+          llvm::Type *llvmBaseTy = getLLVMType(baseTy);
+          return builder.CreateStructGEP(
+              llvmBaseTy, thisPtr, maNode->fieldIndex, maNode->memberName);
+        }
+      }
+    }
+
+    if (maNode->isStaticFieldRef) {
+      auto *varDecl = static_cast<const VarDeclNode *>(maNode->resolvedDecl);
+      std::string gName = varDecl->mangledName.empty()
+                              ? std::string(varDecl->varName)
+                              : varDecl->mangledName;
+      SymbolInfo sym = cgCtx.lookupDetailed(gName);
+      if (!sym.value) {
+        diags.report({DiagLevel::Error, node->line, node->column, node->length,
+                      "Unbound static field.", currentFilePath});
+        return nullptr;
+      }
+      return sym.value;
+    }
+
+    llvm::Value *objPtr = nullptr;
+    if (maNode->object->exprType->isPointerType()) {
+      objPtr = dispatch(maNode->object);
+    } else {
+      objPtr = getLValue(maNode->object);
+    }
+
+    if (!objPtr)
+      return nullptr;
+
+    const Type *baseTy = maNode->object->exprType;
+    if (baseTy->isPointerType())
+      baseTy = static_cast<const PointerType *>(baseTy)->getPointeeType();
+    else if (baseTy->isReferenceType() ||
+             baseTy->getKind() == TypeKind::RValueReference)
+      baseTy = static_cast<const ReferenceType *>(baseTy)->getPointeeType();
+
+    llvm::Type *llvmBaseTy = getLLVMType(baseTy);
+    llvm::Value *gep = objPtr;
+
+    if (baseTy->getKind() != TypeKind::Union) {
+      gep = builder.CreateStructGEP(llvmBaseTy, objPtr, maNode->fieldIndex,
+                                    maNode->memberName);
+    }
+
+    if (node->exprType->getKind() == TypeKind::Array) {
+      llvm::Type *arrTy = getLLVMType(node->exprType);
+      return builder.CreateInBoundsGEP(
+          arrTy, gep, {builder.getInt32(0), builder.getInt32(0)});
+    }
+
+    return gep;
+  }
+
   if (node->kind == NodeKind::TernaryOp) {
     auto *ternary = static_cast<const TernaryOpNode *>(node);
     llvm::Value *condV = dispatch(ternary->condition);
@@ -1221,6 +1290,11 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
   if (node->kind == NodeKind::Variable) {
     auto *varNode = static_cast<const VariableNode *>(node);
 
+    if (varNode->name == "super") {
+      SymbolInfo sym = cgCtx.lookupDetailed("this");
+      return builder.CreateLoad(builder.getPtrTy(), sym.value, "super.this");
+    }
+
     if (varNode->isField) {
       SymbolInfo sym = cgCtx.lookupDetailed("this");
 
@@ -1261,61 +1335,6 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
       return builder.CreateLoad(builder.getPtrTy(), sym.value, "indirect.ref");
     }
     return sym.value;
-  }
-
-  if (node->kind == NodeKind::MemberAccess) {
-    auto *maNode = static_cast<const MemberAccessNode *>(node);
-    if (maNode->isMethodRef)
-      return nullptr;
-
-    if (maNode->isStaticFieldRef) {
-      auto *varDecl = static_cast<const VarDeclNode *>(maNode->resolvedDecl);
-      std::string gName = varDecl->mangledName.empty()
-                              ? std::string(varDecl->varName)
-                              : varDecl->mangledName;
-      SymbolInfo sym = cgCtx.lookupDetailed(gName);
-      if (!sym.value) {
-        diags.report({DiagLevel::Error, node->line, node->column, node->length,
-                      "Unbound static field.", currentFilePath});
-        return nullptr;
-      }
-      return sym.value;
-    }
-
-    llvm::Value *objPtr = nullptr;
-    if (maNode->object->exprType->isPointerType()) {
-      objPtr = dispatch(maNode->object);
-    } else {
-      objPtr = getLValue(maNode->object);
-    }
-
-    if (!objPtr)
-      return nullptr;
-
-    const Type *baseTy = maNode->object->exprType;
-    if (baseTy->isPointerType())
-      baseTy = static_cast<const PointerType *>(baseTy)->getPointeeType();
-    else if (baseTy->isReferenceType() ||
-             baseTy->getKind() == TypeKind::RValueReference)
-      baseTy = static_cast<const ReferenceType *>(baseTy)->getPointeeType();
-
-    llvm::Type *llvmBaseTy = getLLVMType(baseTy);
-    llvm::Value *gep = objPtr;
-
-    if (baseTy->getKind() != TypeKind::Union) {
-      gep = builder.CreateStructGEP(llvmBaseTy, objPtr, maNode->fieldIndex,
-                                    maNode->memberName);
-    }
-
-    if (node->exprType->getKind() == TypeKind::Array) {
-      llvm::Type *arrTy = getLLVMType(node->exprType);
-      return builder.CreateInBoundsGEP(
-          arrTy, gep, {builder.getInt32(0), builder.getInt32(0)});
-    }
-
-    /* Return the memory address (pointer) directly for valid L-Value
-     * assignments */
-    return gep;
   }
 
   if (node->kind == NodeKind::UnaryOp) {
@@ -1507,6 +1526,11 @@ llvm::Value *CodeGen::visit(const TypeLiteralNode *node) {
 }
 
 llvm::Value *CodeGen::visit(const VariableNode *node) {
+  if (node->name == "super") {
+    SymbolInfo sym = cgCtx.lookupDetailed("this");
+    return builder.CreateLoad(builder.getPtrTy(), sym.value, "super.this");
+  }
+
   if (node->isField) {
     SymbolInfo sym = cgCtx.lookupDetailed("this");
 
@@ -1578,13 +1602,17 @@ llvm::Value *CodeGen::visit(const MemberAccessNode *node) {
   }
 
   llvm::Value *objPtr = nullptr;
-  if (node->object->exprType && node->object->exprType->isPointerType()) {
+  if (node->isSuperAccess) {
+    SymbolInfo sym = cgCtx.lookupDetailed("this");
+    objPtr = builder.CreateLoad(builder.getPtrTy(), sym.value, "this.val");
+  } else if (node->object->exprType &&
+             node->object->exprType->isPointerType()) {
     objPtr = dispatch(node->object);
   } else {
     objPtr = getLValue(node->object);
   }
 
-  if (!objPtr) {
+  if (!objPtr && !node->isSuperAccess) {
     lastTemporaryAlloca = nullptr;
     llvm::Value *val = dispatch(node->object);
     if (lastTemporaryAlloca) {
@@ -1599,17 +1627,24 @@ llvm::Value *CodeGen::visit(const MemberAccessNode *node) {
   if (!objPtr)
     return nullptr;
 
-  const Type *baseTy = node->object->exprType;
-  if (baseTy->isPointerType())
-    baseTy = static_cast<const PointerType *>(baseTy)->getPointeeType();
-  else if (baseTy->isReferenceType() ||
-           baseTy->getKind() == TypeKind::RValueReference)
-    baseTy = static_cast<const ReferenceType *>(baseTy)->getPointeeType();
+  const Type *baseTy = nullptr;
+  if (node->isSuperAccess && currentFunc && currentFunc->parentRecord) {
+    if (auto *classTy = llvm::dyn_cast<ClassType>(currentFunc->parentRecord)) {
+      baseTy = classTy->getBaseClass()->getUnqualifiedType();
+    }
+  } else {
+    baseTy = node->object->exprType;
+    if (baseTy->isPointerType())
+      baseTy = static_cast<const PointerType *>(baseTy)->getPointeeType();
+    else if (baseTy->isReferenceType() ||
+             baseTy->getKind() == TypeKind::RValueReference)
+      baseTy = static_cast<const ReferenceType *>(baseTy)->getPointeeType();
+  }
 
   llvm::Type *llvmBaseTy = getLLVMType(baseTy);
   llvm::Value *gep = objPtr;
 
-  if (baseTy->getKind() != TypeKind::Union) {
+  if (baseTy && baseTy->getKind() != TypeKind::Union) {
     gep = builder.CreateStructGEP(llvmBaseTy, objPtr, node->fieldIndex,
                                   node->memberName);
   }
@@ -2967,6 +3002,10 @@ llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
     astParamIdx++;
   }
 
+  if (node->superCall) {
+    dispatch(node->superCall);
+  }
+
   /* Automatically invoke destructors for aggregate fields inside destructors */
   if (node->name == "~" && node->parentRecord) {
     /* Explicitly exclude Unions from auto-destruction logic as their active
@@ -3042,6 +3081,34 @@ llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
 }
 
 llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
+  if (node->isSuperCall) {
+    if (!node->resolvedFunc)
+      return nullptr;
+
+    SymbolInfo sym = cgCtx.lookupDetailed("this");
+    llvm::Value *thisPtr =
+        builder.CreateLoad(builder.getPtrTy(), sym.value, "this.val");
+
+    std::vector<llvm::Value *> argsArgs;
+    argsArgs.push_back(thisPtr);
+
+    llvm::Function *func = getOrCreateFunction(node->resolvedFunc);
+    llvm::FunctionType *calleeTy = func->getFunctionType();
+
+    unsigned llArgIdx = 1;
+    for (const auto &arg : node->args) {
+      llvm::Value *argVal = dispatch(arg);
+      if (llArgIdx < calleeTy->getNumParams()) {
+        llvm::Type *paramTy = calleeTy->getParamType(llArgIdx);
+        argVal = createImplicitCast(argVal, paramTy);
+      }
+      argsArgs.push_back(argVal);
+      llArgIdx++;
+    }
+
+    return builder.CreateCall(calleeTy, func, argsArgs);
+  }
+
   llvm::Function *func = nullptr;
   std::vector<llvm::Value *> argsArgs;
 
@@ -3074,7 +3141,11 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
       if (node->resolvedFunc->isMethod && !node->resolvedFunc->isExtern &&
           !node->resolvedFunc->isStatic && node->resolvedFunc->parentRecord) {
         llvm::Value *objPtr = nullptr;
-        if (ma->object->exprType->isPointerType()) {
+        if (ma->isSuperAccess) {
+          SymbolInfo sym = cgCtx.lookupDetailed("this");
+          objPtr =
+              builder.CreateLoad(builder.getPtrTy(), sym.value, "this.val");
+        } else if (ma->object->exprType->isPointerType()) {
           objPtr = dispatch(ma->object);
         } else {
           objPtr = getLValue(ma->object);
@@ -3094,7 +3165,8 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
 
         argsArgs.push_back(objPtr);
 
-        if (node->resolvedFunc->isVirtual || node->resolvedFunc->isOverride) {
+        if (!ma->isSuperAccess &&
+            (node->resolvedFunc->isVirtual || node->resolvedFunc->isOverride)) {
           const Type *baseTy = ma->object->exprType;
           if (baseTy->isPointerType()) {
             baseTy = static_cast<const PointerType *>(baseTy)->getPointeeType();

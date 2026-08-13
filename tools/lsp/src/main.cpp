@@ -2734,6 +2734,7 @@ void handleSemanticTokens(const json &req) {
                    tok.type == TokenType::NAMESPACE_KW ||
                    tok.type == TokenType::EXTENDS_KW ||
                    tok.type == TokenType::IMPLEMENTS_KW ||
+                   tok.type == TokenType::SUPER_KW ||
                    tok.type == TokenType::USING_KW) {
           visitor.addToken(tok.line > 0 ? tok.line - 1 : 0,
                            tok.column > 0 ? tok.column - 1 : 0,
