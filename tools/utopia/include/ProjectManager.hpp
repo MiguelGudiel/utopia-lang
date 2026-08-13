@@ -13,12 +13,15 @@ struct SourceInfo {
 };
 
 struct SubprojectConfig {
+  std::string name;
+  std::string version;
   std::string path;
   std::string linkType; // "static" or "shared"
 };
 
 struct ProjectConfig {
   std::string name;
+  std::string version;
   std::string target;
   fs::path projectRoot;
   std::string outputDir;

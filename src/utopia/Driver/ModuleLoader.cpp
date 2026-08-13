@@ -68,15 +68,8 @@ ModuleLoader::resolveImportURI(std::string_view uri,
       }
     }
 
-    std::filesystem::path target =
-        config.projectRoot / "utopia_modules" / pkgPath;
-    if (target.extension() != ".utp")
-      target += ".utp";
-
-    if (std::filesystem::exists(target)) {
-      return std::filesystem::weakly_canonical(target);
-    }
-    return std::unexpected("Package module not found: " + pkgPath);
+    return std::unexpected("Package module not found: " + pkgPath +
+                           " (Did you forget to run 'utopia yip get'?)");
   }
 
   std::filesystem::path target(uriStr);

@@ -19,10 +19,16 @@ fs::path findProjectRoot(fs::path startPath) {
   if (!fs::is_directory(current))
     current = current.parent_path();
 
-  while (current.has_parent_path()) {
+  while (true) {
     if (fs::exists(current / "build.yaml"))
       return current;
-    current = current.parent_path();
+
+    fs::path parent = current.parent_path();
+    if (parent == current) {
+      break;
+    }
+
+    current = parent;
   }
   return "";
 }
@@ -37,6 +43,7 @@ ProjectConfig parseBuildManifest(const fs::path &manifestPath) {
 
     if (root["project"]) {
       config.name = root["project"]["name"].as<std::string>("utopia_out");
+      config.version = root["project"]["version"].as<std::string>("0.0.0");
     }
 
     if (root["build"]) {
@@ -92,7 +99,15 @@ ProjectConfig parseBuildManifest(const fs::path &manifestPath) {
     if (root["dependencies"] && root["dependencies"].IsSequence()) {
       for (const auto &dep : root["dependencies"]) {
         SubprojectConfig sub;
-        sub.path = dep["path"].as<std::string>();
+        if (dep["name"]) {
+          sub.name = dep["name"].as<std::string>();
+        }
+        if (dep["version"]) {
+          sub.version = dep["version"].as<std::string>();
+        }
+        if (dep["path"]) {
+          sub.path = dep["path"].as<std::string>();
+        }
         sub.linkType = dep["link"] ? dep["link"].as<std::string>() : "static";
         config.dependencies.push_back(sub);
       }

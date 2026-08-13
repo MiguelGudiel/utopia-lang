@@ -1584,6 +1584,18 @@ llvm::Value *CodeGen::visit(const MemberAccessNode *node) {
     objPtr = getLValue(node->object);
   }
 
+  if (!objPtr) {
+    lastTemporaryAlloca = nullptr;
+    llvm::Value *val = dispatch(node->object);
+    if (lastTemporaryAlloca) {
+      objPtr = lastTemporaryAlloca;
+      lastTemporaryAlloca = nullptr;
+    } else if (val) {
+      objPtr = createEntryBlockAlloca(val->getType(), "tmp.ma.recv");
+      createTBAAStore(val, objPtr, node->object->exprType);
+    }
+  }
+
   if (!objPtr)
     return nullptr;
 
@@ -1608,8 +1620,14 @@ llvm::Value *CodeGen::visit(const MemberAccessNode *node) {
         arrTy, gep, {builder.getInt32(0), builder.getInt32(0)});
   }
 
-  return createTBAALoad(getLLVMType(node->exprType), gep,
-                        tbaaManager.getTBAATagForExpr(*this, node),
+  const Type *loadTy = node->exprType;
+  if (loadTy->isReferenceType() ||
+      loadTy->getKind() == TypeKind::RValueReference) {
+    loadTy = static_cast<const ReferenceType *>(loadTy)->getPointeeType();
+  }
+
+  llvm::Type *llvmTy = getLLVMType(loadTy);
+  return createTBAALoad(llvmTy, gep, tbaaManager.getTBAATagForExpr(*this, node),
                         node->memberName);
 }
 
@@ -1851,9 +1869,15 @@ llvm::Value *CodeGen::visit(const UnaryOpNode *node) {
     }
 
     if (!objPtr) {
+      lastTemporaryAlloca = nullptr;
       llvm::Value *val = dispatch(node->expr);
-      objPtr = createEntryBlockAlloca(val->getType(), "tmp.op.recv");
-      builder.CreateStore(val, objPtr);
+      if (lastTemporaryAlloca) {
+        objPtr = lastTemporaryAlloca;
+        lastTemporaryAlloca = nullptr;
+      } else if (val) {
+        objPtr = createEntryBlockAlloca(val->getType(), "tmp.op.recv");
+        createTBAAStore(val, objPtr, node->expr->exprType);
+      }
     }
 
     llvm::Value *oldVal = nullptr;
@@ -1969,9 +1993,9 @@ llvm::Value *CodeGen::visit(const BinaryOpNode *node) {
         if (lastTemporaryAlloca) {
           objPtr = lastTemporaryAlloca;
           lastTemporaryAlloca = nullptr;
-        } else {
+        } else if (val) {
           objPtr = createEntryBlockAlloca(val->getType(), "tmp.op.recv");
-          builder.CreateStore(val, objPtr);
+          createTBAAStore(val, objPtr, node->left->exprType);
         }
       }
       argsArgs.push_back(objPtr);
@@ -1992,9 +2016,9 @@ llvm::Value *CodeGen::visit(const BinaryOpNode *node) {
           if (lastTemporaryAlloca) {
             rhsVal = lastTemporaryAlloca;
             lastTemporaryAlloca = nullptr;
-          } else {
+          } else if (val) {
             rhsVal = createEntryBlockAlloca(val->getType(), "tmp.op.arg");
-            builder.CreateStore(val, rhsVal);
+            createTBAAStore(val, rhsVal, node->right->exprType);
           }
         }
       } else {
@@ -2023,9 +2047,9 @@ llvm::Value *CodeGen::visit(const BinaryOpNode *node) {
           if (lastTemporaryAlloca) {
             lhsVal = lastTemporaryAlloca;
             lastTemporaryAlloca = nullptr;
-          } else {
+          } else if (val) {
             lhsVal = createEntryBlockAlloca(val->getType(), "tmp.op.arg.l");
-            builder.CreateStore(val, lhsVal);
+            createTBAAStore(val, lhsVal, node->left->exprType);
           }
         }
       } else {
@@ -2054,9 +2078,9 @@ llvm::Value *CodeGen::visit(const BinaryOpNode *node) {
           if (lastTemporaryAlloca) {
             rhsVal = lastTemporaryAlloca;
             lastTemporaryAlloca = nullptr;
-          } else {
+          } else if (val) {
             rhsVal = createEntryBlockAlloca(val->getType(), "tmp.op.arg.r");
-            builder.CreateStore(val, rhsVal);
+            createTBAAStore(val, rhsVal, node->right->exprType);
           }
         }
       } else {
@@ -3055,6 +3079,19 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
         } else {
           objPtr = getLValue(ma->object);
         }
+
+        if (!objPtr) {
+          lastTemporaryAlloca = nullptr;
+          llvm::Value *val = dispatch(ma->object);
+          if (lastTemporaryAlloca) {
+            objPtr = lastTemporaryAlloca;
+            lastTemporaryAlloca = nullptr;
+          } else if (val) {
+            objPtr = createEntryBlockAlloca(val->getType(), "tmp.method.recv");
+            createTBAAStore(val, objPtr, ma->object->exprType);
+          }
+        }
+
         argsArgs.push_back(objPtr);
 
         if (node->resolvedFunc->isVirtual || node->resolvedFunc->isOverride) {
@@ -3486,9 +3523,15 @@ llvm::Value *CodeGen::visit(const ArraySubscriptNode *node) {
     }
 
     if (!objPtr) {
+      lastTemporaryAlloca = nullptr;
       llvm::Value *val = dispatch(node->base);
-      objPtr = createEntryBlockAlloca(val->getType(), "tmp.op.recv");
-      builder.CreateStore(val, objPtr);
+      if (lastTemporaryAlloca) {
+        objPtr = lastTemporaryAlloca;
+        lastTemporaryAlloca = nullptr;
+      } else if (val) {
+        objPtr = createEntryBlockAlloca(val->getType(), "tmp.op.recv");
+        createTBAAStore(val, objPtr, node->base->exprType);
+      }
     }
 
     llvm::Function *func = getOrCreateFunction(node->overloadedOperator);

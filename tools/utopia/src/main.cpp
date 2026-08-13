@@ -1,6 +1,8 @@
 #include "Commands/Build/BuildCommand.hpp"
 #include "Commands/Fmt/FmtCommand.hpp"
 #include "Commands/Run/RunCommand.hpp"
+#include "Commands/Yip/YipCommand.hpp"
+#include "Core/EnvLoader.hpp"
 #include <iostream>
 #include <llvm/Support/ErrorHandling.h>
 #include <llvm/Support/FileSystem.h>
@@ -35,10 +37,21 @@ void printHelp(const std::unordered_map<std::string, std::shared_ptr<ICommand>>
 int main(int argc, char **argv) {
   llvm::install_fatal_error_handler(utopiaFatalErrorHandler, nullptr);
 
+  std::string exePathStr =
+      llvm::sys::fs::getMainExecutable(argv[0], (void *)(intptr_t)&main);
+
+#if defined(UTOPIA_RELEASE_BUILD)
+#elif defined(UTOPIA_SOURCE_DIR)
+  EnvLoader::load(std::filesystem::path(UTOPIA_SOURCE_DIR) / "debug.env");
+#else
+  EnvLoader::load(std::filesystem::current_path() / "debug.env");
+#endif
+
   std::unordered_map<std::string, std::shared_ptr<ICommand>> commands;
   commands["build"] = std::make_shared<BuildCommand>();
   commands["run"] = std::make_shared<RunCommand>();
   commands["fmt"] = std::make_shared<FmtCommand>();
+  commands["yip"] = std::make_shared<YipCommand>();
 
   try {
     if (argc < 2) {
@@ -64,8 +77,6 @@ int main(int argc, char **argv) {
     }
 
     std::vector<std::string> args(argv + argOffset, argv + argc);
-    std::string exePathStr =
-        llvm::sys::fs::getMainExecutable(argv[0], (void *)(intptr_t)&main);
 
     int result = selectedCmd->execute(args, exePathStr);
     llvm::remove_fatal_error_handler();
