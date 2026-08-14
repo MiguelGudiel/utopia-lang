@@ -6,7 +6,8 @@ namespace utopia {
 void OptionsParser::parseCommonOptions(const std::vector<std::string> &args,
                                        GlobalOptions &opts,
                                        std::filesystem::path &startPath) {
-  for (const auto &arg : args) {
+  for (size_t i = 0; i < args.size(); ++i) {
+    const auto &arg = args[i];
     if (arg == "--emit-llvm") {
       opts.emitLLVM = true;
     } else if (arg == "--emit-asm") {
@@ -17,6 +18,14 @@ void OptionsParser::parseCommonOptions(const std::vector<std::string> &args,
       opts.doFormat = true;
     } else if (arg == "-g" || arg == "--debug") {
       opts.isDebug = true;
+    } else if (arg == "--target" && i + 1 < args.size()) {
+      opts.targetTriple = args[++i];
+    } else if (arg.starts_with("--target=")) {
+      opts.targetTriple = arg.substr(9);
+    } else if (arg == "--sysroot" && i + 1 < args.size()) {
+      opts.sysroot = args[++i];
+    } else if (arg.starts_with("--sysroot=")) {
+      opts.sysroot = arg.substr(10);
     } else if (arg.starts_with("-O")) {
       if (arg.length() > 2 && std::isdigit(arg[2])) {
         opts.cliOptLevel = std::stoi(arg.substr(2));

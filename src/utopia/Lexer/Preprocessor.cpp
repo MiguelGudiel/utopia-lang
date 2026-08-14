@@ -101,34 +101,7 @@ Preprocessor::Preprocessor(std::string_view sourceCode,
                            bool isFormatting)
     : source(sourceCode), cursor(0), definedMacros(macros), diags(diags),
       filePath(std::string(filePath)), isFormatting(isFormatting), line(1),
-      col(1), inactiveStartLine(-1) {
-
-#if defined(_WIN32)
-  definedMacros.insert("_WIN32");
-#elif defined(__APPLE__)
-  definedMacros.insert("__APPLE__");
-#elif defined(__ANDROID__)
-  definedMacros.insert("__ANDROID__");
-#elif defined(__linux__) || defined(__gnu_linux__)
-  definedMacros.insert("__gnu_linux__");
-#elif defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
-  definedMacros.insert("__BSD__");
-  definedMacros.insert("__FreeBSD__");
-  definedMacros.insert("__NetBSD__");
-  definedMacros.insert("__OpenBSD__");
-#endif
-
-#if defined(__x86_64__) || defined(_M_X64)
-  definedMacros.insert("x64");
-  definedMacros.insert("x86_64");
-#elif defined(__i386) || defined(_M_IX86)
-  definedMacros.insert("x86");
-#elif defined(__aarch64__) || defined(_M_ARM64)
-  definedMacros.insert("arm64");
-#elif defined(__arm__) || defined(_M_ARM)
-  definedMacros.insert("arm");
-#endif
-}
+      col(1), inactiveStartLine(-1) {}
 
 int Preprocessor::getUTF8CharLength(unsigned char c) {
   if ((c & 0x80) == 0)
@@ -265,8 +238,8 @@ void Preprocessor::processDirective() {
   /* Report the inactive block range strictly excluding the directive lines */
   if (wasSkipping && diags && !isFormatting && inactiveStartLine != -1 &&
       directiveLine > inactiveStartLine) {
-    //diags->report({DiagLevel::Inactive, inactiveStartLine, 1, 0,
-    //               "Inactive preprocessor block", filePath, directiveLine});
+    // diags->report({DiagLevel::Inactive, inactiveStartLine, 1, 0,
+    //                "Inactive preprocessor block", filePath, directiveLine});
   }
 
   if (isSkipping) {
@@ -325,8 +298,8 @@ std::string Preprocessor::process() {
 
   if (skipMode() && diags && !isFormatting && inactiveStartLine != -1 &&
       line >= inactiveStartLine) {
-    //diags->report({DiagLevel::Inactive, inactiveStartLine, 1, 0,
-    //               "Inactive preprocessor block", filePath, line + 1});
+    // diags->report({DiagLevel::Inactive, inactiveStartLine, 1, 0,
+    //                "Inactive preprocessor block", filePath, line + 1});
   }
 
   if (!condStack.empty()) {

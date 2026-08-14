@@ -49,8 +49,16 @@ ProjectConfig parseBuildManifest(const fs::path &manifestPath) {
     if (root["build"]) {
       auto b = root["build"];
       config.target = b["target"].as<std::string>("executable");
-      config.outputDir =
-          b["output_dir"] ? b["output_dir"].as<std::string>() : "build";
+
+      if (b["output_dir"]) {
+        config.outputDir = b["output_dir"].as<std::string>();
+      }
+
+      if (b["output_name"]) {
+        config.outputName = b["output_name"].as<std::string>();
+      } else {
+        config.outputName = config.name;
+      }
 
       if (b["optimization"]) {
         config.optLevel = b["optimization"].as<int>();

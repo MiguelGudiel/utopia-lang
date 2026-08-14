@@ -25,13 +25,17 @@ void printHelp(const std::unordered_map<std::string, std::shared_ptr<ICommand>>
   for (const auto &[name, cmd] : commands) {
     std::cout << "  " << name << " \t" << cmd->getDescription() << "\n";
   }
-  std::cout << "\nOptions:\n"
-            << "  --emit-llvm    Emit LLVM IR (.ll) files.\n"
-            << "  --emit-asm     Emit Assembly (.s) files.\n"
-            << "  --jit          Force JIT execution (default for 'run').\n"
-            << "  -g, --debug    Include debug symbols.\n"
-            << "  -O<level>      Set optimization level (e.g., -O3).\n"
-            << "  -D<macro>      Define a public macro.\n";
+  std::cout
+      << "\nOptions:\n"
+      << "  --emit-llvm    Emit LLVM IR (.ll) files.\n"
+      << "  --emit-asm     Emit Assembly (.s) files.\n"
+      << "  --jit          Force JIT execution (default for 'run').\n"
+      << "  -g, --debug    Include debug symbols.\n"
+      << "  -O<level>      Set optimization level (e.g., -O3).\n"
+      << "  -D<macro>      Define a public macro.\n"
+      << "  --target <T>   Set target triple (e.g., x86_64-pc-windows-msvc).\n"
+      << "  --sysroot <P>  Set the system root directory (e.g., Android "
+         "NDK).\n";
 }
 
 int main(int argc, char **argv) {

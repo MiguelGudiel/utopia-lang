@@ -10,7 +10,8 @@ namespace utopia {
 struct HttpOptions {
   std::string baseUrl;
   std::map<std::string, std::string> defaultHeaders;
-  long timeoutSeconds = 30;
+  long timeoutSeconds = 300;
+  long connectTimeoutSeconds = 30;
   bool enableHttp2 = true;
 };
 

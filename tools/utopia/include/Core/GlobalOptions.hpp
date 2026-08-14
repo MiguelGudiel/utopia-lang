@@ -12,6 +12,8 @@ struct GlobalOptions {
   bool isDebug = false;
   bool doFormat = false;
   std::optional<int> cliOptLevel;
+  std::string targetTriple;
+  std::string sysroot;
   std::string stdlibRoot;
   std::string preludeRoot;
   std::string buildLibRoot;

@@ -11,14 +11,19 @@ namespace utopia {
 
 struct CompileOptions {
   std::string projectName;
+  std::string outputName;
   std::string target;
   std::string sourcePath;
   std::string outputPath;
   std::string projectRoot;
+  std::string mainProjectRoot;
+  std::string currentProjectRoot;
   std::string outputDir;
   std::string stdlibRoot;
   std::string preludeRoot;
   std::string buildLibRoot;
+  std::string targetTriple;
+  std::string sysroot;
   std::vector<std::string> includeDirs;
   std::vector<std::string> linkerFlags;
 

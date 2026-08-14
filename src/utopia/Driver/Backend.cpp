@@ -15,6 +15,7 @@
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/Target/TargetOptions.h>
 #include <llvm/TargetParser/Host.h>
+#include <llvm/TargetParser/Triple.h>
 #include <llvm/Transforms/Utils/Cloning.h>
 #include <memory>
 
@@ -25,16 +26,22 @@ namespace utopia {
 bool Backend::process(llvm::Module *mod, BackendContext &backendCtx,
                       const CompileOptions &options,
                       const std::string &outBasePath) {
-  llvm::InitializeNativeTarget();
-  llvm::InitializeNativeTargetAsmPrinter();
-  llvm::InitializeNativeTargetAsmParser();
+  llvm::InitializeAllTargetInfos();
+  llvm::InitializeAllTargets();
+  llvm::InitializeAllTargetMCs();
+  llvm::InitializeAllAsmParsers();
+  llvm::InitializeAllAsmPrinters();
 
-  std::string targetTripleStr = llvm::sys::getDefaultTargetTriple();
+  std::string targetTripleStr = options.targetTriple;
+  if (targetTripleStr.empty()) {
+    targetTripleStr = llvm::sys::getDefaultTargetTriple();
+  }
+
   llvm::Triple triple(targetTripleStr);
   mod->setTargetTriple(triple);
 
   std::string error;
-  auto target = llvm::TargetRegistry::lookupTarget(targetTripleStr, error);
+  auto target = llvm::TargetRegistry::lookupTarget(triple.getTriple(), error);
   if (!target) {
     std::cerr << "\033[1;31m[Backend Error]\033[0m Target lookup failed: "
               << error << "\n";

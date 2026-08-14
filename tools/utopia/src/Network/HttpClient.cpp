@@ -71,7 +71,12 @@ void HttpClient::setupEasyHandle(void *easyHandle, const HttpRequest &request,
   curl_easy_setopt(easyHandle, CURLOPT_URL, fullUrl.c_str());
   curl_easy_setopt(easyHandle, CURLOPT_WRITEFUNCTION, WriteCallback);
   curl_easy_setopt(easyHandle, CURLOPT_WRITEDATA, responseBody);
+
+  curl_easy_setopt(easyHandle, CURLOPT_CONNECTTIMEOUT,
+                   m_options.connectTimeoutSeconds);
+
   curl_easy_setopt(easyHandle, CURLOPT_TIMEOUT, m_options.timeoutSeconds);
+
   curl_easy_setopt(easyHandle, CURLOPT_FOLLOWLOCATION, 1L);
 
 #ifdef _WIN32
@@ -93,7 +98,12 @@ void HttpClient::setupEasyHandle(void *easyHandle, const HttpRequest &request,
   }
 
   if (m_options.enableHttp2) {
-    curl_easy_setopt(easyHandle, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2_0);
+    if (fullUrl.starts_with("http://")) {
+      curl_easy_setopt(easyHandle, CURLOPT_HTTP_VERSION,
+                       CURL_HTTP_VERSION_2_PRIOR_KNOWLEDGE);
+    } else {
+      curl_easy_setopt(easyHandle, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2_0);
+    }
   }
 
   struct curl_slist *headers = nullptr;

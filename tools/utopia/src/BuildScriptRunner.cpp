@@ -8,6 +8,7 @@
 #include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
 #include <llvm/Support/Error.h>
 #include <llvm/Support/TargetSelect.h>
+#include <llvm/TargetParser/Host.h>
 #include <unordered_set>
 
 namespace utopia {
@@ -15,21 +16,25 @@ namespace utopia {
 static CompileOptions *g_CurrentBuildOptions = nullptr;
 
 extern "C" {
+
 void UtopiaBuild_addLinkerFlag(const char *flag) {
   if (g_CurrentBuildOptions && flag) {
     g_CurrentBuildOptions->linkerFlags.push_back(flag);
   }
 }
+
 void UtopiaBuild_addIncludeDir(const char *dir) {
   if (g_CurrentBuildOptions && dir) {
     g_CurrentBuildOptions->includeDirs.push_back(dir);
   }
 }
+
 void UtopiaBuild_setOptLevel(int level) {
   if (g_CurrentBuildOptions) {
     g_CurrentBuildOptions->optLevel = level;
   }
 }
+
 void UtopiaBuild_addDefine(const char *name, bool isPublic) {
   if (g_CurrentBuildOptions && name) {
     if (isPublic) {
@@ -39,12 +44,14 @@ void UtopiaBuild_addDefine(const char *name, bool isPublic) {
     }
   }
 }
+
 void UtopiaBuild_removeDefine(const char *name) {
   if (g_CurrentBuildOptions && name) {
     g_CurrentBuildOptions->publicMacros.erase(name);
     g_CurrentBuildOptions->privateMacros.erase(name);
   }
 }
+
 bool UtopiaBuild_isDefined(const char *name) {
   if (g_CurrentBuildOptions && name) {
     return g_CurrentBuildOptions->publicMacros.contains(name) ||
@@ -52,6 +59,7 @@ bool UtopiaBuild_isDefined(const char *name) {
   }
   return false;
 }
+
 void UtopiaBuild_addCacheDefine(const char *name, bool defaultValue,
                                 bool isPublic) {
   if (!g_CurrentBuildOptions || !name)
@@ -61,6 +69,69 @@ void UtopiaBuild_addCacheDefine(const char *name, bool defaultValue,
   if (defaultValue) {
     UtopiaBuild_addDefine(name, isPublic);
   }
+}
+
+void UtopiaBuild_setSysroot(const char *sysroot) {
+  if (g_CurrentBuildOptions && sysroot) {
+    g_CurrentBuildOptions->sysroot = sysroot;
+  }
+}
+
+const char *UtopiaBuild_getMainProjectRoot() {
+  return g_CurrentBuildOptions ? g_CurrentBuildOptions->mainProjectRoot.c_str()
+                               : "";
+}
+
+const char *UtopiaBuild_getCurrentProjectRoot() {
+  return g_CurrentBuildOptions
+             ? g_CurrentBuildOptions->currentProjectRoot.c_str()
+             : "";
+}
+
+const char *UtopiaBuild_getOutputDir() {
+  return g_CurrentBuildOptions ? g_CurrentBuildOptions->outputDir.c_str() : "";
+}
+
+const char *UtopiaBuild_getTargetTriple() {
+  return g_CurrentBuildOptions ? g_CurrentBuildOptions->targetTriple.c_str()
+                               : "";
+}
+
+const char *UtopiaBuild_getBuildType() {
+  return (g_CurrentBuildOptions && g_CurrentBuildOptions->isDebug) ? "Debug"
+                                                                   : "Release";
+}
+
+const char *UtopiaBuild_getTargetOS() {
+  if (!g_CurrentBuildOptions)
+    return "unknown";
+  std::string t = g_CurrentBuildOptions->targetTriple;
+  if (t.empty())
+    t = llvm::sys::getDefaultTargetTriple();
+  llvm::Triple triple(t);
+
+  if (triple.isOSWindows())
+    return "windows";
+  if (triple.isMacOSX())
+    return "macos";
+  if (triple.isOSLinux() && !triple.isAndroid())
+    return "linux";
+  if (triple.isAndroid())
+    return "android";
+  return "unknown";
+}
+
+const char *UtopiaBuild_getTargetArch() {
+  if (!g_CurrentBuildOptions)
+    return "unknown";
+  std::string t = g_CurrentBuildOptions->targetTriple;
+  if (t.empty())
+    t = llvm::sys::getDefaultTargetTriple();
+  llvm::Triple triple(t);
+
+  static std::string archStr;
+  archStr = triple.getArchName().str();
+  return archStr.c_str();
 }
 } // extern "C"
 
@@ -79,6 +150,42 @@ bool BuildScriptRunner::run(const std::filesystem::path &scriptPath,
   modConfig.definedMacros = options.publicMacros;
   modConfig.definedMacros.insert(options.privateMacros.begin(),
                                  options.privateMacros.end());
+
+  std::string targetTripleStr = options.targetTriple.empty()
+                                    ? llvm::sys::getDefaultTargetTriple()
+                                    : options.targetTriple;
+  llvm::Triple triple(targetTripleStr);
+
+  if (triple.isOSWindows()) {
+    modConfig.definedMacros.insert("_WIN32");
+  } else if (triple.isMacOSX()) {
+    modConfig.definedMacros.insert("__APPLE__");
+  } else if (triple.isAndroid() ||
+             targetTripleStr.find("android") != std::string::npos) {
+    modConfig.definedMacros.insert("__ANDROID__");
+  } else if (triple.isOSLinux()) {
+    modConfig.definedMacros.insert("__linux__");
+    modConfig.definedMacros.insert("__gnu_linux__");
+  } else if (triple.isOSFreeBSD() || triple.isOSNetBSD() ||
+             triple.isOSOpenBSD()) {
+    modConfig.definedMacros.insert("__BSD__");
+  }
+
+  if (triple.getArch() == llvm::Triple::x86_64) {
+    modConfig.definedMacros.insert("x64");
+    modConfig.definedMacros.insert("x86_64");
+    modConfig.definedMacros.insert("__x86_64__");
+  } else if (triple.getArch() == llvm::Triple::x86) {
+    modConfig.definedMacros.insert("x86");
+    modConfig.definedMacros.insert("__i386__");
+  } else if (triple.getArch() == llvm::Triple::aarch64) {
+    modConfig.definedMacros.insert("arm64");
+    modConfig.definedMacros.insert("__aarch64__");
+  } else if (triple.getArch() == llvm::Triple::arm) {
+    modConfig.definedMacros.insert("arm");
+    modConfig.definedMacros.insert("__arm__");
+  }
+
   modConfig.isBuildScript = true;
 
   DiagnosticsEngine diagEngine;
@@ -164,6 +271,17 @@ bool BuildScriptRunner::run(const std::filesystem::path &scriptPath,
   addSym("UtopiaBuild_removeDefine", (void *)UtopiaBuild_removeDefine);
   addSym("UtopiaBuild_isDefined", (void *)UtopiaBuild_isDefined);
   addSym("UtopiaBuild_addCacheDefine", (void *)UtopiaBuild_addCacheDefine);
+  addSym("UtopiaBuild_setSysroot", (void *)UtopiaBuild_setSysroot);
+
+  addSym("UtopiaBuild_getMainProjectRoot",
+         (void *)UtopiaBuild_getMainProjectRoot);
+  addSym("UtopiaBuild_getCurrentProjectRoot",
+         (void *)UtopiaBuild_getCurrentProjectRoot);
+  addSym("UtopiaBuild_getOutputDir", (void *)UtopiaBuild_getOutputDir);
+  addSym("UtopiaBuild_getTargetTriple", (void *)UtopiaBuild_getTargetTriple);
+  addSym("UtopiaBuild_getBuildType", (void *)UtopiaBuild_getBuildType);
+  addSym("UtopiaBuild_getTargetOS", (void *)UtopiaBuild_getTargetOS);
+  addSym("UtopiaBuild_getTargetArch", (void *)UtopiaBuild_getTargetArch);
 
   if (auto err = jd.define(llvm::orc::absoluteSymbols(symbols))) {
     llvm::consumeError(std::move(err));

@@ -1,9 +1,9 @@
 #include "Core/ProjectBuilder.hpp"
 #include "BuildScriptRunner.hpp"
+#include "Core/EnvLoader.hpp"
 #include "utopia/Common/Logger.hpp"
 #include <algorithm>
 #include <iostream>
-#include "Core/EnvLoader.hpp"
 
 namespace utopia {
 
@@ -32,11 +32,19 @@ bool buildProject(const fs::path &projRoot, CompileOptions &parentOptions,
 
   CompileOptions options;
   options.projectName = config.name;
+  options.outputName = config.outputName;
+  options.currentProjectRoot = projRoot.string();
 
   if (isSubproject) {
     options.target =
         (linkType == "shared") ? "shared_library" : "static_library";
-    options.outputDir = parentOptions.outputDir;
+
+    options.mainProjectRoot = parentOptions.mainProjectRoot;
+    if (config.outputDir.has_value()) {
+      options.outputDir = (projRoot / config.outputDir.value()).string();
+    } else {
+      options.outputDir = parentOptions.outputDir;
+    }
 
     options.optLevel = parentOptions.optLevel;
     options.includeDirs = parentOptions.includeDirs;
@@ -44,7 +52,9 @@ bool buildProject(const fs::path &projRoot, CompileOptions &parentOptions,
     options.publicMacros = parentOptions.publicMacros;
   } else {
     options.target = config.target;
-    options.outputDir = (projRoot / config.outputDir).string();
+    options.mainProjectRoot = projRoot.string();
+    options.outputDir =
+        (projRoot / config.outputDir.value_or("build")).string();
 
     for (const auto &m : globalOpts.cliMacros) {
       options.publicMacros.insert(m);
@@ -61,6 +71,8 @@ bool buildProject(const fs::path &projRoot, CompileOptions &parentOptions,
   options.isJIT = globalOpts.isJIT;
   options.isDebug = globalOpts.isDebug;
   options.doFormat = globalOpts.doFormat;
+  options.targetTriple = globalOpts.targetTriple;
+  options.sysroot = globalOpts.sysroot;
 
   if (config.optLevel.has_value()) {
     options.optLevel = config.optLevel.value();
@@ -73,6 +85,11 @@ bool buildProject(const fs::path &projRoot, CompileOptions &parentOptions,
   for (const auto &flag : config.linkerFlags) {
     options.linkerFlags.push_back(flag);
   }
+
+  if (!globalOpts.targetTriple.empty()) {
+    options.linkerFlags.push_back("--target=" + globalOpts.targetTriple);
+  }
+
   for (const auto &inc : config.includeDirs) {
     options.includeDirs.push_back(inc);
   }
@@ -142,7 +159,8 @@ bool buildProject(const fs::path &projRoot, CompileOptions &parentOptions,
   }
 
   options.sourcePath = config.resolvedSources.front().path;
-  options.outputPath = (fs::path(options.outputDir) / config.name).string();
+  options.outputPath =
+      (fs::path(options.outputDir) / config.outputName).string();
 
   CompilerDriver driver(options);
   if (!driver.run()) {
@@ -157,7 +175,9 @@ bool buildProject(const fs::path &projRoot, CompileOptions &parentOptions,
       ext = ".lib";
 #endif
       parentOptions.linkerFlags.push_back(
-          (outDir / "lib" / ("lib" + options.projectName + ext)).string());
+          "\"" +
+          (outDir / "lib" / ("lib" + options.outputName + ext)).string() +
+          "\"");
     } else if (options.target == "shared_library") {
       std::string ext = ".so";
 #if defined(_WIN32)
@@ -166,7 +186,9 @@ bool buildProject(const fs::path &projRoot, CompileOptions &parentOptions,
       ext = ".dylib";
 #endif
       parentOptions.linkerFlags.push_back(
-          (outDir / "bin" / ("lib" + options.projectName + ext)).string());
+          "\"" +
+          (outDir / "bin" / ("lib" + options.outputName + ext)).string() +
+          "\"");
 
 #ifndef _WIN32
 #ifdef __APPLE__
@@ -186,10 +208,20 @@ bool buildProject(const fs::path &projRoot, CompileOptions &parentOptions,
     }
 
     for (const auto &flag : options.linkerFlags) {
+      std::string processedFlag = flag;
+
+      if (flag.starts_with("-L") && flag.length() > 2) {
+        std::string pathStr = flag.substr(2);
+        fs::path p(pathStr);
+        if (!p.is_absolute()) {
+          processedFlag = "-L" + (fs::path(options.projectRoot) / p).string();
+        }
+      }
+
       if (std::find(parentOptions.linkerFlags.begin(),
                     parentOptions.linkerFlags.end(),
-                    flag) == parentOptions.linkerFlags.end()) {
-        parentOptions.linkerFlags.push_back(flag);
+                    processedFlag) == parentOptions.linkerFlags.end()) {
+        parentOptions.linkerFlags.push_back(processedFlag);
       }
     }
 
