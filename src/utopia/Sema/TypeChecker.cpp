@@ -741,6 +741,7 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
       ctx->reportError(node->line, node->column, node->length,
                        "A class can only extend another class.");
       hasErrors = true;
+      const_cast<ClassDeclNode *>(node)->baseClass = nullptr;
     } else {
       // Detection of inheritance cycles
       const ClassType *current = static_cast<const ClassType *>(bTy);
@@ -1109,7 +1110,7 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
     }
   }
 
-  classTy->setBaseClass(node->baseClass);
+  classTy->setBaseClass(hasErrors ? nullptr : node->baseClass);
   classTy->setIsPolymorphic(isPolymorphic);
   classTy->setIsAbstract(node->isAbstract);
   classTy->setFields(ctx->astCtx.copyArray<FieldInfo>(fInfos));
@@ -1444,7 +1445,7 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
   const DeclNode *target = decls.front();
 
   while (target) {
-    if (auto *td = llvm::dyn_cast<TypedefDeclNode>(target)) {
+    if (auto *td = llvm::dyn_cast_or_null<TypedefDeclNode>(target)) {
       if (!td->targetEntityName.empty()) {
         auto aliased = ctx->lookup(td->targetEntityName);
         if (!aliased.empty()) {
