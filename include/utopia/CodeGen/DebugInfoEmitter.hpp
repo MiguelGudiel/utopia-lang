@@ -28,6 +28,19 @@ public:
   void pushLexicalBlock(const ASTNode *node, llvm::LLVMContext &ctx);
   void popLexicalBlock();
 
+  /* Pushes an explicit LLVM scope to map dynamic routines */
+  void pushScope(llvm::DIScope *scope) {
+    if (emitDebugInfo && scope) {
+      lexicalBlocks.push_back(scope);
+    }
+  }
+
+  void popScope() {
+    if (emitDebugInfo && !lexicalBlocks.empty()) {
+      lexicalBlocks.pop_back();
+    }
+  }
+
   void emitFunctionStart(CodeGen &cg, llvm::Function *func,
                          const FunctionDeclNode *node);
   void emitFunctionEnd();

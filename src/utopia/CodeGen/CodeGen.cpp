@@ -3,6 +3,7 @@
 #include <llvm/ADT/APSInt.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/Support/ModRef.h>
+#include <llvm/Transforms/Utils/ModuleUtils.h>
 #include <optional>
 #include <string>
 
@@ -1113,6 +1114,39 @@ llvm::Value *CodeGen::visit(const ImplicitCastNode *node) {
   }
 
   return temp;
+}
+
+llvm::Function *CodeGen::getOrCreateGlobalInitFunc() {
+  if (globalInitFunc)
+    return globalInitFunc;
+
+  llvm::FunctionType *ft = llvm::FunctionType::get(builder.getVoidTy(), false);
+  std::string initName = "_GLOBAL__sub_I_" + currentFilePath;
+
+  /* Strip invalid pathing characters from the global function linkage name */
+  std::replace(initName.begin(), initName.end(), '/', '_');
+  std::replace(initName.begin(), initName.end(), '.', '_');
+  std::replace(initName.begin(), initName.end(), '\\', '_');
+
+  globalInitFunc = llvm::Function::Create(
+      ft, llvm::GlobalValue::InternalLinkage, initName, mod);
+
+  llvm::BasicBlock::Create(ctx, "entry", globalInitFunc);
+
+  if (diEmitter.isEnabled()) {
+    llvm::DISubroutineType *diFuncTy =
+        diEmitter.getBuilder()->createSubroutineType(
+            diEmitter.getBuilder()->getOrCreateTypeArray({}));
+    llvm::DISubprogram *sp = diEmitter.getBuilder()->createFunction(
+        diEmitter.getFile(), initName, initName, diEmitter.getFile(), 0,
+        diFuncTy, 0, llvm::DINode::FlagArtificial,
+        llvm::DISubprogram::SPFlagDefinition);
+    globalInitFunc->setSubprogram(sp);
+  }
+
+  /* Bind initialization routine to LLVM global constructors */
+  llvm::appendToGlobalCtors(mod, globalInitFunc, 65535);
+  return globalInitFunc;
 }
 
 llvm::Value *CodeGen::getLValue(const ExprNode *node) {
@@ -2395,13 +2429,14 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
       }
 
       if (!initConst) {
-        /* Local statics natively permit runtime initialization via guards */
-        if (isStaticLocal) {
+        /* Local statics natively permit runtime initialization via guards.
+         * Globals are mapped to module startup ctors. */
+        if (isStaticLocal || isGlobal) {
           requiresDynamicInit = true;
         } else {
           diags.report({DiagLevel::Error, node->initializer->line,
                         node->initializer->column, node->initializer->length,
-                        "Global variable requires a compile-time "
+                        "Variable requires a compile-time "
                         "constant initializer.",
                         currentFilePath});
         }
@@ -2452,102 +2487,133 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
      * Thread-safety is deferred to standard ABI guard acquisition in the
      * future. */
     if (requiresDynamicInit) {
-      std::string guardName = bindName + ".guard";
+      llvm::BasicBlock *savedInsertBlock = builder.GetInsertBlock();
+      llvm::BasicBlock *contBB = nullptr;
+      llvm::GlobalVariable *guardVar = nullptr;
 
-      // Guard status: 0 = Not initialized, 1 = Initializing (Lock), 2 =
-      // Initialized
-      llvm::GlobalVariable *guardVar = new llvm::GlobalVariable(
-          mod, builder.getInt8Ty(), false, llvm::GlobalValue::PrivateLinkage,
-          llvm::ConstantInt::get(builder.getInt8Ty(), 0), guardName);
+      if (isStaticLocal) {
+        std::string guardName = bindName + ".guard";
 
-      llvm::Function *theFunction = builder.GetInsertBlock()->getParent();
+        // Guard status: 0 = Not initialized, 1 = Initializing (Lock), 2 =
+        // Initialized
+        guardVar = new llvm::GlobalVariable(
+            mod, builder.getInt8Ty(), false, llvm::GlobalValue::PrivateLinkage,
+            llvm::ConstantInt::get(builder.getInt8Ty(), 0), guardName);
 
-      llvm::BasicBlock *checkBB =
-          llvm::BasicBlock::Create(ctx, "static.check", theFunction);
-      llvm::BasicBlock *spinBB =
-          llvm::BasicBlock::Create(ctx, "static.spin", theFunction);
-      llvm::BasicBlock *initBB =
-          llvm::BasicBlock::Create(ctx, "static.init", theFunction);
-      llvm::BasicBlock *contBB =
-          llvm::BasicBlock::Create(ctx, "static.cont", theFunction);
+        llvm::Function *theFunction = savedInsertBlock->getParent();
 
-      builder.CreateBr(checkBB);
+        llvm::BasicBlock *checkBB =
+            llvm::BasicBlock::Create(ctx, "static.check", theFunction);
+        llvm::BasicBlock *spinBB =
+            llvm::BasicBlock::Create(ctx, "static.spin", theFunction);
+        llvm::BasicBlock *initBB =
+            llvm::BasicBlock::Create(ctx, "static.init", theFunction);
+        contBB = llvm::BasicBlock::Create(ctx, "static.cont", theFunction);
 
-      builder.SetInsertPoint(checkBB);
-      llvm::LoadInst *guardLoad =
-          builder.CreateLoad(builder.getInt8Ty(), guardVar);
-      guardLoad->setAtomic(llvm::AtomicOrdering::Acquire);
+        builder.CreateBr(checkBB);
 
-      llvm::Value *isInit = builder.CreateICmpEQ(guardLoad, builder.getInt8(2));
-      builder.CreateCondBr(isInit, contBB, spinBB);
+        builder.SetInsertPoint(checkBB);
+        llvm::LoadInst *guardLoad =
+            builder.CreateLoad(builder.getInt8Ty(), guardVar);
+        guardLoad->setAtomic(llvm::AtomicOrdering::Acquire);
 
-      builder.SetInsertPoint(spinBB);
-      llvm::Value *cmpXchg = builder.CreateAtomicCmpXchg(
-          guardVar, builder.getInt8(0), builder.getInt8(1), llvm::MaybeAlign(1),
-          llvm::AtomicOrdering::AcquireRelease, llvm::AtomicOrdering::Acquire);
+        llvm::Value *isInit =
+            builder.CreateICmpEQ(guardLoad, builder.getInt8(2));
+        builder.CreateCondBr(isInit, contBB, spinBB);
 
-      llvm::Value *success = builder.CreateExtractValue(cmpXchg, 1);
+        builder.SetInsertPoint(spinBB);
+        llvm::Value *cmpXchg = builder.CreateAtomicCmpXchg(
+            guardVar, builder.getInt8(0), builder.getInt8(1),
+            llvm::MaybeAlign(1), llvm::AtomicOrdering::AcquireRelease,
+            llvm::AtomicOrdering::Acquire);
 
-      builder.CreateCondBr(success, initBB, checkBB);
+        llvm::Value *success = builder.CreateExtractValue(cmpXchg, 1);
 
-      builder.SetInsertPoint(initBB);
+        builder.CreateCondBr(success, initBB, checkBB);
 
-      if (baseUnqualTy->getKind() == TypeKind::Array) {
-        emitArrayLiteralInit(gvar, node->type, node->initializer);
+        builder.SetInsertPoint(initBB);
       } else {
-        bool isRVO = false;
+        llvm::Function *initF = getOrCreateGlobalInitFunc();
+        builder.SetInsertPoint(&initF->back());
+        diEmitter.pushScope(initF->getSubprogram());
+      }
 
-        if (node->initializer->kind == NodeKind::FunctionCall) {
-          auto *callNode =
-              static_cast<const FunctionCallNode *>(node->initializer);
-          if (callNode->target->kind == NodeKind::Variable) {
-            if (callNode->resolvedFunc && callNode->resolvedFunc->isMethod &&
-                callNode->resolvedFunc->returnType->isVoid()) {
-              isRVO = true;
-              emitConstructorCall(callNode, gvar);
-            }
-          }
-        }
+      /* Contextually bind cleanup routines executed throughout dynamic parsing
+       * block safely avoiding scope leaks or unreachable logic */
+      {
+        CGScopeGuard initGuard(cgCtx);
 
-        if (!isRVO) {
-          bool isAggregate = (baseUnqualTy->getKind() == TypeKind::Struct ||
-                              baseUnqualTy->getKind() == TypeKind::Class ||
-                              baseUnqualTy->getKind() == TypeKind::Union);
+        if (baseUnqualTy->getKind() == TypeKind::Array) {
+          emitArrayLiteralInit(gvar, node->type, node->initializer);
+        } else {
+          bool isRVO = false;
 
-          if (isAggregate && node->copyCtor) {
-            llvm::Value *rvalAddr = getLValue(node->initializer);
-            if (!rvalAddr) {
-              lastTemporaryAlloca = nullptr;
-              llvm::Value *initVal = dispatch(node->initializer);
-              if (lastTemporaryAlloca) {
-                rvalAddr = lastTemporaryAlloca;
-                lastTemporaryAlloca = nullptr;
-              } else if (initVal) {
-                rvalAddr = createEntryBlockAlloca(ty, "tmp.copy.src");
-                createTBAAStore(initVal, rvalAddr, node->type);
+          if (node->initializer->kind == NodeKind::FunctionCall) {
+            auto *callNode =
+                static_cast<const FunctionCallNode *>(node->initializer);
+            if (callNode->target->kind == NodeKind::Variable) {
+              if (callNode->resolvedFunc && callNode->resolvedFunc->isMethod &&
+                  callNode->resolvedFunc->returnType->isVoid()) {
+                isRVO = true;
+                emitConstructorCall(callNode, gvar);
               }
             }
+          }
 
-            if (rvalAddr) {
-              llvm::Function *ctorFunc = getOrCreateFunction(node->copyCtor);
-              builder.CreateCall(ctorFunc, {gvar, rvalAddr});
-            } else {
-              diags.report({DiagLevel::Error, node->line, node->column,
-                            node->length,
-                            "Failed to resolve source for copy constructor.",
-                            currentFilePath});
-            }
-          } else if (isAggregate) {
-            llvm::Value *rvalAddr = getLValue(node->initializer);
-            if (rvalAddr) {
-              llvm::Align align = mod.getDataLayout().getABITypeAlign(ty);
-              uint64_t allocSize = mod.getDataLayout().getTypeAllocSize(ty);
-              builder.CreateMemCpy(gvar, align, rvalAddr, align, allocSize);
+          if (!isRVO) {
+            bool isAggregate = (baseUnqualTy->getKind() == TypeKind::Struct ||
+                                baseUnqualTy->getKind() == TypeKind::Class ||
+                                baseUnqualTy->getKind() == TypeKind::Union);
+
+            if (isAggregate && node->copyCtor) {
+              llvm::Value *rvalAddr = getLValue(node->initializer);
+              if (!rvalAddr) {
+                lastTemporaryAlloca = nullptr;
+                llvm::Value *initVal = dispatch(node->initializer);
+                if (lastTemporaryAlloca) {
+                  rvalAddr = lastTemporaryAlloca;
+                  lastTemporaryAlloca = nullptr;
+                } else if (initVal) {
+                  rvalAddr = createEntryBlockAlloca(ty, "tmp.copy.src");
+                  createTBAAStore(initVal, rvalAddr, node->type);
+                }
+              }
+
+              if (rvalAddr) {
+                llvm::Function *ctorFunc = getOrCreateFunction(node->copyCtor);
+                builder.CreateCall(ctorFunc, {gvar, rvalAddr});
+              } else {
+                diags.report({DiagLevel::Error, node->line, node->column,
+                              node->length,
+                              "Failed to resolve source for copy constructor.",
+                              currentFilePath});
+              }
+            } else if (isAggregate) {
+              /* Fallback generic memcpy for records lacking a custom destructor
+               */
+              llvm::Value *rvalAddr = getLValue(node->initializer);
+              if (rvalAddr) {
+                llvm::Align align = mod.getDataLayout().getABITypeAlign(ty);
+                uint64_t allocSize = mod.getDataLayout().getTypeAllocSize(ty);
+                builder.CreateMemCpy(gvar, align, rvalAddr, align, allocSize);
+              } else {
+                lastTemporaryAlloca = nullptr;
+                llvm::Value *initVal = dispatch(node->initializer);
+                lastTemporaryAlloca = nullptr;
+                if (initVal) {
+                  createTBAAStore(initVal, gvar, node->type);
+                } else {
+                  diags.report(
+                      {DiagLevel::Error, node->line, node->column, node->length,
+                       "Initialization failed for variable.", currentFilePath});
+                }
+              }
             } else {
               lastTemporaryAlloca = nullptr;
               llvm::Value *initVal = dispatch(node->initializer);
               lastTemporaryAlloca = nullptr;
               if (initVal) {
+                initVal = createImplicitCast(initVal, ty);
                 createTBAAStore(initVal, gvar, node->type);
               } else {
                 diags.report(
@@ -2555,29 +2621,28 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
                      "Initialization failed for variable.", currentFilePath});
               }
             }
-          } else {
-            lastTemporaryAlloca = nullptr;
-            llvm::Value *initVal = dispatch(node->initializer);
-            lastTemporaryAlloca = nullptr;
-            if (initVal) {
-              initVal = createImplicitCast(initVal, ty);
-              createTBAAStore(initVal, gvar, node->type);
-            } else {
-              diags.report({DiagLevel::Error, node->line, node->column,
-                            node->length, "Initialization failed for variable.",
-                            currentFilePath});
-            }
           }
         }
+
+        emitScopeCleanups();
       }
 
-      llvm::StoreInst *guardStore =
-          builder.CreateStore(builder.getInt8(2), guardVar);
-      guardStore->setAtomic(llvm::AtomicOrdering::Release);
+      if (isStaticLocal) {
+        llvm::StoreInst *guardStore =
+            builder.CreateStore(builder.getInt8(2), guardVar);
+        guardStore->setAtomic(llvm::AtomicOrdering::Release);
 
-      builder.CreateBr(contBB);
+        builder.CreateBr(contBB);
 
-      builder.SetInsertPoint(contBB);
+        builder.SetInsertPoint(contBB);
+      } else {
+        diEmitter.popScope();
+        if (savedInsertBlock) {
+          builder.SetInsertPoint(savedInsertBlock);
+        } else {
+          builder.ClearInsertionPoint();
+        }
+      }
     }
 
     return gvar;
@@ -3578,6 +3643,25 @@ llvm::Value *CodeGen::visit(const ModuleNode *node) {
 
   for (const auto &stmt : node->instantiatedTemplates) {
     dispatch(stmt);
+  }
+
+  /* Finalize any generated dynamic module initializations safely */
+  if (globalInitFunc) {
+    llvm::BasicBlock *savedBB = builder.GetInsertBlock();
+    builder.SetInsertPoint(&globalInitFunc->back());
+
+    if (diEmitter.isEnabled()) {
+      builder.SetCurrentDebugLocation(
+          llvm::DILocation::get(ctx, 0, 0, globalInitFunc->getSubprogram()));
+    }
+
+    builder.CreateRetVoid();
+
+    if (savedBB) {
+      builder.SetInsertPoint(savedBB);
+    } else {
+      builder.ClearInsertionPoint();
+    }
   }
 
   diEmitter.finalize();

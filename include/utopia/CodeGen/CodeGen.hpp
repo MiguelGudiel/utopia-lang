@@ -88,12 +88,15 @@ private:
   DebugInfoEmitter diEmitter;
   TBAAManager tbaaManager;
 
+  llvm::Function *globalInitFunc = nullptr;
+
   void emitLocation(const ASTNode *node);
 
   llvm::Type *getLLVMType(const Type *type);
   llvm::Value *getLValue(const ExprNode *node);
   llvm::Constant *evaluateAsConstant(const ExprNode *node);
   llvm::Function *getOrCreateFunction(const FunctionDeclNode *node);
+  llvm::Function *getOrCreateGlobalInitFunc();
 
   llvm::LoadInst *createTBAALoad(llvm::Type *llTy, llvm::Value *ptr,
                                  const Type *utopiaTy,
