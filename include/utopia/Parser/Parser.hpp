@@ -21,9 +21,9 @@ class Parser {
 public:
   Parser(ASTContext &context, llvm::ArrayRef<Token> tokenStream,
          DiagnosticsEngine &de, std::string_view path,
-         ModuleLoader *loader = nullptr)
+         ModuleLoader *loader = nullptr, bool asyncEnabled = true)
       : astCtx(context), tokens(tokenStream), diags(de), filePath(path),
-        moduleLoader(loader) {}
+        moduleLoader(loader), asyncEnabled(asyncEnabled) {}
 
   ModuleNode *parseModule(std::string_view filePath);
 
@@ -41,6 +41,7 @@ private:
   DiagnosticsEngine &diags;
   std::string_view filePath;
   ModuleLoader *moduleLoader;
+  bool asyncEnabled;
 
   std::vector<std::string_view> currentTemplateParams;
   std::vector<std::string> namespaceStack;

@@ -55,6 +55,7 @@ public:
   void visit(const BinaryOpNode *) {}
   void visit(const TernaryOpNode *) {}
   void visit(const LambdaNode *) {}
+  void visit(const AwaitExprNode *) {}
   void visit(const AssignNode *) {}
   void visit(const BlockNode *) {}
   void visit(const FunctionCallNode *) {}
@@ -145,6 +146,22 @@ public:
   SemaResult visit(const EnumMemberNode *node);
   SemaResult visit(const ImplicitCastNode *node);
   SemaResult visit(const LambdaNode *node);
+  SemaResult visit(const AwaitExprNode *node);
+
+  /* Resolves the prelude's 'Future' template instantiated with 'valueType'.
+   * Returns the resolved record type, or nullptr if async is unavailable. */
+  const Type *getFutureType(const Type *valueType);
+
+  /* Instantiates a method-level template ('static Future<R> value<R>(...)')
+   * with the given type arguments (resolved), registers it on the record and
+   * returns the instantiated function. */
+  const FunctionDeclNode *instantiateMethodTemplate(
+      const FunctionDeclNode *tmplDecl, const RecordType *recordTy,
+      llvm::ArrayRef<const Type *> explicitArgs);
+
+  /* Returns true when 't' (possibly behind a pointer/reference) is a
+   * Future<T>; 'outValue' receives T when non-null. */
+  static bool unwrapFutureType(const Type *t, const Type **outValue);
 
   /* Re-types unresolved lambda arguments against the matched parameter
    * signatures. Returns an error result if a lambda cannot be resolved. */
@@ -196,6 +213,7 @@ public:
   void visit(const DeleteExprNode *node);
   void visit(const NamespaceDeclNode *node);
   void visit(const UsingNode *node);
+  void visit(const AwaitExprNode *node);
   void visit(const ImplicitCastNode *node);
 
   void visit(const NumberNode *) {}

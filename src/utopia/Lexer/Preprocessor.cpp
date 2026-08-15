@@ -11,7 +11,8 @@ class PPExprParser {
   const std::unordered_set<std::string> &macros;
 
   void skipWhitespace() {
-    while (pos < str.length() && std::isspace(str[pos])) {
+    while (pos < str.length() &&
+             std::isspace(static_cast<unsigned char>(str[pos]))) {
       pos++;
     }
   }
@@ -29,7 +30,9 @@ class PPExprParser {
   std::string_view matchId() {
     skipWhitespace();
     size_t start = pos;
-    while (pos < str.length() && (std::isalnum(str[pos]) || str[pos] == '_')) {
+    while (pos < str.length() &&
+           (std::isalnum(static_cast<unsigned char>(str[pos])) ||
+            str[pos] == '_')) {
       pos++;
     }
     return str.substr(start, pos - start);
@@ -149,7 +152,8 @@ void Preprocessor::processDirective() {
   skipSpaces();
 
   size_t kwStart = cursor;
-  while (cursor < source.length() && std::isalpha(source[cursor])) {
+  while (cursor < source.length() &&
+           std::isalpha(static_cast<unsigned char>(source[cursor]))) {
     advance();
   }
   std::string_view kw(source.data() + kwStart, cursor - kwStart);
@@ -257,6 +261,7 @@ std::string Preprocessor::process() {
 
   while (cursor < source.length()) {
     char c = source[cursor];
+    unsigned char uc = static_cast<unsigned char>(c);
 
     if (c == '\n') {
       output += '\n';
@@ -265,7 +270,7 @@ std::string Preprocessor::process() {
       continue;
     }
 
-    if (std::isspace(c)) {
+    if (std::isspace(uc)) {
       output += (skipMode() && !isFormatting) ? ' ' : c;
       advance();
       continue;
@@ -288,10 +293,16 @@ std::string Preprocessor::process() {
 
     isStartOfLine = false;
 
+    /* Copy the whole UTF-8 character: advance() skips the full sequence, so
+     * copying a single byte would drop the continuation bytes of every
+     * multi-byte character and corrupt the output. */
+    int charLen = getUTF8CharLength(uc);
     if (skipMode() && !isFormatting) {
-      output += ' ';
+      for (int i = 0; i < charLen; ++i)
+        output += ' ';
     } else {
-      output += c;
+      for (int i = 0; i < charLen && cursor + i < source.length(); ++i)
+        output += source[cursor + i];
     }
     advance();
   }

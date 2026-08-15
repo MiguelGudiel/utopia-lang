@@ -53,6 +53,12 @@ Utopia combines a C/C++-style memory and execution model with a modern, Dart-ins
 - **Function overloading** by signature, including `const` qualifiers
 - **Function-pointer types** via the `Function` type
 - **Type casting** with the `as` operator and user-defined conversion constructors
+- **Dart-style `async`/`await`**: `async` functions, methods, lambdas and `main` compile to coroutines returning `Future<T>`; `await` suspends until the future completes
+  - Fire-and-forget calls run in the background on the program's event loop
+  - `Future.runOnThread` runs work on real worker threads; async lambdas run there with their own event-loop copy
+  - `Future.value`, `Future.sync`, `Future.delayed`, `Future.wait`, and `then()` chaining (sync and async callbacks)
+  - `Future<T> a = await getA();` keeps the future (no unwrap) and `return fut;` awaits implicitly
+  - The runtime (`libutopia_async`) is injected automatically; disable it with `--no-async` or `async: false` in `build.yaml`
 
 ### Annotations
 
@@ -128,6 +134,7 @@ The `examples/` directory contains small, self-contained programs demonstrating 
 - Custom annotations
 - Smart pointers with Rust-style auto-deref (`unique_ptr`, `shared_ptr`, `weak_ptr`)
 - Dart-style lambdas with inferred signatures (`() => 5`, `(x) => x * 2`)
+- Dart-style async/await (`Future<T>`, `await`, fire-and-forget, `runOnThread`, `then`, `wait`)
 
 Each example is a standalone project with its own `build.yaml` manifest.
 

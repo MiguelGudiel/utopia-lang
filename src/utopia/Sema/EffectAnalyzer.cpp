@@ -112,6 +112,16 @@ void EffectAnalyzer::visit(const UnaryOpNode *n) {
   dispatch(n->expr);
 }
 
+void EffectAnalyzer::visit(const AwaitExprNode *n) {
+  /* Await suspends on the event loop: it may not return and it touches the
+   * scheduler state. */
+  readsMem = true;
+  writesMem = true;
+  hasSync = true;
+  potentiallyInfinite = true;
+  dispatch(n->expr);
+}
+
 void EffectAnalyzer::visit(const BinaryOpNode *n) {
   dispatch(n->left);
   dispatch(n->right);

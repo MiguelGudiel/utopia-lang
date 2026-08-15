@@ -10,6 +10,9 @@ void addIncludeDir(const uint8* dir);
 @extern("UtopiaBuild_setOptLevel")
 void setOptLevel(int32 level);
 
+@extern("UtopiaBuild_setAsyncEnabled")
+void setAsyncEnabled(bool enabled);
+
 @extern("UtopiaBuild_addDefine")
 void addDefine({const uint8* name, bool isPublic = true});
 

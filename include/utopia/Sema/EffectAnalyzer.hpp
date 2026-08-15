@@ -25,6 +25,7 @@ public:
   void visit(const BreakNode *n) {}
   void visit(const ContinueNode *n) {}
   void visit(const UnaryOpNode *n);
+  void visit(const AwaitExprNode *n);
   void visit(const BinaryOpNode *n);
   void visit(const TernaryOpNode *n);
   void visit(const ArraySubscriptNode *n);

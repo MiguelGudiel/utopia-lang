@@ -308,7 +308,8 @@ const Type *Parser::parseType(bool inNewExpr) {
 
     if (currentToken().type == TokenType::RSHIFT) {
       const_cast<Token &>(currentToken()).type = TokenType::GT;
-      const_cast<Token &>(currentToken()).value = ">";
+      /* Keep the original view: it spans both '>' characters, so raw type
+       * strings computed from this token still cover the full '>>'. */
     } else {
       expect(TokenType::GT, "Expected '>'");
     }
@@ -1752,6 +1753,22 @@ ExprNode *Parser::parseAdditive() {
 }
 
 ExprNode *Parser::parseUnary() {
+  if (currentToken().type == TokenType::AWAIT_KW) {
+    int line = currentToken().line;
+    int col = currentToken().column;
+    int len = currentToken().value.length();
+    if (!asyncEnabled) {
+      reportError(line, col, len,
+                  "'await' is disabled for this build (async support is "
+                  "turned off).");
+      throw ParseException();
+    }
+    advance();
+    auto expr = parseUnary();
+    return astCtx.create<AwaitExprNode>(expr, line, col,
+                                        (expr->column + expr->length) - col);
+  }
+
   if (match(TokenType::NEW_KW)) {
     int line = currentToken().line;
     int col = currentToken().column;
@@ -1912,7 +1929,8 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind, bool isAbstract) {
     }
     if (currentToken().type == TokenType::RSHIFT) {
       const_cast<Token &>(currentToken()).type = TokenType::GT;
-      const_cast<Token &>(currentToken()).value = ">";
+      /* Keep the original view: it spans both '>' characters, so raw type
+       * strings computed from this token still cover the full '>>'. */
     } else {
       expect(TokenType::GT, "Expected '>'");
     }
@@ -2236,7 +2254,7 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind, bool isAbstract) {
       }
       if (currentToken().type == TokenType::RSHIFT) {
         const_cast<Token &>(currentToken()).type = TokenType::GT;
-        const_cast<Token &>(currentToken()).value = ">";
+        /* Keep the original view so raw strings cover the full '>>'. */
       } else {
         expect(TokenType::GT, "Expected '>'");
       }
@@ -2248,10 +2266,19 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind, bool isAbstract) {
       auto params = parseParameterList(isVariadic, hasTrailingComma);
       expect(TokenType::RPAREN, "Expected ')'");
 
+      bool isAsyncMethod = match(TokenType::ASYNC_KW);
+      if (isAsyncMethod && !asyncEnabled) {
+        reportError(currentToken().line, currentToken().column, 5,
+                    "'async' methods are disabled for this build (async "
+                    "support is turned off).");
+        throw ParseException();
+      }
+
       auto method = astCtx.create<FunctionDeclNode>(
           memType, memName, mLine, mCol, false, true, isExtern, isVariadic);
       method->parentRecord = recordTy;
       method->isStatic = isStatic;
+      method->isAsync = isAsyncMethod;
       method->params = astCtx.copyArray<ParamDeclNode *>(params);
       method->annotations = memberAnnotations;
       method->hasPublicMod = isPub;
@@ -2670,7 +2697,8 @@ DeclNode *Parser::parseDeclarationOrFunction(
     }
     if (currentToken().type == TokenType::RSHIFT) {
       const_cast<Token &>(currentToken()).type = TokenType::GT;
-      const_cast<Token &>(currentToken()).value = ">";
+      /* Keep the original view: it spans both '>' characters, so raw type
+       * strings computed from this token still cover the full '>>'. */
     } else {
       expect(TokenType::GT, "Expected '>'");
     }
@@ -2789,12 +2817,20 @@ DeclNode *Parser::parseDeclarationOrFunction(
     auto params = parseParameterList(isVariadic, hasTrailingComma);
     expect(TokenType::RPAREN, "Expected ')' after parameters");
 
+    bool isAsync = match(TokenType::ASYNC_KW);
+    if (isAsync && !asyncEnabled) {
+      reportError(currentToken().line, currentToken().column, 5,
+                  "'async' functions are disabled for this build (async "
+                  "support is turned off).");
+      throw ParseException();
+    }
     bool isFuncConst = match(TokenType::CONST_KW);
 
     auto funcDecl = astCtx.create<FunctionDeclNode>(
         nodeType, id, line, col, isFuncConst, false, isExtern, isVariadic);
     funcDecl->fqName = fqName;
     funcDecl->isStatic = isStatic;
+    funcDecl->isAsync = isAsync;
     funcDecl->params = astCtx.copyArray<ParamDeclNode *>(params);
     funcDecl->rawReturnTypeStr = rawTypeStr;
     funcDecl->identifierColumn = idCol;
@@ -3051,7 +3087,7 @@ ExprNode *Parser::parsePostfix() {
         }
         if (currentToken().type == TokenType::RSHIFT) {
           const_cast<Token &>(currentToken()).type = TokenType::GT;
-          const_cast<Token &>(currentToken()).value = ">";
+          /* Keep the original view so raw strings cover the full '>>'. */
         } else {
           expect(TokenType::GT, "Expected '>'");
         }
@@ -3190,6 +3226,13 @@ bool Parser::lambdaFollowedByBody(size_t openOffset) const {
   if (i + 1 >= tokens.size())
     return false;
   TokenType next = peekToken(i + 1).type;
+  /* 'async' may appear between the parameter list and the body:
+   * '(int v) async { ... }'. */
+  if (next == TokenType::ASYNC_KW) {
+    if (i + 2 >= tokens.size())
+      return false;
+    next = peekToken(i + 2).type;
+  }
   return next == TokenType::ARROW || next == TokenType::LBRACE;
 }
 
@@ -3218,6 +3261,13 @@ ExprNode *Parser::parseLambda(const Type *explicitReturnType) {
 
   auto lambda = astCtx.create<LambdaNode>(line, col, 1);
   lambda->explicitReturnType = explicitReturnType;
+  lambda->isAsync = match(TokenType::ASYNC_KW);
+  if (lambda->isAsync && !asyncEnabled) {
+    reportError(currentToken().line, currentToken().column, 5,
+                "'async' lambdas are disabled for this build (async support "
+                "is turned off).");
+    throw ParseException();
+  }
   lambda->params = astCtx.copyArray<ParamDeclNode *>(params);
 
   int endLine = currentToken().line;
@@ -3574,7 +3624,7 @@ ExprNode *Parser::parsePrimary() {
       }
       if (currentToken().type == TokenType::RSHIFT) {
         const_cast<Token &>(currentToken()).type = TokenType::GT;
-        const_cast<Token &>(currentToken()).value = ">";
+        /* Keep the original view so raw strings cover the full '>>'. */
       } else {
         expect(TokenType::GT, "Expected '>'");
       }

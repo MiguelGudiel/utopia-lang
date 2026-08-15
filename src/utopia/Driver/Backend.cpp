@@ -2,11 +2,16 @@
 
 #include "utopia/Common/Timer.hpp"
 #include "utopia/Driver/Backend.hpp"
+#include "llvm/Transforms/Coroutines/CoroCleanup.h"
+#include "llvm/Transforms/Coroutines/CoroConditionalWrapper.h"
+#include "llvm/Transforms/Coroutines/CoroEarly.h"
+#include "llvm/Transforms/Coroutines/CoroSplit.h"
 #include <filesystem>
 #include <iostream>
 #include <llvm/Analysis/TargetLibraryInfo.h>
 #include <llvm/Analysis/TargetTransformInfo.h>
 #include <llvm/IR/LegacyPassManager.h>
+#include <llvm/IR/PassManager.h>
 #include <llvm/MC/TargetRegistry.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Support/Error.h>
@@ -89,6 +94,15 @@ bool Backend::process(llvm::Module *mod, BackendContext &backendCtx,
 
   llvm::ModulePassManager mpm;
 
+  /* Coroutines (async support): CoroEarly must run before the rest of the
+   * pipeline and CoroSplit/CoroCleanup after it. The default pipelines do
+   * not include the coroutine passes, so they are added explicitly here. */
+  {
+    llvm::ModulePassManager coroEarlyPM;
+    coroEarlyPM.addPass(llvm::CoroEarlyPass());
+    mpm.addPass(llvm::CoroConditionalWrapper(std::move(coroEarlyPM)));
+  }
+
   if (level == llvm::OptimizationLevel::O0) {
     mpm = pb.buildO0DefaultPipeline(level);
   } else {
@@ -96,8 +110,33 @@ bool Backend::process(llvm::Module *mod, BackendContext &backendCtx,
   }
 
   {
+    llvm::ModulePassManager coroLowerPM;
+    coroLowerPM.addPass(createModuleToPostOrderCGSCCPassAdaptor(
+        llvm::CoroSplitPass(level != llvm::OptimizationLevel::O0)));
+    coroLowerPM.addPass(llvm::CoroCleanupPass());
+    mpm.addPass(llvm::CoroConditionalWrapper(std::move(coroLowerPM)));
+  }
+
+  {
     ScopedTimer timer("LLVM Optimization");
     mpm.run(*mod, mam);
+  }
+
+  /* The coro.end lowering leaves resume functions ending with
+   * 'unreachable'; at O0 some backends lower that to a fall-through into
+   * the destroy function (running the frame free twice). Replace every
+   * unreachable with a clean return in the resume functions. */
+  for (auto &fn : *mod) {
+    if (fn.empty() || !fn.getName().ends_with(".resume"))
+      continue;
+    for (auto &bb : fn) {
+      auto *unr = llvm::dyn_cast<llvm::UnreachableInst>(bb.getTerminator());
+      if (!unr)
+        continue;
+      llvm::IRBuilder<> b(unr);
+      b.CreateRetVoid();
+      unr->eraseFromParent();
+    }
   }
 
   if (options.isJIT) {

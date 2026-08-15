@@ -10,9 +10,26 @@
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Value.h>
+#include <memory>
+#include <string>
+#include <unordered_map>
 
 namespace utopia {
 class Intrinsic;
+
+/* Bookkeeping for the async function currently being emitted. */
+struct CoroutineInfo {
+  llvm::Value *coroId = nullptr;
+  llvm::AllocaInst *frameSlot = nullptr;    /* stores the coroutine frame ptr */
+  llvm::Value *futureObjSlot = nullptr;     /* stores the returned Future obj */
+  llvm::Value *futureStateSlot = nullptr;   /* stores the future state ptr */
+  llvm::BasicBlock *suspendBlock = nullptr; /* shared coro.end(false) exit */
+  llvm::BasicBlock *cleanupBlock = nullptr; /* shared destroy/free exit */
+  const Type *valueType = nullptr;          /* declared (value) return type */
+  const Type *futureType = nullptr;         /* effective Future<T> type */
+  bool isCoroutine = false;                 /* true when the body has awaits */
+  bool isMain = false;
+};
 
 class CodeGen : public ASTVisitor<CodeGen, llvm::Value *> {
   friend class Intrinsic;
@@ -21,7 +38,7 @@ class CodeGen : public ASTVisitor<CodeGen, llvm::Value *> {
 
 public:
   CodeGen(BackendContext &bCtx, llvm::Module &llvmMod, DiagnosticsEngine &diags,
-          bool emitDebugInfo, std::string filePath);
+          bool emitDebugInfo, std::string filePath, bool asyncEnabled = true);
 
   llvm::Value *dispatch(const ASTNode *node);
 
@@ -69,9 +86,71 @@ public:
   llvm::Value *visit(const EnumDeclNode *node);
   llvm::Value *visit(const EnumMemberNode *node);
   llvm::Value *visit(const ImplicitCastNode *node);
+  llvm::Value *visit(const AwaitExprNode *node);
 
   llvm::Value *createImplicitCast(llvm::Value *src, llvm::Type *destTy);
   void emitLoopCleanups(size_t targetDepth);
+
+  /* Async support (shared with the Future intrinsics). */
+
+  /* Returns true when 't' (possibly behind a pointer/reference) is a
+   * Future<T>; 'outValue' receives T when non-null. */
+  static bool unwrapFutureType(const Type *t, const Type **outValue);
+
+  /* Allocates a Future<T> object wrapping 'state' and returns a pointer to
+   * it. The state's initial reference is transferred to the object. */
+  llvm::Value *createFutureObject(const Type *futureType,
+                                  llvm::Value *state);
+
+  /* Wraps a Future object pointer into the Future<T> value type. */
+  llvm::Value *materializeFutureValue(const Type *futureType,
+                                      llvm::Value *objPtr);
+
+  /* Pointer to the Future object for an expression of Future type (handles
+   * both by-value and pointer operands). */
+  llvm::Value *getFutureObjectPointer(const ExprNode *expr);
+
+  /* Loads the '_state' field of a Future object pointer. 'operandType'
+   * is the expression's type, used to distinguish Future values from
+   * Future object pointers. */
+  llvm::Value *getFutureState(llvm::Value *futureValueOrObjPtr,
+                              const Type *operandType);
+
+  /* Reads the value out of a future state (load for trivial types, a
+   * move/copy-constructed temporary otherwise). */
+  llvm::Value *readFutureValue(llvm::Value *state, const Type *valueType);
+
+  /* Moves/copies 'src' (an expression or SSA value) into a future state's
+   * value slot. */
+  void writeFutureValueInto(llvm::Value *state, llvm::Value *src,
+                            const Type *valueType, bool srcIsLValue = false);
+
+  llvm::Value *getLValue(const ExprNode *node);
+
+  /* Emits a runtime-library call (get-or-create the declaration). */
+  llvm::CallInst *emitRuntimeCall(const std::string &name,
+                                  llvm::Type *retTy,
+                                  llvm::ArrayRef<llvm::Value *> args);
+
+  /* Cached compiler-generated helpers for the async runtime. */
+  llvm::Function *getOrCreateFutureValueDtor(const Type *valueType);
+  llvm::Function *getOrCreateThenThunk(const Type *valueType, bool asyncCb,
+                                        bool cbTakesValue);
+  llvm::Function *getOrCreateThreadThunk(const Type *valueType);
+  llvm::Function *getOrCreateAsyncThreadThunk(const Type *valueType);
+
+  /* Creates a pending future state sized for 'valueType'. */
+  llvm::Value *createFutureState(const Type *valueType);
+
+private:
+  llvm::Function *getOrCreateRuntimeFunction(const std::string &name,
+                                             llvm::FunctionType *ty);
+  void setupAsyncFunction(const FunctionDeclNode *node, llvm::Function *func);
+  void emitAsyncReturn(const FunctionDeclNode *node, llvm::Value *value,
+                       bool valueIsLValue);
+  void emitAsyncFallthroughFinish(const FunctionDeclNode *node);
+  void emitMainWrapper(llvm::Function *userMain,
+                       const FunctionDeclNode *node);
 
 private:
   BackendContext &backend;
@@ -83,6 +162,7 @@ private:
   const FunctionDeclNode *currentFunc = nullptr;
   llvm::AllocaInst *lastTemporaryAlloca = nullptr;
   std::string currentFilePath;
+  bool asyncEnabled = true;
 
   /* CodeGen-context scope depth at function entry. Return/cleanup emission
    * must never touch scopes that belong to an enclosing function (e.g. when a
@@ -95,12 +175,17 @@ private:
   DebugInfoEmitter diEmitter;
   TBAAManager tbaaManager;
 
+  /* Active coroutine bookkeeping while an async function is emitted. */
+  std::unique_ptr<CoroutineInfo> coroInfo;
+
+  /* Cache of compiler-generated async helper functions. */
+  std::unordered_map<std::string, llvm::Function *> asyncHelpers;
+
   llvm::Function *globalInitFunc = nullptr;
 
   void emitLocation(const ASTNode *node);
 
   llvm::Type *getLLVMType(const Type *type);
-  llvm::Value *getLValue(const ExprNode *node);
   llvm::Constant *evaluateAsConstant(const ExprNode *node);
   llvm::Function *getOrCreateFunction(const FunctionDeclNode *node);
   llvm::Function *getOrCreateGlobalInitFunc();

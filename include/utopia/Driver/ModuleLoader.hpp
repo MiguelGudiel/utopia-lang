@@ -21,6 +21,7 @@ struct ModuleLoaderConfig {
   std::unordered_set<std::string> definedMacros;
   bool isBuildScript = false;
   bool isFormatting = false;
+  bool asyncEnabled = true;
 };
 
 class ModuleLoader {

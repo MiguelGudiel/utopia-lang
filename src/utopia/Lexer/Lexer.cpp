@@ -278,6 +278,10 @@ Token Lexer::parseToken() {
       return {TokenType::FUNCTION_KW, id, startLine, startCol};
     if (id == "operator")
       return {TokenType::OPERATOR_KW, id, startLine, startCol};
+    if (id == "async")
+      return {TokenType::ASYNC_KW, id, startLine, startCol};
+    if (id == "await")
+      return {TokenType::AWAIT_KW, id, startLine, startCol};
     if (isTypeKeyword(id))
       return {TokenType::TYPE_KW, id, startLine, startCol};
     return {TokenType::IDENTIFIER, id, startLine, startCol};

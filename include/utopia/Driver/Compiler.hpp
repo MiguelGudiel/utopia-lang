@@ -12,7 +12,8 @@ public:
   static llvm::Module *compileToIR(ModuleNode *root, BackendContext &backendCtx,
                                    const std::string &moduleName,
                                    DiagnosticsEngine &diags,
-                                   bool emitDebugInfo);
+                                   bool emitDebugInfo,
+                                   bool asyncEnabled = true);
 };
 
 } // namespace utopia

@@ -170,6 +170,11 @@ protected:
   const DeclNode *declaration = nullptr;
   bool opaque = true;
 
+  /* For template instantiations: the base template's fully-qualified name
+   * and the resolved template arguments. */
+  std::string_view templateBaseName;
+  llvm::ArrayRef<const Type *> templateArgs;
+
   explicit RecordType(TypeKind k, std::string_view n) : Type(k), name(n) {}
 
 public:
@@ -179,6 +184,13 @@ public:
 
   const DeclNode *getDeclaration() const { return declaration; }
   void setDeclaration(const DeclNode *decl) { declaration = decl; }
+
+  std::string_view getTemplateBaseName() const { return templateBaseName; }
+  void setTemplateBaseName(std::string_view n) { templateBaseName = n; }
+
+  llvm::ArrayRef<const Type *> getTemplateArgs() const { return templateArgs; }
+  void setTemplateArgs(llvm::ArrayRef<const Type *> a) { templateArgs = a; }
+  bool isTemplateInstantiation() const { return !templateBaseName.empty(); }
 
   bool isOpaque() const { return opaque; }
   void setOpaque(bool op) { opaque = op; }

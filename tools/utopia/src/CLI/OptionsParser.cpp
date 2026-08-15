@@ -16,6 +16,8 @@ void OptionsParser::parseCommonOptions(const std::vector<std::string> &args,
       opts.isJIT = true;
     } else if (arg == "--format") {
       opts.doFormat = true;
+    } else if (arg == "--no-async") {
+      opts.asyncEnabled = false;
     } else if (arg == "-g" || arg == "--debug") {
       opts.isDebug = true;
     } else if (arg == "--target" && i + 1 < args.size()) {

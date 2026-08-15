@@ -250,8 +250,7 @@ void ControlFlowPass::visit(const VariableNode *node) {
 }
 
 void ControlFlowPass::visit(const UnaryOpNode *node) {
-  if (node->op == "&") {
-    bool prevAssignTarget = isAssignTarget;
+  if (node->op == "&") {    bool prevAssignTarget = isAssignTarget;
     isAssignTarget = true;
     dispatch(node->expr);
     isAssignTarget = prevAssignTarget;
@@ -377,6 +376,9 @@ void ControlFlowPass::visit(const FunctionCallNode *node) {
 }
 
 void ControlFlowPass::visit(const CastNode *node) { dispatch(node->expr); }
+void ControlFlowPass::visit(const AwaitExprNode *node) {
+  dispatch(node->expr);
+}
 
 void ControlFlowPass::visit(const MemberAccessNode *node) {
   dispatch(node->object);

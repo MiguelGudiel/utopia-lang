@@ -174,7 +174,9 @@ ModuleNode *ModuleLoader::loadModule(const std::string &importURI,
 
   auto tokens = astCtx.copyArray<Token>(tokensVec);
 
-  Parser parser(astCtx, tokens, diags, persistentFilePath, this);
+  bool parserAsync = config.asyncEnabled;
+  Parser parser(astCtx, tokens, diags, persistentFilePath, this,
+                parserAsync);
   ModuleNode *module = parser.parseModule(persistentFilePath);
 
   moduleCache[key] = module;

@@ -112,6 +112,7 @@ ASTNode *ASTCloner::visit(const LambdaNode *n) {
   auto *node = ctx.create<LambdaNode>(n->line, n->column, n->length);
   node->params = cloneArray(n->params);
   node->isExpressionBody = n->isExpressionBody;
+  node->isAsync = n->isAsync;
   if (n->exprBody)
     node->exprBody = static_cast<ExprNode *>(dispatch(n->exprBody));
   if (n->body)
@@ -120,6 +121,13 @@ ASTNode *ASTCloner::visit(const LambdaNode *n) {
   node->hasParens = n->hasParens;
   node->length = n->length;
   node->endLine = n->endLine;
+  return node;
+}
+
+ASTNode *ASTCloner::visit(const AwaitExprNode *n) {
+  auto *node = ctx.create<AwaitExprNode>(
+      static_cast<ExprNode *>(dispatch(n->expr)), n->line, n->column,
+      n->length);
   return node;
 }
 
@@ -343,7 +351,12 @@ ASTNode *ASTCloner::visit(const FunctionDeclNode *n) {
   node->trailingComment = n->trailingComment;
   node->declFilePath = n->declFilePath;
   node->length = n->length;
-  node->isTemplate = false;
+  node->templateParams = n->templateParams;
+  /* A method inside a template class keeps its own template parameters
+   * (e.g. 'static Future<R> value<R>(R value)') when the class-level
+   * parameters are substituted; it must stay a template so its body is not
+   * eagerly type-checked with unbound parameters. */
+  node->isTemplate = !n->templateParams.empty();
   node->parentRecord = n->parentRecord;
   node->rawReturnTypeStr = n->rawReturnTypeStr;
   node->endLine = n->endLine;
@@ -355,6 +368,8 @@ ASTNode *ASTCloner::visit(const FunctionDeclNode *n) {
   node->isVirtual = n->isVirtual;
   node->isOverride = n->isOverride;
   node->isAbstract = n->isAbstract;
+  node->isAsync = n->isAsync;
+  node->intrinsicName = n->intrinsicName;
 
   return node;
 }

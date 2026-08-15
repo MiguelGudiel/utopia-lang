@@ -31,6 +31,7 @@ struct ProjectConfig {
   std::vector<std::string> includeDirs;
   std::vector<std::string> linkerFlags;
   std::optional<int> optLevel;
+  std::optional<bool> asyncEnabled;
   std::vector<SubprojectConfig> dependencies;
 };
 

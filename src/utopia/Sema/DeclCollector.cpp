@@ -3,6 +3,86 @@
 
 namespace utopia {
 
+/* Processes a method's annotations for the pieces the template early-return
+ * paths skip: 'intrinsic', 'extern', 'weak' and 'export' influence how the
+ * method is compiled, so they must be recorded even while the method's body
+ * is not type-checked eagerly. */
+static void collectMethodAnnotations(FunctionDeclNode *method,
+                                     SemaContext *ctx) {
+  bool isExport = false;
+
+  for (const auto *ann : method->annotations) {
+    if (ann->name == "export") {
+      isExport = true;
+    }
+
+    if (ann->name == "intrinsic") {
+      method->isIntrinsic = true;
+      if (!ann->args.empty() && ann->args[0]->kind == NodeKind::String) {
+        method->intrinsicName =
+            static_cast<const StringNode *>(ann->args[0])->value;
+      } else {
+        method->intrinsicName = method->name;
+      }
+    }
+
+    if (ann->name == "weak") {
+      method->isWeak = true;
+    }
+
+    if (ann->name == "extern") {
+      if (ann->args.empty()) {
+        method->externAlias = method->name;
+        method->callingConv = "cdecl";
+      } else if (ann->args.size() <= 2) {
+        if (ann->args[0]->kind == NodeKind::String) {
+          method->externAlias =
+              static_cast<const StringNode *>(ann->args[0])->value;
+        } else {
+          ctx->reportError(ann->args[0]->line, ann->args[0]->column,
+                           ann->args[0]->length,
+                           "First argument of @extern must be a string "
+                           "literal.");
+        }
+
+        if (ann->args.size() == 2) {
+          if (ann->args[1]->kind == NodeKind::String) {
+            std::string_view cc =
+                static_cast<const StringNode *>(ann->args[1])->value;
+            if (cc == "cdecl" || cc == "stdcall" || cc == "fastcall") {
+              method->callingConv = cc;
+            } else {
+              ctx->reportError(ann->args[1]->line, ann->args[1]->column,
+                               ann->args[1]->length,
+                               "Calling convention must be 'cdecl', "
+                               "'stdcall', or 'fastcall'.");
+            }
+          } else {
+            ctx->reportError(ann->args[1]->line, ann->args[1]->column,
+                             ann->args[1]->length,
+                             "Second argument of @extern must be a string "
+                             "literal.");
+          }
+        } else {
+          method->callingConv = "cdecl";
+        }
+      } else {
+        ctx->reportError(ann->line, ann->column, ann->length,
+                         "The @extern annotation accepts at most two string "
+                         "literal arguments.");
+      }
+    }
+  }
+
+  if (method->isExtern) {
+    if (method->externAlias.empty())
+      method->externAlias = method->name;
+    method->mangledName = std::string(method->externAlias);
+  } else if (isExport) {
+    method->mangledName = std::string(method->name);
+  }
+}
+
 void DeclCollectorPass::visit(const NamespaceDeclNode *node) {
   std::string currentNs = ctx->getCurrentNamespace();
   std::string fullNs = currentNs.empty()
@@ -128,6 +208,7 @@ void DeclCollectorPass::visit(const FunctionDeclNode *node) {
     if (node->declFilePath.empty()) {
       const_cast<FunctionDeclNode *>(node)->declFilePath = ctx->currentFile;
     }
+    collectMethodAnnotations(const_cast<FunctionDeclNode *>(node), ctx);
     ctx->templateRegistry[node->name] = node;
     ctx->templateRegistry[node->fqName] = node;
     return;
@@ -278,8 +359,20 @@ void DeclCollectorPass::visit(const UnionDeclNode *node) {
     if (node->declFilePath.empty()) {
       const_cast<UnionDeclNode *>(node)->declFilePath = ctx->currentFile;
     }
+    for (auto *method : node->methods) {
+      if (method->declFilePath.empty()) {
+        const_cast<FunctionDeclNode *>(method)->declFilePath =
+            ctx->currentFile;
+      }
+      collectMethodAnnotations(const_cast<FunctionDeclNode *>(method), ctx);
+    }
     ctx->templateRegistry[node->name] = node;
     ctx->templateRegistry[node->fqName] = node;
+    /* Template records are also visible as identifiers so that static
+     * member access on the type ('Future<int>.value(...)') resolves. */
+    ctx->addDecl(node->name, node);
+    if (node->fqName != node->name)
+      ctx->addDecl(node->fqName, node);
     return;
   }
 
@@ -346,6 +439,17 @@ void DeclCollectorPass::visit(const UnionDeclNode *node) {
         isExport = true;
       }
 
+      if (ann->name == "intrinsic") {
+        const_cast<FunctionDeclNode *>(method)->isIntrinsic = true;
+        if (!ann->args.empty() && ann->args[0]->kind == NodeKind::String) {
+          const_cast<FunctionDeclNode *>(method)->intrinsicName =
+              static_cast<const StringNode *>(ann->args[0])->value;
+        } else {
+          const_cast<FunctionDeclNode *>(method)->intrinsicName =
+              method->name;
+        }
+      }
+
       if (ann->name == "extern") {
         if (ann->args.empty()) {
           const_cast<FunctionDeclNode *>(method)->externAlias = method->name;
@@ -410,8 +514,20 @@ void DeclCollectorPass::visit(const StructDeclNode *node) {
     if (node->declFilePath.empty()) {
       const_cast<StructDeclNode *>(node)->declFilePath = ctx->currentFile;
     }
+    for (auto *method : node->methods) {
+      if (method->declFilePath.empty()) {
+        const_cast<FunctionDeclNode *>(method)->declFilePath =
+            ctx->currentFile;
+      }
+      collectMethodAnnotations(const_cast<FunctionDeclNode *>(method), ctx);
+    }
     ctx->templateRegistry[node->name] = node;
     ctx->templateRegistry[node->fqName] = node;
+    /* Template records are also visible as identifiers so that static
+     * member access on the type ('Future<int>.value(...)') resolves. */
+    ctx->addDecl(node->name, node);
+    if (node->fqName != node->name)
+      ctx->addDecl(node->fqName, node);
     return;
   }
 
@@ -478,6 +594,17 @@ void DeclCollectorPass::visit(const StructDeclNode *node) {
         isExport = true;
       }
 
+      if (ann->name == "intrinsic") {
+        const_cast<FunctionDeclNode *>(method)->isIntrinsic = true;
+        if (!ann->args.empty() && ann->args[0]->kind == NodeKind::String) {
+          const_cast<FunctionDeclNode *>(method)->intrinsicName =
+              static_cast<const StringNode *>(ann->args[0])->value;
+        } else {
+          const_cast<FunctionDeclNode *>(method)->intrinsicName =
+              method->name;
+        }
+      }
+
       if (ann->name == "extern") {
         if (ann->args.empty()) {
           const_cast<FunctionDeclNode *>(method)->externAlias = method->name;
@@ -542,8 +669,20 @@ void DeclCollectorPass::visit(const ClassDeclNode *node) {
     if (node->declFilePath.empty()) {
       const_cast<ClassDeclNode *>(node)->declFilePath = ctx->currentFile;
     }
+    for (auto *method : node->methods) {
+      if (method->declFilePath.empty()) {
+        const_cast<FunctionDeclNode *>(method)->declFilePath =
+            ctx->currentFile;
+      }
+      collectMethodAnnotations(const_cast<FunctionDeclNode *>(method), ctx);
+    }
     ctx->templateRegistry[node->name] = node;
     ctx->templateRegistry[node->fqName] = node;
+    /* Template records are also visible as identifiers so that static
+     * member access on the type ('Future<int>.value(...)') resolves. */
+    ctx->addDecl(node->name, node);
+    if (node->fqName != node->name)
+      ctx->addDecl(node->fqName, node);
     return;
   }
 
@@ -606,6 +745,17 @@ void DeclCollectorPass::visit(const ClassDeclNode *node) {
     for (const auto *ann : method->annotations) {
       if (ann->name == "export") {
         isExport = true;
+      }
+
+      if (ann->name == "intrinsic") {
+        const_cast<FunctionDeclNode *>(method)->isIntrinsic = true;
+        if (!ann->args.empty() && ann->args[0]->kind == NodeKind::String) {
+          const_cast<FunctionDeclNode *>(method)->intrinsicName =
+              static_cast<const StringNode *>(ann->args[0])->value;
+        } else {
+          const_cast<FunctionDeclNode *>(method)->intrinsicName =
+              method->name;
+        }
       }
 
       if (ann->name == "extern") {

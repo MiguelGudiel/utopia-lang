@@ -49,10 +49,11 @@ static const std::unordered_map<std::string_view, AssignOpCode> assignOpMap = {
 
 CodeGen::CodeGen(BackendContext &bCtx, llvm::Module &llvmMod,
                  DiagnosticsEngine &diags, bool emitDebugInfo,
-                 std::string filePath)
+                 std::string filePath, bool asyncEnabled)
     : backend(bCtx), ctx(bCtx.getLLVMContext()), mod(llvmMod), builder(ctx),
       diags(diags), currentFilePath(std::move(filePath)),
-      diEmitter(llvmMod, emitDebugInfo), tbaaManager(ctx) {
+      asyncEnabled(asyncEnabled), diEmitter(llvmMod, emitDebugInfo),
+      tbaaManager(ctx) {
 
   llvm::FastMathFlags fmf;
   fmf.setFast();
@@ -306,7 +307,10 @@ llvm::Function *CodeGen::getOrCreateFunction(const FunctionDeclNode *node) {
   if (node->isTemplate)
     return nullptr;
 
-  std::string irName = node->name == "main" ? "main" : node->mangledName;
+  std::string irName =
+      (node->name == "main" && !node->isMethod)
+          ? (asyncEnabled ? "utopia_user_main" : "main")
+          : node->mangledName;
   llvm::Function *func = mod.getFunction(irName);
 
   if (func)
@@ -333,6 +337,12 @@ llvm::Function *CodeGen::getOrCreateFunction(const FunctionDeclNode *node) {
     retTy = builder.getInt32Ty();
   }
 
+  /* Async functions are coroutines: the externally visible signature returns
+   * a pointer to the Future object. */
+  if (node->isAsync) {
+    retTy = builder.getPtrTy();
+  }
+
   llvm::FunctionType *funcType =
       llvm::FunctionType::get(retTy, paramTypes, node->isVariadic);
 
@@ -353,6 +363,14 @@ llvm::Function *CodeGen::getOrCreateFunction(const FunctionDeclNode *node) {
   }
 
   func->addFnAttr(llvm::Attribute::NoUnwind);
+
+  /* Async functions compile to LLVM coroutines: mark the function so the
+   * CoroSplit pass recognizes it (LLVM 19+ requires the presplit attribute
+   * to be set by the frontend). The enum form must be used: the string form
+   * is not recognized as the PresplitCoroutine attribute. */
+  if (node->isAsync) {
+    func->addFnAttr(llvm::Attribute::PresplitCoroutine);
+  }
 
   /* Map standard inline to an LLVM hint, and forceInline to AlwaysInline */
   for (const auto *ann : node->annotations) {
@@ -3229,6 +3247,7 @@ llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
 
   const FunctionDeclNode *prevFunc = currentFunc;
   currentFunc = node;
+  auto prevCoroInfo = std::move(coroInfo);
 
   funcScopeStarts.push_back(cgCtx.getAllScopes().size());
 
@@ -3238,6 +3257,13 @@ llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
   builder.SetInsertPoint(entry);
 
   CGScopeGuard guard(cgCtx);
+
+  /* Async functions are lowered as coroutines: set up the frame, the future
+   * state and the Future object that the ramp returns to callers. This runs
+   * first so the coroutine intrinsics sit at the top of the entry block. */
+  if (node->isAsync) {
+    setupAsyncFunction(node, func);
+  }
 
   unsigned astParamIdx = 0;
   auto argIt = func->arg_begin();
@@ -3363,16 +3389,19 @@ llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
     }
   }
 
+  /* Async functions are lowered as coroutines: set up the frame, the future
+   * state and the Future object that the ramp returns to callers. */
   dispatch(node->body);
-
   for (auto &bb : *func) {
     if (!bb.getTerminator()) {
       builder.SetInsertPoint(&bb);
 
       emitScopeCleanups();
 
-      if (node->name == "main" && !node->isMethod &&
-          node->returnType->isVoid()) {
+      if (node->isAsync) {
+        emitAsyncFallthroughFinish(node);
+      } else if (node->name == "main" && !node->isMethod &&
+                 node->returnType->isVoid()) {
         builder.CreateRet(llvm::ConstantInt::get(builder.getInt32Ty(), 0));
       } else if (func->getReturnType()->isVoidTy()) {
         builder.CreateRetVoid();
@@ -3382,9 +3411,16 @@ llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
     }
   }
 
+  /* The real C entry point: wraps the user's main so the async runtime can
+   * drive the event loop after the user's code runs. */
+  if (node->name == "main" && !node->isMethod && asyncEnabled) {
+    emitMainWrapper(func, node);
+  }
+
   builder.ClearInsertionPoint();
   currentFunc = prevFunc;
   funcScopeStarts.pop_back();
+  coroInfo = std::move(prevCoroInfo);
 
   diEmitter.emitFunctionEnd();
 
@@ -3651,7 +3687,16 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
       astParamIdx++;
     }
 
-    auto callRes = builder.CreateCall(calleeTy, callee, argsArgs);
+    llvm::Value *callRes = builder.CreateCall(calleeTy, callee, argsArgs);
+
+    /* Async calls return a pointer to the Future object; wrap it into the
+     * Future value type expected by the caller. */
+    if (callRes && node->resolvedFunc && node->resolvedFunc->isAsync) {
+      const Type *futTy = node->resolvedFunc->effectiveReturnType;
+      if (futTy) {
+        callRes = materializeFutureValue(futTy, callRes);
+      }
+    }
 
     if (node->resolvedFunc->isMethod &&
         node->resolvedFunc->returnType->isVoid()) {
@@ -3831,6 +3876,165 @@ llvm::Value *CodeGen::visit(const CastNode *node) {
 }
 
 llvm::Value *CodeGen::visit(const ReturnNode *node) {
+  /* Async functions store the value into the future state and complete the
+   * future instead of returning directly. */
+  if (coroInfo && currentFunc && currentFunc->isAsync) {
+    /* 'return fut;': the returned expression is a Future<T> of the value
+     * type; await it first and complete the enclosing future afterwards. */
+    if (node->implicitAwait) {
+      const Type *futValueTy = nullptr;
+      if (!unwrapFutureType(node->value->exprType, &futValueTy)) {
+        diags.report({DiagLevel::Error, node->line, node->column, node->length,
+                      "Failed to evaluate implicit await return.",
+                      currentFilePath});
+        return nullptr;
+      }
+
+      llvm::Value *futObj = getFutureObjectPointer(node->value);
+      if (!futObj) {
+        diags.report({DiagLevel::Error, node->line, node->column, node->length,
+                      "Failed to evaluate return expression.",
+                      currentFilePath});
+        return nullptr;
+      }
+      llvm::Value *srcState =
+          getFutureState(futObj, node->value->exprType);
+
+      llvm::Function *func = builder.GetInsertBlock()->getParent();
+      llvm::BasicBlock *doneBB =
+          llvm::BasicBlock::Create(ctx, "ret.done", func);
+      llvm::BasicBlock *regBB =
+          llvm::BasicBlock::Create(ctx, "ret.register", func);
+      llvm::BasicBlock *resumedBB =
+          llvm::BasicBlock::Create(ctx, "ret.resumed", func);
+      llvm::BasicBlock *afterBB =
+          llvm::BasicBlock::Create(ctx, "ret.after", func);
+
+      llvm::Value *done32 = emitRuntimeCall("utopia_future_is_completed",
+                                            builder.getInt32Ty(), {srcState});
+      llvm::Value *done =
+          builder.CreateICmpNE(done32, builder.getInt32(0), "ret.done");
+      builder.CreateCondBr(done, doneBB, regBB);
+
+      builder.SetInsertPoint(doneBB);
+      builder.CreateBr(afterBB);
+
+      builder.SetInsertPoint(regBB);
+      llvm::Value *hdl =
+          builder.CreateLoad(builder.getPtrTy(), coroInfo->frameSlot,
+                             "coro.frame");
+      llvm::Value *resumeFn =
+          builder.CreateLoad(builder.getPtrTy(), hdl, "coro.resume.fn");
+      emitRuntimeCall("utopia_future_then", builder.getVoidTy(),
+                      {srcState, resumeFn, hdl});
+
+      llvm::Function *coroSuspendFn = llvm::Intrinsic::getDeclaration(
+          &mod, llvm::Intrinsic::coro_suspend);
+      llvm::Value *s = builder.CreateCall(
+          coroSuspendFn, {coroInfo->coroId, builder.getInt1(false)});
+      llvm::SwitchInst *sw =
+          builder.CreateSwitch(s, coroInfo->suspendBlock, 2);
+      sw->addCase(builder.getInt8(0), resumedBB);
+      sw->addCase(builder.getInt8(1), coroInfo->cleanupBlock);
+
+      builder.SetInsertPoint(resumedBB);
+      builder.CreateBr(afterBB);
+
+      builder.SetInsertPoint(afterBB);
+      llvm::Value *state = builder.CreateLoad(
+          builder.getPtrTy(), coroInfo->futureStateSlot, "future.state");
+      llvm::Value *retVal = readFutureValue(srcState, futValueTy);
+      writeFutureValueInto(state, retVal, coroInfo->valueType, false);
+
+      size_t scopeStart = funcScopeStarts.empty() ? 0 : funcScopeStarts.back();
+      auto allScopes = cgCtx.getAllScopes();
+      for (size_t si = scopeStart; si < allScopes.size(); ++si) {
+        const auto &scope = allScopes[si];
+        for (auto cleanupIt = scope.cleanups.rbegin();
+             cleanupIt != scope.cleanups.rend(); ++cleanupIt) {
+          emitCleanupCall(cleanupIt->instancePtr, cleanupIt->destructor,
+                          cleanupIt->type);
+        }
+        for (auto lifeIt = scope.lifetimes.rbegin();
+             lifeIt != scope.lifetimes.rend(); ++lifeIt) {
+          emitLifetimeEnd(lifeIt->allocaInst, lifeIt->size);
+        }
+      }
+
+      emitAsyncReturn(currentFunc, nullptr, false);
+      return nullptr;
+    }
+
+    llvm::Value *retVal = nullptr;
+    bool isLValue = false;
+    if (node->value) {
+      bool isRefReturn =
+          (coroInfo->valueType->isReferenceType() ||
+           coroInfo->valueType->getKind() == TypeKind::RValueReference);
+
+      if (isRefReturn) {
+        retVal = getLValue(node->value);
+        if (!retVal) {
+          diags.report({DiagLevel::Error, node->line, node->column,
+                        node->length,
+                        "Unresolved l-value in reference return.",
+                        currentFilePath});
+          return nullptr;
+        }
+        isLValue = true;
+      } else {
+        /* Prefer the l-value so the value can be moved out of the source
+         * object with proper ownership semantics. */
+        retVal = getLValue(node->value);
+        if (retVal) {
+          isLValue = true;
+        } else {
+          lastTemporaryAlloca = nullptr;
+          retVal = dispatch(node->value);
+          if (!retVal) {
+            diags.report({DiagLevel::Error, node->line, node->column,
+                          node->length,
+                          "Failed to evaluate return expression.",
+                          currentFilePath});
+            return nullptr;
+          }
+          if (lastTemporaryAlloca) {
+            retVal = lastTemporaryAlloca;
+            lastTemporaryAlloca = nullptr;
+            isLValue = true;
+          }
+        }
+      }
+    }
+
+    /* The value is stored into the future BEFORE the scope cleanups run,
+     * otherwise returning a local would copy from already-destroyed
+     * storage. */
+    llvm::Value *state = builder.CreateLoad(
+        builder.getPtrTy(), coroInfo->futureStateSlot, "future.state");
+    if (retVal) {
+      writeFutureValueInto(state, retVal, coroInfo->valueType, isLValue);
+    }
+
+    size_t scopeStart = funcScopeStarts.empty() ? 0 : funcScopeStarts.back();
+    auto allScopes = cgCtx.getAllScopes();
+    for (size_t si = scopeStart; si < allScopes.size(); ++si) {
+      const auto &scope = allScopes[si];
+      for (auto cleanupIt = scope.cleanups.rbegin();
+           cleanupIt != scope.cleanups.rend(); ++cleanupIt) {
+        emitCleanupCall(cleanupIt->instancePtr, cleanupIt->destructor,
+                        cleanupIt->type);
+      }
+      for (auto lifeIt = scope.lifetimes.rbegin();
+           lifeIt != scope.lifetimes.rend(); ++lifeIt) {
+        emitLifetimeEnd(lifeIt->allocaInst, lifeIt->size);
+      }
+    }
+
+    emitAsyncReturn(currentFunc, nullptr, false);
+    return nullptr;
+  }
+
   llvm::Value *retVal = nullptr;
   if (node->value) {
     bool isRefReturn =
@@ -4767,6 +4971,878 @@ void CodeGen::emitScopeCleanups() {
   for (auto it = scope.lifetimes.rbegin(); it != scope.lifetimes.rend(); ++it) {
     emitLifetimeEnd(it->allocaInst, it->size);
   }
+}
+
+/* ================================================================== */
+/* Async / coroutine support                                           */
+/* ================================================================== */
+
+bool CodeGen::unwrapFutureType(const Type *t, const Type **outValue) {
+  if (!t)
+    return false;
+  const Type *u = t->getUnqualifiedType();
+  while (u->isPointerType() || u->isReferenceType() ||
+         u->getKind() == TypeKind::RValueReference) {
+    if (u->isPointerType())
+      u = static_cast<const PointerType *>(u)->getPointeeType()
+              ->getUnqualifiedType();
+    else if (u->isReferenceType())
+      u = static_cast<const ReferenceType *>(u)->getPointeeType()
+              ->getUnqualifiedType();
+    else
+      u = static_cast<const RValueReferenceType *>(u)->getPointeeType()
+              ->getUnqualifiedType();
+  }
+
+  std::string_view baseName;
+  llvm::ArrayRef<const Type *> args;
+  if (auto *inst = llvm::dyn_cast<TemplateInstType>(u)) {
+    baseName = inst->getBaseName();
+    args = inst->getTemplateArgs();
+  } else if (auto *rec = llvm::dyn_cast<RecordType>(u)) {
+    baseName = rec->getTemplateBaseName();
+    args = rec->getTemplateArgs();
+  } else {
+    return false;
+  }
+
+  if (baseName.empty() || args.size() != 1)
+    return false;
+  if (baseName != "Future" && baseName != "Future.Future" &&
+      !baseName.ends_with(".Future"))
+    return false;
+
+  if (outValue)
+    *outValue = args[0];
+  return true;
+}
+
+llvm::Function *CodeGen::getOrCreateRuntimeFunction(const std::string &name,
+                                                    llvm::FunctionType *ty) {
+  if (llvm::Function *f = mod.getFunction(name))
+    return f;
+  return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, name,
+                                &mod);
+}
+
+llvm::CallInst *CodeGen::emitRuntimeCall(const std::string &name,
+                                         llvm::Type *retTy,
+                                         llvm::ArrayRef<llvm::Value *> args) {
+  std::vector<llvm::Type *> paramTys;
+  for (auto *a : args) {
+    paramTys.push_back(a->getType());
+  }
+  llvm::FunctionType *ty =
+      llvm::FunctionType::get(retTy, paramTys, false);
+  llvm::Function *fn = getOrCreateRuntimeFunction(name, ty);
+  return builder.CreateCall(fn, args);
+}
+
+/* Returns the destructor for a record type, or null when there is none (or
+ * it is implicit). */
+static const FunctionDeclNode *getCustomDestructor(const Type *t) {
+  const Type *u = t->getUnqualifiedType();
+  if (u->getKind() != TypeKind::Class && u->getKind() != TypeKind::Struct &&
+      u->getKind() != TypeKind::Union)
+    return nullptr;
+  auto *recTy = static_cast<const RecordType *>(u);
+  const DeclNode *decl = recTy->getDeclaration();
+  if (!decl)
+    return nullptr;
+  const FunctionDeclNode *dtor = nullptr;
+  if (decl->kind == NodeKind::ClassDecl)
+    dtor = static_cast<const ClassDeclNode *>(decl)->destructor;
+  else if (decl->kind == NodeKind::StructDecl)
+    dtor = static_cast<const StructDeclNode *>(decl)->destructor;
+  else if (decl->kind == NodeKind::UnionDecl)
+    dtor = static_cast<const UnionDeclNode *>(decl)->destructor;
+  if (!dtor || dtor->isImplicit)
+    return nullptr;
+  return dtor;
+}
+
+/* Finds the copy or move constructor for a record type; 'preferMove' picks
+ * the rvalue-reference constructor first. Mirrors the by-value argument
+ * materialization logic. */
+static const FunctionDeclNode *findCopyOrMoveCtor(const Type *t,
+                                                  bool preferMove) {
+  const Type *u = t->getUnqualifiedType();
+  if (u->getKind() != TypeKind::Class && u->getKind() != TypeKind::Struct &&
+      u->getKind() != TypeKind::Union)
+    return nullptr;
+  auto *recTy = static_cast<const RecordType *>(u);
+  const DeclNode *decl = recTy->getDeclaration();
+  if (!decl)
+    return nullptr;
+
+  llvm::ArrayRef<FunctionDeclNode *> ctors;
+  if (decl->kind == NodeKind::ClassDecl)
+    ctors = static_cast<const ClassDeclNode *>(decl)->constructors;
+  else if (decl->kind == NodeKind::StructDecl)
+    ctors = static_cast<const StructDeclNode *>(decl)->constructors;
+  else if (decl->kind == NodeKind::UnionDecl)
+    ctors = static_cast<const UnionDeclNode *>(decl)->constructors;
+
+  const Type *unqualParam = recTy;
+  const FunctionDeclNode *moveCtor = nullptr;
+  const FunctionDeclNode *copyCtor = nullptr;
+  for (auto *c : ctors) {
+    if (c->params.size() != 1)
+      continue;
+    const Type *p0 = c->params[0]->type;
+    const Type *pointee = nullptr;
+    if (p0->isReferenceType()) {
+      pointee = static_cast<const ReferenceType *>(p0)->getPointeeType();
+    } else if (p0->getKind() == TypeKind::RValueReference) {
+      pointee = static_cast<const RValueReferenceType *>(p0)
+                    ->getPointeeType();
+    }
+    if (!pointee || pointee->getUnqualifiedType() != unqualParam)
+      continue;
+    if (p0->getKind() == TypeKind::RValueReference)
+      moveCtor = c;
+    else if (p0->isReferenceType())
+      copyCtor = c;
+  }
+  if (preferMove)
+    return moveCtor ? moveCtor : copyCtor;
+  return copyCtor ? copyCtor : moveCtor;
+}
+
+llvm::Function *
+CodeGen::getOrCreateFutureValueDtor(const Type *valueType) {
+  if (!valueType || valueType->isVoid())
+    return nullptr;
+  const FunctionDeclNode *dtor = getCustomDestructor(valueType);
+  if (!dtor)
+    return nullptr;
+
+  std::string key =
+      "future_dtor_" +
+      std::string(valueType ? valueType->toString() : "void");
+  auto it = asyncHelpers.find(key);
+  if (it != asyncHelpers.end())
+    return it->second;
+
+  llvm::FunctionType *ty = llvm::FunctionType::get(
+      builder.getVoidTy(), {builder.getPtrTy()}, false);
+  auto *fn = llvm::Function::Create(ty, llvm::Function::InternalLinkage, key,
+                                    &mod);
+
+  auto savedIP = builder.saveIP();
+  auto savedLoc = builder.getCurrentDebugLocation();
+  llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", fn);
+  builder.SetInsertPoint(entry);
+
+  llvm::Type *objTy = getLLVMType(valueType);
+  llvm::Value *objPtr = builder.CreateBitCast(
+      fn->getArg(0), llvm::PointerType::getUnqual(objTy));
+  emitCleanupCall(objPtr, dtor, valueType);
+  builder.CreateRetVoid();
+
+  builder.restoreIP(savedIP);
+  builder.SetCurrentDebugLocation(savedLoc);
+
+  asyncHelpers[key] = fn;
+  return fn;
+}
+
+/* 'void thunk(ptr valuePtr, ptr cb, ptr resultState)' — used by
+ * Future.then. When 'asyncCb' is set, the callback returns a Future<void>
+ * which is chained into resultState; otherwise the callback returns void
+ * and resultState is completed immediately after the call. */
+llvm::Function *CodeGen::getOrCreateThenThunk(const Type *valueType,
+                                              bool asyncCb,
+                                              bool cbTakesValue) {
+  std::string key = std::string("then_thunk_") + (asyncCb ? "a_" : "s_") +
+                    (cbTakesValue ? "v_" : "n_") +
+                    std::string(valueType ? valueType->toString() : "void");
+  auto it = asyncHelpers.find(key);
+  if (it != asyncHelpers.end())
+    return it->second;
+
+  llvm::FunctionType *ty = llvm::FunctionType::get(
+      builder.getVoidTy(),
+      {builder.getPtrTy(), builder.getPtrTy(), builder.getPtrTy()}, false);
+  auto *fn = llvm::Function::Create(ty, llvm::Function::InternalLinkage, key,
+                                    &mod);
+
+  auto savedIP = builder.saveIP();
+  auto savedLoc = builder.getCurrentDebugLocation();
+  llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", fn);
+  builder.SetInsertPoint(entry);
+
+  llvm::Value *valuePtr = fn->getArg(0);
+  llvm::Value *cb = fn->getArg(1);
+  llvm::Value *resultState = fn->getArg(2);
+
+  bool isVoidValue = !valueType || valueType->isVoid();
+  std::vector<llvm::Type *> cbParamTys;
+  llvm::Value *val = nullptr;
+  if (!isVoidValue && cbTakesValue) {
+    llvm::Type *llTy = getLLVMType(valueType);
+    llvm::Value *vp = builder.CreateBitCast(
+        valuePtr, llvm::PointerType::getUnqual(llTy));
+    const FunctionDeclNode *dtor = getCustomDestructor(valueType);
+    if (dtor) {
+      llvm::AllocaInst *tmp = createEntryBlockAlloca(llTy, "then.value.tmp");
+      emitDefaultInitialization(tmp, valueType);
+      const FunctionDeclNode *ctor =
+          findCopyOrMoveCtor(valueType, /*preferMove=*/false);
+      if (ctor) {
+        llvm::Function *ctorFunc = getOrCreateFunction(ctor);
+        builder.CreateCall(ctorFunc, {tmp, vp});
+      } else {
+        llvm::Align align = mod.getDataLayout().getABITypeAlign(llTy);
+        uint64_t size = mod.getDataLayout().getTypeAllocSize(llTy);
+        builder.CreateMemCpy(tmp, align, vp, align, size);
+      }
+      /* The callback owns the by-value parameter (its destructor runs on
+       * the callee side), mirroring the by-value argument convention. */
+      val = createTBAALoad(llTy, tmp, valueType);
+    } else {
+      val = createTBAALoad(llTy, vp, valueType);
+    }
+    cbParamTys.push_back(llTy);
+  }
+
+  /* Call the callback through its pointer. */
+  llvm::Type *cbRetTy = asyncCb
+                              ? static_cast<llvm::Type *>(builder.getPtrTy())
+                              : builder.getVoidTy();
+  llvm::FunctionType *cbFnTy =
+      llvm::FunctionType::get(cbRetTy, cbParamTys, false);
+  llvm::Value *cbPtr = builder.CreateBitCast(
+      cb, llvm::PointerType::getUnqual(cbFnTy));
+
+  llvm::Value *ret = nullptr;
+  if (cbParamTys.empty()) {
+    ret = builder.CreateCall(cbFnTy, cbPtr, {});
+  } else {
+    ret = builder.CreateCall(cbFnTy, cbPtr, {val});
+  }
+  if (asyncCb) {
+    emitRuntimeCall("utopia_future_chain", builder.getVoidTy(),
+                    {ret, resultState});
+  } else {
+    emitRuntimeCall("utopia_future_complete", builder.getVoidTy(),
+                    {resultState});
+  }
+  builder.CreateRetVoid();
+
+  builder.restoreIP(savedIP);
+  builder.SetCurrentDebugLocation(savedLoc);
+
+  asyncHelpers[key] = fn;
+  return fn;
+}
+
+/* 'void thunk(ptr state, ptr fn)' — worker-thread entry used by
+ * Future.runOnThread: calls fn, stores the result into the state and
+ * completes it. */
+llvm::Function *CodeGen::getOrCreateThreadThunk(const Type *valueType) {
+  std::string key =
+      "thread_thunk_" +
+      std::string(valueType ? valueType->toString() : "void");
+  auto it = asyncHelpers.find(key);
+  if (it != asyncHelpers.end())
+    return it->second;
+
+  llvm::FunctionType *ty = llvm::FunctionType::get(
+      builder.getVoidTy(), {builder.getPtrTy(), builder.getPtrTy()}, false);
+  auto *fn = llvm::Function::Create(ty, llvm::Function::InternalLinkage, key,
+                                    &mod);
+
+  auto savedIP = builder.saveIP();
+  auto savedLoc = builder.getCurrentDebugLocation();
+  llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", fn);
+  builder.SetInsertPoint(entry);
+
+  llvm::Value *state = fn->getArg(0);
+  llvm::Value *fnPtr = fn->getArg(1);
+
+  bool isVoidValue = !valueType || valueType->isVoid();
+  llvm::Value *retVal = nullptr;
+  if (!isVoidValue) {
+    llvm::Type *retTy = getLLVMType(valueType);
+    llvm::FunctionType *fnTy = llvm::FunctionType::get(retTy, {}, false);
+    llvm::Value *callee = builder.CreateBitCast(
+        fnPtr, llvm::PointerType::getUnqual(fnTy));
+    retVal = builder.CreateCall(fnTy, callee, {});
+    writeFutureValueInto(state, retVal, valueType, false);
+  } else {
+    llvm::FunctionType *fnTy =
+        llvm::FunctionType::get(builder.getVoidTy(), {}, false);
+    llvm::Value *callee = builder.CreateBitCast(
+        fnPtr, llvm::PointerType::getUnqual(fnTy));
+    builder.CreateCall(fnTy, callee, {});
+  }
+
+  emitRuntimeCall("utopia_future_complete", builder.getVoidTy(), {state});
+  builder.CreateRetVoid();
+
+  builder.restoreIP(savedIP);
+  builder.SetCurrentDebugLocation(savedLoc);
+
+  asyncHelpers[key] = fn;
+  return fn;
+}
+
+/* 'void thunk(ptr state, ptr fn)' — worker-thread entry for an async
+ * function passed to Future.runOnThread. The worker calls fn (which runs
+ * the async function's coroutine up to its first await), then pumps its own
+ * event loop until the returned future completes and stores the resulting
+ * value into the outer state. This gives every worker thread its own
+ * runtime copy, so awaits keep working off the main thread. */
+llvm::Function *CodeGen::getOrCreateAsyncThreadThunk(const Type *valueType) {
+  std::string key =
+      "async_thread_thunk_" +
+      std::string(valueType ? valueType->toString() : "void");
+  auto it = asyncHelpers.find(key);
+  if (it != asyncHelpers.end())
+    return it->second;
+
+  llvm::FunctionType *ty = llvm::FunctionType::get(
+      builder.getVoidTy(), {builder.getPtrTy(), builder.getPtrTy()}, false);
+  auto *fn = llvm::Function::Create(ty, llvm::Function::InternalLinkage, key,
+                                    &mod);
+
+  auto savedIP = builder.saveIP();
+  auto savedLoc = builder.getCurrentDebugLocation();
+  llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", fn);
+  builder.SetInsertPoint(entry);
+
+  llvm::Value *state = fn->getArg(0);
+  llvm::Value *fnPtr = fn->getArg(1);
+
+  /* The future struct is {ptr state}; call fn and pull the state pointer out
+   * of the returned struct. */
+  llvm::Type *llFutTy = llvm::StructType::get(
+      ctx, {builder.getPtrTy()}, /*isPacked=*/false);
+  llvm::FunctionType *fnTy = llvm::FunctionType::get(llFutTy, {}, false);
+  llvm::Value *callee = builder.CreateBitCast(
+      fnPtr, llvm::PointerType::getUnqual(fnTy));
+  llvm::Value *fut = builder.CreateCall(fnTy, callee, {});
+  llvm::Value *innerState =
+      builder.CreateExtractValue(fut, 0, "async.fn.state");
+
+  /* Pump this thread's loop until the async function completes. */
+  emitRuntimeCall("utopia_loop_run", builder.getInt32Ty(), {innerState});
+
+  bool isVoidValue = !valueType || valueType->isVoid();
+  if (!isVoidValue) {
+    llvm::Value *retVal = readFutureValue(innerState, valueType);
+    writeFutureValueInto(state, retVal, valueType, false);
+  }
+
+  emitRuntimeCall("utopia_future_complete", builder.getVoidTy(), {state});
+
+  /* The by-value future returned from the call does not run a destructor;
+   * release the reference it carried now that the value was copied out. */
+  emitRuntimeCall("utopia_future_release", builder.getVoidTy(), {innerState});
+
+  builder.CreateRetVoid();
+
+  builder.restoreIP(savedIP);
+  builder.SetCurrentDebugLocation(savedLoc);
+
+  asyncHelpers[key] = fn;
+  return fn;
+}
+
+llvm::Value *CodeGen::getFutureObjectPointer(const ExprNode *expr) {
+  if (!expr)
+    return nullptr;
+
+  const Type *t = expr->exprType;
+  const Type *u = t ? t->getUnqualifiedType() : nullptr;
+  bool isIndirect = u && (u->isPointerType() || u->isReferenceType() ||
+                          u->getKind() == TypeKind::RValueReference);
+
+  llvm::Value *objPtr = nullptr;
+  if (isIndirect) {
+    /* Pointer operands (e.g. 'this') carry the object address in the
+     * value; reference operands (e.g. an operator[] returning T&) need the
+     * l-value resolution. */
+    bool isPointerOperand = u && u->isPointerType();
+    if (isPointerOperand) {
+      objPtr = dispatch(expr);
+      if (!objPtr)
+        objPtr = getLValue(expr);
+    } else {
+      objPtr = getLValue(expr);
+      if (!objPtr)
+        objPtr = dispatch(expr);
+    }
+  } else {
+    objPtr = getLValue(expr);
+    if (!objPtr) {
+      lastTemporaryAlloca = nullptr;
+      llvm::Value *val = dispatch(expr);
+      if (lastTemporaryAlloca) {
+        objPtr = lastTemporaryAlloca;
+        lastTemporaryAlloca = nullptr;
+      } else if (val) {
+        objPtr = createEntryBlockAlloca(val->getType(), "tmp.future.recv");
+        createTBAAStore(val, objPtr, expr->exprType);
+      }
+    }
+  }
+  return objPtr;
+}
+
+llvm::Value *CodeGen::getFutureState(llvm::Value *futureValueOrObjPtr,
+                                       const Type *operandType) {
+  if (!futureValueOrObjPtr)
+    return nullptr;
+
+  /* A Future is a struct whose single field is the runtime state pointer,
+   * whether it is used by value or heap-allocated: one dereference from
+   * the operand's address reaches the state. */
+  const Type *u = operandType ? operandType->getUnqualifiedType() : nullptr;
+  const Type *recordTy = u;
+  while (recordTy &&
+         (recordTy->isPointerType() || recordTy->isReferenceType() ||
+          recordTy->getKind() == TypeKind::RValueReference)) {
+    if (recordTy->isPointerType())
+      recordTy = static_cast<const PointerType *>(recordTy)
+                     ->getPointeeType()
+                     ->getUnqualifiedType();
+    else if (recordTy->isReferenceType())
+      recordTy = static_cast<const ReferenceType *>(recordTy)
+                     ->getPointeeType()
+                     ->getUnqualifiedType();
+    else
+      recordTy = static_cast<const RValueReferenceType *>(recordTy)
+                     ->getPointeeType()
+                     ->getUnqualifiedType();
+  }
+
+  llvm::Type *llTy = nullptr;
+  uint32_t stateFieldIndex = 0;
+  if (auto *rec = llvm::dyn_cast<RecordType>(recordTy)) {
+    if (const FieldInfo *f = rec->getField("_state")) {
+      stateFieldIndex = f->index;
+    }
+    llTy = getLLVMType(rec);
+  }
+  if (!llTy || !llTy->isStructTy()) {
+    llTy = builder.getPtrTy();
+  }
+
+  llvm::Value *stateGep = builder.CreateStructGEP(
+      llTy, futureValueOrObjPtr, stateFieldIndex, "future.state.gep");
+  return builder.CreateLoad(builder.getPtrTy(), stateGep, "future.state");
+}
+llvm::Value *CodeGen::readFutureValue(llvm::Value *state,
+                                      const Type *valueType) {
+  if (!state || !valueType || valueType->isVoid())
+    return nullptr;
+
+  llvm::Type *llTy = getLLVMType(valueType);
+  llvm::Value *vp =
+      emitRuntimeCall("utopia_future_value_ptr", builder.getPtrTy(), {state});
+  vp = builder.CreateBitCast(vp, llvm::PointerType::getUnqual(llTy),
+                             "future.value.ptr");
+
+  const FunctionDeclNode *dtor = getCustomDestructor(valueType);
+  if (!dtor) {
+    return createTBAALoad(llTy, vp, valueType);
+  }
+
+  /* Non-trivial value: move (or copy) it out of the state into a temporary
+   * owned by the current function. */
+  llvm::AllocaInst *tmp = createEntryBlockAlloca(llTy, "await.value.tmp");
+  emitDefaultInitialization(tmp, valueType);
+  const FunctionDeclNode *ctor =
+      findCopyOrMoveCtor(valueType, /*preferMove=*/true);
+  if (ctor) {
+    llvm::Function *ctorFunc = getOrCreateFunction(ctor);
+    builder.CreateCall(ctorFunc, {tmp, vp});
+  } else {
+    llvm::Align align = mod.getDataLayout().getABITypeAlign(llTy);
+    uint64_t size = mod.getDataLayout().getTypeAllocSize(llTy);
+    builder.CreateMemCpy(tmp, align, vp, align, size);
+  }
+  cgCtx.addCleanup(tmp, dtor, valueType);
+  lastTemporaryAlloca = tmp;
+  return tmp;
+}
+
+void CodeGen::writeFutureValueInto(llvm::Value *state, llvm::Value *src,
+                                   const Type *valueType, bool srcIsLValue) {
+  if (!state || !src || !valueType || valueType->isVoid())
+    return;
+
+  llvm::Type *llTy = getLLVMType(valueType);
+  llvm::Value *vp =
+      emitRuntimeCall("utopia_future_value_ptr", builder.getPtrTy(), {state});
+  vp = builder.CreateBitCast(vp, llvm::PointerType::getUnqual(llTy),
+                             "future.value.ptr");
+
+  const FunctionDeclNode *dtor = getCustomDestructor(valueType);
+  if (!dtor) {
+    if (srcIsLValue) {
+      src = builder.CreateLoad(llTy, src, "future.value.load");
+    }
+    src = createImplicitCast(src, llTy);
+    createTBAAStore(src, vp, valueType);
+    return;
+  }
+
+  llvm::Value *srcPtr = src;
+  llvm::AllocaInst *internalTemp = nullptr;
+  if (!srcIsLValue) {
+    internalTemp = createEntryBlockAlloca(llTy, "future.value.src");
+    createTBAAStore(src, internalTemp, valueType);
+    srcPtr = internalTemp;
+  }
+
+  emitDefaultInitialization(vp, valueType);
+  const FunctionDeclNode *ctor =
+      findCopyOrMoveCtor(valueType, /*preferMove=*/!srcIsLValue);
+  if (ctor) {
+    llvm::Function *ctorFunc = getOrCreateFunction(ctor);
+    builder.CreateCall(ctorFunc, {vp, srcPtr});
+  } else {
+    llvm::Align align = mod.getDataLayout().getABITypeAlign(llTy);
+    uint64_t size = mod.getDataLayout().getTypeAllocSize(llTy);
+    builder.CreateMemCpy(vp, align, srcPtr, align, size);
+  }
+
+  /* The internally materialized temporary owns the original storage; release
+   * it now that the state owns its own copy. Real l-values keep their own
+   * lifetime management. */
+  if (internalTemp) {
+    emitCleanupCall(srcPtr, dtor, valueType);
+  }
+}
+
+/* Wraps a future state pointer into the Future value type expected by the
+ * caller of an async function or intrinsic. */
+llvm::Value *CodeGen::materializeFutureValue(const Type *futureType,
+                                             llvm::Value *statePtr) {
+  const Type *u = futureType->getUnqualifiedType();
+  llvm::Type *llFutTy = getLLVMType(u);
+  llvm::AllocaInst *tmp = createEntryBlockAlloca(llFutTy, "future.value");
+  emitDefaultInitialization(tmp, futureType);
+  llvm::Value *gep = builder.CreateStructGEP(llFutTy, tmp, 0, "future.ptr.gep");
+  builder.CreateStore(statePtr, gep);
+  if (const FunctionDeclNode *dtor = getCustomDestructor(futureType)) {
+    cgCtx.addCleanup(tmp, dtor, futureType);
+  }
+  return createTBAALoad(llFutTy, tmp, futureType);
+}
+
+llvm::Value *CodeGen::createFutureObject(const Type *futureType,
+                                         llvm::Value *state) {
+  (void)futureType;
+  /* A Future is a value type whose single field is the runtime state
+   * pointer; no separate heap object is needed. */
+  return state;
+}
+
+llvm::Value *CodeGen::createFutureState(const Type *valueType) {
+  uint64_t size = 0;
+  uint32_t align = 1;
+  if (valueType && !valueType->isVoid()) {
+    llvm::Type *llTy = getLLVMType(valueType);
+    size = mod.getDataLayout().getTypeAllocSize(llTy);
+    align = mod.getDataLayout().getABITypeAlign(llTy).value();
+  }
+  llvm::Function *dtor = getOrCreateFutureValueDtor(valueType);
+  llvm::Value *dtorVal = dtor
+                              ? static_cast<llvm::Value *>(dtor)
+                              : static_cast<llvm::Value *>(
+                                    llvm::ConstantPointerNull::get(
+                                        builder.getPtrTy()));
+  return emitRuntimeCall("utopia_future_create", builder.getPtrTy(),
+                         {builder.getInt64(size), builder.getInt32(align),
+                          dtorVal});
+}
+
+void CodeGen::setupAsyncFunction(const FunctionDeclNode *node,
+                                 llvm::Function *func) {
+  coroInfo = std::make_unique<CoroutineInfo>();
+
+  const Type *inner = nullptr;
+  coroInfo->valueType = unwrapFutureType(node->returnType, &inner)
+                            ? inner
+                            : node->returnType;
+  coroInfo->futureType = node->effectiveReturnType;
+  if (!coroInfo->futureType) {
+    coroInfo->futureType = node->returnType;
+  }
+  coroInfo->isMain = (node->name == "main" && !node->isMethod);
+  coroInfo->isCoroutine = node->hasAwait;
+
+  llvm::Value *state = createFutureState(coroInfo->valueType);
+  coroInfo->futureStateSlot =
+      createEntryBlockAlloca(builder.getPtrTy(), "future.state.slot");
+  builder.CreateStore(state, coroInfo->futureStateSlot);
+
+  /* The coroutine's frame holds a reference to the state so it survives the
+   * caller dropping the returned Future before the coroutine completes. */
+  emitRuntimeCall("utopia_future_retain", builder.getVoidTy(), {state});
+
+  llvm::Value *futObj = createFutureObject(coroInfo->futureType, state);
+  (void)futObj;
+  /* The Future value and the state are the same pointer; the ramp returns
+   * the state, which is stored in a frame-resident slot so the suspend
+   * block can reload it after a resume. */
+
+  if (!coroInfo->isCoroutine) {
+    /* No suspension points: the body runs to completion synchronously and
+     * completes the future on the way out (see visit(ReturnNode)). */
+    return;
+  }
+
+  llvm::Function *coroIdFn =
+      llvm::Intrinsic::getDeclaration(&mod, llvm::Intrinsic::coro_id);
+  llvm::Function *coroSizeFn = llvm::Intrinsic::getDeclaration(
+      &mod, llvm::Intrinsic::coro_size, {builder.getInt64Ty()});
+  llvm::Function *coroBeginFn =
+      llvm::Intrinsic::getDeclaration(&mod, llvm::Intrinsic::coro_begin);
+
+  llvm::Value *id = builder.CreateCall(
+      coroIdFn,
+      {builder.getInt32(0), llvm::ConstantPointerNull::get(builder.getPtrTy()),
+       llvm::ConstantPointerNull::get(builder.getPtrTy()),
+       llvm::ConstantPointerNull::get(builder.getPtrTy())});
+  coroInfo->coroId = id;
+
+  llvm::Value *frameSize = builder.CreateCall(coroSizeFn, {});
+  llvm::Function *mallocFn = mod.getFunction("malloc");
+  if (!mallocFn) {
+    llvm::FunctionType *mallocTy = llvm::FunctionType::get(
+        builder.getPtrTy(), {builder.getInt64Ty()}, false);
+    mallocFn = llvm::Function::Create(
+        mallocTy, llvm::Function::ExternalLinkage, "malloc", mod);
+  }
+  llvm::Value *frameMem = builder.CreateCall(mallocFn, {frameSize});
+  llvm::Value *hdl = builder.CreateCall(coroBeginFn, {id, frameMem});
+
+  coroInfo->frameSlot =
+      createEntryBlockAlloca(builder.getPtrTy(), "coro.frame.slot");
+  builder.CreateStore(hdl, coroInfo->frameSlot);
+
+  /* Shared suspend / cleanup exits for every await site. */
+  coroInfo->suspendBlock =
+      llvm::BasicBlock::Create(ctx, "coro.suspend", func);
+  coroInfo->cleanupBlock =
+      llvm::BasicBlock::Create(ctx, "coro.cleanup", func);
+
+  /* Fill the suspend exit: this is where every await lands on its first
+   * suspension. The ramp returns the future object here; when the block is
+   * reached from the resume function, CoroSplit rewrites the return. */
+  {
+    auto savedIP = builder.saveIP();
+    auto savedLoc = builder.getCurrentDebugLocation();
+    builder.SetInsertPoint(coroInfo->suspendBlock);
+
+    llvm::Value *susHdl = builder.CreateLoad(builder.getPtrTy(),
+                                             coroInfo->frameSlot,
+                                             "coro.frame");
+    llvm::Function *coroEndFn = llvm::Intrinsic::getDeclaration(
+        &mod, llvm::Intrinsic::coro_end);
+    builder.CreateCall(coroEndFn,
+                       {susHdl, builder.getInt1(false), coroInfo->coroId});
+    llvm::Value *susFut = builder.CreateLoad(
+        builder.getPtrTy(), coroInfo->futureStateSlot, "future.obj");
+    builder.CreateRet(susFut);
+
+    /* Fill the destroy exit: the coroutine was destroyed while suspended.
+     * Release the frame's future-state reference, then the coro.free + free
+     * pair releases the frame. */
+    builder.SetInsertPoint(coroInfo->cleanupBlock);
+    llvm::Value *clnHdl = builder.CreateLoad(builder.getPtrTy(),
+                                             coroInfo->frameSlot,
+                                             "coro.frame");
+    llvm::Value *clnState = builder.CreateLoad(
+        builder.getPtrTy(), coroInfo->futureStateSlot, "future.state");
+    emitRuntimeCall("utopia_future_release", builder.getVoidTy(), {clnState});
+    llvm::Function *coroFreeFn = llvm::Intrinsic::getDeclaration(
+        &mod, llvm::Intrinsic::coro_free);
+    llvm::Value *toFree =
+        builder.CreateCall(coroFreeFn, {coroInfo->coroId, clnHdl});
+    llvm::Function *freeFn = mod.getFunction("free");
+    if (!freeFn) {
+      llvm::FunctionType *freeTy = llvm::FunctionType::get(
+          builder.getVoidTy(), {builder.getPtrTy()}, false);
+      freeFn = llvm::Function::Create(
+          freeTy, llvm::Function::ExternalLinkage, "free", mod);
+    }
+    builder.CreateCall(freeFn, {toFree});
+    builder.CreateBr(coroInfo->suspendBlock);
+
+    builder.restoreIP(savedIP);
+    builder.SetCurrentDebugLocation(savedLoc);
+  }
+}
+
+/* Emits the final suspend path: complete the future, mark the coroutine as
+ * done, self-destroy (frees the frame) and return the future object. */
+void CodeGen::emitAsyncReturn(const FunctionDeclNode *node,
+                              llvm::Value *value, bool valueIsLValue) {
+  llvm::Value *state = builder.CreateLoad(
+      builder.getPtrTy(), coroInfo->futureStateSlot, "future.state");
+  if (value) {
+    writeFutureValueInto(state, value, coroInfo->valueType, valueIsLValue);
+  }
+  emitRuntimeCall("utopia_future_complete", builder.getVoidTy(), {state});
+
+  /* The coroutine's own frame reference: the caller may drop the returned
+   * Future (fire-and-forget), so the state must stay alive until the
+   * coroutine is done. For real coroutines the release happens in the
+   * destroy function (which coro.destroy below invokes on the completion
+   * path); releasing here as well would double-release. Plain async
+   * functions (no awaits) have no destroy function, so they release here. */
+  if (!coroInfo->isCoroutine) {
+    emitRuntimeCall("utopia_future_release", builder.getVoidTy(), {state});
+  }
+
+  /* Load the future (the state pointer) before the frame is destroyed. */
+  llvm::Value *fut = builder.CreateLoad(
+      builder.getPtrTy(), coroInfo->futureStateSlot, "future.obj");
+
+  if (coroInfo->isCoroutine) {
+    llvm::Function *coroEndFn = llvm::Intrinsic::getDeclaration(
+        &mod, llvm::Intrinsic::coro_end);
+    llvm::Function *coroDestroyFn = llvm::Intrinsic::getDeclaration(
+        &mod, llvm::Intrinsic::coro_destroy);
+    llvm::Value *hdl = builder.CreateLoad(builder.getPtrTy(),
+                                          coroInfo->frameSlot, "coro.frame");
+
+    /* Mark the coroutine done, then self-destroy (freeing the frame). */
+    builder.CreateCall(coroEndFn,
+                       {hdl, builder.getInt1(true), coroInfo->coroId});
+    builder.CreateCall(coroDestroyFn, {hdl});
+    builder.CreateRet(fut);
+    return;
+  }
+
+  builder.CreateRet(fut);
+}
+
+void CodeGen::emitAsyncFallthroughFinish(const FunctionDeclNode *node) {
+  /* The value type is non-void only when every path returned (Sema);
+   * fall-through with a non-void value is a compile-time error already. */
+  emitAsyncReturn(node, nullptr, false);
+}
+
+void CodeGen::emitMainWrapper(llvm::Function *userMain,
+                              const FunctionDeclNode *node) {
+  if (mod.getFunction("main"))
+    return;
+
+  std::vector<llvm::Type *> paramTys;
+  for (const auto *p : node->params) {
+    if (llvm::isa<ArrayType>(p->type)) {
+      paramTys.push_back(builder.getPtrTy());
+    } else {
+      paramTys.push_back(getLLVMType(p->type));
+    }
+  }
+  llvm::FunctionType *ft =
+      llvm::FunctionType::get(builder.getInt32Ty(), paramTys, false);
+  auto *mainFn = llvm::Function::Create(ft, llvm::Function::ExternalLinkage,
+                                        "main", &mod);
+  llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", mainFn);
+  builder.SetInsertPoint(entry);
+
+  std::vector<llvm::Value *> callArgs;
+  for (auto &arg : mainFn->args()) {
+    callArgs.push_back(&arg);
+  }
+  llvm::Value *fut = builder.CreateCall(userMain, callArgs);
+
+  if (node->isAsync) {
+    emitRuntimeCall("utopia_loop_run", builder.getInt32Ty(), {fut});
+    /* Like Dart, stay alive while fire-and-forget work (timers, worker
+     * threads) is still pending after main completed. */
+    emitRuntimeCall("utopia_loop_run_all", builder.getVoidTy(), {});
+    builder.CreateRet(builder.getInt32(0));
+  } else {
+    /* Synchronous main: drive the event loop until every future scheduled
+     * during main has settled, mirroring the Dart event loop semantics. */
+    emitRuntimeCall("utopia_loop_run_all", builder.getVoidTy(), {});
+    builder.CreateRet(
+        llvm::ConstantInt::get(builder.getInt32Ty(), 0));
+  }
+}
+
+llvm::Value *CodeGen::visit(const AwaitExprNode *node) {
+  if (!coroInfo || !coroInfo->isCoroutine) {
+    return dispatch(node->expr);
+  }
+
+  /* 'Future<T> a = await fut;': the await is consumed as the future
+   * itself, so the operand passes through unwrapped. */
+  if (node->keepFuture) {
+    node->exprType = node->expr->exprType;
+    return dispatch(node->expr);
+  }
+
+  const Type *valueTy = nullptr;
+  if (!unwrapFutureType(node->expr->exprType, &valueTy)) {
+    return dispatch(node->expr);
+  }
+
+  llvm::Value *futObj = getFutureObjectPointer(node->expr);
+  if (!futObj) {
+    diags.report({DiagLevel::Error, node->line, node->column, node->length,
+                  "Failed to evaluate await operand.", currentFilePath});
+    return nullptr;
+  }
+  llvm::Value *state = getFutureState(futObj, node->expr->exprType);
+
+  llvm::Function *func = builder.GetInsertBlock()->getParent();
+  llvm::BasicBlock *doneBB = llvm::BasicBlock::Create(ctx, "await.done", func);
+  llvm::BasicBlock *regBB =
+      llvm::BasicBlock::Create(ctx, "await.register", func);
+  llvm::BasicBlock *resumedBB =
+      llvm::BasicBlock::Create(ctx, "await.resumed", func);
+  llvm::BasicBlock *afterBB =
+      llvm::BasicBlock::Create(ctx, "await.after", func);
+
+  /* The runtime returns an int (C ABI): normalize to i1. */
+  llvm::Value *done32 = emitRuntimeCall("utopia_future_is_completed",
+                                        builder.getInt32Ty(), {state});
+  llvm::Value *done =
+      builder.CreateICmpNE(done32, builder.getInt32(0), "await.done");
+  builder.CreateCondBr(done, doneBB, regBB);
+
+  /* Already completed: take the value inline. */
+  builder.SetInsertPoint(doneBB);
+  builder.CreateBr(afterBB);
+
+  /* Pending: register our resume function and suspend. */
+  builder.SetInsertPoint(regBB);
+  llvm::Value *hdl =
+      builder.CreateLoad(builder.getPtrTy(), coroInfo->frameSlot,
+                         "coro.frame");
+  llvm::Value *resumeFn =
+      builder.CreateLoad(builder.getPtrTy(), hdl, "coro.resume.fn");
+  emitRuntimeCall("utopia_future_then", builder.getVoidTy(),
+                  {state, resumeFn, hdl});
+
+  llvm::Function *coroSuspendFn = llvm::Intrinsic::getDeclaration(
+      &mod, llvm::Intrinsic::coro_suspend);
+  llvm::Value *s =
+      builder.CreateCall(coroSuspendFn, {coroInfo->coroId, builder.getInt1(false)});
+  llvm::SwitchInst *sw =
+      builder.CreateSwitch(s, coroInfo->suspendBlock, 2);
+  sw->addCase(builder.getInt8(0), resumedBB);
+  sw->addCase(builder.getInt8(1), coroInfo->cleanupBlock);
+
+  builder.SetInsertPoint(resumedBB);
+  builder.CreateBr(afterBB);
+
+  /* The value is read once, after either path converges. */
+  builder.SetInsertPoint(afterBB);
+  llvm::Value *val = readFutureValue(state, valueTy);
+  node->exprType = valueTy;
+  return val;
 }
 
 } // namespace utopia

@@ -75,6 +75,11 @@ bool buildProject(const fs::path &projRoot, CompileOptions &parentOptions,
   options.doFormat = globalOpts.doFormat;
   options.targetTriple = globalOpts.targetTriple;
   options.sysroot = globalOpts.sysroot;
+  options.asyncEnabled = globalOpts.asyncEnabled;
+
+  if (config.asyncEnabled.has_value()) {
+    options.asyncEnabled = config.asyncEnabled.value();
+  }
 
   if (config.optLevel.has_value()) {
     options.optLevel = config.optLevel.value();

@@ -89,6 +89,16 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
   if (!t)
     return nullptr;
 
+  if (auto *fnTy = llvm::dyn_cast<FunctionType>(t)) {
+    std::vector<const Type *> resolvedParams;
+    for (const auto *p : fnTy->getParamTypes()) {
+      resolvedParams.push_back(resolveIfTemplate(p));
+    }
+    return ctx->astCtx.getFunctionType(
+        resolveIfTemplate(fnTy->getReturnType()),
+        ctx->astCtx.copyArray<const Type *>(resolvedParams));
+  }
+
   if (auto *instTy = llvm::dyn_cast<TemplateInstType>(t)) {
     if (instTy->getResolvedType())
       return instTy->getResolvedType();
@@ -157,6 +167,27 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
       ctx->astCtx.createRecordType(kind, mangledView);
     }
 
+    /* Record the resolved template arguments on the instantiated record so
+     * the value type can be recovered from e.g. Future<T> instances. */
+    if (auto *recTy = ctx->astCtx.getRecordType(mangledView)) {
+      std::vector<const Type *> resolvedArgs;
+      for (const auto *arg : instTy->getTemplateArgs()) {
+        resolvedArgs.push_back(resolveIfTemplate(arg));
+      }
+      std::string_view baseName = declIt->second->fqName;
+      if (baseName.empty()) {
+        if (auto *cls = llvm::dyn_cast<ClassDeclNode>(declIt->second))
+          baseName = cls->name;
+        else if (auto *str = llvm::dyn_cast<StructDeclNode>(declIt->second))
+          baseName = str->name;
+        else if (auto *uni = llvm::dyn_cast<UnionDeclNode>(declIt->second))
+          baseName = uni->name;
+      }
+      const_cast<RecordType *>(recTy)->setTemplateBaseName(baseName);
+      const_cast<RecordType *>(recTy)->setTemplateArgs(
+          ctx->astCtx.copyArray<const Type *>(resolvedArgs));
+    }
+
     std::unordered_map<std::string_view, const Type *> templateArgMap;
     for (size_t i = 0; i < tmplDecl->templateParams.size(); ++i) {
       templateArgMap[tmplDecl->templateParams[i]] =
@@ -219,9 +250,7 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
         /* Ensure method ownership is retained post-clone */
         auto updateParentRec = [&](llvm::ArrayRef<FunctionDeclNode *> funcs) {
           for (auto *f : funcs) {
-            if (!f->isStatic) {
-              const_cast<FunctionDeclNode *>(f)->parentRecord = recTy;
-            }
+            const_cast<FunctionDeclNode *>(f)->parentRecord = recTy;
           }
         };
 
@@ -1423,6 +1452,12 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
           instDecl->annotations = tmplDecl->annotations;
           instDecl->declFilePath = tmplDecl->declFilePath;
 
+          /* The substitution is complete: the instantiated function is
+           * concrete and its body can be type-checked now. */
+          auto *instFn = llvm::cast<FunctionDeclNode>(instDecl);
+          instFn->isTemplate = false;
+          instFn->templateParams = {};
+
           if (ctx->currentModule) {
             const_cast<ModuleNode *>(ctx->currentModule)
                 ->instantiatedTemplates.push_back(instDecl);
@@ -1569,7 +1604,8 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
             for (auto *p : m->params)
               pTypes.push_back(p->type);
             const Type *funcTy = ctx->astCtx.getFunctionType(
-                m->returnType, ctx->astCtx.copyArray<const Type *>(pTypes));
+                m->effectiveReturnType ? m->effectiveReturnType : m->returnType,
+                ctx->astCtx.copyArray<const Type *>(pTypes));
             node->exprType = ctx->astCtx.getPointerType(funcTy);
             node->isLValue = true;
             checkDeprecated(m, node);
@@ -1669,7 +1705,9 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
       pTypes.push_back(p->type);
 
     const Type *funcTy = ctx->astCtx.getFunctionType(
-        fDecl->returnType, ctx->astCtx.copyArray<const Type *>(pTypes));
+        fDecl->effectiveReturnType ? fDecl->effectiveReturnType
+                                   : fDecl->returnType,
+        ctx->astCtx.copyArray<const Type *>(pTypes));
     ty = ctx->astCtx.getPointerType(funcTy);
   } else if (auto *tdDecl = llvm::dyn_cast<TypedefDeclNode>(target)) {
     if (!target->isPublic(tdDecl->aliasName) &&
@@ -2421,6 +2459,24 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
             "Cannot bind an l-value to an r-value reference.");
       }
     } else {
+      bool awaitKeepsFuture = false;
+      if (node->initializer->kind == NodeKind::Await) {
+        auto *awaitNode =
+            static_cast<const AwaitExprNode *>(node->initializer);
+        /* 'Future<T> a = await fut;': the declared type is the future
+         * itself, so the await passes the future through (Dart-style
+         * declared Future<T> annotations remain valid). */
+        const Type *declInner = nullptr;
+        const Type *operandInner = nullptr;
+        if (unwrapFutureType(declType, &declInner) &&
+            unwrapFutureType(awaitNode->expr->exprType, &operandInner) &&
+            declInner == operandInner) {
+          awaitKeepsFuture = true;
+          const_cast<AwaitExprNode *>(awaitNode)->keepFuture = true;
+          initTy = declType;
+          const_cast<AwaitExprNode *>(awaitNode)->exprType = declType;
+        }
+      }
       if (!canImplicitlyCast(initTy, declType)) {
         std::string initTypeStr = initTy ? initTy->toString() : "unknown";
         (void)ctx->reportError(node->line, node->column, node->length,
@@ -2869,7 +2925,9 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
         for (auto *p : fDecl->params)
           pTypes.push_back(p->type);
         const Type *funcTy = ctx->astCtx.getFunctionType(
-            fDecl->returnType, ctx->astCtx.copyArray<const Type *>(pTypes));
+            fDecl->effectiveReturnType ? fDecl->effectiveReturnType
+                                       : fDecl->returnType,
+            ctx->astCtx.copyArray<const Type *>(pTypes));
         node->exprType = ctx->astCtx.getPointerType(funcTy);
         node->isLValue = true;
         checkDeprecated(target, node);
@@ -2911,12 +2969,69 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
                llvm::isa<StructDeclNode>(objDecl) ||
                llvm::isa<UnionDeclNode>(objDecl)) {
       staticAccessDecl = objDecl;
-      if (auto *cDecl = llvm::dyn_cast<ClassDeclNode>(staticAccessDecl))
-        recordTy = cDecl->recordType;
-      else if (auto *sDecl = llvm::dyn_cast<StructDeclNode>(staticAccessDecl))
-        recordTy = sDecl->recordType;
-      else if (auto *uDecl = llvm::dyn_cast<UnionDeclNode>(staticAccessDecl))
-        recordTy = uDecl->recordType;
+
+      /* Template class used as a static-access object: 'Future<int>.value'
+       * instantiates the record so the static member resolves on the
+       * instantiated class. The class-level arguments may appear either on
+       * the object ('Future<int>.value(...)') or on the member access itself
+       * ('Future.value<int>(...)'); the latter form additionally carries the
+       * method's own template arguments, so it only binds the class when the
+       * record template takes exactly that many parameters. */
+      if (auto *varNode = llvm::dyn_cast<VariableNode>(node->object)) {
+        llvm::ArrayRef<const Type *> classArgs = varNode->templateArgs;
+        if (classArgs.empty() && !node->templateArgs.empty() &&
+            objDecl->isTemplate) {
+          size_t templateParamCount = 0;
+          if (auto *oc = llvm::dyn_cast<ClassDeclNode>(objDecl))
+            templateParamCount = oc->templateParams.size();
+          else if (auto *os = llvm::dyn_cast<StructDeclNode>(objDecl))
+            templateParamCount = os->templateParams.size();
+          else if (auto *ou = llvm::dyn_cast<UnionDeclNode>(objDecl))
+            templateParamCount = ou->templateParams.size();
+          if (templateParamCount == node->templateArgs.size()) {
+            classArgs = node->templateArgs;
+          }
+        }
+        if (!classArgs.empty() && objDecl->isTemplate) {
+          std::vector<const Type *> resolvedArgs;
+          for (const auto *arg : classArgs) {
+            resolvedArgs.push_back(resolveIfTemplate(arg));
+          }
+          auto argsCopy = ctx->astCtx.copyArray<const Type *>(resolvedArgs);
+          std::string_view objBaseName = objDecl->fqName;
+          if (objBaseName.empty()) {
+            if (auto *oc = llvm::dyn_cast<ClassDeclNode>(objDecl))
+              objBaseName = oc->name;
+            else if (auto *os = llvm::dyn_cast<StructDeclNode>(objDecl))
+              objBaseName = os->name;
+            else if (auto *ou = llvm::dyn_cast<UnionDeclNode>(objDecl))
+              objBaseName = ou->name;
+          }
+          auto *instTy = ctx->astCtx.getTemplateInstType(objBaseName,
+                                                         argsCopy);
+          const Type *resolved = resolveIfTemplate(instTy);
+          if (resolved) {
+            const Type *unqual = resolved->getUnqualifiedType();
+            if (unqual->getKind() == TypeKind::Class ||
+                unqual->getKind() == TypeKind::Struct ||
+                unqual->getKind() == TypeKind::Union) {
+              recordTy = static_cast<const RecordType *>(unqual);
+              staticAccessDecl = recordTy->getDeclaration();
+              const_cast<VariableNode *>(varNode)->resolvedDecl =
+                  staticAccessDecl;
+            }
+          }
+        }
+      }
+
+      if (!recordTy) {
+        if (auto *cDecl = llvm::dyn_cast<ClassDeclNode>(staticAccessDecl))
+          recordTy = cDecl->recordType;
+        else if (auto *sDecl = llvm::dyn_cast<StructDeclNode>(staticAccessDecl))
+          recordTy = sDecl->recordType;
+        else if (auto *uDecl = llvm::dyn_cast<UnionDeclNode>(staticAccessDecl))
+          recordTy = uDecl->recordType;
+      }
     }
   }
 
@@ -3131,7 +3246,6 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
       std::vector<ExprNode *> bestResolvedArgs;
 
       const DeclNode *currentRecDecl = recDecl;
-
       // Recursive escalation for method and template resolution
       while (currentRecDecl) {
         llvm::ArrayRef<FunctionDeclNode *> methods;
@@ -3139,8 +3253,6 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
           methods = cDecl->methods;
         else if (auto *sDecl = llvm::dyn_cast<StructDeclNode>(currentRecDecl))
           methods = sDecl->methods;
-        else if (auto *uDecl = llvm::dyn_cast<UnionDeclNode>(currentRecDecl))
-          methods = uDecl->methods;
 
         if (!node->templateArgs.empty()) {
           FunctionDeclNode *tmplDecl = nullptr;
@@ -3205,6 +3317,10 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
                 fnDecl->hasProtectedMod = tmplDecl->hasProtectedMod;
                 fnDecl->annotations = tmplDecl->annotations;
                 fnDecl->declFilePath = tmplDecl->declFilePath;
+                fnDecl->isIntrinsic = tmplDecl->isIntrinsic;
+                fnDecl->intrinsicName = tmplDecl->intrinsicName;
+                fnDecl->isTemplate = false;
+                fnDecl->templateParams = {};
 
                 if (!fnDecl->isStatic && !fnDecl->params.empty() &&
                     fnDecl->params.front()->name == "this") {
@@ -3549,6 +3665,239 @@ SemaResult TypeCheckPass::visit(const UsingNode *node) {
   return ctx->astCtx.VoidTy;
 }
 
+const Type *TypeCheckPass::getFutureType(const Type *valueType) {
+  if (!valueType)
+    return nullptr;
+
+  auto decls = ctx->lookup("Future");
+  const DeclNode *futureDecl = nullptr;
+  for (auto *d : decls) {
+    if (auto *cls = llvm::dyn_cast<ClassDeclNode>(d)) {
+      if (cls->isTemplate) {
+        futureDecl = cls;
+        break;
+      }
+    }
+  }
+  if (!futureDecl) {
+    /* Template registered under its fully-qualified name only. */
+    auto regIt = ctx->templateRegistry.find("Future");
+    if (regIt == ctx->templateRegistry.end()) {
+      regIt = ctx->templateRegistry.find("Future.Future");
+      if (regIt == ctx->templateRegistry.end()) {
+        (void)ctx->reportError(0, 0, 0,
+                               "The 'Future' template is not available; "
+                               "async support may be disabled.");
+        return ctx->astCtx.VoidTy;
+      }
+    }
+    futureDecl = regIt->second;
+  }
+
+  const Type *resolvedValue = resolveIfTemplate(valueType);
+  const Type *argsArr[1] = {resolvedValue};
+  auto args = ctx->astCtx.copyArray<const Type *>(argsArr);
+  std::string_view baseName = futureDecl->fqName;
+  if (baseName.empty()) {
+    baseName = static_cast<const ClassDeclNode *>(futureDecl)->name;
+  }
+  auto *instTy = ctx->astCtx.getTemplateInstType(baseName, args);
+  return resolveIfTemplate(instTy);
+}
+
+bool TypeCheckPass::unwrapFutureType(const Type *t, const Type **outValue) {
+  if (!t)
+    return false;
+  const Type *u = t->getUnqualifiedType();
+  while (u->isPointerType() || u->isReferenceType() ||
+         u->getKind() == TypeKind::RValueReference) {
+    if (u->isPointerType())
+      u = static_cast<const PointerType *>(u)->getPointeeType()
+              ->getUnqualifiedType();
+    else if (u->isReferenceType())
+      u = static_cast<const ReferenceType *>(u)->getPointeeType()
+              ->getUnqualifiedType();
+    else
+      u = static_cast<const RValueReferenceType *>(u)->getPointeeType()
+              ->getUnqualifiedType();
+  }
+
+  std::string_view baseName;
+  llvm::ArrayRef<const Type *> args;
+  if (auto *inst = llvm::dyn_cast<TemplateInstType>(u)) {
+    baseName = inst->getBaseName();
+    args = inst->getTemplateArgs();
+  } else if (auto *rec = llvm::dyn_cast<RecordType>(u)) {
+    baseName = rec->getTemplateBaseName();
+    args = rec->getTemplateArgs();
+  } else {
+    return false;
+  }
+
+  if (baseName.empty() || args.size() != 1)
+    return false;
+  if (baseName != "Future" && baseName != "Future.Future" &&
+      !baseName.ends_with(".Future"))
+    return false;
+
+  if (outValue)
+    *outValue = args[0];
+  return true;
+}
+
+const FunctionDeclNode *TypeCheckPass::instantiateMethodTemplate(
+    const FunctionDeclNode *tmplDecl, const RecordType *recordTy,
+    llvm::ArrayRef<const Type *> explicitArgs) {
+  if (!tmplDecl || !tmplDecl->isTemplate)
+    return nullptr;
+
+  /* Resolve the type arguments: explicit ones are used as-is; otherwise the
+   * method's template parameters are bound positionally to the enclosing
+   * record's template arguments ('Future<int>.value(5)' binds R = int). */
+  std::vector<const Type *> resolvedArgs;
+  if (!explicitArgs.empty()) {
+    for (const auto *arg : explicitArgs) {
+      resolvedArgs.push_back(resolveIfTemplate(arg));
+    }
+  } else {
+    for (const auto *arg : recordTy->getTemplateArgs()) {
+      resolvedArgs.push_back(resolveIfTemplate(arg));
+    }
+  }
+
+  if (resolvedArgs.size() != tmplDecl->templateParams.size())
+    return nullptr;
+
+  std::string mangledName = std::string(tmplDecl->name);
+  for (const auto *arg : resolvedArgs) {
+    std::string argStr = arg->toString();
+    for (char &ch : argStr) {
+      if (!isalnum(ch))
+        ch = '_';
+    }
+    mangledName += "_" + argStr;
+  }
+  std::string_view mangledView = ctx->astCtx.copyString(mangledName);
+
+  /* Reuse an existing instantiation when present. */
+  const DeclNode *recDecl = recordTy->getDeclaration();
+  llvm::ArrayRef<FunctionDeclNode *> methods;
+  if (recDecl) {
+    if (recDecl->kind == NodeKind::ClassDecl)
+      methods = static_cast<const ClassDeclNode *>(recDecl)->methods;
+    else if (recDecl->kind == NodeKind::StructDecl)
+      methods = static_cast<const StructDeclNode *>(recDecl)->methods;
+    else if (recDecl->kind == NodeKind::UnionDecl)
+      methods = static_cast<const UnionDeclNode *>(recDecl)->methods;
+    for (auto *m : methods) {
+      if (m->name == mangledView)
+        return m;
+    }
+  }
+
+  std::unordered_map<std::string_view, const Type *> templateArgMap;
+  for (size_t i = 0; i < tmplDecl->templateParams.size(); ++i) {
+    templateArgMap[tmplDecl->templateParams[i]] = resolvedArgs[i];
+  }
+
+  ASTCloner cloner(ctx->astCtx, templateArgMap);
+  DeclNode *instDecl = static_cast<DeclNode *>(cloner.dispatch(tmplDecl));
+  if (!instDecl || instDecl->kind != NodeKind::FunctionDecl)
+    return nullptr;
+
+  auto *fnDecl = static_cast<FunctionDeclNode *>(instDecl);
+  fnDecl->name = mangledView;
+
+  std::string originalFq = std::string(tmplDecl->fqName);
+  size_t lastDot = originalFq.find_last_of('.');
+  std::string newFq;
+  if (lastDot != std::string::npos) {
+    newFq = originalFq.substr(0, lastDot + 1) + std::string(mangledView);
+  } else {
+    newFq = std::string(mangledView);
+  }
+  fnDecl->fqName = ctx->astCtx.copyString(newFq);
+
+  fnDecl->isMethod = true;
+  fnDecl->isStatic = tmplDecl->isStatic;
+  fnDecl->hasPublicMod = tmplDecl->hasPublicMod;
+  fnDecl->hasPrivateMod = tmplDecl->hasPrivateMod;
+  fnDecl->hasProtectedMod = tmplDecl->hasProtectedMod;
+  fnDecl->annotations = tmplDecl->annotations;
+  fnDecl->declFilePath = tmplDecl->declFilePath;
+  fnDecl->isIntrinsic = tmplDecl->isIntrinsic;
+  fnDecl->intrinsicName = tmplDecl->intrinsicName;
+  fnDecl->parentRecord = recordTy;
+  /* The substitution is complete: the instantiated function is concrete. */
+  fnDecl->isTemplate = false;
+  fnDecl->templateParams = {};
+
+  if (!fnDecl->isStatic && !fnDecl->params.empty() &&
+      fnDecl->params.front()->name == "this") {
+    const_cast<ParamDeclNode *>(fnDecl->params.front())->type =
+        ctx->astCtx.getPointerType(recordTy);
+  }
+
+  if (recDecl) {
+    std::vector<FunctionDeclNode *> updatedMethods(methods.begin(),
+                                                   methods.end());
+    updatedMethods.push_back(fnDecl);
+    if (recDecl->kind == NodeKind::ClassDecl)
+      const_cast<ClassDeclNode *>(
+          static_cast<const ClassDeclNode *>(recDecl))
+          ->methods = ctx->astCtx.copyArray<FunctionDeclNode *>(updatedMethods);
+    else if (recDecl->kind == NodeKind::StructDecl)
+      const_cast<StructDeclNode *>(
+          static_cast<const StructDeclNode *>(recDecl))
+          ->methods = ctx->astCtx.copyArray<FunctionDeclNode *>(updatedMethods);
+    else if (recDecl->kind == NodeKind::UnionDecl)
+      const_cast<UnionDeclNode *>(static_cast<const UnionDeclNode *>(recDecl))
+          ->methods = ctx->astCtx.copyArray<FunctionDeclNode *>(updatedMethods);
+  }
+
+  fnDecl->mangledName = Mangler::mangle(fnDecl, std::string(recordTy->getName()));
+
+  auto prevContext = ctx->getCurrentRecordContext();
+  auto prevFile = ctx->currentFile;
+
+  ctx->setCurrentRecordContext(recordTy);
+  ctx->setCurrentFile(fnDecl->declFilePath);
+
+  dispatch(fnDecl);
+
+  ctx->setCurrentFile(prevFile);
+  ctx->setCurrentRecordContext(prevContext);
+
+  return fnDecl;
+}
+
+SemaResult TypeCheckPass::visit(const AwaitExprNode *node) {
+  auto res = dispatch(node->expr);
+  if (!res)
+    return std::unexpected(ErrorInfo{node->line, node->column, node->length,
+                                     "Failed to evaluate await operand."});
+
+  const FunctionDeclNode *cur = ctx->getCurrentFunction();
+  if (cur && !cur->isAsync) {
+    return ctx->reportError(
+        node->line, node->column, node->length,
+        "The 'await' expression is only allowed inside 'async' functions.");
+  }
+  if (cur)
+    const_cast<FunctionDeclNode *>(cur)->hasAwait = true;
+
+  const Type *t = *res;
+  const Type *valueTy = nullptr;
+  if (unwrapFutureType(t, &valueTy)) {
+    node->exprType = valueTy;
+    node->isLValue = false;
+    return valueTy;
+  }
+  /* Dart semantics: awaiting a non-Future passes the value through. */
+  node->exprType = t;
+  return t;
+}
+
 SemaResult TypeCheckPass::visit(const FunctionDeclNode *node) {
   if (node->isTemplate)
     return ctx->astCtx.VoidTy;
@@ -3572,8 +3921,21 @@ SemaResult TypeCheckPass::visit(const FunctionDeclNode *node) {
                                      "Type visibility error"});
   }
 
+  /* Async functions return a Future of their declared type. A declared
+   * 'Future<T>' return type is allowed and keeps the value type 'T' for the
+   * body's return statements (Dart semantics). */
+  const Type *valueReturnType = node->returnType;
+  if (node->isAsync) {
+    const Type *inner = nullptr;
+    if (unwrapFutureType(node->returnType, &inner)) {
+      valueReturnType = inner;
+    }
+    const_cast<FunctionDeclNode *>(node)->effectiveReturnType =
+        getFutureType(valueReturnType);
+  }
+
   if (node->name == "main" && !node->isMethod) {
-    const Type *unqualRet = node->returnType->getUnqualifiedType();
+    const Type *unqualRet = valueReturnType->getUnqualifiedType();
     bool validRet = false;
 
     if (unqualRet->isBuiltinType()) {
@@ -3643,7 +4005,7 @@ SemaResult TypeCheckPass::visit(const FunctionDeclNode *node) {
   }
 
   const Type *prevRet = ctx->getFunctionReturnType();
-  ctx->setFunctionReturnType(node->returnType);
+  ctx->setFunctionReturnType(valueReturnType);
 
   ScopeGuard guard(*ctx, ScopeKind::FunctionParams);
   bool hasErrors = false;
@@ -3692,26 +4054,31 @@ SemaResult TypeCheckPass::visit(const FunctionDeclNode *node) {
       hasErrors = true;
     }
 
-    if (!node->returnType->isVoid() && !guaranteesReturn(node->body)) {
+    if (!valueReturnType->isVoid() && !guaranteesReturn(node->body)) {
       SemaResult err =
           ctx->reportError(node->line, node->column, node->length,
                            "This function has a return type of '" +
-                               node->returnType->toString() +
+                               valueReturnType->toString() +
                                "', but doesn't end with a return statement.");
       hasErrors = true;
     }
 
-    EffectAnalyzer ea;
-    if (node->superCall)
-      ea.dispatch(node->superCall);
-    ea.dispatch(node->body);
+    /* The coroutine IR generated for async functions cannot be analyzed for
+     * effect attributes; skip the analysis so no wrong attributes leak into
+     * the coroutine. */
+    if (!node->isAsync) {
+      EffectAnalyzer ea;
+      if (node->superCall)
+        ea.dispatch(node->superCall);
+      ea.dispatch(node->body);
 
-    node->isReadNone = !ea.readsMem && !ea.writesMem;
-    node->isReadOnly = ea.readsMem && !ea.writesMem;
-    node->isNoFree = !ea.freesMem;
-    node->isNoSync = !ea.hasSync;
-    node->isWillReturn = !ea.potentiallyInfinite;
-    node->isMustProgress = true;
+      node->isReadNone = !ea.readsMem && !ea.writesMem;
+      node->isReadOnly = ea.readsMem && !ea.writesMem;
+      node->isNoFree = !ea.freesMem;
+      node->isNoSync = !ea.hasSync;
+      node->isWillReturn = !ea.potentiallyInfinite;
+      node->isMustProgress = true;
+    }
   }
 
   ctx->setFunctionReturnType(prevRet);
@@ -3722,7 +4089,8 @@ SemaResult TypeCheckPass::visit(const FunctionDeclNode *node) {
                                      "Errors in function declaration"});
   }
 
-  return node->returnType;
+  return node->effectiveReturnType ? node->effectiveReturnType
+                                   : node->returnType;
 }
 
 SemaResult TypeCheckPass::visit(const TypedefDeclNode *node) {
@@ -3758,7 +4126,9 @@ SemaResult TypeCheckPass::visit(const TypedefDeclNode *node) {
         pTypes.push_back(p->type);
 
       const Type *funcTy = ctx->astCtx.getFunctionType(
-          fDecl->returnType, ctx->astCtx.copyArray<const Type *>(pTypes));
+          fDecl->effectiveReturnType ? fDecl->effectiveReturnType
+                                     : fDecl->returnType,
+          ctx->astCtx.copyArray<const Type *>(pTypes));
       const Type *ptrFuncTy = ctx->astCtx.getPointerType(funcTy);
 
       node->aliasType->setTarget(ptrFuncTy);
@@ -3933,16 +4303,76 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
             static_cast<const ArrayType *>(paramType)->getElementType());
       }
 
-      if (!canImplicitlyCast(resolvedTypes[p], paramType)) {
-        std::string gotType = resolvedTypes[p] ? resolvedTypes[p]->toString()
-                                               : "unresolved/unknown";
+      /* Async lambdas only match parameters whose signature returns a
+       * Future; sync lambdas only match non-Future returns. Without this
+       * filter the 'auto' return placeholder of an unresolved lambda would
+       * match the wrong overload and the re-type pass would fail.
+       * Future.runOnThread is the exception: it accepts an async lambda and
+       * runs it on a worker thread with its own event loop. */
+      bool isRunOnThread =
+          fDecl->isIntrinsic && fDecl->intrinsicName == "future_runOnThread";
+      if (resolvedArgs[p] && resolvedArgs[p]->kind == NodeKind::Lambda &&
+          !isRunOnThread) {
+        auto *lambda = static_cast<const LambdaNode *>(resolvedArgs[p]);
+        const Type *paramFnReturn = nullptr;
+        const Type *ptU = paramType->getUnqualifiedType();
+        if (ptU->isPointerType()) {
+          const Type *ptPointee =
+              static_cast<const PointerType *>(ptU)
+                  ->getPointeeType()
+                  ->getUnqualifiedType();
+          if (auto *ptFn = llvm::dyn_cast<FunctionType>(ptPointee)) {
+            paramFnReturn = ptFn->getReturnType();
+          }
+        }
+        bool paramIsFuture =
+            paramFnReturn && unwrapFutureType(paramFnReturn, nullptr);
+        if (lambda->isAsync != paramIsFuture) {
+          errors.push_back(
+              lambda->isAsync
+                  ? "An 'async' lambda cannot be passed where a synchronous "
+                    "function is expected."
+                  : "A synchronous lambda cannot be passed where an 'async' "
+                    "function is expected.");
+          continue;
+        }
+      }
+
+      /* Future.runOnThread accepts an async lambda: the worker runs it with
+       * its own event loop and the outer future completes with the lambda's
+       * value type. Compare the lambda's Future<X> signature against the
+       * X-returning parameter signature. */
+      const Type *argTypeForCast = resolvedTypes[p];
+      if (isRunOnThread && argTypeForCast) {
+        const Type *uArg = argTypeForCast->getUnqualifiedType();
+        if (uArg->isPointerType()) {
+          const Type *argPointee =
+              static_cast<const PointerType *>(uArg)->getPointeeType()
+                  ->getUnqualifiedType();
+          if (auto *argFn = llvm::dyn_cast<FunctionType>(argPointee)) {
+            const Type *argInner = nullptr;
+            if (unwrapFutureType(argFn->getReturnType(), &argInner)) {
+              std::vector<const Type *> argParams;
+              for (const auto *pt : argFn->getParamTypes())
+                argParams.push_back(pt);
+              const Type *unwrappedFn = ctx->astCtx.getFunctionType(
+                  argInner, ctx->astCtx.copyArray<const Type *>(argParams));
+              argTypeForCast = ctx->astCtx.getPointerType(unwrappedFn);
+            }
+          }
+        }
+      }
+
+      if (!canImplicitlyCast(argTypeForCast, paramType)) {
+        std::string gotType = argTypeForCast ? argTypeForCast->toString()
+                                             : "unresolved/unknown";
         errors.push_back("Type mismatch for parameter '" +
                          std::string(fDecl->params[p]->name) + "': expected '" +
                          paramType->toString() + "', but got '" + gotType +
                          "'.");
       } else {
         if (explicitlyProvided[p] &&
-            canImplicitlyCast(resolvedTypes[p], paramType, false)) {
+            canImplicitlyCast(argTypeForCast, paramType, false)) {
           outScore += 10;
         }
 
@@ -4114,8 +4544,10 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
     emitRValueRefWarnings(bestMatch, bestResolvedArgs);
 
     const_cast<FunctionCallNode *>(node)->isSuperCall = true;
-    node->exprType = bestMatch->returnType;
-    node->isLValue = bestMatch->returnType->isReferenceType();
+    node->exprType = bestMatch->effectiveReturnType
+                         ? bestMatch->effectiveReturnType
+                         : bestMatch->returnType;
+    node->isLValue = node->exprType->isReferenceType();
     return node->exprType;
   }
 
@@ -4430,7 +4862,9 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
             node->exprType = constructorRecTy;
             node->isLValue = false;
           } else {
-            node->exprType = bestMatch->returnType;
+            node->exprType = bestMatch->effectiveReturnType
+                                 ? bestMatch->effectiveReturnType
+                                 : bestMatch->returnType;
             node->isLValue = (node->exprType->isReferenceType());
           }
 
@@ -4568,13 +5002,28 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
 
         for (const auto *method : methods) {
           if (method->name == ma->memberName) {
+            /* Method-level templates can be called without explicit type
+             * arguments: bind the method's template parameters positionally
+             * to the enclosing record's template arguments
+             * ('Future<int>.value(5)' binds R = int). */
+            const FunctionDeclNode *candidate = method;
+            if (method->isTemplate && ma->templateArgs.empty() && recordTy &&
+                recordTy->isTemplateInstantiation() &&
+                method->templateParams.size() ==
+                    recordTy->getTemplateArgs().size()) {
+              candidate = instantiateMethodTemplate(method, recordTy,
+                                                    ma->templateArgs);
+            }
+            if (!candidate)
+              continue;
+
             int score = 0;
             std::vector<ExprNode *> resolvedArgs;
-            auto errs = checkMatch(method, score, resolvedArgs);
+            auto errs = checkMatch(candidate, score, resolvedArgs);
             if (errs.empty()) {
               if (score > bestScore) {
                 bestScore = score;
-                bestMatch = method;
+                bestMatch = candidate;
                 bestResolvedArgs = resolvedArgs;
                 overloadErrors.clear();
               }
@@ -4596,7 +5045,9 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
             return lambdaRes;
           }
 
-          node->exprType = bestMatch->returnType;
+          node->exprType = bestMatch->effectiveReturnType
+                               ? bestMatch->effectiveReturnType
+                               : bestMatch->returnType;
           node->isLValue = (node->exprType->isReferenceType());
 
           checkDeprecated(bestMatch, node);
@@ -4918,7 +5369,19 @@ SemaResult TypeCheckPass::visit(const ReturnNode *node) {
     }
   }
 
-  if (expectedRet->isVoid() || !canImplicitlyCast(*valType, expectedRet)) {
+  if ((expectedRet->isVoid() && !(*valType)->isVoid()) ||
+      (!expectedRet->isVoid() && !canImplicitlyCast(*valType, expectedRet))) {
+    /* Async functions may return a Future<T> of their value type
+     * ('return fut;'); the codegen awaits it implicitly. */
+    const FunctionDeclNode *cur = ctx->getCurrentFunction();
+    const Type *inner = nullptr;
+    if (cur && cur->isAsync && unwrapFutureType(*valType, &inner) &&
+        canImplicitlyCast(inner, expectedRet)) {
+      const_cast<ReturnNode *>(node)->implicitAwait = true;
+      const_cast<ReturnNode *>(node)->value =
+          performImplicitConversion(node->value, expectedRet);
+      return *valType;
+    }
     return ctx->reportError(node->line, node->column, node->length,
                             "Return type mismatch: expected '" +
                                 expectedRet->toString() + "', got '" +
@@ -5828,6 +6291,16 @@ SemaResult TypeCheckPass::visit(const LambdaNode *node) {
     returnType = expectedFn->getReturnType();
   }
 
+  /* Async lambdas complete with a Future of their value type. When the
+   * expected signature already returns a Future, unwrap it so the body is
+   * checked against the value type (Dart semantics). */
+  if (node->isAsync) {
+    const Type *inner = nullptr;
+    if (returnType && unwrapFutureType(returnType, &inner)) {
+      returnType = inner;
+    }
+  }
+
   /* The expected signature must not leak into nested lambdas inside the body;
    * it is hidden from here on and restored when this visit completes. */
   ExpectedFnGuard expectedGuard(*ctx, expected);
@@ -5925,6 +6398,7 @@ SemaResult TypeCheckPass::visit(const LambdaNode *node) {
   fnDecl->fqName = name;
   fnDecl->declFilePath = ctx->currentFile;
   fnDecl->mangledName = Mangler::mangle(fnDecl);
+  fnDecl->isAsync = node->isAsync;
   const_cast<LambdaNode *>(node)->synthesizedFunc = fnDecl;
   const_cast<LambdaNode *>(node)->mangledName = fnDecl->mangledName;
 
@@ -5955,22 +6429,30 @@ SemaResult TypeCheckPass::visit(const LambdaNode *node) {
                 "', but lambda declares '" + pType->toString() + "'.");
       }
     }
-    if (expectedFn->getReturnType()->getUnqualifiedType()->getKind() !=
-            TypeKind::Auto &&
-        !canImplicitlyCast(returnType, expectedFn->getReturnType())) {
+    /* Async lambdas are compared against the expected signature with their
+     * effective (Future-wrapped) return type. The expected return type is
+     * resolved first so template-instance placeholders (e.g. Future<void>
+     * in an instantiated method signature) compare equal. */
+    const Type *effectiveReturn = node->isAsync ? getFutureType(returnType)
+                                                : returnType;
+    const Type *expectedRet = resolveIfTemplate(expectedFn->getReturnType());
+    if (expectedRet->getUnqualifiedType()->getKind() != TypeKind::Auto &&
+        !canImplicitlyCast(effectiveReturn, expectedRet)) {
       return ctx->reportError(
           node->line, node->column, node->length,
           "Lambda return type mismatch: expected '" +
               expectedFn->getReturnType()->toString() + "', got '" +
-              returnType->toString() + "'.");
+              effectiveReturn->toString() + "'.");
     }
   }
 
   std::vector<const Type *> paramTypes;
   for (const auto *p : node->params)
     paramTypes.push_back(p->type);
+  const Type *fnReturn =
+      node->isAsync ? getFutureType(returnType) : returnType;
   auto fnTy = ctx->astCtx.getFunctionType(
-      returnType, ctx->astCtx.copyArray<const Type *>(paramTypes));
+      fnReturn, ctx->astCtx.copyArray<const Type *>(paramTypes));
   node->exprType = ctx->astCtx.getPointerType(fnTy);
   node->isLValue = false;
   const_cast<LambdaNode *>(node)->unresolved = false;

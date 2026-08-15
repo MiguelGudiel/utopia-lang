@@ -75,6 +75,17 @@ void sendResponse(const json &res) {
             << content << std::flush;
 }
 
+/* Returns the request id when present, null otherwise. Handlers must never
+ * touch req["id"] directly: a malformed request would otherwise abort the
+ * whole server through nlohmann's assertion. */
+json requestId(const json &req) {
+  if (req.contains("id"))
+    return req["id"];
+  return nullptr;
+}
+
+
+
 class LocalVarCollector : public ASTVisitor<LocalVarCollector, void> {
 public:
   int targetLine;
@@ -200,6 +211,7 @@ public:
   void visit(const TypeLiteralNode *) {}
   void visit(const VariableNode *) {}
   void visit(const UnaryOpNode *) {}
+  void visit(const AwaitExprNode *node) { dispatch(node->expr); }
   void visit(const BinaryOpNode *) {}
   void visit(const TernaryOpNode *) {}
   void visit(const ArrayLiteralNode *) {}
@@ -905,7 +917,7 @@ void handleHover(const json &req) {
       }
     }
   }
-  sendResponse({{"jsonrpc", "2.0"}, {"id", req["id"]}, {"result", res}});
+  sendResponse({{"jsonrpc", "2.0"}, {"id", requestId(req)}, {"result", res}});
 }
 
 void handleSignatureHelp(const json &req) {
@@ -1004,7 +1016,7 @@ void handleSignatureHelp(const json &req) {
     }
   }
 
-  sendResponse({{"jsonrpc", "2.0"}, {"id", req["id"]}, {"result", res}});
+  sendResponse({{"jsonrpc", "2.0"}, {"id", requestId(req)}, {"result", res}});
 }
 
 void handleDefinition(const json &req) {
@@ -1150,7 +1162,7 @@ void handleDefinition(const json &req) {
       }
     }
   }
-  sendResponse({{"jsonrpc", "2.0"}, {"id", req["id"]}, {"result", res}});
+  sendResponse({{"jsonrpc", "2.0"}, {"id", requestId(req)}, {"result", res}});
 }
 
 void handleCompletion(const json &req) {
@@ -1980,7 +1992,7 @@ void handleCompletion(const json &req) {
     }
   }
 
-  sendResponse({{"jsonrpc", "2.0"}, {"id", req["id"]}, {"result", items}});
+  sendResponse({{"jsonrpc", "2.0"}, {"id", requestId(req)}, {"result", items}});
 }
 
 std::string uriToPath(const std::string &uri) {
@@ -2119,6 +2131,30 @@ void loadPackagesLSP(const std::filesystem::path &manifestPath,
   }
 }
 
+/* Applies the async runtime configuration: enabled by default, or
+ * 'async: false' in the project's build.yaml. The prelude's Future class
+ * is guarded by the UTOPIA_ASYNC macro, so it must be defined exactly like
+ * the compiler driver does. */
+void applyAsyncConfig(ModuleLoaderConfig &modConfig,
+                      const std::filesystem::path &projRoot) {
+  if (!projRoot.empty()) {
+    std::filesystem::path manifest = projRoot / "build.yaml";
+    if (std::filesystem::exists(manifest)) {
+      try {
+        YAML::Node root = YAML::LoadFile(manifest.string());
+        if (root["build"] && root["build"]["async"]) {
+          modConfig.asyncEnabled = root["build"]["async"].as<bool>();
+        }
+      } catch (...) {
+        /* Malformed build.yaml: keep the default. */
+      }
+    }
+  }
+  if (modConfig.asyncEnabled) {
+    modConfig.definedMacros.insert("UTOPIA_ASYNC");
+  }
+}
+
 void processFile(const std::string &uri, std::string text) {
   DocumentState newState;
   newState.text = std::move(text);
@@ -2201,6 +2237,8 @@ void processFile(const std::string &uri, std::string text) {
     modConfig.definedMacros.insert("arm64");
 #endif
 
+    applyAsyncConfig(modConfig, projRoot);
+
     std::lock_guard<std::mutex> lock(cacheMutex);
     projectConfigCache[projRootStr] = modConfig;
   }
@@ -2222,7 +2260,14 @@ void processFile(const std::string &uri, std::string text) {
       SemaPipeline pipeline;
       pipeline.run(newState.ast, *newState.sema);
     }
+  } catch (const std::exception &e) {
+    /* Analysis errors must never kill the server: report diagnostics from
+     * whatever was parsed and keep the document state usable. */
+    std::cerr << "[LSP] Analysis failed for " << uri << ": " << e.what()
+              << "\n";
   } catch (...) {
+    std::cerr << "[LSP] Analysis failed for " << uri
+              << " (unknown error).\n";
   }
 
   sendResponse(
@@ -2326,6 +2371,8 @@ void handleFormatting(const json &req) {
       modConfig.definedMacros.insert("arm64");
 #endif
 
+      applyAsyncConfig(modConfig, projRoot);
+
       std::lock_guard<std::mutex> lock(cacheMutex);
       projectConfigCache[projRootStr] = modConfig;
     }
@@ -2360,7 +2407,7 @@ void handleFormatting(const json &req) {
     } catch (...) {
     }
   }
-  sendResponse({{"jsonrpc", "2.0"}, {"id", req["id"]}, {"result", res}});
+  sendResponse({{"jsonrpc", "2.0"}, {"id", requestId(req)}, {"result", res}});
 }
 
 void workerThread() {
@@ -2825,6 +2872,7 @@ public:
       dispatch(n->value);
   }
   void visit(const UnaryOpNode *n) { dispatch(n->expr); }
+  void visit(const AwaitExprNode *n) { dispatch(n->expr); }
   void visit(const LambdaNode *n) {
     for (auto *p : n->params)
       dispatch(p);
@@ -2959,7 +3007,7 @@ void handleSemanticTokens(const json &req) {
   }
 
   sendResponse(
-      {{"jsonrpc", "2.0"}, {"id", req["id"]}, {"result", {{"data", data}}}});
+      {{"jsonrpc", "2.0"}, {"id", requestId(req)}, {"result", {{"data", data}}}});
 }
 
 } // namespace utopia::lsp
@@ -2970,73 +3018,98 @@ int main() {
   std::string line;
   while (std::getline(std::cin, line)) {
     if (line.find("Content-Length:") == 0) {
-      int len = std::stoi(line.substr(15));
+      int len = 0;
+      try {
+        len = std::stoi(line.substr(15));
+      } catch (...) {
+        std::cerr << "[LSP] Invalid Content-Length header; skipping message.\n";
+        continue;
+      }
+      if (len <= 0 || len > (1 << 26)) {
+        /* Malformed or absurd lengths must not block or crash the server. */
+        std::cerr << "[LSP] Bogus Content-Length (" << len
+                  << "); skipping message.\n";
+        continue;
+      }
       while (std::getline(std::cin, line) && (line != "\r" && !line.empty()))
         ;
 
       std::vector<char> buf(len);
       std::cin.read(buf.data(), len);
-      auto req = json::parse(std::string(buf.begin(), buf.end()));
-      std::string method = req["method"];
 
-      if (method == "initialize") {
-        utopia::lsp::sendResponse(
-            {{"jsonrpc", "2.0"},
-             {"id", req["id"]},
-             {"result",
-              {{"capabilities",
-                {{"textDocumentSync", 1},
-                 {"hoverProvider", true},
-                 {"definitionProvider", true},
-                 {"completionProvider", {{"triggerCharacters", {".", "@"}}}},
-                 {"signatureHelpProvider", {{"triggerCharacters", {"(", ","}}}},
-                 {"documentFormattingProvider", true},
-                 {"semanticTokensProvider",
-                  {{"legend",
-                    {{"tokenTypes",
-                      {"class", "struct", "enum", "type", "function", "method",
-                       "property", "variable", "parameter", "enumMember",
-                       "macro", "keyword", "namespace"}},
-                     {"tokenModifiers",
-                      {"declaration", "static", "readonly"}}}},
-                   {"range", false},
-                   {"full", true}}}}}}}});
-      } else if (method == "textDocument/hover") {
-        utopia::lsp::handleHover(req);
-      } else if (method == "textDocument/definition") {
-        utopia::lsp::handleDefinition(req);
-      } else if (method == "textDocument/completion") {
-        utopia::lsp::handleCompletion(req);
-      } else if (method == "textDocument/signatureHelp") {
-        utopia::lsp::handleSignatureHelp(req);
-      } else if (method == "textDocument/formatting") {
-        utopia::lsp::handleFormatting(req);
-      } else if (method == "textDocument/semanticTokens/full") {
-        utopia::lsp::handleSemanticTokens(req);
-      } else if (method == "textDocument/didOpen" ||
-                 method == "textDocument/didChange") {
-        std::string uri = req["params"]["textDocument"]["uri"];
-        std::string text =
-            (method == "textDocument/didOpen")
-                ? req["params"]["textDocument"]["text"].get<std::string>()
-                : req["params"]["contentChanges"][0]["text"].get<std::string>();
+      try {
+        auto req = json::parse(std::string(buf.begin(), buf.end()));
+        std::string method = req["method"];
 
-        {
-          std::lock_guard<std::mutex> lock(utopia::lsp::workerMutex);
-          utopia::lsp::pendingUri = uri;
-          utopia::lsp::pendingText = std::move(text);
-          utopia::lsp::hasPendingChange = true;
+        if (method == "initialize") {
+          utopia::lsp::sendResponse(
+              {{"jsonrpc", "2.0"},
+               {"id", utopia::lsp::requestId(req)},
+               {"result",
+                {{"capabilities",
+                  {{"textDocumentSync", 1},
+                   {"hoverProvider", true},
+                   {"definitionProvider", true},
+                   {"completionProvider",
+                    {{"triggerCharacters", {".", "@"}}}},
+                   {"signatureHelpProvider",
+                    {{"triggerCharacters", {"(", ","}}}},
+                   {"documentFormattingProvider", true},
+                   {"semanticTokensProvider",
+                    {{"legend",
+                      {{"tokenTypes",
+                        {"class", "struct", "enum", "type", "function",
+                         "method", "property", "variable", "parameter",
+                         "enumMember", "macro", "keyword", "namespace"}},
+                       {"tokenModifiers",
+                        {"declaration", "static", "readonly"}}}},
+                     {"range", false},
+                     {"full", true}}}}}}}});
+        } else if (method == "textDocument/hover") {
+          utopia::lsp::handleHover(req);
+        } else if (method == "textDocument/definition") {
+          utopia::lsp::handleDefinition(req);
+        } else if (method == "textDocument/completion") {
+          utopia::lsp::handleCompletion(req);
+        } else if (method == "textDocument/signatureHelp") {
+          utopia::lsp::handleSignatureHelp(req);
+        } else if (method == "textDocument/formatting") {
+          utopia::lsp::handleFormatting(req);
+        } else if (method == "textDocument/semanticTokens/full") {
+          utopia::lsp::handleSemanticTokens(req);
+        } else if (method == "textDocument/didOpen" ||
+                   method == "textDocument/didChange") {
+          std::string uri = req["params"]["textDocument"]["uri"];
+          std::string text =
+              (method == "textDocument/didOpen")
+                  ? req["params"]["textDocument"]["text"].get<std::string>()
+                  : req["params"]["contentChanges"][0]["text"]
+                        .get<std::string>();
+
+          {
+            std::lock_guard<std::mutex> lock(utopia::lsp::workerMutex);
+            utopia::lsp::pendingUri = uri;
+            utopia::lsp::pendingText = std::move(text);
+            utopia::lsp::hasPendingChange = true;
+          }
+          utopia::lsp::workerCV.notify_one();
+        } else if (method == "shutdown") {
+          /* Client asks to shut down, server must return a null result */
+          utopia::lsp::sendResponse({{"jsonrpc", "2.0"},
+                                     {"id", utopia::lsp::requestId(req)},
+                                     {"result", nullptr}});
+        } else if (method == "exit") {
+          utopia::lsp::isRunning = false;
+          utopia::lsp::workerCV.notify_one();
+          worker.join();
+          return 0;
         }
-        utopia::lsp::workerCV.notify_one();
-      } else if (method == "shutdown") {
-        /* Client asks to shut down, server must return a null result */
-        utopia::lsp::sendResponse(
-            {{"jsonrpc", "2.0"}, {"id", req["id"]}, {"result", nullptr}});
-      } else if (method == "exit") {
-        utopia::lsp::isRunning = false;
-        utopia::lsp::workerCV.notify_one();
-        worker.join();
-        return 0;
+      } catch (const std::exception &e) {
+        /* A malformed or unexpected request must never take the server
+         * down: log a clear error and keep serving. */
+        std::cerr << "[LSP] Failed to process request: " << e.what() << "\n";
+      } catch (...) {
+        std::cerr << "[LSP] Failed to process request (unknown error).\n";
       }
     }
   }

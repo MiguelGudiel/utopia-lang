@@ -26,6 +26,7 @@ This book is organized like the documentation of other systems languages, so you
 | [Enums](language/enums.md) | Typed enumerations |
 | [Object-Oriented Programming](language/oop.md) | Inheritance, interfaces, abstraction, polymorphism, access control |
 | [Generics](language/generics.md) | Template classes, functions, and methods |
+| [Async / Await](language/async.md) | Dart-style `Future<T>`, `await`, coroutines, and threads |
 | [Operators](language/operators.md) | Built-in operators and operator overloading |
 | [Memory Management](language/memory.md) | `new`/`delete`, RAII, pointers, smart pointers, auto-deref |
 | [Modules](language/modules.md) | `import`/`export`, namespaces, `using`, the prelude |

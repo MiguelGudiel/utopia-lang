@@ -51,6 +51,7 @@ enum class NodeKind : uint8_t {
   TypeLiteral,
   TernaryOp,
   Lambda,
+  Await,
   NamespaceDecl,
   Using
 };
@@ -123,6 +124,7 @@ struct ExprNode : public ASTNode {
     case NodeKind::ImplicitCast:
     case NodeKind::TypeLiteral:
     case NodeKind::Lambda:
+    case NodeKind::Await:
       return true;
     default:
       return false;
@@ -156,8 +158,27 @@ struct LambdaNode : public ExprNode {
   LambdaNode(int l, int c, int len)
       : ExprNode(NodeKind::Lambda, l, c, len) {}
 
+  /* 'async' lambdas compile to a coroutine returning a Future. */
+  bool isAsync = false;
+
   static bool classof(const ASTNode *node) {
     return node->kind == NodeKind::Lambda;
+  }
+};
+
+struct AwaitExprNode : public ExprNode {
+  ExprNode *expr;
+
+  /* Set by Sema when the await's result is consumed as the Future itself
+   * (e.g. 'Future<int> a = await getA();'): the operand is passed through
+   * without unwrapping its value. */
+  mutable bool keepFuture = false;
+
+  AwaitExprNode(ExprNode *e, int l, int c, int len)
+      : ExprNode(NodeKind::Await, l, c, len), expr(e) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Await;
   }
 };
 
@@ -505,6 +526,12 @@ struct BlockNode : public StmtNode {
 
 struct ReturnNode : public StmtNode {
   ExprNode *value;
+
+  /* Set by Sema when an async function returns a Future<T> of its value
+   * type ('return fut;'): the codegen awaits the future before completing
+   * the enclosing coroutine. */
+  mutable bool implicitAwait = false;
+
   ReturnNode(ExprNode *v, int l, int c, int len)
       : StmtNode(NodeKind::Return, l, c, len), value(v) {}
 
@@ -550,6 +577,13 @@ struct FunctionDeclNode : public DeclNode {
   bool isVirtual = false;
   bool isOverride = false;
   bool isAbstract = false;
+  /* 'async' functions compile to coroutines that return a Future<T> of
+   * their declared return type. */
+  bool isAsync = false;
+  /* Set by Sema when the body (not nested lambdas) contains an await. */
+  mutable bool hasAwait = false;
+  /* For async functions: Future<returnType>, resolved during Sema. */
+  mutable const Type *effectiveReturnType = nullptr;
   std::string_view intrinsicName;
   mutable std::string_view externAlias;
   std::string_view callingConv = "cdecl";

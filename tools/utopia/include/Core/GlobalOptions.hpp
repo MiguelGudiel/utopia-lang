@@ -11,6 +11,7 @@ struct GlobalOptions {
   bool isJIT = false;
   bool isDebug = false;
   bool doFormat = false;
+  bool asyncEnabled = true;
   std::optional<int> cliOptLevel;
   std::string targetTriple;
   std::string sysroot;

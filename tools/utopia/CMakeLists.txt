@@ -14,7 +14,19 @@ set(CLI_SOURCES
 
 add_executable(utopia ${CLI_SOURCES})
 
+# The async runtime is only referenced from JIT-compiled user code, so the
+# static archive would be dropped by the linker; pull it in whole and export
+# its symbols so the JIT can resolve them via
+# DynamicLibrarySearchGenerator::GetForCurrentProcess.
 target_link_libraries(utopia PRIVATE utopia_core CURL::libcurl)
+
+if(UNIX AND NOT APPLE)
+    target_link_libraries(utopia PRIVATE
+        "-Wl,--whole-archive" utopia_async "-Wl,--no-whole-archive")
+    target_link_options(utopia PRIVATE -rdynamic)
+else()
+    target_link_libraries(utopia PRIVATE utopia_async)
+endif()
 
 if(WIN32)
     target_link_libraries(utopia PRIVATE ws2_32)

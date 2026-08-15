@@ -1,0 +1,130 @@
+#if UTOPIA_ASYNC
+
+/* Runtime bindings for the async runtime (libutopia_async). */
+
+@extern("utopia_future_release")
+private void _utopia_future_release(void* state);
+
+@extern("utopia_future_retain")
+private void _utopia_future_retain(void* state);
+
+@extern("utopia_future_is_completed")
+private int32 _utopia_future_is_completed(void* state);
+
+/* Future<T>: a future backed by a reference-counted runtime
+ * state. An 'async' function of declared type T returns a Future<T>; the
+ * compiler lowers 'await' to continuation registration + coroutine
+ * suspension on the calling thread's event loop.
+ *
+ * Ownership: every Future holds one reference to its runtime state; the
+ * copy constructor and operator= increment/decrement the reference count,
+ * so Future behaves like a reference type (Dart semantics) in a language
+ * without a garbage collector.
+ *
+ * The static factories (value/sync/delayed/runOnThread/wait) are method
+ * templates so that Future<void> keeps working: their bodies are only
+ * checked when instantiated with a concrete type argument.
+ */
+class Future<T> {
+  private void* _state;
+
+  private Future(void* state) {
+    this._state = state;
+  }
+
+  /* Default-constructed futures have no runtime state; assigning a real
+   * future to them (e.g. through List push) transfers ownership. */
+  private Future() {
+    this._state = null;
+  }
+
+  ~Future() {
+    if (this._state != null) {
+      _utopia_future_release(this._state);
+    }
+  }
+
+  Future(const Future<T>& other) {
+    this._state = other._state;
+    if (this._state != null) {
+      _utopia_future_retain(this._state);
+    }
+  }
+
+  void operator=(const Future<T>& other) {
+    if (this._state != null) {
+      _utopia_future_release(this._state);
+    }
+    this._state = other._state;
+    if (this._state != null) {
+      _utopia_future_retain(this._state);
+    }
+  }
+
+  /* True once the future has completed. Awaiting an already-completed
+   * future takes its value inline without suspending. */
+  bool isCompleted() {
+    return _utopia_future_is_completed(this._state) != 0;
+  }
+
+  /* Runs 'cb' with the future's value once it completes. The returned
+   * Future<void> completes after the callback ran, so 'then' calls chain:
+   * f.then(cb1).then(cb2). */
+  @intrinsic("future_then")
+  Future<void> then(void Function(T) cb);
+
+  /* Variant for async callbacks: the returned future completes after the
+   * callback's own future completes. */
+  @intrinsic("future_then")
+  Future<void> then(Future<void> Function(T) cb);
+
+  /* Convenience overloads for callbacks that ignore the value (and for
+   * Future<void>). */
+  @intrinsic("future_then")
+  Future<void> then(void Function() cb);
+
+  @intrinsic("future_then")
+  Future<void> then(Future<void> Function() cb);
+
+  /* Runs 'cb' when this future completes (value or not). */
+  Future<void> whenComplete(void Function() cb) async {
+    await this;
+    cb();
+  }
+
+  /* A future that is already completed with 'value'. */
+  @intrinsic("future_value")
+  static Future<R> value<R>(R value);
+
+  /* Runs 'fn' immediately and completes the future with its result. */
+  @intrinsic("future_sync")
+  static Future<R> sync<R>(R Function() fn);
+
+  /* A future that completes with the result of 'fn' after 'ms'
+   * milliseconds. */
+  static Future<R> delayed<R>(int64 ms, R Function() fn) async {
+    await _delay(ms);
+    return fn();
+  }
+
+  /* Runs 'fn' on a real worker thread. Awaiting the returned future waits
+   * for the thread to finish; not awaiting it lets the work run in the
+   * background while the event loop continues. */
+  @intrinsic("future_runOnThread")
+  static Future<R> runOnThread<R>(R Function() fn);
+
+  /* A future that completes with a list of the values of every future in
+   * 'futures', in order. */
+  static Future<List<R>> wait<R>(List<Future<R>> futures) async {
+    List<R> results;
+    for (usize i = 0; i < futures.length(); i++) {
+      results.push(await futures[i]);
+    }
+    return results;
+  }
+
+  @intrinsic("future_delay")
+  private static Future<void> _delay(int64 ms);
+}
+
+#endif

@@ -34,6 +34,7 @@ public:
   Piece *visit(const StringNode *node);
   Piece *visit(const VariableNode *node);
   Piece *visit(const UnaryOpNode *node);
+  Piece *visit(const AwaitExprNode *node);
   Piece *visit(const BinaryOpNode *node);
   Piece *visit(const TernaryOpNode *node);
   Piece *visit(const LambdaNode *node);

@@ -93,6 +93,8 @@ enum class TokenType : uint8_t {
   ENUM_KW,    /* enum */
   FUNCTION_KW,
   OPERATOR_KW, /* operator */
+  ASYNC_KW,    /* async */
+  AWAIT_KW,    /* await */
   COMMA,
   SEMICOLON,
   RETURN,

@@ -35,6 +35,12 @@ void UtopiaBuild_setOptLevel(int level) {
   }
 }
 
+void UtopiaBuild_setAsyncEnabled(int enabled) {
+  if (g_CurrentBuildOptions) {
+    g_CurrentBuildOptions->asyncEnabled = enabled != 0;
+  }
+}
+
 void UtopiaBuild_addDefine(const char *name, bool isPublic) {
   if (g_CurrentBuildOptions && name) {
     if (isPublic) {
@@ -232,7 +238,8 @@ bool BuildScriptRunner::run(const std::filesystem::path &scriptPath,
 
     llvm::Module *llvmMod =
         Compiler::compileToIR(const_cast<ModuleNode *>(modNode), backendCtx,
-                              unitStr, diagEngine, options.isDebug);
+                              unitStr, diagEngine, options.isDebug,
+                              options.asyncEnabled);
 
     if (!llvmMod || diagEngine.hasErrors()) {
       return false;
@@ -272,6 +279,7 @@ bool BuildScriptRunner::run(const std::filesystem::path &scriptPath,
   addSym("UtopiaBuild_addLinkerFlag", (void *)UtopiaBuild_addLinkerFlag);
   addSym("UtopiaBuild_addIncludeDir", (void *)UtopiaBuild_addIncludeDir);
   addSym("UtopiaBuild_setOptLevel", (void *)UtopiaBuild_setOptLevel);
+  addSym("UtopiaBuild_setAsyncEnabled", (void *)UtopiaBuild_setAsyncEnabled);
   addSym("UtopiaBuild_addDefine", (void *)UtopiaBuild_addDefine);
   addSym("UtopiaBuild_removeDefine", (void *)UtopiaBuild_removeDefine);
   addSym("UtopiaBuild_isDefined", (void *)UtopiaBuild_isDefined);

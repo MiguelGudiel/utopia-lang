@@ -64,6 +64,10 @@ ProjectConfig parseBuildManifest(const fs::path &manifestPath) {
         config.optLevel = b["optimization"].as<int>();
       }
 
+      if (b["async"]) {
+        config.asyncEnabled = b["async"].as<bool>();
+      }
+
       if (b["linker_flags"] && b["linker_flags"].IsSequence()) {
         for (const auto &flag : b["linker_flags"]) {
           config.linkerFlags.push_back(flag.as<std::string>());

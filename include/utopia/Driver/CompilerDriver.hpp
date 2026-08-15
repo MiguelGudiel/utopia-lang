@@ -37,6 +37,7 @@ struct CompileOptions {
   bool emitAsm = false;
   bool isJIT = false;
   bool doFormat = false;
+  bool asyncEnabled = true;
 
   int optLevel = 0;
   bool isDebug = false;

@@ -160,6 +160,12 @@ bool CompilerDriver::run() {
 
   modConfig.isFormatting = options.doFormat;
 
+  /* Async support is on by default; when enabled, the prelude's Future
+   * class is compiled in and the async runtime is linked. */
+  if (options.asyncEnabled) {
+    modConfig.definedMacros.insert("UTOPIA_ASYNC");
+  }
+
   ModuleLoader loader(astCtx, modConfig, diagEngine);
 
   {
@@ -248,7 +254,8 @@ bool CompilerDriver::run() {
 
     llvm::Module *llvmMod =
         Compiler::compileToIR(const_cast<ModuleNode *>(modNode), backendCtx,
-                              unitPath.string(), diagEngine, options.isDebug);
+                              unitPath.string(), diagEngine, options.isDebug,
+                              options.asyncEnabled);
 
     if (!llvmMod || diagEngine.hasErrors()) {
       std::cerr << "\033[1;31m[Fatal]\033[0m Compilation aborted for "
@@ -303,6 +310,15 @@ bool CompilerDriver::run() {
       return false;
     }
     auto jit = std::move(*jitEx);
+
+    /* Resolve the async runtime symbols from the compiler process itself
+     * (the runtime is linked into the utopia binary). */
+    if (options.asyncEnabled) {
+      if (auto gen = llvm::orc::DynamicLibrarySearchGenerator::GetForCurrentProcess(
+              jit->getDataLayout().getGlobalPrefix())) {
+        jit->getMainJITDylib().addGenerator(std::move(*gen));
+      }
+    }
 
     /* Transfer global LLVMContext ownership to thread-safe architecture */
     auto uniqueCtx = backendCtx.takeContext();
@@ -389,6 +405,47 @@ bool CompilerDriver::run() {
         continue;
       }
       activeLinkerFlags.push_back(flag);
+    }
+
+    /* Link the async runtime (event loop, threads, timers) when async
+     * support is enabled. */
+    if (options.asyncEnabled) {
+      std::vector<fs::path> asyncLibDirs;
+      /* Install layout: <prefix>/lib/utopia/async */
+      if (!options.preludeRoot.empty()) {
+        asyncLibDirs.push_back(
+            fs::path(options.preludeRoot).parent_path().parent_path() /
+            "async");
+      }
+      /* Source layout: <repo>/build/runtime/utopia_async */
+      if (!options.preludeRoot.empty()) {
+        asyncLibDirs.push_back(
+            fs::path(options.preludeRoot).parent_path().parent_path()
+                .parent_path() /
+            "build" / "runtime" / "utopia_async");
+      }
+
+      bool linked = false;
+      for (const auto &dir : asyncLibDirs) {
+        if (fs::exists(dir / "libutopia_async.a")) {
+          activeLinkerFlags.push_back("\"-L" + dir.string() + "\"");
+          activeLinkerFlags.push_back("-lutopia_async");
+          /* The async runtime is C++; the C linker needs the C++ runtime
+           * library for its exception/RTTI support. */
+          activeLinkerFlags.push_back("-lstdc++");
+          linked = true;
+          break;
+        }
+      }
+      if (!linked) {
+        Logger::warning(
+            "[Linker] libutopia_async.a not found; async programs may fail "
+            "to link.");
+      }
+
+      if (!isAndroidTarget) {
+        activeLinkerFlags.push_back("-lpthread");
+      }
     }
 
     if (!options.sysroot.empty()) {

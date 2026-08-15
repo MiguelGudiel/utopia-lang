@@ -466,6 +466,12 @@ Piece *PieceFactory::visit(const UnaryOpNode *node) {
       std::vector<Piece *>{create<TextPiece>(std::string(node->op)), expr});
 }
 
+Piece *PieceFactory::visit(const AwaitExprNode *node) {
+  Piece *expr = dispatchExpr(node->expr);
+  return create<ConcatPiece>(
+      std::vector<Piece *>{create<TextPiece>("await "), expr});
+}
+
 Piece *PieceFactory::visit(const BinaryOpNode *node) {
   Piece *left = dispatchExpr(node->left);
   Piece *right = dispatchExpr(node->right);
@@ -793,6 +799,10 @@ Piece *PieceFactory::visit(const FunctionDeclNode *node) {
   signature.push_back(
       create<ListPiece>(create<TextPiece>("("), std::move(params),
                         create<TextPiece>(")"), node->hasTrailingComma));
+
+  if (node->isAsync) {
+    signature.push_back(create<TextPiece>(" async"));
+  }
 
   Piece *mainSig = create<ConcatPiece>(std::move(signature));
 

@@ -1,3 +1,4 @@
+export "Async/Future.utp";
 export "String.utp";
 export "Math/Limits.utp";
 export "Memory/Core.utp";

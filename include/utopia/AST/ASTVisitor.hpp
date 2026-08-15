@@ -151,6 +151,9 @@ public:
     case NodeKind::ImplicitCast:
       return static_cast<Derived *>(this)->visit(
           static_cast<const ImplicitCastNode *>(node));
+    case NodeKind::Await:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const AwaitExprNode *>(node));
     default:
       /* Dispatch failure routing to prevent silent segfaults on unmapped nodes
        */

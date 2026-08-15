@@ -50,6 +50,12 @@ public:
     return isHit(n) ? n : nullptr;
   }
 
+  const ASTNode *visit(const AwaitExprNode *n) {
+    if (auto found = find(n->expr))
+      return found;
+    return isHit(n) ? n : nullptr;
+  }
+
   const ASTNode *visit(const BinaryOpNode *n) {
     if (auto L = find(n->left))
       return L;
