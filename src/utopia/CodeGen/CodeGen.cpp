@@ -3306,14 +3306,50 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
     llvm::FunctionType *calleeTy = func->getFunctionType();
 
     unsigned llArgIdx = 1;
+    unsigned astParamIdx = 0;
     for (const auto &arg : node->args) {
-      llvm::Value *argVal = dispatch(arg);
+      llvm::Value *argVal = nullptr;
+
+      const Type *paramDeclTy = nullptr;
+      if (astParamIdx < node->resolvedFunc->params.size()) {
+        paramDeclTy = node->resolvedFunc->params[astParamIdx]->type;
+      }
+
+      bool isRefParam = paramDeclTy &&
+                        (paramDeclTy->isReferenceType() ||
+                         paramDeclTy->getKind() == TypeKind::RValueReference);
+
+      if (isRefParam) {
+        argVal = getLValue(arg);
+        if (!argVal) {
+          lastTemporaryAlloca = nullptr;
+          llvm::Value *val = dispatch(arg);
+          if (lastTemporaryAlloca) {
+            argVal = lastTemporaryAlloca;
+            lastTemporaryAlloca = nullptr;
+          } else {
+            argVal = createEntryBlockAlloca(val->getType(), "tmp.op.arg");
+            builder.CreateStore(val, argVal);
+          }
+        }
+      } else {
+        argVal = paramDeclTy ? materializeByValueArg(arg, paramDeclTy)
+                             : nullptr;
+
+        if (!argVal) {
+          lastTemporaryAlloca = nullptr;
+          argVal = dispatch(arg);
+          lastTemporaryAlloca = nullptr;
+        }
+      }
+
       if (llArgIdx < calleeTy->getNumParams()) {
         llvm::Type *paramTy = calleeTy->getParamType(llArgIdx);
         argVal = createImplicitCast(argVal, paramTy);
       }
       argsArgs.push_back(argVal);
       llArgIdx++;
+      astParamIdx++;
     }
 
     return builder.CreateCall(calleeTy, func, argsArgs);
