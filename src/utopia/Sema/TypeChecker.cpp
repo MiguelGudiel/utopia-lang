@@ -67,6 +67,17 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
 
     auto declIt = ctx->templateRegistry.find(instTy->getBaseName());
     if (declIt == ctx->templateRegistry.end()) {
+      /* Templates are registered under both their unqualified name and their
+       * fully-qualified name; fall back to the unqualified suffix when the
+       * type was resolved through a 'using' directive or namespace-qualified
+       * syntax. */
+      std::string_view bn = instTy->getBaseName();
+      size_t dotPos = bn.find_last_of('.');
+      if (dotPos != std::string_view::npos) {
+        declIt = ctx->templateRegistry.find(bn.substr(dotPos + 1));
+      }
+    }
+    if (declIt == ctx->templateRegistry.end()) {
       (void)ctx->reportError(0, 0, 0,
                              "Template declaration not found: " +
                                  std::string(instTy->getBaseName()));
@@ -83,9 +94,16 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
       return ctx->astCtx.VoidTy;
     }
 
-    std::string mangledName = std::string(instTy->getBaseName());
+    /* Mangle from the fully-qualified template name: type names parsed before
+     * imported modules are loaded may be unqualified ('unique_ptr'), so using
+     * the registry's fqName keeps the instantiation name stable and
+     * namespace-aware across the type, call, and reference paths. Template
+     * arguments are resolved first so nested instantiations mangle
+     * identically from every resolution site. */
+    std::string mangledName = std::string(declIt->second->fqName);
     for (const auto *arg : instTy->getTemplateArgs()) {
-      std::string argStr = arg->toString();
+      const Type *resArg = resolveIfTemplate(arg);
+      std::string argStr = resArg->toString();
       for (char &c : argStr) {
         if (!isalnum(c))
           c = '_';
@@ -129,15 +147,9 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
       instDecl->alignment = tmplDecl->alignment;
       instDecl->isPacked = tmplDecl->isPacked;
 
-      std::string originalFq = std::string(tmplDecl->fqName);
-      size_t lastDot = originalFq.find_last_of('.');
-      std::string newFq;
-      if (lastDot != std::string::npos) {
-        newFq = originalFq.substr(0, lastDot + 1) + std::string(mangledView);
-      } else {
-        newFq = std::string(mangledView);
-      }
-      instDecl->fqName = ctx->astCtx.copyString(newFq);
+      /* The mangled name is built from the fully-qualified template name, so
+       * it already carries any namespace qualification. */
+      instDecl->fqName = ctx->astCtx.copyString(mangledView);
 
       if (auto *clsDecl = llvm::dyn_cast<ClassDeclNode>(instDecl)) {
         clsDecl->name = mangledView;
@@ -222,8 +234,19 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
       auto prevFile = ctx->currentFile;
       ctx->setCurrentFile(instDecl->declFilePath);
 
+      /* Instantiate inside a dedicated scope so that the cloned record's
+       * fields and methods (registered during typechecking) do not leak into
+       * the enclosing lexical scope, which would collide with user variables
+       * named like a field (e.g. a local 'ptr' vs. unique_ptr's 'ptr'). */
+      ctx->pushScope();
       dcp.dispatch(instDecl);
       dispatch(instDecl);
+      ctx->popScope();
+
+      /* Re-register the instantiated declaration at module scope so member
+       * resolution (ctx->lookup of the mangled record name) and later calls
+       * can find it from any function. */
+      ctx->symTable.addGlobalSymbol(instDecl->fqName, instDecl);
 
       ctx->setCurrentFile(prevFile);
     }
@@ -623,6 +646,23 @@ SemaResult TypeCheckPass::visit(const UnionDeclNode *node) {
     if (!res)
       hasErrors = true;
   }
+
+  /* Rebuild the field layout with the now-resolved field types so template
+   * instantiations (e.g. smart pointer fields) reach code generation. */
+  {
+    std::vector<FieldInfo> resolvedInfos;
+    uint32_t resolvedIdx = 0;
+    for (auto *f : node->fields) {
+      if (f->isStatic)
+        continue;
+      resolvedInfos.push_back({f->varName, f->type, resolvedIdx++,
+                               f->isPublic(f->varName),
+                               f->isProtected(f->varName)});
+    }
+    const_cast<RecordType *>(const_cast<UnionDeclNode *>(node)->recordType)->setFields(
+        ctx->astCtx.copyArray<FieldInfo>(resolvedInfos));
+  }
+
   for (const auto *ctor : node->constructors) {
     auto res = dispatch(ctor);
     if (!res)
@@ -697,6 +737,23 @@ SemaResult TypeCheckPass::visit(const StructDeclNode *node) {
     if (!res)
       hasErrors = true;
   }
+
+  /* Rebuild the field layout with the now-resolved field types so template
+   * instantiations (e.g. smart pointer fields) reach code generation. */
+  {
+    std::vector<FieldInfo> resolvedInfos;
+    uint32_t resolvedIdx = 0;
+    for (auto *f : node->fields) {
+      if (f->isStatic)
+        continue;
+      resolvedInfos.push_back({f->varName, f->type, resolvedIdx++,
+                               f->isPublic(f->varName),
+                               f->isProtected(f->varName)});
+    }
+    const_cast<RecordType *>(const_cast<StructDeclNode *>(node)->recordType)->setFields(
+        ctx->astCtx.copyArray<FieldInfo>(resolvedInfos));
+  }
+
   for (const auto *ctor : node->constructors) {
     auto res = dispatch(ctor);
     if (!res)
@@ -1113,13 +1170,65 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
   classTy->setBaseClass(hasErrors ? nullptr : node->baseClass);
   classTy->setIsPolymorphic(isPolymorphic);
   classTy->setIsAbstract(node->isAbstract);
-  classTy->setFields(ctx->astCtx.copyArray<FieldInfo>(fInfos));
 
+  /* Dispatch fields up front so template-typed fields are resolved
+   * (resolveIfTemplate) and the FieldInfo layout below carries resolved
+   * types instead of raw TemplateInstType placeholders. */
   for (const auto *field : node->fields) {
     auto res = dispatch(field);
     if (!res)
       hasErrors = true;
   }
+
+  /* Rebuild the field layout with the now-resolved field types. */
+  {
+    std::vector<FieldInfo> resolvedInfos;
+    uint32_t resolvedIdx = 0;
+    if (isPolymorphic) {
+      resolvedIdx = 1;
+    }
+    if (node->baseClass && !hasErrors) {
+      if (auto *pType =
+              llvm::dyn_cast<ClassType>(node->baseClass->getUnqualifiedType())) {
+        if (auto *pDecl = llvm::dyn_cast_or_null<ClassDeclNode>(
+                pType->getDeclaration())) {
+          auto collectResolved =
+              [&](const ClassDeclNode *cDecl, auto &self) -> void {
+            if (!cDecl)
+              return;
+            if (cDecl->baseClass) {
+              if (auto *pt = llvm::dyn_cast<ClassType>(
+                      cDecl->baseClass->getUnqualifiedType())) {
+                if (auto *pd = llvm::dyn_cast_or_null<ClassDeclNode>(
+                        pt->getDeclaration())) {
+                  self(pd, self);
+                }
+              }
+            }
+            for (auto *f : cDecl->fields) {
+              if (f->isStatic)
+                continue;
+              bool isPub = f->isPublic(f->varName);
+              bool isProt = f->isProtected(f->varName);
+              std::string_view fname = (!isPub && !isProt) ? "" : f->varName;
+              resolvedInfos.push_back(
+                  {fname, f->type, resolvedIdx++, isPub, isProt});
+            }
+          };
+          collectResolved(pDecl, collectResolved);
+        }
+      }
+    }
+    for (auto *f : node->fields) {
+      if (f->isStatic)
+        continue;
+      resolvedInfos.push_back({f->varName, f->type, resolvedIdx++,
+                               f->isPublic(f->varName),
+                               f->isProtected(f->varName)});
+    }
+    classTy->setFields(ctx->astCtx.copyArray<FieldInfo>(resolvedInfos));
+  }
+
   for (const auto *ctor : node->constructors) {
     auto res = dispatch(ctor);
     if (!res)
@@ -1251,7 +1360,10 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
     }
 
     if (tmplDecl) {
-      std::string mangledName = std::string(node->name);
+      /* Mangle from the fully-qualified template name so namespace-qualified
+       * templates ('std.make_unique_Inner') resolve consistently with the
+       * type-instantiation path. */
+      std::string mangledName = std::string(tmplDecl->fqName);
       for (const auto *arg : node->templateArgs) {
         const Type *resArg = resolveIfTemplate(arg);
         std::string argStr = resArg->toString();
@@ -1276,6 +1388,7 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
 
         if (instDecl) {
           llvm::cast<FunctionDeclNode>(instDecl)->name = mangledView;
+          instDecl->fqName = mangledView;
           instDecl->hasPublicMod = tmplDecl->hasPublicMod;
           instDecl->hasPrivateMod = tmplDecl->hasPrivateMod;
           instDecl->hasProtectedMod = tmplDecl->hasProtectedMod;
@@ -1292,8 +1405,12 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
           auto prevFile = ctx->currentFile;
           ctx->setCurrentFile(instDecl->declFilePath);
 
+          ctx->pushScope();
           dcp.dispatch(instDecl);
           dispatch(instDecl);
+          ctx->popScope();
+
+          ctx->symTable.addGlobalSymbol(instDecl->fqName, instDecl);
 
           ctx->setCurrentFile(prevFile);
         }
@@ -1706,7 +1823,8 @@ SemaResult TypeCheckPass::visit(const UnaryOpNode *node) {
                                      "Cascading error in unary op"});
 
   if (node->op == "++" || node->op == "--" || node->op == "-" ||
-      node->op == "+" || node->op == "~" || node->op == "!") {
+      node->op == "+" || node->op == "~" || node->op == "!" ||
+      node->op == "*") {
     if (auto *opDecl = resolveOverloadedOperator(*exprType, node->op, {})) {
       /* Enforce visibility constraint on unary overloaded operators */
       if (!opDecl->isPublic(opDecl->name) &&
@@ -2348,29 +2466,35 @@ SemaResult TypeCheckPass::visit(const AssignNode *node) {
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,
                                      "Cascading error in assignment"});
 
-  if (auto *opDecl =
-          resolveOverloadedOperator(*lhsType, node->op, {node->value})) {
-    /* Enforce visibility constraint on assignment and compound assignment
-     * operators */
-    if (!opDecl->isPublic(opDecl->name) &&
-        ctx->getCurrentRecordContext() != opDecl->parentRecord) {
-      return ctx->reportError(node->line, node->column, node->length,
-                              "Cannot call private overloaded operator '" +
-                                  std::string(opDecl->name) + "'.");
+  /* Raw pointers are assigned with built-in pointer semantics; do not let
+   * operator= overloads of the pointee hijack the assignment (e.g.
+   * 'other._ptr = null' where _ptr is 'shared_ptr<T>*'). References and
+   * r-value references alias the record itself, so their operator= applies. */
+  if (!(*lhsType)->getUnqualifiedType()->isPointerType()) {
+    if (auto *opDecl =
+            resolveOverloadedOperator(*lhsType, node->op, {node->value})) {
+      /* Enforce visibility constraint on assignment and compound assignment
+       * operators */
+      if (!opDecl->isPublic(opDecl->name) &&
+          ctx->getCurrentRecordContext() != opDecl->parentRecord) {
+        return ctx->reportError(node->line, node->column, node->length,
+                                "Cannot call private overloaded operator '" +
+                                    std::string(opDecl->name) + "'.");
+      }
+      if (opDecl->isMethod && !opDecl->isStatic) {
+        const_cast<AssignNode *>(node)->value =
+            performImplicitConversion(node->value, opDecl->params[0]->type);
+      } else {
+        const_cast<AssignNode *>(node)->target =
+            performImplicitConversion(node->target, opDecl->params[0]->type);
+        const_cast<AssignNode *>(node)->value =
+            performImplicitConversion(node->value, opDecl->params[1]->type);
+      }
+      node->overloadedOperator = opDecl;
+      node->exprType = opDecl->returnType;
+      node->isLValue = true;
+      return opDecl->returnType;
     }
-    if (opDecl->isMethod && !opDecl->isStatic) {
-      const_cast<AssignNode *>(node)->value =
-          performImplicitConversion(node->value, opDecl->params[0]->type);
-    } else {
-      const_cast<AssignNode *>(node)->target =
-          performImplicitConversion(node->target, opDecl->params[0]->type);
-      const_cast<AssignNode *>(node)->value =
-          performImplicitConversion(node->value, opDecl->params[1]->type);
-    }
-    node->overloadedOperator = opDecl;
-    node->exprType = opDecl->returnType;
-    node->isLValue = true;
-    return opDecl->returnType;
   }
 
   if (!node->target->isLValue) {
@@ -2793,6 +2917,14 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
       }
     }
 
+    /* Fall back to the declaration attached to the record type itself. This
+     * covers template instantiations that were registered during instantiation
+     * but whose mangled class name may not be visible in the current lexical
+     * scope. */
+    if (!recDecl) {
+      recDecl = recordTy->getDeclaration();
+    }
+
     if (recDecl) {
       if (staticAccessDecl) {
         llvm::ArrayRef<VarDeclNode *> staticFields;
@@ -3073,6 +3205,40 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
           }
         } else {
           break;
+        }
+      }
+    }
+  }
+
+  if (!staticAccessDecl) {
+    /*
+     * Rust-style auto-deref: when the member is not found on the record
+     * itself, check whether the object type overloads 'operator*'. If so,
+     * wrap the object in a unary dereference node and retry the access on the
+     * resulting pointee type. Each implicit wrap adds one '*' node to the
+     * object chain, so the walk below also bounds the recursion depth of
+     * nested smart pointers.
+     */
+    int derefCount = 0;
+    ExprNode *curr = node->object;
+    while (curr && curr->kind == NodeKind::UnaryOp) {
+      auto *uop = static_cast<UnaryOpNode *>(curr);
+      if (uop->op == "*") {
+        derefCount++;
+        curr = uop->expr;
+      } else {
+        break;
+      }
+    }
+
+    if (derefCount < 64) {
+      if (resolveOverloadedOperator(*objType, "*", {})) {
+        auto *derefNode = ctx->astCtx.create<UnaryOpNode>(
+            "*", node->object, node->line, node->column);
+        auto derefRes = dispatch(derefNode);
+        if (derefRes) {
+          const_cast<MemberAccessNode *>(node)->object = derefNode;
+          return visit(node);
         }
       }
     }
@@ -3823,6 +3989,43 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
 
   if (node->target->kind == NodeKind::Variable) {
     auto *varTarget = static_cast<const VariableNode *>(node->target);
+
+    if (!varTarget->templateArgs.empty()) {
+      /* Template classes used as constructor calls (e.g.
+       * 'unique_ptr<Foo>(ptr)') are instantiated here so the target can be
+       * renamed to its mangled record name and resolved through constructor
+       * candidate matching below. */
+      auto regIt = ctx->templateRegistry.find(varTarget->name);
+      if (regIt != ctx->templateRegistry.end() &&
+          (llvm::isa<ClassDeclNode>(regIt->second) ||
+           llvm::isa<StructDeclNode>(regIt->second) ||
+           llvm::isa<UnionDeclNode>(regIt->second))) {
+        /* Use the fully-qualified template name so the mangled instantiation
+         * name matches the one produced by the type-resolution path. */
+        const DeclNode *tmpl = regIt->second;
+        std::string_view baseName = tmpl->fqName;
+        auto argsCopy = ctx->astCtx.copyArray<const Type *>(
+            varTarget->templateArgs);
+        auto *instTy =
+            ctx->astCtx.getTemplateInstType(baseName, argsCopy);
+        const Type *resolved = resolveIfTemplate(instTy);
+        if (resolved) {
+          const Type *unqual = resolved->getUnqualifiedType();
+          if (unqual->getKind() == TypeKind::Class ||
+              unqual->getKind() == TypeKind::Struct ||
+              unqual->getKind() == TypeKind::Union) {
+            auto *recTy = static_cast<const RecordType *>(unqual);
+            const_cast<VariableNode *>(varTarget)->name = recTy->getName();
+          }
+        }
+      } else {
+        /* Force template function instantiation up front so the target is
+         * renamed to its mangled form (e.g. 'make_unique_Inner') and resolves
+         * through the direct call matching below. */
+        (void)dispatch(varTarget);
+      }
+    }
+
     std::string_view name = varTarget->name;
     auto decls = ctx->lookup(name);
 
@@ -4204,6 +4407,10 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
               recDecl = d;
               break;
             }
+          }
+
+          if (!recDecl) {
+            recDecl = recordTy->getDeclaration();
           }
         }
       }

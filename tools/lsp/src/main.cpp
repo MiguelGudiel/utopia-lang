@@ -1165,6 +1165,53 @@ void handleCompletion(const json &req) {
     items.push_back(item);
   };
 
+  /* Rust-style auto-deref: if the record overloads 'operator*', follow its
+   * return type to the pointee record (mirroring the compiler's member-access
+   * resolution for smart pointers). */
+  auto getAutoDerefTarget = [&](const DeclNode *recDecl) -> const DeclNode * {
+    if (!recDecl)
+      return nullptr;
+    llvm::ArrayRef<FunctionDeclNode *> methods;
+    if (recDecl->kind == NodeKind::ClassDecl)
+      methods = static_cast<const ClassDeclNode *>(recDecl)->methods;
+    else if (recDecl->kind == NodeKind::StructDecl)
+      methods = static_cast<const StructDeclNode *>(recDecl)->methods;
+    else if (recDecl->kind == NodeKind::UnionDecl)
+      methods = static_cast<const UnionDeclNode *>(recDecl)->methods;
+    else
+      return nullptr;
+
+    for (const auto *m : methods) {
+      if (m->name == "operator*") {
+        const Type *ret = m->returnType;
+        if (!ret)
+          return nullptr;
+        const Type *unqual = ret->getUnqualifiedType();
+        if (unqual->isPointerType()) {
+          unqual = static_cast<const PointerType *>(unqual)
+                       ->getPointeeType()
+                       ->getUnqualifiedType();
+        } else if (unqual->isReferenceType()) {
+          unqual = static_cast<const ReferenceType *>(unqual)
+                       ->getPointeeType()
+                       ->getUnqualifiedType();
+        } else if (unqual->getKind() == TypeKind::RValueReference) {
+          unqual = static_cast<const RValueReferenceType *>(unqual)
+                       ->getPointeeType()
+                       ->getUnqualifiedType();
+        }
+        if (unqual->getKind() == TypeKind::Class ||
+            unqual->getKind() == TypeKind::Struct ||
+            unqual->getKind() == TypeKind::Union) {
+          auto *recTy = static_cast<const RecordType *>(unqual);
+          return recTy->getDeclaration();
+        }
+        return nullptr;
+      }
+    }
+    return nullptr;
+  };
+
   auto addBuiltInAnnotations = [&]() {
     std::vector<std::string> builtInAnnotations = {
         "extern",          "export",       "align",     "packed",
@@ -1541,6 +1588,39 @@ void handleCompletion(const json &req) {
                       break;
                     }
                   }
+
+                  /* Rust-style auto-deref for smart pointers: if the member is
+                   * not on the record itself, follow operator* chains. */
+                  if (!nextInstanceType) {
+                    const DeclNode *derefDecl = getAutoDerefTarget(rDecl);
+                    int derefDepth = 0;
+                    while (derefDecl && derefDepth < 8) {
+                      llvm::ArrayRef<VarDeclNode *> dFields;
+                      if (derefDecl->kind == NodeKind::ClassDecl)
+                        dFields =
+                            static_cast<const ClassDeclNode *>(derefDecl)
+                                ->fields;
+                      else if (derefDecl->kind == NodeKind::StructDecl)
+                        dFields =
+                            static_cast<const StructDeclNode *>(derefDecl)
+                                ->fields;
+                      else if (derefDecl->kind == NodeKind::UnionDecl)
+                        dFields =
+                            static_cast<const UnionDeclNode *>(derefDecl)
+                                ->fields;
+
+                      for (const auto *f : dFields) {
+                        if (f->varName == part) {
+                          nextInstanceType = f->type;
+                          break;
+                        }
+                      }
+                      if (nextInstanceType)
+                        break;
+                      derefDecl = getAutoDerefTarget(derefDecl);
+                      derefDepth++;
+                    }
+                  }
                 }
               }
             } else if (staticTypeDecl) {
@@ -1688,6 +1768,50 @@ void handleCompletion(const json &req) {
                   addCompletion(std::string(m->name), 2, detail,
                                 std::string(m->docString));
                 }
+              }
+
+              /* Rust-style auto-deref: also suggest the pointee's members for
+               * smart pointers (unique_ptr/shared_ptr/etc.). */
+              const DeclNode *derefDecl = getAutoDerefTarget(rDecl);
+              int derefDepth = 0;
+              while (derefDecl && derefDepth < 8) {
+                llvm::ArrayRef<VarDeclNode *> dFields;
+                llvm::ArrayRef<FunctionDeclNode *> dMethods;
+                if (derefDecl->kind == NodeKind::ClassDecl) {
+                  dFields = static_cast<const ClassDeclNode *>(derefDecl)
+                                ->fields;
+                  dMethods = static_cast<const ClassDeclNode *>(derefDecl)
+                                 ->methods;
+                } else if (derefDecl->kind == NodeKind::StructDecl) {
+                  dFields = static_cast<const StructDeclNode *>(derefDecl)
+                                ->fields;
+                  dMethods = static_cast<const StructDeclNode *>(derefDecl)
+                                 ->methods;
+                } else if (derefDecl->kind == NodeKind::UnionDecl) {
+                  dFields = static_cast<const UnionDeclNode *>(derefDecl)
+                                ->fields;
+                  dMethods = static_cast<const UnionDeclNode *>(derefDecl)
+                                 ->methods;
+                }
+
+                for (const auto *f : dFields) {
+                  if (!f->isStatic) {
+                    std::string detail =
+                        f->type ? f->type->toString() : "auto";
+                    addCompletion(std::string(f->varName), 5, detail,
+                                  std::string(f->docString));
+                  }
+                }
+                for (const auto *m : dMethods) {
+                  if (!m->isStatic && !m->name.starts_with("operator")) {
+                    std::string detail =
+                        m->returnType ? m->returnType->toString() : "auto";
+                    addCompletion(std::string(m->name), 2, detail,
+                                  std::string(m->docString));
+                  }
+                }
+                derefDecl = getAutoDerefTarget(derefDecl);
+                derefDepth++;
               }
             }
           }

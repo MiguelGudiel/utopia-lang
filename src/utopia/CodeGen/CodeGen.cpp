@@ -578,9 +578,20 @@ void CodeGen::emitConstructorCall(const FunctionCallNode *node,
         }
       }
     } else {
-      lastTemporaryAlloca = nullptr;
-      argVal = dispatch(arg);
-      lastTemporaryAlloca = nullptr;
+      const Type *paramDeclTy = nullptr;
+      if (node->resolvedFunc &&
+          astParamIdx < node->resolvedFunc->params.size()) {
+        paramDeclTy = node->resolvedFunc->params[astParamIdx]->type;
+      }
+
+      argVal = paramDeclTy ? materializeByValueArg(arg, paramDeclTy)
+                           : nullptr;
+
+      if (!argVal) {
+        lastTemporaryAlloca = nullptr;
+        argVal = dispatch(arg);
+        lastTemporaryAlloca = nullptr;
+      }
 
       if (func && argVal && llArgIdx < func->arg_size()) {
         llvm::Type *paramTy = func->getFunctionType()->getParamType(llArgIdx);
@@ -600,6 +611,110 @@ void CodeGen::emitConstructorCall(const FunctionCallNode *node,
   }
 
   builder.CreateCall(func, argsArgs);
+}
+
+llvm::Value *CodeGen::materializeByValueArg(const ExprNode *arg,
+                                            const Type *paramDeclTy) {
+  if (!arg || !paramDeclTy)
+    return nullptr;
+
+  const Type *unqualParam = paramDeclTy->getUnqualifiedType();
+  if (unqualParam->getKind() != TypeKind::Class &&
+      unqualParam->getKind() != TypeKind::Struct &&
+      unqualParam->getKind() != TypeKind::Union) {
+    return nullptr;
+  }
+  auto *recTy = static_cast<const RecordType *>(unqualParam);
+  const DeclNode *decl = recTy->getDeclaration();
+  if (!decl)
+    return nullptr;
+
+  const FunctionDeclNode *dtor = nullptr;
+  if (decl->kind == NodeKind::ClassDecl)
+    dtor = static_cast<const ClassDeclNode *>(decl)->destructor;
+  else if (decl->kind == NodeKind::StructDecl)
+    dtor = static_cast<const StructDeclNode *>(decl)->destructor;
+  else if (decl->kind == NodeKind::UnionDecl)
+    dtor = static_cast<const UnionDeclNode *>(decl)->destructor;
+
+  /* Records without a custom destructor may be passed by value with plain
+   * bitwise semantics. */
+  if (!dtor || dtor->isImplicit)
+    return nullptr;
+
+  llvm::ArrayRef<FunctionDeclNode *> ctors;
+  if (decl->kind == NodeKind::ClassDecl)
+    ctors = static_cast<const ClassDeclNode *>(decl)->constructors;
+  else if (decl->kind == NodeKind::StructDecl)
+    ctors = static_cast<const StructDeclNode *>(decl)->constructors;
+  else if (decl->kind == NodeKind::UnionDecl)
+    ctors = static_cast<const UnionDeclNode *>(decl)->constructors;
+
+  const FunctionDeclNode *copyOrMove = nullptr;
+  bool preferMove = !arg->isLValue;
+  for (auto *c : ctors) {
+    if (c->params.size() != 1)
+      continue;
+    const Type *p0 = c->params[0]->type;
+    const Type *pointee = nullptr;
+    if (p0->isReferenceType()) {
+      pointee =
+          static_cast<const ReferenceType *>(p0)->getPointeeType();
+    } else if (p0->getKind() == TypeKind::RValueReference) {
+      pointee = static_cast<const RValueReferenceType *>(p0)
+                    ->getPointeeType();
+    }
+    if (!pointee || pointee->getUnqualifiedType() != unqualParam)
+      continue;
+    if (p0->getKind() == TypeKind::RValueReference) {
+      /* Prefer the move constructor for r-values, but keep looking so the
+       * copy constructor remains the fallback when no move constructor
+       * exists. */
+      if (preferMove) {
+        copyOrMove = c;
+        break;
+      }
+    } else if (p0->isReferenceType()) {
+      if (!preferMove) {
+        copyOrMove = c;
+        break;
+      }
+      if (!copyOrMove) {
+        copyOrMove = c;
+      }
+    }
+  }
+
+  if (!copyOrMove)
+    return nullptr;
+
+  llvm::AllocaInst *tmp =
+      createEntryBlockAlloca(getLLVMType(paramDeclTy), "tmp.arg.copy");
+  emitDefaultInitialization(tmp, paramDeclTy);
+
+  llvm::Value *src = nullptr;
+  lastTemporaryAlloca = nullptr;
+  src = getLValue(arg);
+  if (!src) {
+    llvm::Value *val = dispatch(arg);
+    if (lastTemporaryAlloca) {
+      src = lastTemporaryAlloca;
+      lastTemporaryAlloca = nullptr;
+    } else if (val) {
+      src = createEntryBlockAlloca(val->getType(), "tmp.arg.src");
+      createTBAAStore(val, src, arg->exprType);
+    }
+  }
+
+  if (src) {
+    llvm::Function *ctorFunc = getOrCreateFunction(copyOrMove);
+    builder.CreateCall(ctorFunc, {tmp, src});
+  }
+  /* The by-value argument is transferred to the callee, which owns it and
+   * registers the destructor cleanup for the parameter. Do NOT register a
+   * cleanup here. */
+  lastTemporaryAlloca = nullptr;
+  return createTBAALoad(getLLVMType(paramDeclTy), tmp, paramDeclTy);
 }
 
 llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
@@ -3069,6 +3184,31 @@ llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
     bool isRef = paramDecl->type->isReferenceType() ||
                  paramDecl->type->getKind() == TypeKind::RValueReference;
     cgCtx.bind(pName, alloca, !isRef);
+
+    /* By-value records with a custom destructor are owned by the callee;
+     * register the destructor cleanup so RAII semantics hold for smart
+     * pointers and other destructor-based types passed by value. */
+    if (!isRef) {
+      const Type *unqualP = paramDecl->type->getUnqualifiedType();
+      if (unqualP->getKind() == TypeKind::Class ||
+          unqualP->getKind() == TypeKind::Struct ||
+          unqualP->getKind() == TypeKind::Union) {
+        auto *recTy = static_cast<const RecordType *>(unqualP);
+        if (const DeclNode *decl = recTy->getDeclaration()) {
+          const FunctionDeclNode *dtor = nullptr;
+          if (decl->kind == NodeKind::ClassDecl)
+            dtor = static_cast<const ClassDeclNode *>(decl)->destructor;
+          else if (decl->kind == NodeKind::StructDecl)
+            dtor = static_cast<const StructDeclNode *>(decl)->destructor;
+          else if (decl->kind == NodeKind::UnionDecl)
+            dtor = static_cast<const UnionDeclNode *>(decl)->destructor;
+          if (dtor && !dtor->isImplicit) {
+            cgCtx.addCleanup(alloca, dtor, paramDecl->type);
+          }
+        }
+      }
+    }
+
     astParamIdx++;
   }
 
@@ -3333,9 +3473,23 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
           }
         }
       } else {
-        lastTemporaryAlloca = nullptr;
-        argVal = dispatch(arg);
-        lastTemporaryAlloca = nullptr;
+        /* Passing a record by value requires materializing a proper copy (or
+         * move) so destructor-based types (smart pointers, String, ...) keep
+         * correct ownership semantics instead of a raw bitwise copy. */
+        const Type *paramDeclTy = nullptr;
+        if (node->resolvedFunc &&
+            astParamIdx < node->resolvedFunc->params.size()) {
+          paramDeclTy = node->resolvedFunc->params[astParamIdx]->type;
+        }
+
+        argVal = paramDeclTy ? materializeByValueArg(arg, paramDeclTy)
+                             : nullptr;
+
+        if (!argVal) {
+          lastTemporaryAlloca = nullptr;
+          argVal = dispatch(arg);
+          lastTemporaryAlloca = nullptr;
+        }
 
         if (func && argVal) {
           if (llArgIdx < calleeTy->getNumParams()) {
@@ -3361,15 +3515,21 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
     }
 
     auto callRes = builder.CreateCall(calleeTy, callee, argsArgs);
-    lastTemporaryAlloca = nullptr;
 
     if (node->resolvedFunc->isMethod &&
         node->resolvedFunc->returnType->isVoid()) {
       if (!node->exprType->isVoid()) {
+        /* Constructor call: the instance alloca is the resulting object.
+         * Re-point lastTemporaryAlloca at it (argument evaluation nulls it)
+         * so RVO/return-escape logic can drop its cleanup when the object is
+         * returned by value. */
+        lastTemporaryAlloca = llvm::cast<llvm::AllocaInst>(argsArgs[0]);
         return createTBAALoad(getLLVMType(node->exprType), argsArgs[0],
                               node->exprType);
       }
     }
+
+    lastTemporaryAlloca = nullptr;
 
     return callRes;
 
@@ -3624,9 +3784,13 @@ llvm::Value *CodeGen::visit(const ModuleNode *node) {
 
   for (const auto &stmt : node->statements) {
     if (stmt->kind == NodeKind::StructDecl) {
-      getLLVMType(static_cast<const StructDeclNode *>(stmt)->recordType);
+      const auto *sDecl = static_cast<const StructDeclNode *>(stmt);
+      if (!sDecl->isTemplate)
+        getLLVMType(sDecl->recordType);
     } else if (stmt->kind == NodeKind::ClassDecl) {
-      getLLVMType(static_cast<const ClassDeclNode *>(stmt)->recordType);
+      const auto *cDecl = static_cast<const ClassDeclNode *>(stmt);
+      if (!cDecl->isTemplate)
+        getLLVMType(cDecl->recordType);
     } else if (stmt->kind == NodeKind::AnnotationDecl) {
       getLLVMType(static_cast<const AnnotationDeclNode *>(stmt)->recordType);
     }
@@ -3817,9 +3981,21 @@ llvm::Value *CodeGen::visit(const NewExprNode *node) {
               }
             }
           } else {
-            lastTemporaryAlloca = nullptr;
-            argVal = dispatch(arg);
-            lastTemporaryAlloca = nullptr;
+            const Type *paramDeclTy = nullptr;
+            if (node->resolvedConstructor &&
+                astParamIdx < node->resolvedConstructor->params.size()) {
+              paramDeclTy =
+                  node->resolvedConstructor->params[astParamIdx]->type;
+            }
+
+            argVal = paramDeclTy ? materializeByValueArg(arg, paramDeclTy)
+                                 : nullptr;
+
+            if (!argVal) {
+              lastTemporaryAlloca = nullptr;
+              argVal = dispatch(arg);
+              lastTemporaryAlloca = nullptr;
+            }
 
             if (ctorFunc && argVal && llArgIdx < ctorFunc->arg_size()) {
               llvm::Type *paramTy =

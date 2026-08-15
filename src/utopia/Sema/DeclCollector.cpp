@@ -129,6 +129,7 @@ void DeclCollectorPass::visit(const FunctionDeclNode *node) {
       const_cast<FunctionDeclNode *>(node)->declFilePath = ctx->currentFile;
     }
     ctx->templateRegistry[node->name] = node;
+    ctx->templateRegistry[node->fqName] = node;
     return;
   }
 
@@ -278,6 +279,7 @@ void DeclCollectorPass::visit(const UnionDeclNode *node) {
       const_cast<UnionDeclNode *>(node)->declFilePath = ctx->currentFile;
     }
     ctx->templateRegistry[node->name] = node;
+    ctx->templateRegistry[node->fqName] = node;
     return;
   }
 
@@ -409,6 +411,7 @@ void DeclCollectorPass::visit(const StructDeclNode *node) {
       const_cast<StructDeclNode *>(node)->declFilePath = ctx->currentFile;
     }
     ctx->templateRegistry[node->name] = node;
+    ctx->templateRegistry[node->fqName] = node;
     return;
   }
 
@@ -540,6 +543,7 @@ void DeclCollectorPass::visit(const ClassDeclNode *node) {
       const_cast<ClassDeclNode *>(node)->declFilePath = ctx->currentFile;
     }
     ctx->templateRegistry[node->name] = node;
+    ctx->templateRegistry[node->fqName] = node;
     return;
   }
 

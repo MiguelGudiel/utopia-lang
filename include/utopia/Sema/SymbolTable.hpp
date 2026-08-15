@@ -38,6 +38,17 @@ public:
     scopes.back().symbols[name].push_back(decl);
   }
 
+  /*
+   * Registers a symbol in the module (global) scope regardless of the current
+   * lexical scope. Used for template instantiations whose mangled names must
+   * remain resolvable from any function without polluting local scopes.
+   */
+  void addGlobalSymbol(std::string_view name, const DeclNode *decl) {
+    if (scopes.empty())
+      return;
+    scopes.front().symbols[name].push_back(decl);
+  }
+
   /**
    * Retrieves the current lexical scope to perform localized redefinition
    * checks.

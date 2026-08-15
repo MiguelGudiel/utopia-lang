@@ -2656,6 +2656,92 @@ DeclNode *Parser::parseDeclarationOrFunction(
   std::string fqNameStr = getFQName(id);
   std::string_view fqName = astCtx.copyString(fqNameStr);
 
+  /*
+   * Disambiguate the C++ "most vexing parse": 'Type name(expr...)' is a
+   * variable declaration with a constructor-call initializer whenever the
+   * tokens inside the parentheses cannot form a parameter list, e.g.
+   * 'unique_ptr<Foo> up(new Foo());'. A leading type (keyword or
+   * 'Type name' pair) keeps the declaration a function declaration.
+   */
+  bool isVarWithCtorCall = false;
+  if (currentToken().type == TokenType::LPAREN && tParams.empty() &&
+      !isImplicitlyTyped) {
+    TokenType firstTok = peekToken(1).type;
+    if (firstTok == TokenType::IDENTIFIER) {
+      TokenType secondTok = peekToken(2).type;
+      if (secondTok == TokenType::IDENTIFIER ||
+          secondTok == TokenType::STAR || secondTok == TokenType::AMPERSAND ||
+          secondTok == TokenType::LOGICAL_AND ||
+          secondTok == TokenType::COMMA || secondTok == TokenType::LT ||
+          secondTok == TokenType::RSHIFT) {
+        isVarWithCtorCall = false;
+      } else {
+        isVarWithCtorCall = true;
+      }
+    } else if (firstTok != TokenType::RPAREN &&
+               firstTok != TokenType::TYPE_KW &&
+               firstTok != TokenType::CONST_KW &&
+               firstTok != TokenType::VAR_KW &&
+               firstTok != TokenType::STATIC_KW &&
+               firstTok != TokenType::LBRACE) {
+      isVarWithCtorCall = true;
+    }
+  }
+
+  if (isVarWithCtorCall) {
+    std::vector<ExprNode *> args;
+    std::vector<std::string_view> argNames;
+    bool hasTrailingComma = false;
+
+    expect(TokenType::LPAREN, "Expected '('");
+    if (currentToken().type != TokenType::RPAREN) {
+      do {
+        if (currentToken().type == TokenType::RPAREN) {
+          hasTrailingComma = true;
+          break;
+        }
+        if (currentToken().type == TokenType::IDENTIFIER &&
+            peekToken().type == TokenType::COLON) {
+          argNames.push_back(currentToken().value);
+          advance();
+          advance();
+          args.push_back(parseExpression());
+        } else {
+          argNames.push_back("");
+          args.push_back(parseExpression());
+        }
+      } while (match(TokenType::COMMA));
+    }
+
+    int callEndLine = currentToken().line;
+    int callEndCol = currentToken().column + (int)currentToken().value.length();
+    expect(TokenType::RPAREN, "Expected ')'");
+
+    auto argsRef = astCtx.copyArray<ExprNode *>(args);
+    auto namesRef = astCtx.copyArray<std::string_view>(argNames);
+
+    auto target = astCtx.create<VariableNode>(id, idCol, col, idLen);
+    auto callNode = astCtx.create<FunctionCallNode>(
+        target, argsRef, namesRef, line, col, callEndCol - col);
+    callNode->endLine = callEndLine;
+
+    ExprNode *init = callNode;
+    int endLine = currentToken().line;
+    int endCol = currentToken().column + (int)currentToken().value.length();
+    expect(TokenType::SEMICOLON, "Expected ';' after variable declaration");
+
+    auto varDecl =
+        astCtx.create<VarDeclNode>(nodeType, id, init, line, col, endCol - col);
+    varDecl->fqName = fqName;
+    varDecl->rawTypeStr = rawTypeStr;
+    varDecl->endLine = endLine;
+    varDecl->identifierColumn = idCol;
+    varDecl->identifierLength = idLen;
+    varDecl->isStatic = isStatic;
+
+    return varDecl;
+  }
+
   if (match(TokenType::LPAREN)) {
     bool isVariadic = false;
     bool hasTrailingComma = false;

@@ -1,0 +1,330 @@
+namespace std {
+
+/*
+ * Internal reference-count block shared by shared_ptr and weak_ptr.
+ */
+class RefCountBlock {
+  public int sharedCount;
+  public int weakCount;
+
+  public RefCountBlock() {
+    this.sharedCount = 1;
+    this.weakCount = 0;
+  }
+}
+
+/*
+ * unique_ptr is a smart pointer that owns and manages another object through
+ * a pointer and disposes of that object when the unique_ptr goes out of
+ * scope. It cannot be copied; ownership is transferred via move semantics.
+ */
+class unique_ptr<T> {
+  private T* _ptr;
+
+  public unique_ptr() {
+    this._ptr = null;
+  }
+
+  public unique_ptr(T* p) {
+    this._ptr = p;
+  }
+
+  public unique_ptr(unique_ptr<T>&& other) {
+    this._ptr = other._ptr;
+    other._ptr = null;
+  }
+
+  public ~unique_ptr() {
+    if (this._ptr != null) {
+      delete this._ptr;
+      this._ptr = null;
+    }
+  }
+
+  public void operator=(unique_ptr<T>&& other) {
+    if (this._ptr == other._ptr) return;
+    if (this._ptr != null) {
+      delete this._ptr;
+    }
+    this._ptr = other._ptr;
+    other._ptr = null;
+  }
+
+  public T* operator*() {
+    return this._ptr;
+  }
+
+  public T* get() {
+    return this._ptr;
+  }
+
+  public T* release() {
+    T* old = this._ptr;
+    this._ptr = null;
+    return old;
+  }
+
+  public void reset() {
+    if (this._ptr != null) {
+      delete this._ptr;
+      this._ptr = null;
+    }
+  }
+
+  public void reset(T* p) {
+    if (this._ptr != null) {
+      delete this._ptr;
+    }
+    this._ptr = p;
+  }
+
+  public bool operator==(T* other) {
+    return this._ptr == other;
+  }
+
+  public bool operator!=(T* other) {
+    return this._ptr != other;
+  }
+
+  public bool operator==(const unique_ptr<T>& other) {
+    return this._ptr == other._ptr;
+  }
+
+  public bool operator!=(const unique_ptr<T>& other) {
+    return this._ptr != other._ptr;
+  }
+}
+
+/*
+ * shared_ptr retains shared ownership of an object through a pointer.
+ * Several shared_ptr objects may own the same object; the object is destroyed
+ * when the last owner releases it.
+ */
+class shared_ptr<T> {
+  private T* _ptr;
+  public RefCountBlock* _ctrl;
+
+  public shared_ptr() {
+    this._ptr = null;
+    this._ctrl = null;
+  }
+
+  public shared_ptr(T* p) {
+    this._ptr = p;
+    if (p != null) {
+      this._ctrl = new RefCountBlock();
+    } else {
+      this._ctrl = null;
+    }
+  }
+
+  public shared_ptr(const shared_ptr<T>& other) {
+    this._ptr = other._ptr;
+    this._ctrl = other._ctrl;
+    if (this._ctrl != null) {
+      this._ctrl.sharedCount = this._ctrl.sharedCount + 1;
+    }
+  }
+
+  public shared_ptr(shared_ptr<T>&& other) {
+    this._ptr = other._ptr;
+    this._ctrl = other._ctrl;
+    other._ptr = null;
+    other._ctrl = null;
+  }
+
+  public ~shared_ptr() {
+    this._releaseRef();
+  }
+
+  public void operator=(const shared_ptr<T>& other) {
+    if (this._ctrl == other._ctrl) return;
+    this._releaseRef();
+    this._ptr = other._ptr;
+    this._ctrl = other._ctrl;
+    if (this._ctrl != null) {
+      this._ctrl.sharedCount = this._ctrl.sharedCount + 1;
+    }
+  }
+
+  public void operator=(shared_ptr<T>&& other) {
+    if (this._ctrl == other._ctrl) return;
+    this._releaseRef();
+    this._ptr = other._ptr;
+    this._ctrl = other._ctrl;
+    other._ptr = null;
+    other._ctrl = null;
+  }
+
+  public T* operator*() {
+    return this._ptr;
+  }
+
+  public T* get() {
+    return this._ptr;
+  }
+
+  public int use_count() {
+    if (this._ctrl != null) {
+      return this._ctrl.sharedCount;
+    }
+    return 0;
+  }
+
+  public void reset() {
+    this._releaseRef();
+    this._ptr = null;
+    this._ctrl = null;
+  }
+
+  public void reset(T* p) {
+    this._releaseRef();
+    this._ptr = p;
+    if (p != null) {
+      this._ctrl = new RefCountBlock();
+    } else {
+      this._ctrl = null;
+    }
+  }
+
+  public bool operator==(T* other) {
+    return this._ptr == other;
+  }
+
+  public bool operator!=(T* other) {
+    return this._ptr != other;
+  }
+
+  public bool operator==(const shared_ptr<T>& other) {
+    return this._ptr == other._ptr;
+  }
+
+  public bool operator!=(const shared_ptr<T>& other) {
+    return this._ptr != other._ptr;
+  }
+
+  /* Internal: adopt a raw pointer and an existing control block (weak_ptr
+   * lock). Bumps the shared count. */
+  public void _set_internal(T* p, RefCountBlock* c) {
+    this._ptr = p;
+    this._ctrl = c;
+    if (c != null) {
+      c.sharedCount = c.sharedCount + 1;
+    }
+  }
+
+  private void _releaseRef() {
+    if (this._ctrl != null) {
+      this._ctrl.sharedCount = this._ctrl.sharedCount - 1;
+      if (this._ctrl.sharedCount == 0) {
+        if (this._ptr != null) {
+          delete this._ptr;
+          this._ptr = null;
+        }
+        if (this._ctrl.weakCount == 0) {
+          delete this._ctrl;
+        }
+      }
+      this._ctrl = null;
+    }
+  }
+}
+
+/*
+ * weak_ptr holds a non-owning ("weak") reference to an object managed by
+ * shared_ptr. It does not keep the object alive; lock() upgrades it to a
+ * shared_ptr if the object is still alive.
+ */
+class weak_ptr<T> {
+  private T* _ptr;
+  private RefCountBlock* _ctrl;
+
+  public weak_ptr() {
+    this._ptr = null;
+    this._ctrl = null;
+  }
+
+  public weak_ptr(const shared_ptr<T>& sp) {
+    this._ptr = sp.get();
+    this._ctrl = sp._ctrl;
+    if (this._ctrl != null) {
+      this._ctrl.weakCount = this._ctrl.weakCount + 1;
+    }
+  }
+
+  public weak_ptr(const weak_ptr<T>& other) {
+    this._ptr = other._ptr;
+    this._ctrl = other._ctrl;
+    if (this._ctrl != null) {
+      this._ctrl.weakCount = this._ctrl.weakCount + 1;
+    }
+  }
+
+  public weak_ptr(weak_ptr<T>&& other) {
+    this._ptr = other._ptr;
+    this._ctrl = other._ctrl;
+    other._ptr = null;
+    other._ctrl = null;
+  }
+
+  public ~weak_ptr() {
+    this._releaseRef();
+  }
+
+  public void operator=(const weak_ptr<T>& other) {
+    if (this._ctrl == other._ctrl) return;
+    this._releaseRef();
+    this._ptr = other._ptr;
+    this._ctrl = other._ctrl;
+    if (this._ctrl != null) {
+      this._ctrl.weakCount = this._ctrl.weakCount + 1;
+    }
+  }
+
+  public void operator=(weak_ptr<T>&& other) {
+    if (this._ctrl == other._ctrl) return;
+    this._releaseRef();
+    this._ptr = other._ptr;
+    this._ctrl = other._ctrl;
+    other._ptr = null;
+    other._ctrl = null;
+  }
+
+  public bool expired() {
+    if (this._ctrl == null) return true;
+    return this._ctrl.sharedCount == 0;
+  }
+
+  public shared_ptr<T> lock() {
+    if (this.expired()) {
+      return shared_ptr<T>();
+    }
+    shared_ptr<T> sp;
+    sp._set_internal(this._ptr, this._ctrl);
+    return sp;
+  }
+
+  private void _releaseRef() {
+    if (this._ctrl != null) {
+      this._ctrl.weakCount = this._ctrl.weakCount - 1;
+      if (this._ctrl.sharedCount == 0 && this._ctrl.weakCount == 0) {
+        delete this._ctrl;
+      }
+      this._ctrl = null;
+    }
+  }
+}
+
+/*
+ * Factory helpers. Accept an already-constructed heap object and adopt it,
+ * mirroring std::make_unique/std::make_shared ownership semantics.
+ */
+unique_ptr<T> make_unique<T>(T* p) {
+  return unique_ptr<T>(p);
+}
+
+shared_ptr<T> make_shared<T>(T* p) {
+  return shared_ptr<T>(p);
+}
+
+}

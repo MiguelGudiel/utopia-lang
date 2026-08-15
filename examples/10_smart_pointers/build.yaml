@@ -1,0 +1,9 @@
+project:
+  name: "smart_pointers"
+
+build:
+  target: executable
+  source_dirs:
+    - src/
+  sources:
+    - "main.utp"

@@ -121,6 +121,8 @@ private:
 
   void emitConstructorCall(const FunctionCallNode *node,
                            llvm::Value *targetAddr);
+  llvm::Value *materializeByValueArg(const ExprNode *arg,
+                                     const Type *paramDeclTy);
   void emitArrayLiteralInit(llvm::Value *targetAddr, const Type *targetType,
                             const ExprNode *initExpr);
   llvm::AllocaInst *createEntryBlockAlloca(llvm::Type *type,
