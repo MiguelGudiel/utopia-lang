@@ -1899,7 +1899,17 @@ SemaResult TypeCheckPass::visit(const UnaryOpNode *node) {
     }
     resType = *exprType;
   } else if (node->op == "++" || node->op == "--") {
-    if (!(*exprType)->isNumeric()) {
+    /* Dereference the operand type: incrementing through a reference
+     * modifies the referenced value. */
+    const Type *opBase = *exprType;
+    if (opBase->isReferenceType()) {
+      opBase = static_cast<const ReferenceType *>(opBase)->getPointeeType();
+    } else if (opBase->getKind() == TypeKind::RValueReference) {
+      opBase =
+          static_cast<const RValueReferenceType *>(opBase)->getPointeeType();
+    }
+
+    if (!opBase->isNumeric()) {
       return ctx->reportError(node->line, node->column, node->length,
                               "Unary operator '" + std::string(node->op) +
                                   "' requires a numeric operand");
@@ -1909,7 +1919,7 @@ SemaResult TypeCheckPass::visit(const UnaryOpNode *node) {
           node->line, node->column, node->length,
           "Expression is not assignable (must be an l-value)");
     }
-    if ((*exprType)->isConstQualified() ||
+    if (opBase->isConstQualified() ||
         ((*exprType)->isReferenceType() &&
          static_cast<const ReferenceType *>(*exprType)
              ->getPointeeType()
@@ -1917,7 +1927,7 @@ SemaResult TypeCheckPass::visit(const UnaryOpNode *node) {
       return ctx->reportError(node->line, node->column, node->length,
                               "Cannot modify a constant variable");
     }
-    resType = *exprType;
+    resType = opBase;
   } else {
     return ctx->reportError(node->line, node->column, node->length,
                             "Unknown unary operator");
@@ -2840,7 +2850,31 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
           "Cannot access member of incomplete (opaque) type");
     }
 
-    if (auto field = recordTy->getField(node->memberName)) {
+    /* Field lookup walks up the inheritance chain so inherited fields are
+     * accessible through the instance ('obj.field'), not only via 'super'. */
+    const RecordType *fieldRecTy = recordTy;
+    const FieldInfo *field = nullptr;
+    while (fieldRecTy) {
+      field = fieldRecTy->getField(node->memberName);
+      if (field)
+        break;
+      if (fieldRecTy->getKind() == TypeKind::Class) {
+        const auto *classTy = static_cast<const ClassType *>(fieldRecTy);
+        if (!classTy->getBaseClass())
+          break;
+        const Type *baseUnqual =
+            classTy->getBaseClass()->getUnqualifiedType();
+        fieldRecTy =
+            llvm::dyn_cast_or_null<RecordType>(baseUnqual);
+        if (fieldRecTy && fieldRecTy->getKind() != TypeKind::Class)
+          break;
+      } else {
+        break;
+      }
+    }
+
+    if (field) {
+      const RecordType *declaringRecTy = fieldRecTy;
       bool isPub = field->isPublic;
       bool isProt = field->isProtected;
       bool canAccess = false;
@@ -2849,12 +2883,12 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
       if (isPub) {
         canAccess = true;
       } else if (isProt) {
-        if (currCtx == recordTy)
+        if (currCtx == declaringRecTy)
           canAccess = true;
         else if (currCtx) {
           const ClassType *currClass = llvm::dyn_cast<ClassType>(currCtx);
           while (currClass) {
-            if (currClass == recordTy) {
+            if (currClass == declaringRecTy) {
               canAccess = true;
               break;
             }
@@ -2870,7 +2904,7 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
           }
         }
       } else {
-        if (currCtx == recordTy) {
+        if (currCtx == declaringRecTy) {
           canAccess = true;
         }
       }
@@ -2987,6 +3021,7 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
             const_cast<MemberAccessNode *>(node)->isStaticFieldRef = true;
             const_cast<MemberAccessNode *>(node)->resolvedDecl = f;
             node->exprType = f->type;
+            node->isLValue = true;
             checkDeprecated(f, node);
             return f->type;
           }

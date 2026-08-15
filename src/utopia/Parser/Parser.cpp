@@ -2720,7 +2720,25 @@ DeclNode *Parser::parseDeclarationOrFunction(
     auto argsRef = astCtx.copyArray<ExprNode *>(args);
     auto namesRef = astCtx.copyArray<std::string_view>(argNames);
 
-    auto target = astCtx.create<VariableNode>(id, idCol, col, idLen);
+    /* The constructor-call initializer targets the declared type, e.g.
+     * 'Text t1("hello")' becomes 't1 = Text("hello")'. Template types keep
+     * their base name and template arguments so the Sema phase can resolve
+     * the instantiated constructor. */
+    ExprNode *target = nullptr;
+    const Type *baseType = nodeType->getUnqualifiedType();
+    if (auto *instTy = llvm::dyn_cast<TemplateInstType>(baseType)) {
+      auto *tVar =
+          astCtx.create<VariableNode>(instTy->getBaseName(), line, col, idLen);
+      tVar->templateArgs =
+          astCtx.copyArray<const Type *>(instTy->getTemplateArgs());
+      target = tVar;
+    } else {
+      std::string_view targetName =
+          astCtx.copyString(baseType->toString());
+      target =
+          astCtx.create<VariableNode>(targetName, idCol, col, idLen);
+    }
+
     auto callNode = astCtx.create<FunctionCallNode>(
         target, argsRef, namesRef, line, col, callEndCol - col);
     callNode->endLine = callEndLine;
