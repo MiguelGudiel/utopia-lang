@@ -31,6 +31,9 @@ const uint8* _getCurrentProjectRoot();
 @extern("UtopiaBuild_getOutputDir")
 const uint8* _getOutputDir();
 
+@extern("UtopiaBuild_getMainOutputDir")
+const uint8* _getMainOutputDir();
+
 @extern("UtopiaBuild_getTargetTriple")
 const uint8* _getTargetTriple();
 
@@ -46,6 +49,7 @@ const uint8* _getTargetArch();
 const String MAIN_PROJECT_ROOT = _getMainProjectRoot();
 const String CURRENT_PROJECT_ROOT = _getCurrentProjectRoot();
 const String OUTPUT_DIR = _getOutputDir();
+const String MAIN_OUTPUT_DIR = _getMainOutputDir();
 const String TARGET_TRIPLE = _getTargetTriple();
 const String BUILD_TYPE = _getBuildType();
 const String TARGET_OS = _getTargetOS();

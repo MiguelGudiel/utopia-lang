@@ -40,6 +40,7 @@ bool buildProject(const fs::path &projRoot, CompileOptions &parentOptions,
         (linkType == "shared") ? "shared_library" : "static_library";
 
     options.mainProjectRoot = parentOptions.mainProjectRoot;
+    options.mainOutputDir = parentOptions.mainOutputDir;
     if (config.outputDir.has_value()) {
       options.outputDir = (projRoot / config.outputDir.value()).string();
     } else {
@@ -55,6 +56,7 @@ bool buildProject(const fs::path &projRoot, CompileOptions &parentOptions,
     options.mainProjectRoot = projRoot.string();
     options.outputDir =
         (projRoot / config.outputDir.value_or("build")).string();
+    options.mainOutputDir = options.outputDir;
 
     for (const auto &m : globalOpts.cliMacros) {
       options.publicMacros.insert(m);

@@ -92,6 +92,11 @@ const char *UtopiaBuild_getOutputDir() {
   return g_CurrentBuildOptions ? g_CurrentBuildOptions->outputDir.c_str() : "";
 }
 
+const char *UtopiaBuild_getMainOutputDir() {
+  return g_CurrentBuildOptions ? g_CurrentBuildOptions->mainOutputDir.c_str()
+                               : "";
+}
+
 const char *UtopiaBuild_getTargetTriple() {
   return g_CurrentBuildOptions ? g_CurrentBuildOptions->targetTriple.c_str()
                                : "";
@@ -278,6 +283,8 @@ bool BuildScriptRunner::run(const std::filesystem::path &scriptPath,
   addSym("UtopiaBuild_getCurrentProjectRoot",
          (void *)UtopiaBuild_getCurrentProjectRoot);
   addSym("UtopiaBuild_getOutputDir", (void *)UtopiaBuild_getOutputDir);
+  addSym("UtopiaBuild_getMainOutputDir",
+         (void *)UtopiaBuild_getMainOutputDir);
   addSym("UtopiaBuild_getTargetTriple", (void *)UtopiaBuild_getTargetTriple);
   addSym("UtopiaBuild_getBuildType", (void *)UtopiaBuild_getBuildType);
   addSym("UtopiaBuild_getTargetOS", (void *)UtopiaBuild_getTargetOS);

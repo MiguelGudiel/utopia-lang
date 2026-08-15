@@ -19,6 +19,7 @@ struct CompileOptions {
   std::string mainProjectRoot;
   std::string currentProjectRoot;
   std::string outputDir;
+  std::string mainOutputDir;
   std::string stdlibRoot;
   std::string preludeRoot;
   std::string buildLibRoot;
