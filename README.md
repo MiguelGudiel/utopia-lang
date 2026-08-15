@@ -127,6 +127,7 @@ The `examples/` directory contains small, self-contained programs demonstrating 
 - Generics/templates
 - Custom annotations
 - Smart pointers with Rust-style auto-deref (`unique_ptr`, `shared_ptr`, `weak_ptr`)
+- Dart-style lambdas with inferred signatures (`() => 5`, `(x) => x * 2`)
 
 Each example is a standalone project with its own `build.yaml` manifest.
 

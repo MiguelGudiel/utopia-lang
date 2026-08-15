@@ -68,6 +68,11 @@ void EffectAnalyzer::visit(const ImplicitCastNode *n) {
   dispatch(n->expr);
 }
 
+void EffectAnalyzer::visit(const LambdaNode *n) {
+  /* A lambda defers its effects until called; the body's effects are tracked
+   * by the synthesized function's own analysis. */
+}
+
 void EffectAnalyzer::visit(const ForNode *n) {
   potentiallyInfinite = true;
   if (n->initStatement)

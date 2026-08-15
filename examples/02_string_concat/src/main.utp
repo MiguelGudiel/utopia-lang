@@ -5,13 +5,14 @@
 int main() {
   String greeting = "Welcome to ";
   String language = "Utopia Language!";
-  
-  /* Concatenate strings using the overloaded '+' operator */
+
+  /* '+' is overloaded for String, so operands of different scopes
+   * concatenate into a new String. */
   String message = greeting + language;
-  
-  /* Access the raw C-string for the standard print function */
+
+  /* c_str() hands the raw buffer to printf-style functions. */
   print("%s\n", message.c_str());
   print("Total string length: %d\n", message.length());
-  
+
   return 0;
 }

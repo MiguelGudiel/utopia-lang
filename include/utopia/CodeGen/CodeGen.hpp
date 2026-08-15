@@ -65,6 +65,7 @@ public:
   llvm::Value *visit(const TypeLiteralNode *node);
   llvm::Value *visit(const ArrayLiteralNode *node);
   llvm::Value *visit(const NullNode *node);
+  llvm::Value *visit(const LambdaNode *node);
   llvm::Value *visit(const EnumDeclNode *node);
   llvm::Value *visit(const EnumMemberNode *node);
   llvm::Value *visit(const ImplicitCastNode *node);
@@ -82,6 +83,12 @@ private:
   const FunctionDeclNode *currentFunc = nullptr;
   llvm::AllocaInst *lastTemporaryAlloca = nullptr;
   std::string currentFilePath;
+
+  /* CodeGen-context scope depth at function entry. Return/cleanup emission
+   * must never touch scopes that belong to an enclosing function (e.g. when a
+   * lambda's synthesized function is emitted while another function is being
+   * generated). */
+  std::vector<size_t> funcScopeStarts;
 
   std::unordered_set<const RecordType *> generatingRecords;
 
@@ -128,6 +135,8 @@ private:
   llvm::AllocaInst *createEntryBlockAlloca(llvm::Type *type,
                                            const std::string &varName);
   void emitDefaultInitialization(llvm::Value *ptr, const Type *type);
+  void emitArrayDefaultConstruct(llvm::Value *ptr, const Type *arrayType,
+                                 const FunctionDeclNode *ctor);
   void emitCleanupCall(llvm::Value *ptr, const FunctionDeclNode *dtor,
                        const Type *type = nullptr);
   void emitScopeCleanups();

@@ -158,6 +158,13 @@ bool Parser::isDeclaration() {
       return true;
     }
 
+    /* 'Name Function(...)' is a function pointer type declaration (e.g.
+     * 'String Function() f = ...'); 'Function' is a keyword so this cannot
+     * be an expression. */
+    if (nextTok == TokenType::FUNCTION_KW) {
+      return true;
+    }
+
     if (nextTok == TokenType::AMPERSAND || nextTok == TokenType::STAR ||
         nextTok == TokenType::LBRACKET || nextTok == TokenType::LOGICAL_AND) {
 
@@ -599,7 +606,8 @@ const Type *Parser::applyArrayDeclarator(const Type *baseType) {
 }
 
 std::vector<ParamDeclNode *>
-Parser::parseParameterList(bool &isVariadic, bool &hasTrailingComma) {
+Parser::parseParameterList(bool &isVariadic, bool &hasTrailingComma,
+                           bool allowUntypedParams) {
   std::vector<ParamDeclNode *> params;
   isVariadic = false;
   hasTrailingComma = false;
@@ -649,11 +657,26 @@ Parser::parseParameterList(bool &isVariadic, bool &hasTrailingComma) {
       throw ParseException();
     }
 
-    const char *typeStart = currentToken().value.data();
-    const Type *pType = parseType();
-    const char *typeEnd =
-        tokens[cursor - 1].value.data() + tokens[cursor - 1].value.length();
-    std::string_view rawTypeStr(typeStart, typeEnd - typeStart);
+    const Type *pType = nullptr;
+    std::string_view rawTypeStr;
+
+    /* Untyped parameters (Dart-style lambdas): an identifier not followed by
+     * another identifier or type modifier is the parameter name itself. */
+    bool isUntyped =
+        allowUntypedParams && currentToken().type == TokenType::IDENTIFIER;
+    if (isUntyped) {
+      TokenType nxt = peekToken().type;
+      isUntyped = (nxt == TokenType::COMMA || nxt == TokenType::RPAREN ||
+                   nxt == TokenType::ASSIGN || nxt == TokenType::LBRACE);
+    }
+
+    if (!isUntyped) {
+      const char *typeStart = currentToken().value.data();
+      pType = parseType();
+      const char *typeEnd =
+          tokens[cursor - 1].value.data() + tokens[cursor - 1].value.length();
+      rawTypeStr = std::string_view(typeStart, typeEnd - typeStart);
+    }
 
     std::string_view pName = currentToken().value;
     int idCol = currentToken().column;
@@ -3124,9 +3147,120 @@ ExprNode *Parser::parsePostfix() {
   return expr;
 }
 
+bool Parser::looksLikeLambdaParams(size_t openOffset) const {
+  TokenType firstTok = peekToken(openOffset + 1).type;
+  if (firstTok == TokenType::RPAREN)
+    return true; /* () */
+  if (firstTok == TokenType::TYPE_KW || firstTok == TokenType::CONST_KW ||
+      firstTok == TokenType::LBRACE || firstTok == TokenType::REQUIRED_KW)
+    return true; /* (int a) / (const uint8* s) / ({int x}) / ({required bool b}) */
+  if (firstTok == TokenType::IDENTIFIER) {
+    TokenType secondTok = peekToken(openOffset + 2).type;
+    if (secondTok == TokenType::IDENTIFIER || /* (Foo a) */
+        secondTok == TokenType::COMMA ||      /* (a, b) */
+        secondTok == TokenType::RPAREN ||     /* (a) */
+        secondTok == TokenType::STAR ||       /* (Foo* p) */
+        secondTok == TokenType::AMPERSAND ||  /* (Foo& r) */
+        secondTok == TokenType::LOGICAL_AND ||/* (Foo&& r) */
+        secondTok == TokenType::LT ||         /* (Foo<Bar> p) */
+        secondTok == TokenType::RSHIFT) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool Parser::lambdaFollowedByBody(size_t openOffset) const {
+  /* Scan to the balanced ')' and check that it is followed by '=>' or '{'. */
+  int depth = 0;
+  size_t i = openOffset;
+  while (i < tokens.size()) {
+    TokenType t = peekToken(i).type;
+    if (t == TokenType::LPAREN || t == TokenType::LT ||
+        t == TokenType::LBRACKET || t == TokenType::LBRACE) {
+      depth++;
+    } else if (t == TokenType::RPAREN || t == TokenType::GT ||
+               t == TokenType::RBRACKET || t == TokenType::RBRACE) {
+      depth--;
+      if (depth <= 0)
+        break;
+    }
+    i++;
+  }
+  if (i + 1 >= tokens.size())
+    return false;
+  TokenType next = peekToken(i + 1).type;
+  return next == TokenType::ARROW || next == TokenType::LBRACE;
+}
+
+std::vector<ParamDeclNode *> Parser::parseLambdaParams() {
+  bool isVariadic = false;
+  bool hasTrailingComma = false;
+  int vLine = currentToken().line;
+  int vCol = currentToken().column;
+  auto params =
+      parseParameterList(isVariadic, hasTrailingComma, /*allowUntyped=*/true);
+  if (isVariadic) {
+    reportError(vLine, vCol, 3,
+                "Variadic lambda parameters are not supported.");
+    throw ParseException();
+  }
+  return params;
+}
+
+ExprNode *Parser::parseLambda(const Type *explicitReturnType) {
+  int line = currentToken().line;
+  int col = currentToken().column;
+
+  expect(TokenType::LPAREN, "Expected '(' to start lambda parameters");
+  auto params = parseLambdaParams();
+  expect(TokenType::RPAREN, "Expected ')' after lambda parameters");
+
+  auto lambda = astCtx.create<LambdaNode>(line, col, 1);
+  lambda->explicitReturnType = explicitReturnType;
+  lambda->params = astCtx.copyArray<ParamDeclNode *>(params);
+
+  int endLine = currentToken().line;
+  int endCol = currentToken().column + (int)currentToken().value.length();
+
+  if (match(TokenType::ARROW)) {
+    auto expr = parseExpression();
+    endLine = currentToken().line;
+    endCol = currentToken().column + (int)currentToken().value.length();
+
+    /* Unlike function declarations, the trailing ';' belongs to the
+     * enclosing statement, not to the lambda expression itself. */
+    lambda->isExpressionBody = true;
+    lambda->exprBody = expr;
+    lambda->length = endCol - col;
+    lambda->endLine = endLine;
+    return lambda;
+  }
+
+  auto block = parseBlock();
+  lambda->body = block;
+  lambda->length = block->column + block->length - col;
+  lambda->endLine = block->endLine;
+  return lambda;
+}
+
 ExprNode *Parser::parsePrimary() {
   int line = currentToken().line;
   int col = currentToken().column;
+
+  /* Lambdas: '() => e', '(int a, int b) { ... }', '(a, b) => a + b', and
+   * explicit-return variants 'int (int a) => a + 1'. */
+  if (currentToken().type == TokenType::LPAREN &&
+      lambdaFollowedByBody(0) && looksLikeLambdaParams(0)) {
+    return parseLambda(nullptr);
+  }
+  if ((currentToken().type == TokenType::TYPE_KW ||
+       currentToken().type == TokenType::IDENTIFIER) &&
+      peekToken().type == TokenType::LPAREN && lambdaFollowedByBody(1) &&
+      looksLikeLambdaParams(1)) {
+    const Type *retTy = parseType();
+    return parseLambda(retTy);
+  }
 
   if (currentToken().type == TokenType::TYPE_KW) {
     const Type *t = parseType();

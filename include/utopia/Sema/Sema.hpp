@@ -54,6 +54,7 @@ public:
   void visit(const UnaryOpNode *) {}
   void visit(const BinaryOpNode *) {}
   void visit(const TernaryOpNode *) {}
+  void visit(const LambdaNode *) {}
   void visit(const AssignNode *) {}
   void visit(const BlockNode *) {}
   void visit(const FunctionCallNode *) {}
@@ -143,6 +144,14 @@ public:
   SemaResult visit(const EnumDeclNode *node);
   SemaResult visit(const EnumMemberNode *node);
   SemaResult visit(const ImplicitCastNode *node);
+  SemaResult visit(const LambdaNode *node);
+
+  /* Re-types unresolved lambda arguments against the matched parameter
+   * signatures. Returns an error result if a lambda cannot be resolved. */
+  SemaResult resolveLambdaArgs(const FunctionDeclNode *fn,
+                               const std::vector<ExprNode *> &resolvedArgs);
+  SemaResult resolveLambdaArgs(const FunctionType *fTy,
+                               const std::vector<ExprNode *> &resolvedArgs);
   SemaResult visit(const NamespaceDeclNode *node);
   SemaResult visit(const UsingNode *node);
 };
@@ -177,6 +186,7 @@ public:
   void visit(const UnaryOpNode *node);
   void visit(const BinaryOpNode *node);
   void visit(const TernaryOpNode *node);
+  void visit(const LambdaNode *) {}
   void visit(const FunctionCallNode *node);
   void visit(const CastNode *node);
   void visit(const MemberAccessNode *node);

@@ -46,6 +46,9 @@ public:
     case NodeKind::TernaryOp:
       return static_cast<Derived *>(this)->visit(
           static_cast<const TernaryOpNode *>(node));
+    case NodeKind::Lambda:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const LambdaNode *>(node));
     case NodeKind::Module:
       return static_cast<Derived *>(this)->visit(
           static_cast<const ModuleNode *>(node));
@@ -155,6 +158,16 @@ public:
                 << static_cast<int>(node->kind) << '\n';
       throw std::runtime_error("ASTVisitor: Unhandled NodeKind: " +
                                std::to_string(static_cast<int>(node->kind)));
+    }
+  }
+
+  /* Default lambda handler: passes that do not need lambda internals treat
+   * them as opaque expressions. Specialized passes override this. */
+  R visit(const LambdaNode *) {
+    if constexpr (std::is_void_v<R>) {
+      return;
+    } else {
+      return R{};
     }
   }
 };

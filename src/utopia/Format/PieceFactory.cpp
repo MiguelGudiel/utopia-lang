@@ -698,6 +698,32 @@ Piece *PieceFactory::visit(const ParamDeclNode *node) {
   return p;
 }
 
+Piece *PieceFactory::visit(const LambdaNode *node) {
+  std::vector<Piece *> pieces;
+
+  if (node->explicitReturnType) {
+    pieces.push_back(
+        create<TextPiece>(node->explicitReturnType->toString() + " "));
+  }
+
+  std::vector<Piece *> params;
+  for (const auto *p : node->params) {
+    params.push_back(dispatch(p));
+  }
+  pieces.push_back(create<ListPiece>(create<TextPiece>("("), std::move(params),
+                                     create<TextPiece>(")")));
+
+  if (node->isExpressionBody && node->exprBody) {
+    pieces.push_back(create<TextPiece>(" => "));
+    pieces.push_back(dispatchExpr(node->exprBody));
+  } else if (node->body) {
+    pieces.push_back(create<TextPiece>(" "));
+    pieces.push_back(dispatch(node->body));
+  }
+
+  return create<ConcatPiece>(pieces);
+}
+
 Piece *PieceFactory::visit(const FunctionDeclNode *node) {
   std::vector<Piece *> sigParts;
 

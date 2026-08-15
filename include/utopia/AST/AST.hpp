@@ -50,6 +50,7 @@ enum class NodeKind : uint8_t {
   ImplicitCast,
   TypeLiteral,
   TernaryOp,
+  Lambda,
   NamespaceDecl,
   Using
 };
@@ -121,10 +122,42 @@ struct ExprNode : public ASTNode {
     case NodeKind::Null:
     case NodeKind::ImplicitCast:
     case NodeKind::TypeLiteral:
+    case NodeKind::Lambda:
       return true;
     default:
       return false;
     }
+  }
+};
+
+struct ParamDeclNode;
+struct BlockNode;
+struct FunctionDeclNode;
+struct FunctionCallNode;
+
+struct LambdaNode : public ExprNode {
+  /* Parameter list. Parameters may carry a null 'type' when the type is
+   * inferred from the expected function signature (Dart-style lambdas). */
+  llvm::ArrayRef<ParamDeclNode *> params;
+
+  /* Body: either an expression (Dart '=> expr') or a statement block. */
+  ExprNode *exprBody = nullptr;
+  BlockNode *body = nullptr;
+  bool isExpressionBody = false;
+
+  /* Optional explicit return type: 'int (int a) => a + 1'. */
+  const Type *explicitReturnType = nullptr;
+
+  /* Resolved during semantic analysis. */
+  const FunctionDeclNode *synthesizedFunc = nullptr;
+  std::string_view mangledName;
+  bool unresolved = false;
+
+  LambdaNode(int l, int c, int len)
+      : ExprNode(NodeKind::Lambda, l, c, len) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Lambda;
   }
 };
 

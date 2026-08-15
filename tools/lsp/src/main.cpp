@@ -206,6 +206,15 @@ public:
   void visit(const ArraySubscriptNode *) {}
   void visit(const MemberAccessNode *) {}
   void visit(const FunctionCallNode *) {}
+  void visit(const LambdaNode *n) {
+    for (auto *p : n->params)
+      dispatch(p);
+    if (n->isExpressionBody && n->exprBody) {
+      dispatch(n->exprBody);
+    } else if (n->body) {
+      dispatch(n->body);
+    }
+  }
   void visit(const CastNode *) {}
   void visit(const NewExprNode *) {}
   void visit(const DeleteExprNode *) {}
@@ -2816,6 +2825,15 @@ public:
       dispatch(n->value);
   }
   void visit(const UnaryOpNode *n) { dispatch(n->expr); }
+  void visit(const LambdaNode *n) {
+    for (auto *p : n->params)
+      dispatch(p);
+    if (n->isExpressionBody && n->exprBody) {
+      dispatch(n->exprBody);
+    } else if (n->body) {
+      dispatch(n->body);
+    }
+  }
   void visit(const BinaryOpNode *n) {
     dispatch(n->left);
     dispatch(n->right);

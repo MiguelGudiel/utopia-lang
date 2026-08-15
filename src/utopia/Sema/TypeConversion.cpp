@@ -180,18 +180,26 @@ bool canImplicitlyCast(const Type *from, const Type *to,
       }
 
       /* Enforce strict parameter structural equality for function pointer
-       * assignments */
+       * assignments. Untyped lambda placeholders ('auto' components) act as
+       * wildcards so an unresolved lambda matches any expected signature. */
       if (auto *fF = llvm::dyn_cast<FunctionType>(fromPointee)) {
         if (auto *fT = llvm::dyn_cast<FunctionType>(toPointee)) {
+          auto isAuto = [](const Type *t) {
+            return t->getUnqualifiedType()->getKind() == TypeKind::Auto;
+          };
           if (fF->getReturnType()->getUnqualifiedType() !=
-              fT->getReturnType()->getUnqualifiedType())
-            return false;
+              fT->getReturnType()->getUnqualifiedType()) {
+            if (!isAuto(fF->getReturnType()))
+              return false;
+          }
           if (fF->getParamTypes().size() != fT->getParamTypes().size())
             return false;
           for (size_t i = 0; i < fF->getParamTypes().size(); i++) {
             if (fF->getParamTypes()[i]->getUnqualifiedType() !=
-                fT->getParamTypes()[i]->getUnqualifiedType())
-              return false;
+                fT->getParamTypes()[i]->getUnqualifiedType()) {
+              if (!isAuto(fF->getParamTypes()[i]))
+                return false;
+            }
           }
           return true;
         }

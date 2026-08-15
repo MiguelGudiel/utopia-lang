@@ -2206,8 +2206,16 @@ llvm::Value *CodeGen::visit(const BinaryOpNode *node) {
           }
         }
       } else {
+        const Type *paramDeclTy = nullptr;
+        if (opFunc->params.size() > 0) {
+          paramDeclTy = opFunc->params[0]->type;
+        }
         lastTemporaryAlloca = nullptr;
-        rhsVal = dispatch(node->right);
+        rhsVal = paramDeclTy ? materializeByValueArg(node->right, paramDeclTy)
+                             : nullptr;
+        if (!rhsVal) {
+          rhsVal = dispatch(node->right);
+        }
         lastTemporaryAlloca = nullptr;
 
         llvm::Type *paramTy = func->getFunctionType()->getParamType(1);
@@ -2237,8 +2245,16 @@ llvm::Value *CodeGen::visit(const BinaryOpNode *node) {
           }
         }
       } else {
+        const Type *paramDeclTy = nullptr;
+        if (opFunc->params.size() > 0) {
+          paramDeclTy = opFunc->params[0]->type;
+        }
         lastTemporaryAlloca = nullptr;
-        lhsVal = dispatch(node->left);
+        lhsVal = paramDeclTy ? materializeByValueArg(node->left, paramDeclTy)
+                             : nullptr;
+        if (!lhsVal) {
+          lhsVal = dispatch(node->left);
+        }
         lastTemporaryAlloca = nullptr;
 
         llvm::Type *paramTyL = func->getFunctionType()->getParamType(0);
@@ -2268,8 +2284,16 @@ llvm::Value *CodeGen::visit(const BinaryOpNode *node) {
           }
         }
       } else {
+        const Type *paramDeclTy = nullptr;
+        if (opFunc->params.size() > 1) {
+          paramDeclTy = opFunc->params[1]->type;
+        }
         lastTemporaryAlloca = nullptr;
-        rhsVal = dispatch(node->right);
+        rhsVal = paramDeclTy ? materializeByValueArg(node->right, paramDeclTy)
+                             : nullptr;
+        if (!rhsVal) {
+          rhsVal = dispatch(node->right);
+        }
         lastTemporaryAlloca = nullptr;
 
         llvm::Type *paramTyR = func->getFunctionType()->getParamType(1);
@@ -2608,6 +2632,7 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
      * future. */
     if (requiresDynamicInit) {
       llvm::BasicBlock *savedInsertBlock = builder.GetInsertBlock();
+      auto savedDebugLoc = builder.getCurrentDebugLocation();
       llvm::BasicBlock *contBB = nullptr;
       llvm::GlobalVariable *guardVar = nullptr;
 
@@ -2755,8 +2780,13 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
         builder.CreateBr(contBB);
 
         builder.SetInsertPoint(contBB);
+        builder.SetCurrentDebugLocation(savedDebugLoc);
       } else {
         diEmitter.popScope();
+        /* Restore the caller's debug location so instructions emitted after
+         * the dynamic init block are not annotated with the init function's
+         * scope. */
+        builder.SetCurrentDebugLocation(savedDebugLoc);
         if (savedInsertBlock) {
           builder.SetInsertPoint(savedInsertBlock);
         } else {
@@ -2890,7 +2920,9 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
       }
     }
   } else {
-    /* Leave arrays strictly uninitialized when declared without initializers */
+    /* Scalar arrays keep C-style default-init; record arrays have their
+     * elements default-constructed so invariants hold before use and before
+     * the scope-end destructor loop runs. */
     if (node->type->getKind() != TypeKind::Array) {
       emitDefaultInitialization(alloca, node->type);
 
@@ -2902,6 +2934,7 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
         if (decl) {
           const FunctionDeclNode *emptyCtor = nullptr;
           llvm::ArrayRef<FunctionDeclNode *> ctors;
+
           if (decl->kind == NodeKind::ClassDecl)
             ctors = static_cast<const ClassDeclNode *>(decl)->constructors;
           else if (decl->kind == NodeKind::StructDecl)
@@ -2918,6 +2951,41 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
           if (emptyCtor) {
             llvm::Function *ctorFunc = getOrCreateFunction(emptyCtor);
             builder.CreateCall(ctorFunc, {alloca});
+          }
+        }
+      }
+    } else {
+      const Type *elemUnqual = baseUnqualTy;
+      while (elemUnqual->getKind() == TypeKind::Array) {
+        elemUnqual = static_cast<const ArrayType *>(elemUnqual)
+                         ->getElementType()
+                         ->getUnqualifiedType();
+      }
+
+      if (elemUnqual->getKind() == TypeKind::Class ||
+          elemUnqual->getKind() == TypeKind::Struct ||
+          elemUnqual->getKind() == TypeKind::Union) {
+        auto *recTy = static_cast<const RecordType *>(elemUnqual);
+        auto *decl = recTy->getDeclaration();
+        if (decl) {
+          const FunctionDeclNode *emptyCtor = nullptr;
+          llvm::ArrayRef<FunctionDeclNode *> ctors;
+
+          if (decl->kind == NodeKind::ClassDecl)
+            ctors = static_cast<const ClassDeclNode *>(decl)->constructors;
+          else if (decl->kind == NodeKind::StructDecl)
+            ctors = static_cast<const StructDeclNode *>(decl)->constructors;
+          else if (decl->kind == NodeKind::UnionDecl)
+            ctors = static_cast<const UnionDeclNode *>(decl)->constructors;
+
+          for (auto *ctor : ctors) {
+            if (ctor->params.empty()) {
+              emptyCtor = ctor;
+              break;
+            }
+          }
+          if (emptyCtor) {
+            emitArrayDefaultConstruct(alloca, node->type, emptyCtor);
           }
         }
       }
@@ -2969,8 +3037,17 @@ llvm::Value *CodeGen::visit(const AssignNode *node) {
         }
       }
     } else {
+      const Type *paramDeclTy = nullptr;
+      if (node->overloadedOperator->params.size() > 0) {
+        paramDeclTy = node->overloadedOperator->params[0]->type;
+      }
       lastTemporaryAlloca = nullptr;
-      rhsVal = dispatch(node->value);
+      rhsVal =
+          paramDeclTy ? materializeByValueArg(node->value, paramDeclTy)
+                      : nullptr;
+      if (!rhsVal) {
+        rhsVal = dispatch(node->value);
+      }
       lastTemporaryAlloca = nullptr;
 
       llvm::Type *paramTy = func->getFunctionType()->getParamType(1);
@@ -3117,6 +3194,27 @@ llvm::Value *CodeGen::visit(const NullNode *node) {
   return llvm::ConstantPointerNull::get(builder.getPtrTy());
 }
 
+llvm::Value *CodeGen::visit(const LambdaNode *node) {
+  if (!node->synthesizedFunc || !node->synthesizedFunc->body)
+    return nullptr;
+
+  /* Emit the synthesized function once, then yield its address. */
+  llvm::Function *func = getOrCreateFunction(node->synthesizedFunc);
+  if (func->empty()) {
+    /* Emitting a function body clears the builder's insertion point, so the
+     * enclosing function's position must be restored afterwards. Likewise
+     * the debug location is restored: instructions emitted by the lambda
+     * would otherwise carry a location scoped to the lambda's subprogram,
+     * which fails IR verification. */
+    auto savedIP = builder.saveIP();
+    auto savedDebugLoc = builder.getCurrentDebugLocation();
+    dispatch(node->synthesizedFunc);
+    builder.restoreIP(savedIP);
+    builder.SetCurrentDebugLocation(savedDebugLoc);
+  }
+  return func;
+}
+
 llvm::Value *CodeGen::visit(const ParamDeclNode *node) { return nullptr; }
 
 llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
@@ -3131,6 +3229,8 @@ llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
 
   const FunctionDeclNode *prevFunc = currentFunc;
   currentFunc = node;
+
+  funcScopeStarts.push_back(cgCtx.getAllScopes().size());
 
   diEmitter.emitFunctionStart(*this, func, node);
 
@@ -3284,6 +3384,7 @@ llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
 
   builder.ClearInsertionPoint();
   currentFunc = prevFunc;
+  funcScopeStarts.pop_back();
 
   diEmitter.emitFunctionEnd();
 
@@ -3583,7 +3684,43 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
 
     unsigned argIdx = 0;
     for (const auto &arg : node->args) {
-      llvm::Value *argVal = dispatch(arg);
+      llvm::Value *argVal = nullptr;
+
+      if (argIdx < llvmFTy->getNumParams()) {
+        const Type *paramDeclTy = fTy->getParamTypes()[argIdx];
+        bool isRefParam = paramDeclTy->isReferenceType() ||
+                          paramDeclTy->getKind() == TypeKind::RValueReference;
+
+        if (isRefParam) {
+          argVal = getLValue(arg);
+          if (!argVal) {
+            lastTemporaryAlloca = nullptr;
+            llvm::Value *val = dispatch(arg);
+            if (lastTemporaryAlloca) {
+              argVal = lastTemporaryAlloca;
+              lastTemporaryAlloca = nullptr;
+            } else {
+              argVal = createEntryBlockAlloca(val->getType(), "tmp.op.arg");
+              builder.CreateStore(val, argVal);
+            }
+          }
+        } else {
+          /* By-value records with a custom destructor must be copied into a
+           * fresh temporary so the callee owns an independent instance;
+           * bitwise transfer would make both sides free the same buffer. */
+          argVal = materializeByValueArg(arg, paramDeclTy);
+          if (!argVal) {
+            lastTemporaryAlloca = nullptr;
+            argVal = dispatch(arg);
+            lastTemporaryAlloca = nullptr;
+          }
+        }
+      }
+
+      if (!argVal) {
+        argVal = dispatch(arg);
+      }
+
       if (argIdx < llvmFTy->getNumParams()) {
         argVal = createImplicitCast(argVal, llvmFTy->getParamType(argIdx));
       }
@@ -3736,18 +3873,22 @@ llvm::Value *CodeGen::visit(const ReturnNode *node) {
     }
   }
 
+  /* Emit cleanups and lifetime ends only for scopes belonging to the current
+   * function; enclosing functions' scopes (e.g. when emitting a lambda's
+   * synthesized function) must not be closed here. */
+  size_t scopeStart = funcScopeStarts.empty() ? 0 : funcScopeStarts.back();
   auto allScopes = cgCtx.getAllScopes();
-  for (auto scopeIt = allScopes.rbegin(); scopeIt != allScopes.rend();
-       ++scopeIt) {
-    for (auto cleanupIt = scopeIt->cleanups.rbegin();
-         cleanupIt != scopeIt->cleanups.rend(); ++cleanupIt) {
+  for (size_t si = scopeStart; si < allScopes.size(); ++si) {
+    const auto &scope = allScopes[si];
+    for (auto cleanupIt = scope.cleanups.rbegin();
+         cleanupIt != scope.cleanups.rend(); ++cleanupIt) {
       emitCleanupCall(cleanupIt->instancePtr, cleanupIt->destructor,
                       cleanupIt->type);
     }
 
     /* Ensure deterministic lifetime closure upon early returns */
-    for (auto lifeIt = scopeIt->lifetimes.rbegin();
-         lifeIt != scopeIt->lifetimes.rend(); ++lifeIt) {
+    for (auto lifeIt = scope.lifetimes.rbegin();
+         lifeIt != scope.lifetimes.rend(); ++lifeIt) {
       emitLifetimeEnd(lifeIt->allocaInst, lifeIt->size);
     }
   }
@@ -3974,87 +4115,158 @@ llvm::Value *CodeGen::visit(const NewExprNode *node) {
   llvm::Value *typedMem =
       builder.CreateBitCast(userMem, getLLVMType(node->exprType));
 
-  if (node->hasParens) {
-    if (node->arraySize) {
+  if (node->arraySize) {
+    if (node->hasParens) {
       llvm::Value *memsetSize = builder.CreateSub(sizeVal, builder.getInt64(8));
       builder.CreateMemSet(userMem, builder.getInt8(0), memsetSize,
                            llvm::Align(1));
-    } else {
-      emitDefaultInitialization(typedMem, node->allocatedType);
+    }
 
-      if (node->resolvedConstructor) {
-        llvm::Function *ctorFunc =
-            getOrCreateFunction(node->resolvedConstructor);
-        std::vector<llvm::Value *> argsArgs;
-        argsArgs.push_back(typedMem);
+    /* Default-construct every element of a record array so its state is
+     * valid before use and before 'delete[]' runs the element destructors. */
+    const Type *elemUnqual = node->allocatedType->getUnqualifiedType();
+    const FunctionDeclNode *elemCtor = nullptr;
+    if (elemUnqual->getKind() == TypeKind::Class ||
+        elemUnqual->getKind() == TypeKind::Struct ||
+        elemUnqual->getKind() == TypeKind::Union) {
+      auto *recTy = static_cast<const RecordType *>(elemUnqual);
+      if (auto *decl = recTy->getDeclaration()) {
+        llvm::ArrayRef<FunctionDeclNode *> ctors;
+        if (decl->kind == NodeKind::ClassDecl)
+          ctors = static_cast<const ClassDeclNode *>(decl)->constructors;
+        else if (decl->kind == NodeKind::StructDecl)
+          ctors = static_cast<const StructDeclNode *>(decl)->constructors;
+        else if (decl->kind == NodeKind::UnionDecl)
+          ctors = static_cast<const UnionDeclNode *>(decl)->constructors;
 
-        unsigned llArgIdx = 1;
-        unsigned astParamIdx = 0;
-
-        for (const auto &arg : node->args) {
-          llvm::Value *argVal = nullptr;
-
-          bool isRefParam = false;
-          if (node->resolvedConstructor &&
-              astParamIdx < node->resolvedConstructor->params.size()) {
-            isRefParam = node->resolvedConstructor->params[astParamIdx]
-                             ->type->isReferenceType() ||
-                         node->resolvedConstructor->params[astParamIdx]
-                                 ->type->getKind() == TypeKind::RValueReference;
+        for (const auto *ctor : ctors) {
+          if (ctor->params.empty()) {
+            elemCtor = ctor;
+            break;
           }
-
-          if (isRefParam) {
-            argVal = getLValue(arg);
-            if (!argVal) {
-              lastTemporaryAlloca = nullptr;
-              llvm::Value *val = dispatch(arg);
-              if (lastTemporaryAlloca) {
-                argVal = lastTemporaryAlloca;
-                lastTemporaryAlloca = nullptr;
-              } else {
-                argVal = createEntryBlockAlloca(val->getType(), "tmp.op.arg");
-                builder.CreateStore(val, argVal);
-              }
-            }
-          } else {
-            const Type *paramDeclTy = nullptr;
-            if (node->resolvedConstructor &&
-                astParamIdx < node->resolvedConstructor->params.size()) {
-              paramDeclTy =
-                  node->resolvedConstructor->params[astParamIdx]->type;
-            }
-
-            argVal = paramDeclTy ? materializeByValueArg(arg, paramDeclTy)
-                                 : nullptr;
-
-            if (!argVal) {
-              lastTemporaryAlloca = nullptr;
-              argVal = dispatch(arg);
-              lastTemporaryAlloca = nullptr;
-            }
-
-            if (ctorFunc && argVal && llArgIdx < ctorFunc->arg_size()) {
-              llvm::Type *paramTy =
-                  ctorFunc->getFunctionType()->getParamType(llArgIdx);
-              argVal = createImplicitCast(argVal, paramTy);
-            }
-          }
-
-          if (!argVal) {
-            diags.report({DiagLevel::Error, arg->line, arg->column, arg->length,
-                          "Failed to evaluate argument for constructor call.",
-                          currentFilePath});
-            return nullptr;
-          }
-          argsArgs.push_back(argVal);
-          llArgIdx++;
-          astParamIdx++;
         }
-
-        builder.CreateCall(ctorFunc, argsArgs);
       }
     }
-  }
+
+    if (elemCtor) {
+      llvm::Function *ctorFunc = getOrCreateFunction(elemCtor);
+      llvm::Function *theFunction = builder.GetInsertBlock()->getParent();
+
+      llvm::BasicBlock *condBB =
+          llvm::BasicBlock::Create(ctx, "new.array.cond", theFunction);
+      llvm::BasicBlock *bodyBB =
+          llvm::BasicBlock::Create(ctx, "new.array.body", theFunction);
+      llvm::BasicBlock *endBB =
+          llvm::BasicBlock::Create(ctx, "new.array.end", theFunction);
+
+      llvm::IRBuilder<> tmpB(&theFunction->getEntryBlock(),
+                             theFunction->getEntryBlock().begin());
+      llvm::AllocaInst *idxAlloca =
+          tmpB.CreateAlloca(builder.getInt64Ty(), nullptr, "new.idx");
+
+      builder.CreateStore(builder.getInt64(0), idxAlloca);
+      builder.CreateBr(condBB);
+
+      builder.SetInsertPoint(condBB);
+      llvm::Value *idxVal =
+          builder.CreateLoad(builder.getInt64Ty(), idxAlloca);
+      llvm::Value *cmp = builder.CreateICmpULT(idxVal, arrSize64);
+      builder.CreateCondBr(cmp, bodyBB, endBB);
+
+      builder.SetInsertPoint(bodyBB);
+      llvm::Value *elemPtr = builder.CreateInBoundsGEP(
+          getLLVMType(elemUnqual), typedMem, idxVal);
+      builder.CreateCall(ctorFunc, {elemPtr});
+      llvm::Value *nextIdx = builder.CreateAdd(idxVal, builder.getInt64(1));
+      builder.CreateStore(nextIdx, idxAlloca);
+      builder.CreateBr(condBB);
+
+      builder.SetInsertPoint(endBB);
+    }
+  } else if (node->hasParens || node->resolvedConstructor) {
+    emitDefaultInitialization(typedMem, node->allocatedType);
+
+    if (node->resolvedConstructor) {
+      llvm::Function *ctorFunc =
+          getOrCreateFunction(node->resolvedConstructor);
+      std::vector<llvm::Value *> argsArgs;
+      argsArgs.push_back(typedMem);
+
+      unsigned llArgIdx = 1;
+      unsigned astParamIdx = 0;
+
+      for (const auto &arg : node->args) {
+        llvm::Value *argVal = nullptr;
+
+        bool isRefParam = false;
+        if (node->resolvedConstructor &&
+            astParamIdx < node->resolvedConstructor->params.size()) {
+          isRefParam = node->resolvedConstructor->params[astParamIdx]
+                           ->type->isReferenceType() ||
+                       node->resolvedConstructor->params[astParamIdx]
+                               ->type->getKind() == TypeKind::RValueReference;
+        }
+
+        if (isRefParam) {
+          argVal = getLValue(arg);
+          if (!argVal) {
+            lastTemporaryAlloca = nullptr;
+            llvm::Value *val = dispatch(arg);
+            if (lastTemporaryAlloca) {
+              argVal = lastTemporaryAlloca;
+              lastTemporaryAlloca = nullptr;
+            } else {
+              argVal = createEntryBlockAlloca(val->getType(), "tmp.op.arg");
+              builder.CreateStore(val, argVal);
+            }
+          }
+        } else {
+          const Type *paramDeclTy = nullptr;
+          if (node->resolvedConstructor &&
+              astParamIdx < node->resolvedConstructor->params.size()) {
+            paramDeclTy =
+                node->resolvedConstructor->params[astParamIdx]->type;
+          }
+
+          argVal = paramDeclTy ? materializeByValueArg(arg, paramDeclTy)
+                               : nullptr;
+
+          if (!argVal) {
+            lastTemporaryAlloca = nullptr;
+            argVal = dispatch(arg);
+            lastTemporaryAlloca = nullptr;
+          }
+
+          if (ctorFunc && argVal && llArgIdx < ctorFunc->arg_size()) {
+            llvm::Type *paramTy =
+                ctorFunc->getFunctionType()->getParamType(llArgIdx);
+            argVal = createImplicitCast(argVal, paramTy);
+          }
+        }
+
+        if (!argVal) {
+          diags.report({DiagLevel::Error, arg->line, arg->column, arg->length,
+                        "Failed to evaluate argument for constructor call.",
+                        currentFilePath});
+          return nullptr;
+        }
+        argsArgs.push_back(argVal);
+        llArgIdx++;
+        astParamIdx++;
+      }
+
+      builder.CreateCall(ctorFunc, argsArgs);
+    } else if (!node->args.empty()) {
+      /* Scalar initialization: 'new T(value)' writes the argument into the
+       * allocated object (e.g. 'new int(42)'). */
+      llvm::Value *initVal = dispatch(node->args[0]);
+      if (initVal) {
+        initVal =
+            createImplicitCast(initVal, getLLVMType(node->allocatedType));
+        createTBAAStore(initVal, typedMem, node->allocatedType);
+      }
+    }
+}
 
   return typedMem;
 }
@@ -4393,6 +4605,53 @@ void CodeGen::emitDefaultInitialization(llvm::Value *ptr, const Type *type) {
       }
     }
   }
+}
+
+void CodeGen::emitArrayDefaultConstruct(llvm::Value *ptr, const Type *arrayType,
+                                        const FunctionDeclNode *ctor) {
+  if (!ptr || !ctor)
+    return;
+
+  const Type *unqual = arrayType->getUnqualifiedType();
+  if (unqual->getKind() != TypeKind::Array) {
+    llvm::Function *ctorFunc = getOrCreateFunction(ctor);
+    builder.CreateCall(ctorFunc, {ptr});
+    return;
+  }
+
+  const ArrayType *arrTy = static_cast<const ArrayType *>(unqual);
+  uint64_t count = arrTy->getSize();
+  if (count == 0)
+    return;
+
+  llvm::Function *theFunction = builder.GetInsertBlock()->getParent();
+  llvm::BasicBlock *condBB =
+      llvm::BasicBlock::Create(ctx, "ctor.array.cond", theFunction);
+  llvm::BasicBlock *bodyBB =
+      llvm::BasicBlock::Create(ctx, "ctor.array.body", theFunction);
+  llvm::BasicBlock *endBB =
+      llvm::BasicBlock::Create(ctx, "ctor.array.end", theFunction);
+
+  llvm::AllocaInst *idxAlloca =
+      createEntryBlockAlloca(builder.getInt64Ty(), "ctor.idx");
+  builder.CreateStore(builder.getInt64(0), idxAlloca);
+  builder.CreateBr(condBB);
+
+  builder.SetInsertPoint(condBB);
+  llvm::Value *idxVal = builder.CreateLoad(builder.getInt64Ty(), idxAlloca);
+  llvm::Value *cmp = builder.CreateICmpULT(idxVal, builder.getInt64(count));
+  builder.CreateCondBr(cmp, bodyBB, endBB);
+
+  builder.SetInsertPoint(bodyBB);
+  llvm::Type *llvmArrTy = getLLVMType(arrTy);
+  llvm::Value *elemPtr = builder.CreateInBoundsGEP(
+      llvmArrTy, ptr, {builder.getInt32(0), idxVal});
+  emitArrayDefaultConstruct(elemPtr, arrTy->getElementType(), ctor);
+  llvm::Value *nextIdx = builder.CreateAdd(idxVal, builder.getInt64(1));
+  builder.CreateStore(nextIdx, idxAlloca);
+  builder.CreateBr(condBB);
+
+  builder.SetInsertPoint(endBB);
 }
 
 void CodeGen::emitArrayLiteralInit(llvm::Value *targetAddr,

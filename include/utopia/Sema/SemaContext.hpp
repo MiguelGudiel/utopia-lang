@@ -50,6 +50,21 @@ public:
   }
   void popScope() { symTable.popScope(); }
 
+  /* Expected function signature stack, used to type lambdas from their
+   * assignment/argument context (Dart-style inference). */
+  std::vector<const Type *> expectedFunctionTypes;
+  uint64_t lambdaCounter = 0;
+
+  void pushExpectedFunctionType(const Type *t) {
+    expectedFunctionTypes.push_back(t);
+  }
+  void popExpectedFunctionType() { expectedFunctionTypes.pop_back(); }
+  const Type *getExpectedFunctionType() const {
+    if (expectedFunctionTypes.empty())
+      return nullptr;
+    return expectedFunctionTypes.back();
+  }
+
   /**
    * Compares two types structurally by string representation to safely handle
    * unresolved template parameters during the initial collection pass.

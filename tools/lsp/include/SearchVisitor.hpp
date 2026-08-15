@@ -170,6 +170,20 @@ public:
     return isHit(n) ? n : nullptr;
   }
 
+  const ASTNode *visit(const LambdaNode *n) {
+    for (auto *p : n->params)
+      if (auto found = find(p))
+        return found;
+    if (n->isExpressionBody && n->exprBody) {
+      if (auto found = find(n->exprBody))
+        return found;
+    } else if (n->body) {
+      if (auto found = find(n->body))
+        return found;
+    }
+    return isHit(n) ? n : nullptr;
+  }
+
   const ASTNode *visit(const MemberAccessNode *n) {
     if (auto found = find(n->object))
       return found;

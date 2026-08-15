@@ -91,7 +91,7 @@ int main(int argc, char **argv) {
               << std::endl;
     return 1;
   } catch (...) {
-    std::cerr << "[Unknown Fatal Error] Utopia se cerró inesperadamente."
+    std::cerr << "[Unknown Fatal Error] Utopia terminated unexpectedly."
               << std::endl;
     return 1;
   }

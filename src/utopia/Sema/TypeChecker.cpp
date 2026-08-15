@@ -8,6 +8,34 @@
 namespace utopia {
 
 namespace {
+/* True when 't' is (a pointer to) a function type. */
+static bool isFunctionPointerType(const Type *t) {
+  if (!t)
+    return false;
+  const Type *u = t->getUnqualifiedType();
+  if (u->isPointerType()) {
+    const Type *p = static_cast<const PointerType *>(u)
+                        ->getPointeeType()
+                        ->getUnqualifiedType();
+    return p->getKind() == TypeKind::Function;
+  }
+  return u->getKind() == TypeKind::Function;
+}
+
+/* Returns the function pointer type that should drive lambda inference for a
+ * declaration of type 't': the type itself when it is a function pointer, or
+ * the element type when 't' is an array of function pointers. */
+static const Type *getExpectedFunctionPtrType(const Type *t) {
+  if (!t)
+    return nullptr;
+  const Type *u = t->getUnqualifiedType();
+  if (auto *arr = llvm::dyn_cast<ArrayType>(u)) {
+    const Type *e = arr->getElementType()->getUnqualifiedType();
+    return isFunctionPointerType(e) ? e : nullptr;
+  }
+  return isFunctionPointerType(u) ? t : nullptr;
+}
+
 /* Operator categorization limits large evaluation chains during semantic passes
  */
 enum class OpCategory {
@@ -2122,7 +2150,19 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
 
   /* Evaluate Initializer & Infer Type (if required) */
   if (node->initializer) {
+    bool pushedExpected = false;
+    if (!isAuto) {
+      if (const Type *expFn = getExpectedFunctionPtrType(declType)) {
+        ctx->pushExpectedFunctionType(expFn);
+        pushedExpected = true;
+      }
+    }
+
     auto initRes = dispatch(node->initializer);
+
+    if (pushedExpected)
+      ctx->popExpectedFunctionType();
+
     if (!initRes) {
       if (ctx->getScopeDepth() > 1) {
         ctx->addDecl(node->varName, node);
@@ -2154,6 +2194,14 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
 
       if (declType->isConstQualified()) {
         inferred = ctx->astCtx.getConstType(inferred);
+      }
+
+      if (node->initializer->kind == NodeKind::Lambda &&
+          static_cast<const LambdaNode *>(node->initializer)->unresolved) {
+        return ctx->reportError(
+            node->line, node->column, node->length,
+            "Cannot infer lambda parameter types: no expected function "
+            "signature is available.");
       }
 
       declType = inferred;
@@ -2192,6 +2240,46 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
   const Type *checkTy = declType;
   while (checkTy->getKind() == TypeKind::Array) {
     checkTy = static_cast<const ArrayType *>(checkTy)->getElementType();
+  }
+
+  /* Record arrays declared without an initializer have their elements
+   * default-constructed at runtime, so a parameterless constructor must
+   * exist. */
+  if (!node->initializer && declType->getKind() == TypeKind::Array) {
+    const Type *elemUnqual = checkTy->getUnqualifiedType();
+    if (elemUnqual->getKind() == TypeKind::Class ||
+        elemUnqual->getKind() == TypeKind::Struct ||
+        elemUnqual->getKind() == TypeKind::Union) {
+      auto *recTy = static_cast<const RecordType *>(elemUnqual);
+      auto *decl = recTy->getDeclaration();
+      if (decl) {
+        llvm::ArrayRef<FunctionDeclNode *> ctors;
+        if (decl->kind == NodeKind::ClassDecl)
+          ctors = static_cast<const ClassDeclNode *>(decl)->constructors;
+        else if (decl->kind == NodeKind::StructDecl)
+          ctors = static_cast<const StructDeclNode *>(decl)->constructors;
+        else if (decl->kind == NodeKind::UnionDecl)
+          ctors = static_cast<const UnionDeclNode *>(decl)->constructors;
+
+        bool hasDefaultCtor = false;
+        for (const auto *ctor : ctors) {
+          if (ctor->params.empty()) {
+            hasDefaultCtor = true;
+            break;
+          }
+        }
+        if (!hasDefaultCtor) {
+          auto err = ctx->reportError(
+              node->line, node->column, node->length,
+              "Array declaration of '" + std::string(recTy->getName()) +
+                  "' requires a default constructor.");
+          if (ctx->getScopeDepth() > 1) {
+            ctx->addDecl(node->varName, node);
+          }
+          return err;
+        }
+      }
+    }
   }
 
   if (!checkTy->isPointerType() && !checkTy->isReferenceType() &&
@@ -2470,7 +2558,16 @@ SemaResult TypeCheckPass::visit(const AssignNode *node) {
   auto lhsType = dispatch(node->target);
   ctx->isAssignTarget = prevAssignTarget;
 
+  bool pushedExpected = false;
+  if (const Type *expFn = getExpectedFunctionPtrType(*lhsType)) {
+    ctx->pushExpectedFunctionType(expFn);
+    pushedExpected = true;
+  }
+
   auto rhsType = dispatch(node->value);
+
+  if (pushedExpected)
+    ctx->popExpectedFunctionType();
 
   if (!lhsType || !rhsType)
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,
@@ -4324,6 +4421,11 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
               ctx->astCtx.copyArray<ExprNode *>(bestResolvedArgs);
           const_cast<FunctionCallNode *>(node)->argNames = {};
 
+          if (auto lambdaRes = resolveLambdaArgs(bestMatch, bestResolvedArgs);
+              !lambdaRes) {
+            return lambdaRes;
+          }
+
           if (isConstructorCall) {
             node->exprType = constructorRecTy;
             node->isLValue = false;
@@ -4489,6 +4591,11 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
               ctx->astCtx.copyArray<ExprNode *>(bestResolvedArgs);
           const_cast<FunctionCallNode *>(node)->argNames = {};
 
+          if (auto lambdaRes = resolveLambdaArgs(bestMatch, bestResolvedArgs);
+              !lambdaRes) {
+            return lambdaRes;
+          }
+
           node->exprType = bestMatch->returnType;
           node->isLValue = (node->exprType->isReferenceType());
 
@@ -4586,6 +4693,11 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
             ctx->astCtx.copyArray<ExprNode *>(bestResolvedArgs);
         const_cast<FunctionCallNode *>(node)->argNames = {};
 
+        if (auto lambdaRes = resolveLambdaArgs(bestMatch, bestResolvedArgs);
+            !lambdaRes) {
+          return lambdaRes;
+        }
+
         node->exprType = recordTy;
         node->isLValue = false;
         checkDeprecated(bestMatch, node);
@@ -4625,6 +4737,36 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
       if (pointee->getKind() == TypeKind::Function) {
         auto fTy = static_cast<const FunctionType *>(pointee);
 
+        /* A lambda used as a direct call target has no signature context, so
+         * its untyped parameters are inferred from the call's arguments. */
+        if (node->target->kind == NodeKind::Lambda &&
+            static_cast<const LambdaNode *>(node->target)->unresolved) {
+          auto inferredFnTy = ctx->astCtx.getFunctionType(
+              ctx->astCtx.AutoTy,
+              ctx->astCtx.copyArray<const Type *>(argTypes));
+          ctx->pushExpectedFunctionType(
+              ctx->astCtx.getPointerType(inferredFnTy));
+          auto targetRes = dispatch(node->target);
+          ctx->popExpectedFunctionType();
+
+          const Type *resolvedUnqual =
+              node->target->exprType
+                  ? node->target->exprType->getUnqualifiedType()
+                  : nullptr;
+          if (!targetRes || !resolvedUnqual ||
+              !resolvedUnqual->isPointerType() ||
+              static_cast<const PointerType *>(resolvedUnqual)
+                      ->getPointeeType()
+                      ->getKind() != TypeKind::Function) {
+            return ctx->reportError(
+                node->line, node->column, node->length,
+                "Failed to infer lambda parameter types from call arguments.");
+          }
+          pointee = static_cast<const PointerType *>(resolvedUnqual)
+                        ->getPointeeType();
+          fTy = static_cast<const FunctionType *>(pointee);
+        }
+
         if (argTypes.size() != fTy->getParamTypes().size()) {
           return ctx->reportError(
               node->line, node->column, node->length,
@@ -4641,6 +4783,10 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
         for (size_t i = 0; i < node->args.size(); ++i) {
           resolvedArgs.push_back(performImplicitConversion(
               const_cast<ExprNode *>(node->args[i]), fTy->getParamTypes()[i]));
+        }
+
+        if (auto lambdaRes = resolveLambdaArgs(fTy, resolvedArgs); !lambdaRes) {
+          return lambdaRes;
         }
 
         const_cast<FunctionCallNode *>(node)->args =
@@ -4750,7 +4896,17 @@ SemaResult TypeCheckPass::visit(const ReturnNode *node) {
     return ctx->astCtx.VoidTy;
   }
 
+  bool pushedExpected = false;
+  if (const Type *expFn = getExpectedFunctionPtrType(expectedRet)) {
+    ctx->pushExpectedFunctionType(expFn);
+    pushedExpected = true;
+  }
+
   auto valType = dispatch(node->value);
+
+  if (pushedExpected)
+    ctx->popExpectedFunctionType();
+
   if (!valType)
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,
                                      "Cascading error in return expression"});
@@ -4876,27 +5032,31 @@ SemaResult TypeCheckPass::visit(const ArraySubscriptNode *node) {
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,
                                      "Cascading error in array subscript"});
 
-  if (auto *opDecl =
-          resolveOverloadedOperator(*baseType, "[]", {node->index})) {
-    /* Enforce visibility constraint on array subscript operators */
-    if (!opDecl->isPublic(opDecl->name) &&
-        ctx->getCurrentRecordContext() != opDecl->parentRecord) {
-      return ctx->reportError(node->line, node->column, node->length,
-                              "Cannot call private overloaded operator '[]'.");
+  /* A raw pointer base always means built-in element access ('arr[i]');
+   * the pointee's operator[] must not hijack it through pointer auto-deref. */
+  if (!(*baseType)->getUnqualifiedType()->isPointerType()) {
+    if (auto *opDecl =
+            resolveOverloadedOperator(*baseType, "[]", {node->index})) {
+      /* Enforce visibility constraint on array subscript operators */
+      if (!opDecl->isPublic(opDecl->name) &&
+          ctx->getCurrentRecordContext() != opDecl->parentRecord) {
+        return ctx->reportError(node->line, node->column, node->length,
+                                "Cannot call private overloaded operator '[]'.");
+      }
+      if (opDecl->isMethod && !opDecl->isStatic) {
+        const_cast<ArraySubscriptNode *>(node)->index =
+            performImplicitConversion(node->index, opDecl->params[0]->type);
+      } else {
+        const_cast<ArraySubscriptNode *>(node)->base =
+            performImplicitConversion(node->base, opDecl->params[0]->type);
+        const_cast<ArraySubscriptNode *>(node)->index =
+            performImplicitConversion(node->index, opDecl->params[1]->type);
+      }
+      node->overloadedOperator = opDecl;
+      node->exprType = opDecl->returnType;
+      node->isLValue = opDecl->returnType->isReferenceType();
+      return opDecl->returnType;
     }
-    if (opDecl->isMethod && !opDecl->isStatic) {
-      const_cast<ArraySubscriptNode *>(node)->index =
-          performImplicitConversion(node->index, opDecl->params[0]->type);
-    } else {
-      const_cast<ArraySubscriptNode *>(node)->base =
-          performImplicitConversion(node->base, opDecl->params[0]->type);
-      const_cast<ArraySubscriptNode *>(node)->index =
-          performImplicitConversion(node->index, opDecl->params[1]->type);
-    }
-    node->overloadedOperator = opDecl;
-    node->exprType = opDecl->returnType;
-    node->isLValue = opDecl->returnType->isReferenceType();
-    return opDecl->returnType;
   }
 
   const Type *unqualBase = (*baseType)->getUnqualifiedType();
@@ -4940,6 +5100,46 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
       return ctx->reportError(node->line, node->column, node->length,
                               "Array size in 'new' must be an integer type");
     }
+    if (node->hasParens && !node->args.empty()) {
+      return ctx->reportError(
+          node->line, node->column, node->length,
+          "Initializer arguments cannot be combined with an array size in "
+          "'new'.");
+    }
+
+    /* Array elements of record type are default-constructed at runtime, so a
+     * parameterless constructor must exist. */
+    const Type *elemUnqual = node->allocatedType->getUnqualifiedType();
+    if (elemUnqual->getKind() == TypeKind::Class ||
+        elemUnqual->getKind() == TypeKind::Struct ||
+        elemUnqual->getKind() == TypeKind::Union) {
+      auto *recTy = static_cast<const RecordType *>(elemUnqual);
+      if (auto *decl = recTy->getDeclaration()) {
+        llvm::ArrayRef<FunctionDeclNode *> ctors;
+        if (decl->kind == NodeKind::ClassDecl)
+          ctors = static_cast<const ClassDeclNode *>(decl)->constructors;
+        else if (decl->kind == NodeKind::StructDecl)
+          ctors = static_cast<const StructDeclNode *>(decl)->constructors;
+        else if (decl->kind == NodeKind::UnionDecl)
+          ctors = static_cast<const UnionDeclNode *>(decl)->constructors;
+
+        bool hasDefaultCtor = false;
+        for (const auto *ctor : ctors) {
+          if (ctor->params.empty()) {
+            hasDefaultCtor = true;
+            break;
+          }
+        }
+        if (!hasDefaultCtor) {
+          return ctx->reportError(
+              node->line, node->column, node->length,
+              "Array allocation of '" +
+                  std::string(recTy->getName()) +
+                  "' requires a default constructor.");
+        }
+      }
+    }
+
     node->exprType = ctx->astCtx.getPointerType(node->allocatedType);
     return node->exprType;
   }
@@ -5189,8 +5389,44 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
         const_cast<NewExprNode *>(node)->args =
             ctx->astCtx.copyArray<ExprNode *>(bestResolvedArgs);
         const_cast<NewExprNode *>(node)->argNames = {};
+
+        if (auto lambdaRes = resolveLambdaArgs(bestMatch, bestResolvedArgs);
+            !lambdaRes) {
+          return lambdaRes;
+        }
       }
     }
+  }
+
+  if (node->hasParens && !node->args.empty() &&
+      baseUnqualTy->getKind() != TypeKind::Class &&
+      baseUnqualTy->getKind() != TypeKind::Struct &&
+      baseUnqualTy->getKind() != TypeKind::Union) {
+    /* Scalar allocation with an initializer: 'new int(42)' stores the
+     * argument into the object. At most one argument is allowed. */
+    if (node->args.size() > 1) {
+      return ctx->reportError(
+          node->line, node->column, node->length,
+          "'new' on a scalar type accepts at most one initializer argument.");
+    }
+
+    const Type *allocUnqual = node->allocatedType->getUnqualifiedType();
+    auto argType = dispatch(node->args[0]);
+    if (!argType) {
+      return std::unexpected(ErrorInfo{node->line, node->column,
+                                       node->length,
+                                       "Cascading error in new argument"});
+    }
+
+    if (!canImplicitlyCast(*argType, allocUnqual)) {
+      return ctx->reportError(
+          node->line, node->column, node->length,
+          "Cannot initialize '" + allocUnqual->toString() + "' with '" +
+              (*argType)->toString() + "'.");
+    }
+
+    const_cast<NewExprNode *>(node)->args = ctx->astCtx.copyArray<ExprNode *>(
+        performImplicitConversion(node->args[0], allocUnqual));
   }
 
   node->exprType = ctx->astCtx.getPointerType(node->allocatedType);
@@ -5240,6 +5476,504 @@ SemaResult TypeCheckPass::visit(const NullNode *node) {
 }
 
 SemaResult TypeCheckPass::visit(const ImplicitCastNode *node) {
+  return node->exprType;
+}
+
+/* Walks a lambda block body in statement order while binding its declared
+ * locals to the current scope. This lets each 'return' value expression be
+ * dispatched to infer the lambda's return type even when the lambda has no
+ * expected signature (e.g. IIFEs or direct calls), where locals declared
+ * earlier in the body must already be visible. */
+namespace {
+struct LambdaReturnInferer : public ASTVisitor<LambdaReturnInferer, void> {
+  SemaContext &ctx;
+  TypeCheckPass &pass;
+  const Type *inferred = nullptr;
+
+  LambdaReturnInferer(SemaContext &c, TypeCheckPass &p) : ctx(c), pass(p) {}
+
+  void walkStatements(llvm::ArrayRef<ASTNode *> stmts) {
+    for (const auto *s : stmts) {
+      if (inferred)
+        return;
+      if (s->kind == NodeKind::VarDecl) {
+        const auto *vd = static_cast<const VarDeclNode *>(s);
+        ctx.addDecl(vd->varName, static_cast<const DeclNode *>(vd));
+      }
+      dispatch(s);
+    }
+  }
+
+  void visit(const ReturnNode *node) {
+    if (!inferred && node->value) {
+      if (auto retTy = pass.dispatch(node->value)) {
+        inferred = *retTy;
+      }
+    }
+  }
+  void visit(const BlockNode *node) {
+    ScopeGuard guard(ctx);
+    walkStatements(node->statements);
+  }
+  void visit(const IfNode *node) {
+    if (node->thenBlock)
+      dispatch(node->thenBlock);
+    if (node->elseBlock)
+      dispatch(node->elseBlock);
+  }
+  void visit(const WhileNode *node) {
+    if (node->body)
+      dispatch(node->body);
+  }
+  void visit(const ForNode *node) {
+    if (node->initStatement) {
+      if (node->initStatement->kind == NodeKind::VarDecl) {
+        const auto *vd =
+            static_cast<const VarDeclNode *>(node->initStatement);
+        ctx.addDecl(vd->varName, static_cast<const DeclNode *>(vd));
+      }
+      dispatch(node->initStatement);
+    }
+    if (node->body)
+      dispatch(node->body);
+  }
+  void visit(const SwitchNode *node) {
+    for (const auto *c : node->cases)
+      dispatch(c);
+  }
+  void visit(const CaseNode *node) { walkStatements(node->statements); }
+  void visit(const LambdaNode *) {} /* nested lambdas are typed on their own */
+  void visit(const ASTNode *) {}    /* no-op fallback for other node kinds */
+};
+
+/* The expected signature of a lambda drives only its own parameter/return
+ * typing; it must not leak into nested lambdas inside the body. This guard
+ * hides it while the body is processed and restores it afterwards so the
+ * caller's bookkeeping stays balanced. */
+struct ExpectedFnGuard {
+  SemaContext &ctx;
+  bool active;
+  const Type *saved;
+
+  ExpectedFnGuard(SemaContext &c, const Type *expected)
+      : ctx(c), active(expected != nullptr), saved(expected) {
+    if (active)
+      ctx.popExpectedFunctionType();
+  }
+  ~ExpectedFnGuard() {
+    if (active)
+      ctx.pushExpectedFunctionType(saved);
+  }
+};
+
+/* Lambdas lower to plain function pointers, so they cannot capture variables
+ * from an enclosing function's stack. This checker walks a lambda body (not
+ * descending into nested lambdas, which are validated on their own) and flags
+ * every reference to an enclosing local or parameter. */
+struct LambdaCaptureChecker {
+  SemaContext &ctx;
+  const LambdaNode *lambda;
+  std::vector<std::vector<std::string_view>> frames;
+  std::vector<const VariableNode *> violations;
+
+  explicit LambdaCaptureChecker(SemaContext &c, const LambdaNode *l)
+      : ctx(c), lambda(l) {}
+
+  void check(const ASTNode *node) { walk(node); }
+
+  void walk(const ASTNode *node) {
+    if (!node)
+      return;
+    switch (node->kind) {
+    case NodeKind::Variable:
+      checkVar(static_cast<const VariableNode *>(node));
+      break;
+    case NodeKind::UnaryOp:
+      walk(static_cast<const UnaryOpNode *>(node)->expr);
+      break;
+    case NodeKind::BinaryOp:
+      walk(static_cast<const BinaryOpNode *>(node)->left);
+      walk(static_cast<const BinaryOpNode *>(node)->right);
+      break;
+    case NodeKind::TernaryOp: {
+      auto *t = static_cast<const TernaryOpNode *>(node);
+      walk(t->condition);
+      walk(t->trueExpr);
+      walk(t->falseExpr);
+      break;
+    }
+    case NodeKind::Lambda:
+      break; /* nested lambdas are validated by their own visit */
+    case NodeKind::Assign:
+      walk(static_cast<const AssignNode *>(node)->target);
+      walk(static_cast<const AssignNode *>(node)->value);
+      break;
+    case NodeKind::Block: {
+      frames.emplace_back();
+      for (const auto *s : static_cast<const BlockNode *>(node)->statements)
+        walk(s);
+      frames.pop_back();
+      break;
+    }
+    case NodeKind::If: {
+      auto *i = static_cast<const IfNode *>(node);
+      walk(i->condition);
+      walk(i->thenBlock);
+      walk(i->elseBlock);
+      break;
+    }
+    case NodeKind::For: {
+      auto *f = static_cast<const ForNode *>(node);
+      walk(f->initStatement);
+      walk(f->condition);
+      walk(f->increment);
+      walk(f->body);
+      break;
+    }
+    case NodeKind::While: {
+      auto *w = static_cast<const WhileNode *>(node);
+      walk(w->condition);
+      walk(w->body);
+      break;
+    }
+    case NodeKind::Switch: {
+      auto *s = static_cast<const SwitchNode *>(node);
+      walk(s->condition);
+      for (const auto *c : s->cases)
+        walk(c);
+      break;
+    }
+    case NodeKind::Case: {
+      auto *c = static_cast<const CaseNode *>(node);
+      walk(c->value);
+      for (const auto *s : c->statements)
+        walk(s);
+      break;
+    }
+    case NodeKind::FunctionCall: {
+      auto *call = static_cast<const FunctionCallNode *>(node);
+      walk(call->target);
+      for (const auto *a : call->args)
+        walk(a);
+      break;
+    }
+    case NodeKind::Return:
+      walk(static_cast<const ReturnNode *>(node)->value);
+      break;
+    case NodeKind::Cast:
+      walk(static_cast<const CastNode *>(node)->expr);
+      break;
+    case NodeKind::MemberAccess:
+      walk(static_cast<const MemberAccessNode *>(node)->object);
+      break;
+    case NodeKind::ArraySubscript: {
+      auto *sub = static_cast<const ArraySubscriptNode *>(node);
+      walk(sub->base);
+      walk(sub->index);
+      break;
+    }
+    case NodeKind::ArrayLiteral:
+      for (const auto *e : static_cast<const ArrayLiteralNode *>(node)->elements)
+        walk(e);
+      break;
+    case NodeKind::New: {
+      auto *n = static_cast<const NewExprNode *>(node);
+      walk(n->arraySize);
+      for (const auto *a : n->args)
+        walk(a);
+      break;
+    }
+    case NodeKind::Delete:
+      walk(static_cast<const DeleteExprNode *>(node)->ptr);
+      break;
+    case NodeKind::VarDecl: {
+      auto *v = static_cast<const VarDeclNode *>(node);
+      if (!frames.empty())
+        frames.back().push_back(v->varName);
+      walk(v->initializer);
+      break;
+    }
+    case NodeKind::ImplicitCast:
+      walk(static_cast<const ImplicitCastNode *>(node)->expr);
+      break;
+    default:
+      break; /* leaves and declarations */
+    }
+  }
+
+private:
+  void checkVar(const VariableNode *node) {
+    for (const auto &frame : frames) {
+      for (auto name : frame) {
+        if (name == node->name)
+          return; /* declared inside the lambda body */
+      }
+    }
+    for (const auto *p : lambda->params) {
+      if (p->name == node->name)
+        return; /* the lambda's own parameter */
+    }
+
+    auto decls = ctx.lookup(node->name);
+    for (const auto *d : decls) {
+      if (d->kind == NodeKind::FunctionDecl)
+        return; /* plain function reference */
+      if (d->kind == NodeKind::VarDecl &&
+          static_cast<const VarDeclNode *>(d)->isGlobal)
+        return; /* global variable */
+      if (d->kind == NodeKind::EnumDecl || d->kind == NodeKind::EnumMember ||
+          d->kind == NodeKind::ClassDecl || d->kind == NodeKind::StructDecl ||
+          d->kind == NodeKind::UnionDecl || d->kind == NodeKind::TypedefDecl ||
+          d->kind == NodeKind::NamespaceDecl ||
+          d->kind == NodeKind::AnnotationDecl)
+        return; /* type/namespace references */
+    }
+    if (!decls.empty())
+      violations.push_back(node);
+  }
+};
+} // namespace
+
+SemaResult
+TypeCheckPass::resolveLambdaArgs(const FunctionDeclNode *fn,
+                                 const std::vector<ExprNode *> &resolvedArgs) {
+  std::vector<const Type *> paramTypes;
+  for (const auto *p : fn->params)
+    paramTypes.push_back(p->type);
+  return resolveLambdaArgs(
+      ctx->astCtx.getFunctionType(ctx->astCtx.VoidTy,
+                                  ctx->astCtx.copyArray<const Type *>(paramTypes)),
+      resolvedArgs);
+}
+
+SemaResult
+TypeCheckPass::resolveLambdaArgs(const FunctionType *fTy,
+                                 const std::vector<ExprNode *> &resolvedArgs) {
+  for (size_t i = 0; i < resolvedArgs.size() &&
+                     i < fTy->getParamTypes().size();
+       ++i) {
+    auto *lambda = llvm::dyn_cast<LambdaNode>(resolvedArgs[i]);
+    if (!lambda || !lambda->unresolved)
+      continue;
+
+    const Type *paramTy = fTy->getParamTypes()[i];
+    ctx->pushExpectedFunctionType(paramTy);
+    auto res = dispatch(lambda);
+    ctx->popExpectedFunctionType();
+
+    if (!res)
+      return std::unexpected(ErrorInfo{lambda->line, lambda->column,
+                                       lambda->length,
+                                       "Failed to type lambda argument"});
+    if (lambda->unresolved) {
+      return ctx->reportError(lambda->line, lambda->column, lambda->length,
+                              "Cannot infer lambda parameter types: no "
+                              "expected function signature is available.");
+    }
+  }
+  return SemaResult(ctx->astCtx.VoidTy);
+}
+
+SemaResult TypeCheckPass::visit(const LambdaNode *node) {
+  /* 1. Resolve the expected signature from the assignment/argument context. */
+  const Type *expected = ctx->getExpectedFunctionType();
+  const FunctionType *expectedFn = nullptr;
+  if (expected) {
+    const Type *u = expected->getUnqualifiedType();
+    if (u->isReferenceType()) {
+      u = static_cast<const ReferenceType *>(u)->getPointeeType()->getUnqualifiedType();
+    } else if (u->getKind() == TypeKind::RValueReference) {
+      u = static_cast<const RValueReferenceType *>(u)->getPointeeType()->getUnqualifiedType();
+    }
+    if (u->isPointerType()) {
+      u = static_cast<const PointerType *>(u)->getPointeeType()->getUnqualifiedType();
+    }
+    if (auto *ft = llvm::dyn_cast<FunctionType>(u)) {
+      expectedFn = ft;
+    }
+  }
+
+  /* 2. Resolve parameter types: explicit types are kept; untyped parameters
+   * are filled from the expected signature. */
+  bool missingContext = false;
+  for (size_t i = 0; i < node->params.size(); ++i) {
+    const_cast<ParamDeclNode *>(node->params[i])->type =
+        resolveIfTemplate(node->params[i]->type);
+    const Type *paramTy = node->params[i]->type;
+    /* 'Auto' here is the placeholder left by a previous unresolved dispatch,
+     * not a user-written type, so it is always re-typed from the context. */
+    bool isPlaceholder =
+        !paramTy || paramTy->getUnqualifiedType()->getKind() == TypeKind::Auto;
+    if (isPlaceholder) {
+      if (expectedFn && i < expectedFn->getParamTypes().size()) {
+        const_cast<ParamDeclNode *>(node->params[i])->type =
+            expectedFn->getParamTypes()[i];
+      } else {
+        const_cast<ParamDeclNode *>(node->params[i])->type =
+            ctx->astCtx.AutoTy;
+        missingContext = true;
+      }
+    }
+  }
+
+  /* 3. Resolve the return type: explicit > context > body inference. An
+   * 'auto' expected return (call-site inference) means the return type must
+   * come from the body. */
+  const Type *returnType = nullptr;
+  if (node->explicitReturnType) {
+    returnType = resolveIfTemplate(node->explicitReturnType);
+  } else if (expectedFn &&
+             expectedFn->getReturnType()->getUnqualifiedType()->getKind() !=
+                 TypeKind::Auto) {
+    returnType = expectedFn->getReturnType();
+  }
+
+  /* The expected signature must not leak into nested lambdas inside the body;
+   * it is hidden from here on and restored when this visit completes. */
+  ExpectedFnGuard expectedGuard(*ctx, expected);
+
+  if (missingContext && !returnType) {
+    /* Untyped parameters with no context: leave the lambda unresolved so the
+     * surrounding call can re-type it with the matched parameter signature.
+     * The body is not dispatched here; it will be fully checked once the
+     * expected signature is known (see resolveLambdaArgs). */
+    const_cast<LambdaNode *>(node)->unresolved = true;
+    std::vector<const Type *> autoParams;
+    for (const auto *p : node->params)
+      autoParams.push_back(p->type);
+    auto fnTy = ctx->astCtx.getFunctionType(
+        ctx->astCtx.AutoTy, ctx->astCtx.copyArray<const Type *>(autoParams));
+    node->exprType = ctx->astCtx.getPointerType(fnTy);
+    node->isLValue = false;
+
+    /* Reject captures even when the body is not dispatched yet (e.g. a
+     * lambda used as a call target without a signature context). */
+    LambdaCaptureChecker captureChecker(*ctx, node);
+    captureChecker.check(node->isExpressionBody
+                             ? static_cast<const ASTNode *>(node->exprBody)
+                             : static_cast<const ASTNode *>(node->body));
+    for (const auto *v : captureChecker.violations) {
+      ctx->reportError(
+          v->line, v->column, v->length,
+          "Lambda captures local variable '" + std::string(v->name) +
+              "'; lambdas are function pointers and cannot capture enclosing "
+              "function variables.");
+    }
+
+    return node->exprType;
+  }
+
+  if (!returnType) {
+    /* Parameters must be in scope so the body can reference them while the
+     * return type is inferred. */
+    ScopeGuard guard(*ctx, ScopeKind::FunctionParams);
+    for (const auto *p : node->params)
+      ctx->addDecl(p->name, p);
+
+    if (node->isExpressionBody) {
+      auto exprTy = dispatch(node->exprBody);
+      if (!exprTy)
+        return std::unexpected(ErrorInfo{node->line, node->column,
+                                         node->length,
+                                         "Failed to infer lambda return type"});
+      returnType = *exprTy;
+    } else {
+      LambdaReturnInferer inferer(*ctx, *this);
+      inferer.dispatch(node->body);
+      returnType = inferer.inferred ? inferer.inferred : ctx->astCtx.VoidTy;
+    }
+  }
+
+  /* 4. Build the final body: '=> expr' becomes 'return expr;' unless the
+   * lambda returns void. */
+  BlockNode *finalBody = node->body;
+  if (node->isExpressionBody) {
+    auto block = ctx->astCtx.create<BlockNode>(node->line, node->column);
+    ASTNode *stmt = node->exprBody;
+    if (!returnType->isVoid()) {
+      stmt = ctx->astCtx.create<ReturnNode>(node->exprBody, node->line,
+                                            node->column, node->length);
+    }
+    block->statements = ctx->astCtx.copyArray<ASTNode *>(stmt);
+    block->isExpressionBody = true;
+    block->finalize(node->endLine ? node->endLine : node->line);
+    finalBody = block;
+  }
+
+  /* 5. Lambdas lower to function pointers: reject captures of the enclosing
+   * function's stack. */
+  LambdaCaptureChecker captureChecker(*ctx, node);
+  captureChecker.check(finalBody);
+  for (const auto *v : captureChecker.violations) {
+    ctx->reportError(
+        v->line, v->column, v->length,
+        "Lambda captures local variable '" + std::string(v->name) +
+            "'; lambdas are function pointers and cannot capture enclosing "
+            "function variables.");
+  }
+  if (!captureChecker.violations.empty())
+    return std::unexpected(ErrorInfo{node->line, node->column, node->length,
+                                     "Lambda capture error"});
+
+  /* 6. Synthesize the function declaration and type-check the body. */
+  std::string nameStr =
+      "__lambda_" + std::to_string(ctx->lambdaCounter++);  std::string_view name = ctx->astCtx.copyString(nameStr);
+  auto *fnDecl = ctx->astCtx.create<FunctionDeclNode>(
+      returnType, name, node->line, node->column, false, false, false, false);
+  fnDecl->params = node->params;
+  fnDecl->body = finalBody;
+  fnDecl->fqName = name;
+  fnDecl->declFilePath = ctx->currentFile;
+  fnDecl->mangledName = Mangler::mangle(fnDecl);
+  const_cast<LambdaNode *>(node)->synthesizedFunc = fnDecl;
+  const_cast<LambdaNode *>(node)->mangledName = fnDecl->mangledName;
+
+  auto bodyRes = dispatch(fnDecl);
+  if (!bodyRes) {
+    return std::unexpected(ErrorInfo{node->line, node->column, node->length,
+                                     "Errors in lambda body"});
+  }
+
+  /* 7. Validate the signature against the expected one. */
+  if (expectedFn) {
+    if (node->params.size() != expectedFn->getParamTypes().size()) {
+      return ctx->reportError(
+          node->line, node->column, node->length,
+          "Lambda has " + std::to_string(node->params.size()) +
+              " parameters, but the expected function signature takes " +
+              std::to_string(expectedFn->getParamTypes().size()) + ".");
+    }
+    for (size_t i = 0; i < node->params.size(); ++i) {
+      const Type *pType =
+          node->params[i]->type->getUnqualifiedType();
+      const Type *eType = expectedFn->getParamTypes()[i]->getUnqualifiedType();
+      if (pType != eType) {
+        return ctx->reportError(
+            node->line, node->column, node->length,
+            "Lambda parameter " + std::to_string(i + 1) +
+                " type mismatch: expected '" + eType->toString() +
+                "', but lambda declares '" + pType->toString() + "'.");
+      }
+    }
+    if (expectedFn->getReturnType()->getUnqualifiedType()->getKind() !=
+            TypeKind::Auto &&
+        !canImplicitlyCast(returnType, expectedFn->getReturnType())) {
+      return ctx->reportError(
+          node->line, node->column, node->length,
+          "Lambda return type mismatch: expected '" +
+              expectedFn->getReturnType()->toString() + "', got '" +
+              returnType->toString() + "'.");
+    }
+  }
+
+  std::vector<const Type *> paramTypes;
+  for (const auto *p : node->params)
+    paramTypes.push_back(p->type);
+  auto fnTy = ctx->astCtx.getFunctionType(
+      returnType, ctx->astCtx.copyArray<const Type *>(paramTypes));
+  node->exprType = ctx->astCtx.getPointerType(fnTy);
+  node->isLValue = false;
+  const_cast<LambdaNode *>(node)->unresolved = false;
   return node->exprType;
 }
 

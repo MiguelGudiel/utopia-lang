@@ -30,7 +30,8 @@ public:
   DeclNode *
   parseDeclarationOrFunction(llvm::ArrayRef<AnnotationNode *> annotations = {});
   std::vector<ParamDeclNode *> parseParameterList(bool &isVariadic,
-                                                  bool &hasTrailingComma);
+                                                  bool &hasTrailingComma,
+                                                  bool allowUntypedParams = false);
 
 private:
   ASTContext &astCtx;
@@ -132,6 +133,10 @@ private:
   ExprNode *parseUnary();
   ExprNode *parsePostfix();
   ExprNode *parsePrimary();
+  ExprNode *parseLambda(const Type *explicitReturnType);
+  std::vector<ParamDeclNode *> parseLambdaParams();
+  bool looksLikeLambdaParams(size_t openOffset) const;
+  bool lambdaFollowedByBody(size_t openOffset) const;
 };
 
 } // namespace utopia
