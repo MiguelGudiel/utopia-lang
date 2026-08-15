@@ -331,8 +331,21 @@ bool CompilerDriver::run() {
       return false;
     }
 
+    /* Initialize global constructors (e.g. llvm.global_ctors) */
+    if (auto initErr = jit->initialize(jit->getMainJITDylib())) {
+      std::cerr << "\033[1;31m[JIT Error]\033[0m Failed to initialize globals."
+                << std::endl;
+      llvm::consumeError(std::move(initErr));
+      return false;
+    }
+
     int (*mainFn)() = mainSym->toPtr<int (*)()>();
     int result = mainFn();
+
+    /* Deinitialize globals */
+    if (auto deinitErr = jit->deinitialize(jit->getMainJITDylib())) {
+      llvm::consumeError(std::move(deinitErr));
+    }
 
     Logger::debug("\033[1;32m[JIT Execution Finished]\033[0m Exit code: " +
                   std::to_string(result));

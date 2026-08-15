@@ -114,10 +114,10 @@ const char *UtopiaBuild_getTargetOS() {
     return "windows";
   if (triple.isMacOSX())
     return "macos";
-  if (triple.isOSLinux() && !triple.isAndroid())
-    return "linux";
-  if (triple.isAndroid())
+  if (triple.isAndroid() || t.find("android") != std::string::npos)
     return "android";
+  if (triple.isOSLinux())
+    return "linux";
   return "unknown";
 }
 
@@ -322,6 +322,17 @@ bool BuildScriptRunner::run(const std::filesystem::path &scriptPath,
     return false;
   }
 
+  /* Initialize global constructors (e.g. llvm.global_ctors) */
+  if (auto initErr = jit->initialize(jit->getMainJITDylib())) {
+    llvm::handleAllErrors(
+        std::move(initErr), [&](const llvm::ErrorInfoBase &EI) {
+          std::cerr << "[Build Script JIT Error] Failed to initialize globals: "
+                    << EI.message() << "\n";
+        });
+    g_CurrentBuildOptions = nullptr;
+    return false;
+  }
+
   int (*mainFn)() = mainSym->toPtr<int (*)()>();
 
   /* Temporarily shift the working directory to the project root to ensure
@@ -330,6 +341,11 @@ bool BuildScriptRunner::run(const std::filesystem::path &scriptPath,
   std::filesystem::current_path(projRoot);
 
   int exitCode = mainFn();
+
+  /* Deinitialize globals */
+  if (auto deinitErr = jit->deinitialize(jit->getMainJITDylib())) {
+    llvm::consumeError(std::move(deinitErr));
+  }
 
   std::filesystem::current_path(previousPath);
 

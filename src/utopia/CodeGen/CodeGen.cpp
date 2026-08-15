@@ -2447,7 +2447,12 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
       initConst = llvm::Constant::getNullValue(ty);
     }
 
-    bool isConstant = node->type->isConstQualified();
+    /* Const-qualified globals may only be marked immutable in LLVM IR when
+     * they carry a compile-time constant initializer. Globals requiring
+     * dynamic initialization are written by module startup ctors, so they
+     * must remain writable (and would otherwise land in read-only sections
+     * under both AOT and JIT, causing crashes). */
+    bool isConstant = node->type->isConstQualified() && !requiresDynamicInit;
     std::string bindName = node->mangledName.empty()
                                ? std::string(node->varName)
                                : node->mangledName;
