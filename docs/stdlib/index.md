@@ -4,7 +4,7 @@ Utopia ships two layers of standard library:
 
 ## The prelude
 
-`libs/prelude/lib/` — loaded **automatically** into every module. It re-exports:
+`libs/prelude/lib/` — loaded **automatically** into every module. Prelude symbols have **no namespace**; they are available globally without `using`. It re-exports:
 
 | Module | Contents |
 | --- | --- |
@@ -17,14 +17,13 @@ Utopia ships two layers of standard library:
 
 ## The standard library
 
-`libs/stdlib/lib/` — imported explicitly with `import "utopia:...";`:
+`libs/stdlib/lib/` — imported explicitly with `import "utopia:...";`. Each module declares its own domain namespace, so members are reached as `IO.Path`, `Memory.unique_ptr`, etc. (or brought in with `using IO;`):
 
-| Module | Import | Contents |
-| --- | --- | --- |
-| `memory.utp` | `import "utopia:memory";` | `std.unique_ptr`, `std.shared_ptr`, `std.weak_ptr`, `std.make_unique`, `std.make_shared` |
-| `ffi.utp` | `import "utopia:ffi";` | `DynamicLibrary` (dlopen/dlsym) |
-| `io.utp` | `import "utopia:io";` | `Path`, `File`, `Directory`, `FileHandle` |
-| `test.utp` | `import "utopia:test";` | Example overload set |
+| Module | Import | Namespace | Contents |
+| --- | --- | --- | --- |
+| `memory.utp` | `import "utopia:memory";` | `Memory` | `unique_ptr`, `shared_ptr`, `weak_ptr`, `make_unique`, `make_shared` |
+| `ffi.utp` | `import "utopia:ffi";` | `FFI` | `DynamicLibrary` (dlopen/dlsym) |
+| `io.utp` | `import "utopia:io";` | `IO` | `Path`, `File`, `Directory`, `FileHandle` |
 
 ## The builder library
 

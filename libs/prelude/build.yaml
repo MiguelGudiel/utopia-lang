@@ -7,13 +7,21 @@ build:
   output_dir: "build/lib"
   include_dirs:
     - "."
+  linker_flags:
+    - "-lm"
   sources:
     - "lib/prelude.utp"
     - "lib/String.utp"
     - "lib/Math/Limits.utp"
+    - "lib/Math/Math.utp"
     - "lib/Memory/Core.utp"
     - "lib/System/OS.utp"
     - "lib/IO/Console.utp"
     - "lib/Core/ListLiteralView.utp"
     - "lib/Core/List.utp"
+    - "lib/Core/Duration.utp"
+    - "lib/Core/Stopwatch.utp"
+    - "lib/Core/DateTime.utp"
+    - "lib/Core/Random.utp"
+    - "lib/Core/Utility.utp"
     - "lib/Async/Future.utp"

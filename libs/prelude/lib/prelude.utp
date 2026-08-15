@@ -1,7 +1,13 @@
-export "Async/Future.utp";
 export "String.utp";
+export "Core/Duration.utp";
+export "Core/Stopwatch.utp";
+export "Core/DateTime.utp";
+export "Core/Random.utp";
+export "Core/Utility.utp";
+export "Core/List.utp";
 export "Math/Limits.utp";
+export "Math/Math.utp";
 export "Memory/Core.utp";
 export "System/OS.utp";
 export "IO/Console.utp";
-export "Core/List.utp";
+export "Async/Future.utp";

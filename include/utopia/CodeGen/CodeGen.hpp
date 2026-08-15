@@ -164,6 +164,10 @@ private:
   std::string currentFilePath;
   bool asyncEnabled = true;
 
+  /* When set by getLValue, reference-typed function calls return their raw
+   * address instead of the loaded value. */
+  bool suppressRefResultLoad = false;
+
   /* CodeGen-context scope depth at function entry. Return/cleanup emission
    * must never touch scopes that belong to an enclosing function (e.g. when a
    * lambda's synthesized function is emitted while another function is being

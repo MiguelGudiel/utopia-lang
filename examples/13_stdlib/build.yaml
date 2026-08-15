@@ -1,5 +1,5 @@
 project:
-  name: "annotations"
+  name: "stdlib"
 
 build:
   target: executable

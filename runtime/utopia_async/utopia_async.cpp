@@ -147,6 +147,12 @@ static int64_t nowMs() {
       .count();
 }
 
+static int64_t nowUs() {
+  using namespace std::chrono;
+  return duration_cast<microseconds>(steady_clock::now().time_since_epoch())
+      .count();
+}
+
 static void schedulerMain() {
   for (;;) {
     bool didWork = false;
@@ -452,7 +458,7 @@ void utopia_future_chain(void *src, void *dst) {
 /* ------------------------------------------------------------------ */
 
 struct UtopiaTimer {
-  int64_t dueMs;
+  int64_t dueUs;
   UtopiaFutureState *state;
   UtopiaTimer *next;
 };
@@ -485,10 +491,10 @@ static void timerThreadMain() {
       gTimerCv().wait(lock);
       continue;
     }
-    int64_t now = nowMs();
-    if (gTimers()->dueMs > now) {
+    int64_t now = nowUs();
+    if (gTimers()->dueUs > now) {
       gTimerCv().wait_for(lock,
-                          std::chrono::milliseconds(gTimers()->dueMs - now));
+                          std::chrono::microseconds(gTimers()->dueUs - now));
       continue;
     }
     UtopiaTimer *due = gTimers();
@@ -598,9 +604,12 @@ void utopia_future_wait(void *state) {
   }
 }
 
-/* Creates a future state that completes after 'ms' milliseconds on the
- * calling thread's event loop. */
-void *utopia_future_delay(int64_t ms) {
+/* Creates a future state that completes after 'us' microseconds on the
+ * calling thread's event loop. A non-positive delay completes as soon as
+ * the timer thread gets to it: the future is never completed synchronously,
+ * so 'await' always suspends and resumes on the event loop (Dart
+ * semantics for Future.delayed(Duration.zero, ...)). */
+void *utopia_future_delay_us(int64_t us) {
   void *state = utopia_future_create(0, 1, nullptr);
   auto *s = static_cast<UtopiaFutureState *>(state);
   s->ownerLoop = getLoop();
@@ -614,13 +623,13 @@ void *utopia_future_delay(int64_t ms) {
     }
   }
   auto *t = new UtopiaTimer();
-  t->dueMs = nowMs() + (ms > 0 ? ms : 0);
+  t->dueUs = nowUs() + (us > 0 ? us : 0);
   t->state = s;
   t->next = nullptr;
   {
     std::lock_guard<std::mutex> lock(gTimerMtx());
     UtopiaTimer **walk = &gTimers();
-    while (*walk && (*walk)->dueMs <= t->dueMs)
+    while (*walk && (*walk)->dueUs <= t->dueUs)
       walk = &(*walk)->next;
     t->next = *walk;
     *walk = t;
@@ -628,6 +637,9 @@ void *utopia_future_delay(int64_t ms) {
   gTimerCv().notify_one();
   return state;
 }
+
+/* Creates a future state that completes after 'ms' milliseconds. */
+void *utopia_future_delay(int64_t ms) { return utopia_future_delay_us(ms * 1000); }
 
 /* ------------------------------------------------------------------ */
 /* Threads                                                             */

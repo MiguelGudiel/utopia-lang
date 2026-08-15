@@ -1,0 +1,355 @@
+import "../String.utp";
+import "Duration.utp";
+
+/*
+ * DateTime — a point in time with microsecond precision, mirroring the most
+ * useful parts of Dart's dart:core DateTime API.
+ *
+ * Values before the epoch (negative microsecondsSinceEpoch) and UTC/local
+ * conversion are supported through the platform C library.
+ */
+
+/* Mirrors the C struct tm. On glibc/bionic the trailing gmtoff/zone fields
+ * are written by localtime_r/gmtime_r, so they are included there. */
+struct _Tm {
+  int32 tm_sec;
+  int32 tm_min;
+  int32 tm_hour;
+  int32 tm_mday;
+  int32 tm_mon;
+  int32 tm_year;
+  int32 tm_wday;
+  int32 tm_yday;
+  int32 tm_isdst;
+  #if !_WIN32 && !__APPLE__
+  int64 tm_gmtoff;
+  uint8* tm_zone;
+}
+
+@extern("time")
+int64 _os_time(int64* t);
+
+@extern("mktime")
+int64 _os_mktime(_Tm* tm);
+
+#if _WIN32
+
+@extern("localtime_s")
+int32 _os_localtime_s(_Tm* tm, int64* time);
+
+@extern("gmtime_s")
+int32 _os_gmtime_s(_Tm* tm, int64* time);
+
+@extern("_mkgmtime")
+int64 _os_mkgmtime(_Tm* tm);
+
+#else
+
+@extern("localtime_r")
+_Tm* _os_localtime_r(int64* time, _Tm* tm);
+
+@extern("gmtime_r")
+_Tm* _os_gmtime_r(int64* time, _Tm* tm);
+
+@extern("timegm")
+int64 _os_timegm(_Tm* tm);
+
+#endif
+
+
+class DateTime {
+  int64 _us;
+  bool _utc;
+
+  /* Constructs a local DateTime from calendar parts (Dart's DateTime
+   * constructor). 'month' is 1-based; the remaining parts default like in
+   * Dart. */
+  DateTime(
+    int64 year,
+    int64 month = 1,
+    int64 day = 1,
+    int64 hour = 0,
+    int64 minute = 0,
+    int64 second = 0,
+    int64 millisecond = 0,
+    int64 microsecond = 0,
+  ) {
+    _Tm tm;
+    tm.tm_sec = second as int32;
+    tm.tm_min = minute as int32;
+    tm.tm_hour = hour as int32;
+    tm.tm_mday = day as int32;
+    tm.tm_mon = (month - 1) as int32;
+    tm.tm_year = (year - 1900) as int32;
+    tm.tm_wday = 0;
+    tm.tm_yday = 0;
+    tm.tm_isdst = -1;
+    int64 secs = _os_mktime(&tm);
+    this._us = secs * 1000000 + millisecond * 1000 + microsecond;
+    this._utc = false;
+  }
+
+  /* Internal: builds a DateTime directly from an epoch timestamp. */
+  static DateTime _fromUs(int64 microseconds, bool isUtc) {
+    DateTime d = DateTime(0);
+    d._us = microseconds;
+    d._utc = isUtc;
+    return d;
+  }
+
+  /* Constructs a UTC DateTime from calendar parts (Dart's DateTime.utc). */
+  static DateTime utc(
+    int64 year,
+    int64 month = 1,
+    int64 day = 1,
+    int64 hour = 0,
+    int64 minute = 0,
+    int64 second = 0,
+    int64 millisecond = 0,
+    int64 microsecond = 0,
+  ) {
+    _Tm tm;
+    tm.tm_sec = second as int32;
+    tm.tm_min = minute as int32;
+    tm.tm_hour = hour as int32;
+    tm.tm_mday = day as int32;
+    tm.tm_mon = (month - 1) as int32;
+    tm.tm_year = (year - 1900) as int32;
+    tm.tm_wday = 0;
+    tm.tm_yday = 0;
+    tm.tm_isdst = 0;
+    #if _WIN32
+    int64 secs = _os_mkgmtime(&tm);
+    #else
+    int64 secs = _os_timegm(&tm);
+    #endif
+    return DateTime._fromUs(
+      secs * 1000000 + millisecond * 1000 + microsecond,
+      true,
+    );
+  }
+
+  /* The current date and time in the local time zone (Dart's DateTime.now). */
+  @inline
+  static DateTime now() {
+    int64 secs = _os_time(null);
+    return DateTime.fromMicrosecondsSinceEpoch(secs * 1000000, isUtc: false);
+  }
+
+  @inline
+  static DateTime fromMicrosecondsSinceEpoch(
+    int64 microseconds,
+    {bool isUtc = false},
+  ) {
+    return DateTime._fromUs(microseconds, isUtc);
+  }
+
+  @inline
+  static DateTime fromMillisecondsSinceEpoch(
+    int64 milliseconds,
+    {bool isUtc = false},
+  ) {
+    return DateTime.fromMicrosecondsSinceEpoch(
+      milliseconds * 1000,
+      isUtc: isUtc,
+    );
+  }
+
+  /* The calendar components in this DateTime's own zone. */
+  _Tm _toTm() {
+    _Tm tm;
+    int64 secs = this._us / 1000000;
+    #if _WIN32
+    if (this._utc) {
+      _os_gmtime_s(&tm, &secs);
+    } else {
+      _os_localtime_s(&tm, &secs);
+    }
+    #else
+    if (this._utc) {
+      _os_gmtime_r(&secs, &tm);
+    } else {
+      _os_localtime_r(&secs, &tm);
+    }
+    #endif
+    return tm;
+  }
+
+  int32 year() {
+    return this._toTm().tm_year + 1900;
+  }
+
+  int32 month() {
+    return this._toTm().tm_mon + 1;
+  }
+
+  int32 day() {
+    return this._toTm().tm_mday;
+  }
+
+  int32 hour() {
+    return this._toTm().tm_hour;
+  }
+
+  int32 minute() {
+    return this._toTm().tm_min;
+  }
+
+  int32 second() {
+    return this._toTm().tm_sec;
+  }
+
+  /* The millisecond within the current second, 0..999. */
+  int32 millisecond() {
+    return ((this._us % 1000000) / 1000) as int32;
+  }
+
+  /* The microsecond within the current millisecond, 0..999. */
+  int32 microsecond() {
+    return (this._us % 1000) as int32;
+  }
+
+  /* Day of the week: 1 = Monday .. 7 = Sunday (Dart's weekday). */
+  int32 weekday() {
+    int32 w = this._toTm().tm_wday;
+    return w == 0 ? 7 : w;
+  }
+
+  /* Day of the year, 1..366 (Dart's dayOfYear). */
+  int32 dayOfYear() {
+    return this._toTm().tm_yday + 1;
+  }
+
+  bool isUtc() {
+    return this._utc;
+  }
+
+  @inline
+  int64 microsecondsSinceEpoch() {
+    return this._us;
+  }
+
+  @inline
+  int64 millisecondsSinceEpoch() {
+    return this._us / 1000;
+  }
+
+  /* This minus 'other', as a Duration (Dart's difference). */
+  @inline
+  Duration difference(DateTime other) {
+    return Duration.microseconds(this._us - other._us);
+  }
+
+  @inline
+  DateTime add(Duration duration) {
+    return DateTime.fromMicrosecondsSinceEpoch(
+      this._us + duration.inMicroseconds(),
+      isUtc: this._utc,
+    );
+  }
+
+  @inline
+  DateTime subtract(Duration duration) {
+    return DateTime.fromMicrosecondsSinceEpoch(
+      this._us - duration.inMicroseconds(),
+      isUtc: this._utc,
+    );
+  }
+
+  @inline
+  bool isBefore(DateTime other) {
+    return this._us < other._us;
+  }
+
+  @inline
+  bool isAfter(DateTime other) {
+    return this._us > other._us;
+  }
+
+  @inline
+  bool isAtSameMomentAs(DateTime other) {
+    return this._us == other._us;
+  }
+
+  /* Negative when this < other, zero when equal, positive otherwise. */
+  int32 compareTo(DateTime other) {
+    if (this._us < other._us) return -1;
+    if (this._us > other._us) return 1;
+    return 0;
+  }
+
+  @extern("snprintf")
+  static int32 c_snprintf(uint8* str, usize size, const uint8* format, ...);
+
+  /* Local: "2024-01-15 10:30:00.000000"; UTC appends "Z". */
+  String toString() {
+    _Tm tm = this._toTm();
+    uint8[64] buf;
+    if (this._utc) {
+      DateTime.c_snprintf(
+        &buf[0],
+        64,
+        "%04lld-%02lld-%02lld %02lld:%02lld:%02lld.%03lld%03lldZ",
+        (tm.tm_year + 1900) as int64,
+        (tm.tm_mon + 1) as int64,
+        tm.tm_mday as int64,
+        tm.tm_hour as int64,
+        tm.tm_min as int64,
+        tm.tm_sec as int64,
+        this.millisecond() as int64,
+        this.microsecond() as int64,
+      );
+    } else {
+      DateTime.c_snprintf(
+        &buf[0],
+        64,
+        "%04lld-%02lld-%02lld %02lld:%02lld:%02lld.%03lld%03lld",
+        (tm.tm_year + 1900) as int64,
+        (tm.tm_mon + 1) as int64,
+        tm.tm_mday as int64,
+        tm.tm_hour as int64,
+        tm.tm_min as int64,
+        tm.tm_sec as int64,
+        this.millisecond() as int64,
+        this.microsecond() as int64,
+      );
+    }
+    return &buf[0];
+  }
+
+  /* ISO 8601: "2024-01-15T10:30:00.000000"; UTC appends "Z". */
+  String toIso8601String() {
+    _Tm tm = this._toTm();
+    uint8[64] buf;
+    if (this._utc) {
+      DateTime.c_snprintf(
+        &buf[0],
+        64,
+        "%04lld-%02lld-%02lldT%02lld:%02lld:%02lld.%03lld%03lldZ",
+        (tm.tm_year + 1900) as int64,
+        (tm.tm_mon + 1) as int64,
+        tm.tm_mday as int64,
+        tm.tm_hour as int64,
+        tm.tm_min as int64,
+        tm.tm_sec as int64,
+        this.millisecond() as int64,
+        this.microsecond() as int64,
+      );
+    } else {
+      DateTime.c_snprintf(
+        &buf[0],
+        64,
+        "%04lld-%02lld-%02lldT%02lld:%02lld:%02lld.%03lld%03lld",
+        (tm.tm_year + 1900) as int64,
+        (tm.tm_mon + 1) as int64,
+        tm.tm_mday as int64,
+        tm.tm_hour as int64,
+        tm.tm_min as int64,
+        tm.tm_sec as int64,
+        this.millisecond() as int64,
+        this.microsecond() as int64,
+      );
+    }
+    return &buf[0];
+  }
+}

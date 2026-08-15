@@ -22,7 +22,7 @@ Names are mangled with an Itanium-ABI-style scheme (`_Z...`):
 
 - Constructors: `_ZN<len><class><len>ctorC1E<params>` (e.g. `_ZN5InnerC1Ei`).
 - Destructors: `...D1Ev`.
-- Template instantiations mangle their arguments into the name (`Box_int`, `std.unique_ptr_Widget`).
+- Template instantiations mangle their arguments into the name (`Box_int`, `Memory.unique_ptr_Widget`).
 - `@export` and `@extern` symbols keep their unmangled names.
 
 ### Calling conventions

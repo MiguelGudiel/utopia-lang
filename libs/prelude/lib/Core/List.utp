@@ -1,9 +1,9 @@
 export "ListLiteralView.utp";
 
 class List<T> {
-  private T* _data;
-  private usize _length;
-  private usize _capacity;
+  T* _data;
+  usize _length;
+  usize _capacity;
 
   List() {
     this._length = 0;
@@ -85,4 +85,215 @@ class List<T> {
   T& operator[](usize index) {
     return this._data[index];
   }
+
+  /* Dart-style aliases and collection helpers.
+   *
+   * Methods that copy or compare T values are declared with a dummy type
+   * parameter so their bodies are only checked when actually called: this
+   * keeps List<T> instantiable for any T (like Future<void>), mirroring
+   * C++'s lazy member instantiation. The dummy binds to the record's own
+   * type argument, so call sites look normal: list.sort(), list.join(", ").
+   */
+
+  void add<T2>(T value) {
+    this.push(value);
+  }
+
+  void addAll<T2>(const List<T>& other) {
+    for (usize i = 0; i < other._length; i++) {
+      this.push(other._data[i]);
+    }
+  }
+
+  /* List-literal overload (Dart: list.addAll([...])). */
+  void addAll<T2>(ListLiteralView<T> view) {
+    for (usize i = 0; i < view.length; i++) {
+      this.push(view.data[i]);
+    }
+  }
+
+  @inline
+  bool isEmpty() {
+    return this._length == 0;
+  }
+
+  @inline
+  bool isNotEmpty() {
+    return this._length != 0;
+  }
+
+  void clear() {
+    this._length = 0;
+  }
+
+  /* True when 'value' is present (uses operator== on T). The dummy type
+   * parameter defers the check until the method is actually called, so
+   * List<T> stays instantiable for types without operator==. */
+  bool contains<T2>(T value) {
+    for (usize i = 0; i < this._length; i++) {
+      if (this._data[i] == value) return true;
+    }
+    return false;
+  }
+
+  /* Index of the first occurrence of 'value', or -1 when absent. */
+  int64 indexOf<T2>(T value) {
+    for (usize i = 0; i < this._length; i++) {
+      if (this._data[i] == value) return i as int64;
+    }
+    return -1;
+  }
+
+  /* Index of the last occurrence of 'value', or -1 when absent. */
+  int64 lastIndexOf<T2>(T value) {
+    for (int64 i = (this._length - 1) as int64; i >= 0; i--) {
+      if (this._data[i as usize] == value) return i;
+    }
+    return -1;
+  }
+
+  @inline
+  T& first() {
+    return this._data[0];
+  }
+
+  @inline
+  T& last() {
+    return this._data[this._length - 1];
+  }
+
+  /* Inserts 'value' at 'index', shifting the following elements right. */
+  void insert(usize index, T value) {
+    if (index > this._length) index = this._length;
+    if (this._length >= this._capacity) {
+      this._capacity = this._capacity * 2;
+      T* newData = new T[this._capacity];
+      for (usize i = 0; i < index; i++) {
+        newData[i] = this._data[i];
+      }
+      newData[index] = value;
+      for (usize i = index; i < this._length; i++) {
+        newData[i + 1] = this._data[i];
+      }
+      delete[] this._data;
+      this._data = newData;
+    } else {
+      for (usize i = this._length; i > index; i--) {
+        this._data[i] = this._data[i - 1];
+      }
+      this._data[index] = value;
+    }
+    this._length++;
+  }
+
+  /* Removes and returns the element at 'index'. */
+  T removeAt<T2>(usize index) {
+    T removed = this._data[index];
+    for (usize i = index; i + 1 < this._length; i++) {
+      this._data[i] = this._data[i + 1];
+    }
+    this._length--;
+    return removed;
+  }
+
+  /* Removes the first occurrence of 'value'; returns whether one was
+   * removed. */
+  bool remove<T2>(T value) {
+    for (usize i = 0; i < this._length; i++) {
+      if (this._data[i] == value) {
+        this.removeAt(i);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /* A new list holding the elements in [start, end). */
+  List<T> sublist<T2>(usize start, usize end) {
+    List<T> result;
+    if (start >= end || start >= this._length) return result;
+    if (end > this._length) end = this._length;
+    for (usize i = start; i < end; i++) {
+      result.push(this._data[i]);
+    }
+    return result;
+  }
+
+  /* Concatenates the elements' string forms with 'separator' between them.
+   * T must be convertible to String. */
+  String join<T2>(String separator) {
+    String result;
+    for (usize i = 0; i < this._length; i++) {
+      if (i > 0) {
+        result = result + separator;
+      }
+      result = result + String(this._data[i]);
+    }
+    return result;
+  }
+
+  /* Runs 'fn' for every element, in order. */
+  void forEach<T2>(void Function(T) fn) {
+    for (usize i = 0; i < this._length; i++) {
+      fn(this._data[i]);
+    }
+  }
+
+  /* A new list with the result of applying 'fn' to every element. */
+  List<T2> map<T2>(T2 Function(T) fn) {
+    List<T2> result;
+    for (usize i = 0; i < this._length; i++) {
+      result.push(fn(this._data[i]));
+    }
+    return result;
+  }
+
+  /* A new list with only the elements for which 'fn' returns true. */
+  List<T> where<T2>(bool Function(T) fn) {
+    List<T> result;
+    for (usize i = 0; i < this._length; i++) {
+      if (fn(this._data[i])) {
+        result.push(this._data[i]);
+      }
+    }
+    return result;
+  }
+
+  /* Combines the elements with 'fn', from first to last. The first element
+   * is returned as-is (Dart reduce semantics). */
+  T reduce<T2>(T Function(T, T) fn) {
+    T acc = this._data[0];
+    for (usize i = 1; i < this._length; i++) {
+      acc = fn(acc, this._data[i]);
+    }
+    return acc;
+  }
+
+  /* Sorts in place using operator< on T (stable insertion sort). */
+  void sort<T2>() {
+    for (usize i = 1; i < this._length; i++) {
+      T key = this._data[i];
+      int64 j = (i - 1) as int64;
+      while (j >= 0 && key < this._data[j as usize]) {
+        this._data[(j + 1) as usize] = this._data[j as usize];
+        j--;
+      }
+      this._data[(j + 1) as usize] = key;
+    }
+  }
+
+  /* Sorts in place with an explicit comparator ('less' must return true when
+   * its first argument should come before the second). */
+  void sort<T2>(bool Function(T, T) less) {
+    for (usize i = 1; i < this._length; i++) {
+      T key = this._data[i];
+      int64 j = (i - 1) as int64;
+      while (j >= 0 && less(key, this._data[j as usize])) {
+        this._data[(j + 1) as usize] = this._data[j as usize];
+        j--;
+      }
+      this._data[(j + 1) as usize] = key;
+    }
+  }
 }
+

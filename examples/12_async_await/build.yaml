@@ -7,3 +7,6 @@ build:
     - src/
   sources:
     - "main.utp"
+  linker_flags:
+    - "-lm"
+

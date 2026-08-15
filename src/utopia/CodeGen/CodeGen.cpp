@@ -5,6 +5,7 @@
 #include <llvm/Support/ModRef.h>
 #include <llvm/Transforms/Utils/ModuleUtils.h>
 #include <optional>
+#include <functional>
 #include <string>
 
 namespace utopia {
@@ -1138,7 +1139,8 @@ llvm::Value *CodeGen::visit(const ImplicitCastNode *node) {
     if (unqualTarget->getKind() == TypeKind::Struct &&
         unqualExpr->getKind() == TypeKind::Array) {
       auto *recTy = static_cast<const RecordType *>(unqualTarget);
-      if (recTy->getName().starts_with("ListLiteralView_")) {
+      if (recTy->getName().find("ListLiteralView_") !=
+          std::string_view::npos) {
         llvm::Type *llTy = getLLVMType(node->targetType);
         llvm::AllocaInst *temp = createEntryBlockAlloca(llTy, "llv.tmp");
         emitDefaultInitialization(temp, node->targetType);
@@ -1285,6 +1287,21 @@ llvm::Function *CodeGen::getOrCreateGlobalInitFunc() {
 llvm::Value *CodeGen::getLValue(const ExprNode *node) {
   if (!node)
     return nullptr;
+
+  if (node->kind == NodeKind::FunctionCall) {
+    /* A reference-typed call yields the address of the referenced object:
+     * dispatch() normally loads it, so suppress the load here. */
+    auto *callNode = static_cast<const FunctionCallNode *>(node);
+    if (callNode->exprType &&
+        (callNode->exprType->isReferenceType() ||
+         callNode->exprType->getKind() == TypeKind::RValueReference)) {
+      bool prev = suppressRefResultLoad;
+      suppressRefResultLoad = true;
+      llvm::Value *addr = dispatch(callNode);
+      suppressRefResultLoad = prev;
+      return addr;
+    }
+  }
 
   if (node->kind == NodeKind::MemberAccess) {
     auto *maNode = static_cast<const MemberAccessNode *>(node);
@@ -2478,7 +2495,8 @@ llvm::Value *CodeGen::visit(const TernaryOpNode *node) {
 
 llvm::Value *CodeGen::visit(const VarDeclNode *node) {
   bool isGlobal = !builder.GetInsertBlock();
-  bool isStaticLocal = !isGlobal && node->isStatic && !node->isExtern;
+  bool isStaticLocal = !isGlobal && node->isStatic && !node->isExtern &&
+                       node->mangledName.empty();
 
   uint64_t customAlign = 0;
 
@@ -2642,7 +2660,13 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
     if (isGlobal) {
       cgCtx.bind(bindName, gvar, true);
     } else {
+      /* Static class fields are looked up through their mangled name (see
+       * MemberAccessNode), so bind both spellings: the unqualified name
+       * covers local statics and the mangled name covers member access. */
       cgCtx.bind(node->varName, gvar, true);
+      if (bindName != node->varName) {
+        cgCtx.bind(bindName, gvar, true);
+      }
     }
 
     /* Implements dynamic initialization block for local static variables.
@@ -2743,6 +2767,14 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
               }
 
               if (rvalAddr) {
+                /* Copy constructors construct the object: zero the
+                 * destination first so member-wise copies that route through
+                 * operator= (which may free the previous buffer) are safe on
+                 * the freshly allocated, otherwise uninitialized storage. */
+                llvm::Align align = mod.getDataLayout().getABITypeAlign(ty);
+                uint64_t allocSize = mod.getDataLayout().getTypeAllocSize(ty);
+                builder.CreateMemSet(gvar, builder.getInt8(0), allocSize,
+                                     align);
                 llvm::Function *ctorFunc = getOrCreateFunction(node->copyCtor);
                 builder.CreateCall(ctorFunc, {gvar, rvalAddr});
               } else {
@@ -2896,6 +2928,13 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
           }
 
           if (rvalAddr) {
+            /* See the comment in the module-level copy-constructor path:
+             * zero the destination so member-wise operator= copies are safe
+             * on uninitialized storage. */
+            llvm::Align align = mod.getDataLayout().getABITypeAlign(ty);
+            uint64_t allocSize = mod.getDataLayout().getTypeAllocSize(ty);
+            builder.CreateMemSet(alloca, builder.getInt8(0), allocSize,
+                                 align);
             llvm::Function *ctorFunc = getOrCreateFunction(node->copyCtor);
             builder.CreateCall(ctorFunc, {alloca, rvalAddr});
           } else {
@@ -3428,6 +3467,7 @@ llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
 }
 
 llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
+
   if (node->isSuperCall) {
     if (!node->resolvedFunc)
       return nullptr;
@@ -3689,6 +3729,24 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
 
     llvm::Value *callRes = builder.CreateCall(calleeTy, callee, argsArgs);
 
+    /* Reference-typed call results yield an address; load it so dispatch
+     * returns the value (matching the operator[]/subscript convention).
+     * getLValue() keeps providing the raw address for l-value uses. */
+    if (callRes && node->exprType &&
+        (node->exprType->isReferenceType() ||
+         node->exprType->getKind() == TypeKind::RValueReference) &&
+        !suppressRefResultLoad) {
+      const Type *refPointee = node->exprType;
+      if (refPointee->isReferenceType()) {
+        refPointee =
+            static_cast<const ReferenceType *>(refPointee)->getPointeeType();
+      } else {
+        refPointee = static_cast<const RValueReferenceType *>(refPointee)
+                         ->getPointeeType();
+      }
+      callRes = createTBAALoad(getLLVMType(refPointee), callRes, refPointee);
+    }
+
     /* Async calls return a pointer to the Future object; wrap it into the
      * Future value type expected by the caller. */
     if (callRes && node->resolvedFunc && node->resolvedFunc->isAsync) {
@@ -3773,7 +3831,25 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
       argIdx++;
     }
 
-    return builder.CreateCall(llvmFTy, dynamicFuncPtr, argsArgs);
+    llvm::Value *dynRes = builder.CreateCall(llvmFTy, dynamicFuncPtr, argsArgs);
+
+    /* Reference-typed function-pointer results yield an address; load it
+     * (see the direct-call path above). */
+    if (dynRes && node->exprType &&
+        (node->exprType->isReferenceType() ||
+         node->exprType->getKind() == TypeKind::RValueReference) &&
+        !suppressRefResultLoad) {
+      const Type *refPointee = node->exprType;
+      if (refPointee->isReferenceType()) {
+        refPointee =
+            static_cast<const ReferenceType *>(refPointee)->getPointeeType();
+      } else {
+        refPointee = static_cast<const RValueReferenceType *>(refPointee)
+                         ->getPointeeType();
+      }
+      dynRes = createTBAALoad(getLLVMType(refPointee), dynRes, refPointee);
+    }
+    return dynRes;
   }
 }
 
@@ -4146,6 +4222,51 @@ llvm::Value *CodeGen::visit(const ModuleNode *node) {
               gvar = new llvm::GlobalVariable(mod, ty,
                                               varDecl->type->isConstQualified(),
                                               linkage, init, bindName);
+            }
+            cgCtx.bind(bindName, gvar, true);
+          }
+        } else if (stmt->kind == NodeKind::ClassDecl ||
+                   stmt->kind == NodeKind::StructDecl ||
+                   stmt->kind == NodeKind::UnionDecl ||
+                   stmt->kind == NodeKind::NamespaceDecl) {
+          /* Declare static class/struct/union fields of dependency modules
+           * so member access (which resolves through the mangled name) can
+           * reference them across modules. Namespace blocks are unwrapped
+           * recursively. */
+          std::vector<const VarDeclNode *> staticFields;
+          std::function<void(const ASTNode *)> collectStatics =
+              [&](const ASTNode *n) {
+                if (auto *c = llvm::dyn_cast<ClassDeclNode>(n)) {
+                  for (const auto *f : c->fields)
+                    if (f->isStatic)
+                      staticFields.push_back(f);
+                } else if (auto *s = llvm::dyn_cast<StructDeclNode>(n)) {
+                  for (const auto *f : s->fields)
+                    if (f->isStatic)
+                      staticFields.push_back(f);
+                } else if (auto *u = llvm::dyn_cast<UnionDeclNode>(n)) {
+                  for (const auto *f : u->fields)
+                    if (f->isStatic)
+                      staticFields.push_back(f);
+                } else if (auto *ns = llvm::dyn_cast<NamespaceDeclNode>(n)) {
+                  for (const auto *inner : ns->statements)
+                    collectStatics(inner);
+                }
+              };
+          collectStatics(stmt);
+
+          for (const auto *field : staticFields) {
+            std::string bindName = field->mangledName.empty()
+                                       ? std::string(field->varName)
+                                       : field->mangledName;
+            if (cgCtx.lookupDetailed(bindName).value)
+              continue;
+            llvm::Type *ty = getLLVMType(field->type);
+            llvm::GlobalVariable *gvar = mod.getGlobalVariable(bindName);
+            if (!gvar) {
+              gvar = new llvm::GlobalVariable(
+                  mod, ty, field->type->isConstQualified(),
+                  llvm::GlobalValue::ExternalLinkage, nullptr, bindName);
             }
             cgCtx.bind(bindName, gvar, true);
           }

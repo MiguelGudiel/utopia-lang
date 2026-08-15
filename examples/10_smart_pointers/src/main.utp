@@ -4,7 +4,7 @@
  */
 import "utopia:memory";
 
-using std;
+using Memory;
 
 class Widget {
   public int id;

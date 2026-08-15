@@ -362,6 +362,33 @@ public:
   }
 };
 
+/* Future._delayUs(us): a Future<void> that completes after 'us'
+ * microseconds (used by the Duration overload of Future.delayed). */
+class FutureDelayUsIntrinsic : public Intrinsic {
+public:
+  llvm::Value *evaluateRuntime(CodeGen &cg,
+                               const FunctionCallNode *node) const override {
+    if (node->args.size() != 1 || !node->resolvedFunc)
+      return nullptr;
+
+    llvm::Value *us = cg.dispatch(node->args[0]);
+    if (!us)
+      return nullptr;
+
+    llvm::Value *delayState = cg.emitRuntimeCall(
+        "utopia_future_delay_us", getBuilder(cg).getPtrTy(), {us});
+
+    const Type *resultTy = node->resolvedFunc->returnType;
+    llvm::Value *obj = cg.createFutureObject(resultTy, delayState);
+    return cg.materializeFutureValue(resultTy, obj);
+  }
+
+  llvm::Constant *
+  evaluateConstant(CodeGen &cg, const FunctionCallNode *node) const override {
+    return nullptr;
+  }
+};
+
 IntrinsicRegistry::IntrinsicRegistry() {
   registerIntrinsic("sizeof_type", std::make_unique<SizeofTypeIntrinsic>());
   registerIntrinsic("sizeof_expr", std::make_unique<SizeofExprIntrinsic>());
@@ -373,6 +400,8 @@ IntrinsicRegistry::IntrinsicRegistry() {
                     std::make_unique<FutureRunOnThreadIntrinsic>());
   registerIntrinsic("future_sync", std::make_unique<FutureSyncIntrinsic>());
   registerIntrinsic("future_delay", std::make_unique<FutureDelayIntrinsic>());
+  registerIntrinsic("future_delay_us",
+                    std::make_unique<FutureDelayUsIntrinsic>());
 }
 
 const IntrinsicRegistry &IntrinsicRegistry::instance() {

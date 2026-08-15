@@ -4,7 +4,7 @@ Utopia's standard library provides C++-style smart pointers with **Rust-style au
 
 ```utp
 import "utopia:memory";
-using std;
+using Memory;
 ```
 
 ## `unique_ptr<T>`
@@ -92,7 +92,7 @@ unique_ptr<T> make_unique<T>(T* p);
 shared_ptr<T> make_shared<T>(T* p);
 ```
 
-They adopt an already-constructed heap object, mirroring `std::make_unique`/`std::make_shared` ownership semantics. Factories can also return by value with RVO:
+They adopt an already-constructed heap object, mirroring `Memory.make_unique`/`Memory.make_shared` ownership semantics (and C++'s `std::make_unique`/`std::make_shared`). Factories can also return by value with RVO:
 
 ```utp
 unique_ptr<Widget> makeWidget() {

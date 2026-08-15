@@ -63,6 +63,8 @@ static int32 _remove(const uint8* filename);
 @extern("rename")
 static int32 _rename(const uint8* oldname, const uint8* newname);
 
+namespace IO {
+
 class Path {
   static String getExecutablePath() {
     uint8[4096] exePath;
@@ -400,3 +402,5 @@ class Directory {
     return system(cmd.c_str()) == 0;
   }
 }
+
+} /* namespace IO */

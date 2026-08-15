@@ -1,0 +1,219 @@
+/*
+ * Math — mathematical constants and functions, mirroring the useful parts
+ * of dart:math and <cmath>.
+ */
+
+@extern("sqrt")
+float64 _c_sqrt(float64 x);
+
+@extern("pow")
+float64 _c_pow(float64 base, float64 exponent);
+
+@extern("exp")
+float64 _c_exp(float64 x);
+
+@extern("log")
+float64 _c_log(float64 x);
+
+@extern("log10")
+float64 _c_log10(float64 x);
+
+@extern("log2")
+float64 _c_log2(float64 x);
+
+@extern("sin")
+float64 _c_sin(float64 x);
+
+@extern("cos")
+float64 _c_cos(float64 x);
+
+@extern("tan")
+float64 _c_tan(float64 x);
+
+@extern("asin")
+float64 _c_asin(float64 x);
+
+@extern("acos")
+float64 _c_acos(float64 x);
+
+@extern("atan")
+float64 _c_atan(float64 x);
+
+@extern("atan2")
+float64 _c_atan2(float64 y, float64 x);
+
+@extern("sinh")
+float64 _c_sinh(float64 x);
+
+@extern("cosh")
+float64 _c_cosh(float64 x);
+
+@extern("tanh")
+float64 _c_tanh(float64 x);
+
+@extern("floor")
+float64 _c_floor(float64 x);
+
+@extern("ceil")
+float64 _c_ceil(float64 x);
+
+@extern("round")
+float64 _c_round(float64 x);
+
+@extern("trunc")
+float64 _c_trunc(float64 x);
+
+@extern("fmod")
+float64 _c_fmod(float64 x, float64 y);
+
+@extern("hypot")
+float64 _c_hypot(float64 x, float64 y);
+
+@extern("fabs")
+float64 _c_fabs(float64 x);
+
+
+class Math {
+  static const float64 PI = 3.14159265358979323846;
+  static const float64 E = 2.71828182845904523536;
+  static const float64 LN2 = 0.69314718055994530942;
+  static const float64 LN10 = 2.30258509299404568402;
+  static const float64 LOG2E = 1.44269504088896340736;
+  static const float64 LOG10E = 0.43429448190325182765;
+  static const float64 SQRT2 = 1.41421356237309504880;
+  static const float64 SQRT1_2 = 0.70710678118654752440;
+  static const float64 DEG2RAD = 0.01745329251994329577;
+  static const float64 RAD2DEG = 57.29577951308232087680;
+
+  @forceInline
+  static float64 sqrt(float64 x) {
+    return _c_sqrt(x);
+  }
+
+  @forceInline
+  static float64 pow(float64 base, float64 exponent) {
+    return _c_pow(base, exponent);
+  }
+
+  @forceInline
+  static float64 exp(float64 x) {
+    return _c_exp(x);
+  }
+
+  @forceInline
+  static float64 log(float64 x) {
+    return _c_log(x);
+  }
+
+  @forceInline
+  static float64 log10(float64 x) {
+    return _c_log10(x);
+  }
+
+  @forceInline
+  static float64 log2(float64 x) {
+    return _c_log2(x);
+  }
+
+  @forceInline
+  static float64 sin(float64 x) {
+    return _c_sin(x);
+  }
+
+  @forceInline
+  static float64 cos(float64 x) {
+    return _c_cos(x);
+  }
+
+  @forceInline
+  static float64 tan(float64 x) {
+    return _c_tan(x);
+  }
+
+  @forceInline
+  static float64 asin(float64 x) {
+    return _c_asin(x);
+  }
+
+  @forceInline
+  static float64 acos(float64 x) {
+    return _c_acos(x);
+  }
+
+  @forceInline
+  static float64 atan(float64 x) {
+    return _c_atan(x);
+  }
+
+  @forceInline
+  static float64 atan2(float64 y, float64 x) {
+    return _c_atan2(y, x);
+  }
+
+  @forceInline
+  static float64 sinh(float64 x) {
+    return _c_sinh(x);
+  }
+
+  @forceInline
+  static float64 cosh(float64 x) {
+    return _c_cosh(x);
+  }
+
+  @forceInline
+  static float64 tanh(float64 x) {
+    return _c_tanh(x);
+  }
+
+  @forceInline
+  static float64 floor(float64 x) {
+    return _c_floor(x);
+  }
+
+  @forceInline
+  static float64 ceil(float64 x) {
+    return _c_ceil(x);
+  }
+
+  @forceInline
+  static float64 round(float64 x) {
+    return _c_round(x);
+  }
+
+  @forceInline
+  static float64 trunc(float64 x) {
+    return _c_trunc(x);
+  }
+
+  /* Remainder of x / y, with the sign of x (Dart's '%' on doubles). */
+  @forceInline
+  static float64 fmod(float64 x, float64 y) {
+    return _c_fmod(x, y);
+  }
+
+  @forceInline
+  static float64 hypot(float64 x, float64 y) {
+    return _c_hypot(x, y);
+  }
+
+  @forceInline
+  static float64 abs(float64 x) {
+    return _c_fabs(x);
+  }
+
+  @forceInline
+  static int64 abs(int64 x) {
+    return x < 0 ? -x : x;
+  }
+
+  @forceInline
+  static float64 min(float64 a, float64 b) {
+    return a < b ? a : b;
+  }
+
+  @forceInline
+  static float64 max(float64 a, float64 b) {
+    return a > b ? a : b;
+  }
+}
+

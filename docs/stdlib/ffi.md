@@ -1,9 +1,10 @@
 # FFI: Dynamic Libraries
 
-The `utopia:ffi` module provides runtime loading of shared libraries and symbol resolution — the Utopia equivalent of `dlopen`/`dlsym`.
+The `utopia:ffi` module provides runtime loading of shared libraries and symbol resolution — the Utopia equivalent of `dlopen`/`dlsym`. The `DynamicLibrary` type lives in the `FFI` namespace:
 
 ```utp
 import "utopia:ffi";
+using FFI;
 ```
 
 ## DynamicLibrary
@@ -24,6 +25,7 @@ class DynamicLibrary {
 
 ```utp
 import "utopia:ffi";
+using FFI;
 
 int main() {
   DynamicLibrary* lib = DynamicLibrary.open("libmylib.so");

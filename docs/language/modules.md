@@ -69,11 +69,11 @@ namespace App;   // all top-level declarations in this file belong to App
 
 ```utp
 import "utopia:memory";
-using std;
+using Memory;
 
 int main() {
   unique_ptr<Widget> u = make_unique<Widget>(new Widget());
-  // ^ unique_ptr and make_unique resolved through 'std'
+  // ^ unique_ptr and make_unique resolved through 'Memory'
 }
 ```
 

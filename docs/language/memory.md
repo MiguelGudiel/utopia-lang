@@ -70,7 +70,7 @@ The standard library provides C++-style smart pointers with Rust-style auto-dere
 
 ```utp
 import "utopia:memory";
-using std;
+using Memory;
 
 class Widget {
   public int id;

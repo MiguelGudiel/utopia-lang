@@ -3,6 +3,8 @@
 #include "utopia/Common/Logger.hpp"
 #include "utopia/Sema/EffectAnalyzer.hpp"
 #include "utopia/Sema/Sema.hpp"
+#include <llvm/Support/Debug.h>
+#include <llvm/Support/raw_ostream.h>
 #include <string>
 
 namespace utopia {
@@ -88,6 +90,35 @@ bool TypeCheckPass::run(const ModuleNode *module, SemaContext &context) {
 const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
   if (!t)
     return nullptr;
+
+  /* The parser falls back to a template parameter placeholder when a type
+   * name cannot be resolved at parse time (e.g. a cross-module reference
+   * whose module is parsed later). At semantic time such placeholders can
+   * be recovered through the symbol table: resolve them to the declared
+   * record/alias/enum when one is visible. Genuine template parameters
+   * (T, R, ...) have no declaration and stay untouched. */
+  if (auto *tp = llvm::dyn_cast<TemplateParamType>(t)) {
+    auto decls = ctx->lookup(tp->getName());
+    for (const auto *d : decls) {
+      if (d->kind == NodeKind::ClassDecl ||
+          d->kind == NodeKind::StructDecl ||
+          d->kind == NodeKind::UnionDecl) {
+        if (const Type *rt = ctx->astCtx.getRecordType(d->fqName))
+          return rt;
+        continue;
+      }
+      if (d->kind == NodeKind::TypedefDecl) {
+        if (const Type *at = ctx->astCtx.getTypeAlias(d->fqName))
+          return at;
+        continue;
+      }
+      if (d->kind == NodeKind::EnumDecl) {
+        if (const Type *et = ctx->astCtx.getEnumTypeByName(d->fqName))
+          return et;
+      }
+    }
+    return t;
+  }
 
   if (auto *fnTy = llvm::dyn_cast<FunctionType>(t)) {
     std::vector<const Type *> resolvedParams;
@@ -2861,6 +2892,82 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
 
       auto decls = ctx->symTable.lookupExact(targetFQName, ctx->currentModule);
       if (decls.empty()) {
+        /* Template functions are kept in the template registry instead of the
+         * symbol table, so a qualified call like 'Memory.make_unique<int>(...)'
+         * needs an explicit lookup plus instantiation here to resolve like the
+         * unqualified form. */
+        const DeclNode *tmplDecl = nullptr;
+        auto regIt = ctx->templateRegistry.find(targetFQName);
+        if (regIt != ctx->templateRegistry.end() &&
+            llvm::isa<FunctionDeclNode>(regIt->second) &&
+            (!ctx->currentModule ||
+             ctx->currentModule->canSee(regIt->second->declFilePath))) {
+          tmplDecl = regIt->second;
+        }
+
+        if (tmplDecl && !node->templateArgs.empty()) {
+          const auto *tfn = static_cast<const FunctionDeclNode *>(tmplDecl);
+          std::string mangledName = std::string(tmplDecl->fqName);
+          for (const auto *arg : node->templateArgs) {
+            const Type *resArg = resolveIfTemplate(arg);
+            std::string argStr = resArg->toString();
+            for (char &c : argStr) {
+              if (!isalnum(c))
+                c = '_';
+            }
+            mangledName += "_" + argStr;
+          }
+          std::string_view mangledView = ctx->astCtx.copyString(mangledName);
+
+          auto instDecls =
+              ctx->symTable.lookupExact(mangledView, ctx->currentModule);
+          if (instDecls.empty()) {
+            std::unordered_map<std::string_view, const Type *> templateArgMap;
+            for (size_t i = 0; i < tfn->templateParams.size(); ++i) {
+              templateArgMap[tfn->templateParams[i]] =
+                  resolveIfTemplate(node->templateArgs[i]);
+            }
+
+            ASTCloner cloner(ctx->astCtx, templateArgMap);
+            DeclNode *instDecl =
+                llvm::cast<DeclNode>(cloner.dispatch(tmplDecl));
+
+            if (instDecl) {
+              llvm::cast<FunctionDeclNode>(instDecl)->name = mangledView;
+              instDecl->fqName = mangledView;
+              instDecl->hasPublicMod = tmplDecl->hasPublicMod;
+              instDecl->hasPrivateMod = tmplDecl->hasPrivateMod;
+              instDecl->hasProtectedMod = tmplDecl->hasProtectedMod;
+              instDecl->annotations = tmplDecl->annotations;
+              instDecl->declFilePath = tmplDecl->declFilePath;
+
+              auto *instFn = llvm::cast<FunctionDeclNode>(instDecl);
+              instFn->isTemplate = false;
+              instFn->templateParams = {};
+
+              if (ctx->currentModule) {
+                const_cast<ModuleNode *>(ctx->currentModule)
+                    ->instantiatedTemplates.push_back(instDecl);
+              }
+              DeclCollectorPass dcp;
+              dcp.ctx = ctx;
+
+              auto prevFile = ctx->currentFile;
+              ctx->setCurrentFile(instDecl->declFilePath);
+
+              ctx->pushScope();
+              dcp.dispatch(instDecl);
+              dispatch(instDecl);
+              ctx->popScope();
+
+              ctx->symTable.addGlobalSymbol(instDecl->fqName, instDecl);
+              ctx->setCurrentFile(prevFile);
+            }
+          }
+          decls = ctx->symTable.lookupExact(mangledView, ctx->currentModule);
+        }
+      }
+      if (decls.empty()) {
         return ctx->reportError(
             node->line, node->column, node->length,
             "No member named '" + std::string(node->memberName) +
@@ -3255,15 +3362,15 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
           methods = sDecl->methods;
 
         if (!node->templateArgs.empty()) {
-          FunctionDeclNode *tmplDecl = nullptr;
-          for (auto *m : methods) {
-            if (m->name == node->memberName && m->isTemplate) {
-              tmplDecl = m;
-              break;
-            }
-          }
-
-          if (tmplDecl) {
+          /* Instantiate EVERY matching method template with the explicit
+           * type arguments: overloads like Future.delayed<R>(int64, fn) and
+           * Future.delayed<R>(Duration, fn) must all be available so the
+           * call-site overload resolution picks the right one. */
+          for (auto *tmplDecl : methods) {
+            if (tmplDecl->name != node->memberName || !tmplDecl->isTemplate)
+              continue;
+            if (node->templateArgs.size() != tmplDecl->templateParams.size())
+              continue;
             std::string mangledName = std::string(node->memberName);
             for (const auto *arg : node->templateArgs) {
               const Type *resArg = resolveIfTemplate(arg);
@@ -3367,7 +3474,6 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
                 ctx->setCurrentRecordContext(prevContext);
               }
             }
-            const_cast<MemberAccessNode *>(node)->memberName = mangledView;
           }
         }
 
@@ -3777,6 +3883,18 @@ const FunctionDeclNode *TypeCheckPass::instantiateMethodTemplate(
     }
     mangledName += "_" + argStr;
   }
+  /* Disambiguate overloads that share template parameters but differ in
+   * their parameter lists (e.g. 'sort<T2>()' vs 'sort<T2>(cmp)'): the
+   * resolved-argument suffix alone would collide. */
+  for (const auto *p : tmplDecl->params) {
+    std::string paramStr = p->type ? p->type->toString() : "void";
+    for (char &ch : paramStr) {
+      if (!isalnum(ch))
+        ch = '_';
+    }
+    mangledName += "_p_" + paramStr;
+  }
+  llvm::dbgs() << "[dbg instMethod] " << tmplDecl->name << " -> " << mangledName << "\n";
   std::string_view mangledView = ctx->astCtx.copyString(mangledName);
 
   /* Reuse an existing instantiation when present. */
@@ -3802,8 +3920,11 @@ const FunctionDeclNode *TypeCheckPass::instantiateMethodTemplate(
 
   ASTCloner cloner(ctx->astCtx, templateArgMap);
   DeclNode *instDecl = static_cast<DeclNode *>(cloner.dispatch(tmplDecl));
-  if (!instDecl || instDecl->kind != NodeKind::FunctionDecl)
+  if (!instDecl || instDecl->kind != NodeKind::FunctionDecl) {
+    llvm::dbgs() << "[dbg instMethod] clone failed for " << tmplDecl->name
+                 << "\n";
     return nullptr;
+  }
 
   auto *fnDecl = static_cast<FunctionDeclNode *>(instDecl);
   fnDecl->name = mangledView;
@@ -4154,6 +4275,12 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
       argTypes.push_back(*argType);
     }
   }
+  if (node->target->kind == NodeKind::MemberAccess &&
+      static_cast<const MemberAccessNode *>(node->target)->memberName == "delayed") {
+    llvm::dbgs() << "[dbg delayed call] argTypes:";
+    for (auto &t : argTypes) llvm::dbgs() << " [" << t->toString() << "]";
+    llvm::dbgs() << "\n";
+  }
 
   if (hasErrors) {
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,
@@ -4292,8 +4419,9 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
       }
     }
 
-    if (!errors.empty())
+    if (!errors.empty()) {
       return errors;
+    }
 
     for (size_t p = 0; p < expectedParams; ++p) {
       const Type *paramType = fDecl->params[p]->type;
@@ -4371,9 +4499,18 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
                          paramType->toString() + "', but got '" + gotType +
                          "'.");
       } else {
-        if (explicitlyProvided[p] &&
-            canImplicitlyCast(argTypeForCast, paramType, false)) {
-          outScore += 10;
+        if (explicitlyProvided[p]) {
+          /* Exact (or identity-after-unqualification) matches outrank
+           * implicit numeric conversions so overload sets like abs(int64) /
+           * abs(float64) and min(int32) / min(float64) resolve to the
+           * argument's own type instead of the first declared candidate. */
+          const Type *uArg = argTypeForCast->getUnqualifiedType();
+          const Type *uParam = paramType->getUnqualifiedType();
+          if (uArg == uParam) {
+            outScore += 10;
+          } else if (canImplicitlyCast(argTypeForCast, paramType, false)) {
+            outScore += 5;
+          }
         }
 
         bool isLValue = resolvedArgs[p]->isLValue;
@@ -4409,8 +4546,14 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
       }
     }
 
-    if (!errors.empty())
+    if (!errors.empty()) {
+      llvm::dbgs() << "[dbg checkMatch errors] f=" << fDecl->name << " p0="
+                   << (fDecl->params.empty() ? "?" : fDecl->params[0]->type->toString())
+                   << " errors:";
+      for (auto &e : errors) llvm::dbgs() << " [" << e << "]";
+      llvm::dbgs() << "\n";
       return errors;
+    }
 
     for (size_t p = 0; p < expectedParams; ++p) {
       const Type *paramType = fDecl->params[p]->type;
@@ -4848,6 +4991,9 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
         }
 
         if (bestMatch) {
+          llvm::dbgs() << "[dbg ctor-call] " << bestMatch->name
+                       << " isCtor=" << isConstructorCall
+                       << " exprTy=" << (isConstructorCall ? constructorRecTy->toString() : bestMatch->returnType->toString()) << "\n";
           const_cast<FunctionCallNode *>(node)->resolvedFunc = bestMatch;
           const_cast<FunctionCallNode *>(node)->args =
               ctx->astCtx.copyArray<ExprNode *>(bestResolvedArgs);
@@ -5007,12 +5153,24 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
              * to the enclosing record's template arguments
              * ('Future<int>.value(5)' binds R = int). */
             const FunctionDeclNode *candidate = method;
-            if (method->isTemplate && ma->templateArgs.empty() && recordTy &&
-                recordTy->isTemplateInstantiation() &&
-                method->templateParams.size() ==
-                    recordTy->getTemplateArgs().size()) {
-              candidate = instantiateMethodTemplate(method, recordTy,
-                                                    ma->templateArgs);
+            if (method->isTemplate && recordTy) {
+              if (ma->templateArgs.empty() &&
+                  recordTy->isTemplateInstantiation() &&
+                  method->templateParams.size() ==
+                      recordTy->getTemplateArgs().size()) {
+                /* Bind the method's template parameters positionally to the
+                 * enclosing record's template arguments. */
+                candidate = instantiateMethodTemplate(method, recordTy,
+                                                      ma->templateArgs);
+              } else if (!ma->templateArgs.empty() &&
+                         method->templateParams.size() ==
+                             ma->templateArgs.size()) {
+                /* Explicit type arguments ('Future.delayed<void>(...)') are
+                 * applied to every matching overload so the usual overload
+                 * resolution picks the right signature. */
+                candidate = instantiateMethodTemplate(method, recordTy,
+                                                      ma->templateArgs);
+              }
             }
             if (!candidate)
               continue;

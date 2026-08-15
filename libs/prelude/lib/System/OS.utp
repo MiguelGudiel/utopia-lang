@@ -1,5 +1,74 @@
+import "../String.utp";
+
 @extern
 uint32 sleep(uint32 seconds);
 
 @extern
 int32 system(const uint8* command);
+
+#if _WIN32
+
+@extern("_putenv")
+int32 _os_putenv(const uint8* string);
+
+#else
+
+@extern("setenv")
+int32 _os_setenv(const uint8* name, const uint8* value, int32 overwrite);
+
+@extern("unsetenv")
+int32 _os_unsetenv(const uint8* name);
+
+#endif
+
+@extern("getenv")
+uint8* _os_getenv(const uint8* name);
+
+
+/*
+ * Environment variable access, mirroring std::getenv / std::setenv.
+ */
+class Env {
+  @inline
+  static String get(const uint8* name) {
+    uint8* value = _os_getenv(name);
+    if (value == null) return "";
+    return value;
+  }
+
+  @inline
+  static String get(String name) {
+    return Env.get(name.c_str());
+  }
+
+  static bool set(const uint8* name, const uint8* value) {
+    #if _WIN32
+    /* _putenv takes "NAME=value" and always overwrites. */
+    String entry = name;
+    entry = entry + "=";
+    entry = entry + value;
+    return _os_putenv(entry.c_str()) == 0;
+    #else
+    return _os_setenv(name, value, 1) == 0;
+    #endif
+  }
+
+  static bool set(String name, String value) {
+    return Env.set(name.c_str(), value.c_str());
+  }
+
+  static bool unset(const uint8* name) {
+    #if _WIN32
+    String entry = name;
+    entry = entry + "=";
+    return _os_putenv(entry.c_str()) == 0;
+    #else
+    return _os_unsetenv(name) == 0;
+    #endif
+  }
+
+  static bool unset(String name) {
+    return Env.unset(name.c_str());
+  }
+}
+

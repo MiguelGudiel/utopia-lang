@@ -72,7 +72,7 @@ class Stack<T> {
 - Nested angle brackets (`Foo<Bar<int>>`) are handled correctly by the lexer/parser (`>>` is split).
 - Instantiation is lazy: a template is cloned and type-checked the first time it is used with concrete type arguments.
 - The compiler maintains a per-module cache of instantiated templates, so repeated uses share a single instantiation.
-- Instantiated names are mangled deterministically (e.g. `Box_int`, `std.unique_ptr_Widget`), including namespace qualification.
+- Instantiated names are mangled deterministically (e.g. `Box_int`, `Memory.unique_ptr_Widget`), including namespace qualification.
 
 ## Smart pointer generics
 
@@ -80,7 +80,7 @@ The standard library's smart pointers are generic, and their `operator*` partici
 
 ```utp
 import "utopia:memory";
-using std;
+using Memory;
 
 unique_ptr<Inner> up = make_unique<Inner>(new Inner(42));
 up.sayHello();   // resolved through operator* automatically

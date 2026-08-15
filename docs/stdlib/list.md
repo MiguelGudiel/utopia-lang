@@ -53,7 +53,7 @@ int main() {
 
 ```utp
 import "utopia:memory";
-using std;
+using Memory;
 
 List<unique_ptr<Widget>> widgets;
 widgets.push(make_unique<Widget>(new Widget()));

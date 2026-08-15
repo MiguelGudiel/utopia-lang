@@ -1,9 +1,10 @@
 # I/O: Path, File, Directory, FileHandle
 
-The `utopia:io` module provides a filesystem and file I/O API with RAII resource management.
+The `utopia:io` module provides a filesystem and file I/O API with RAII resource management. All types live in the `IO` namespace:
 
 ```utp
 import "utopia:io";
+using IO;
 ```
 
 ## Path
@@ -98,6 +99,7 @@ d.deleteRecursive();          // rm -rf / rmdir /s /q
 
 ```utp
 import "utopia:io";
+using IO;
 
 int main() {
   File cfg("config.ini");

@@ -18,6 +18,13 @@ Future<int> fetchData() async {
   return 42;
 }
 
+/* The Duration overload: Duration.zero still runs asynchronously, exactly
+ * like Dart's Future.delayed(Duration.zero, ...). */
+Future<String> fetchLater() async {
+  await Future.delayed<void>(Duration(milliseconds: 50), () {});
+  return "later";
+}
+
 /* Fire-and-forget: this runs in the background while main continues. */
 int backgroundWork = 0;
 
@@ -34,6 +41,15 @@ Future<int> fetchTwice() async {
 }
 
 int main() async {
+  /* Future.delayed with a Duration (Dart API). */
+  String later = await fetchLater();
+  print("delayed(Duration): %s\n", later.c_str());
+
+  /* Future.microtask defers to the event loop: 'now' is printed before
+   * the microtask runs. */
+  Future.microtask<void>(() { print("microtask ran\n"); });
+  print("after microtask launch\n");
+
   /* Fire-and-forget async call: continues immediately. */
   backgroundUpdate();
   print("background right after launch: %d\n", backgroundWork);

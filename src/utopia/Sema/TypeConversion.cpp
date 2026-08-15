@@ -74,15 +74,18 @@ bool canImplicitlyCast(const Type *from, const Type *to,
   /* Implicit Array to ListLiteralView intrinsic resolution */
   if (auto *arrFrom = llvm::dyn_cast<ArrayType>(unqualFrom)) {
     if (auto *recTo = llvm::dyn_cast<RecordType>(unqualTo)) {
-      if (recTo->getName().starts_with("ListLiteralView_")) {
-        std::string expectedName = "ListLiteralView_";
+      std::string_view recName = recTo->getName();
+      std::string_view marker = "ListLiteralView_";
+      size_t pos = recName.find(marker);
+      if (pos != std::string_view::npos) {
+        std::string expectedSuffix = std::string(marker);
         std::string argStr = arrFrom->getElementType()->toString();
         for (char &c : argStr) {
           if (!isalnum(c))
             c = '_';
         }
-        expectedName += argStr;
-        if (recTo->getName() == expectedName) {
+        expectedSuffix += argStr;
+        if (recName.ends_with(expectedSuffix)) {
           return true;
         }
       }
@@ -376,13 +379,26 @@ ExprNode *TypeCheckPass::performImplicitConversion(ExprNode *expr,
   if (llvm::isa<ImplicitCastNode>(expr))
     return expr;
 
-  const Type *unqualTo = to->getUnqualifiedType();
+  /* Strip reference layers off the target so user-defined conversions (e.g.
+   * uint8* -> const String&) reach the conversion-constructor path; the
+   * resulting cast node keeps the full reference type so codegen returns
+   * the temporary's address. */
+  const Type *targetBase = to;
+  if (targetBase->isReferenceType()) {
+    targetBase = static_cast<const ReferenceType *>(targetBase)
+                     ->getPointeeType();
+  } else if (targetBase->getKind() == TypeKind::RValueReference) {
+    targetBase = static_cast<const RValueReferenceType *>(targetBase)
+                     ->getPointeeType();
+  }
+
+  const Type *unqualTo = targetBase->getUnqualifiedType();
   const Type *unqualFrom = expr->exprType->getUnqualifiedType();
 
   /* Intercept Array to ListLiteralView intrinsic conversion */
   if (llvm::isa<ArrayType>(unqualFrom)) {
     if (auto *recTo = llvm::dyn_cast<RecordType>(unqualTo)) {
-      if (recTo->getName().starts_with("ListLiteralView_")) {
+      if (recTo->getName().find("ListLiteralView_") != std::string_view::npos) {
         auto *castNode = ctx->astCtx.create<ImplicitCastNode>(
             expr, to, nullptr, expr->line, expr->column, expr->length);
         castNode->exprType = to;

@@ -85,9 +85,9 @@ Utopia combines a C/C++-style memory and execution model with a modern, Dart-ins
 - **`Math`**: numeric limits constants (`INT32_MAX`, `FLOAT64_MIN`, ...)
 - **`Memory`**: `malloc`/`free` bindings and type reflection (`Type`, `MethodInfo`)
 - **`System`**: `sleep`, `system` bindings
-- **`Path`/`File`/`Directory`/`FileHandle`**: filesystem and file I/O utilities
-- **`DynamicLibrary`**: runtime `dlopen`/`dlsym`-style FFI
-- **Smart pointers** (`std.unique_ptr`, `std.shared_ptr`, `std.weak_ptr`, `std.make_unique`, `std.make_shared`)
+- **`Path`/`File`/`Directory`/`FileHandle`**: filesystem and file I/O utilities (in the `IO` namespace)
+- **`DynamicLibrary`**: runtime `dlopen`/`dlsym`-style FFI (in the `FFI` namespace)
+- **Smart pointers** (`Memory.unique_ptr`, `Memory.shared_ptr`, `Memory.weak_ptr`, `Memory.make_unique`, `Memory.make_shared`) in the `Memory` namespace
 
 ## Installation
 
