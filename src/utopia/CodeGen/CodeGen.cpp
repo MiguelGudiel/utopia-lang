@@ -252,7 +252,6 @@ CodeGen::createTypeReflectionConstant(const Type *t,
   bool isArray = llvm::isa<ArrayType>(unqual);
   bool isPointer = llvm::isa<PointerType>(unqual);
 
-  /* Bools in LLVM ABI */
   fields.push_back(
       llvm::ConstantInt::get(builder.getInt1Ty(), isClass ? 1 : 0));
   fields.push_back(
@@ -269,11 +268,28 @@ CodeGen::createTypeReflectionConstant(const Type *t,
 }
 
 llvm::Value *CodeGen::createImplicitCast(llvm::Value *src, llvm::Type *destTy) {
+  return createImplicitCast(src, destTy, nullptr);
+}
+
+llvm::Value *CodeGen::createImplicitCast(llvm::Value *src, llvm::Type *destTy,
+                                         const Type *srcType) {
   if (!src)
     return nullptr;
   llvm::Type *srcTy = src->getType();
   if (srcTy == destTy)
     return src;
+
+  /* Determine the source signedness from the Utopia type when available;
+   * defaults to signed for raw LLVM values. Integer widening must respect
+   * it (uint8 -> int32 zero-extends, int8 -> int32 sign-extends). */
+  bool srcIsSigned = true;
+  if (srcType) {
+    const Type *u = srcType->getUnqualifiedType();
+    if (u->getKind() == TypeKind::Builtin) {
+      auto k = static_cast<const BuiltinType *>(u)->getBuiltinKind();
+      srcIsSigned = (k >= BuiltinKind::Int8 && k <= BuiltinKind::Int64);
+    }
+  }
 
   // Pointer cast support (e.g. T* to void* or void* to T*)
   if (srcTy->isPointerTy() && destTy->isPointerTy()) {
@@ -289,15 +305,30 @@ llvm::Value *CodeGen::createImplicitCast(llvm::Value *src, llvm::Type *destTy) {
   }
 
   if (srcTy->isIntegerTy() && destTy->isIntegerTy()) {
-    return builder.CreateIntCast(src, destTy, true);
+    /* Conversion to i1 (bool) must be a zero-test: truncating would turn
+     * even values like 42 into false. */
+    if (destTy->getIntegerBitWidth() == 1)
+      return builder.CreateICmpNE(
+          src, llvm::ConstantInt::get(srcTy, 0), "bool.cast");
+    /* i1 (bool) must zero-extend: sign-extending a boolean would yield -1
+     * for 'true' instead of 1. */
+    if (srcTy->getIntegerBitWidth() == 1)
+      return builder.CreateIntCast(src, destTy, false);
+    return builder.CreateIntCast(src, destTy, srcIsSigned);
   }
   if (srcTy->isFloatingPointTy() && destTy->isFloatingPointTy()) {
     return builder.CreateFPCast(src, destTy);
   }
   if (srcTy->isIntegerTy() && destTy->isFloatingPointTy()) {
-    return builder.CreateSIToFP(src, destTy);
+    if (srcIsSigned)
+      return builder.CreateSIToFP(src, destTy);
+    return builder.CreateUIToFP(src, destTy);
   }
   if (srcTy->isFloatingPointTy() && destTy->isIntegerTy()) {
+    /* Conversion to i1 (bool): zero-test the float. */
+    if (destTy->getIntegerBitWidth() == 1)
+      return builder.CreateFCmpONE(
+          src, llvm::ConstantFP::get(srcTy, 0.0), "bool.cast");
     return builder.CreateFPToSI(src, destTy);
   }
 
@@ -614,7 +645,7 @@ void CodeGen::emitConstructorCall(const FunctionCallNode *node,
 
       if (func && argVal && llArgIdx < func->arg_size()) {
         llvm::Type *paramTy = func->getFunctionType()->getParamType(llArgIdx);
-        argVal = createImplicitCast(argVal, paramTy);
+        argVal = createImplicitCast(argVal, paramTy, arg->exprType);
       }
     }
 
@@ -833,7 +864,15 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
         }
       }
 
-      return llvm::ConstantExpr::getBitCast(inner, destTy);
+      /* Only emit the bitcast when LLVM accepts it. The unconditional
+       * fallback previously produced invalid IR for record targets
+       * ('bitcast ptr @.str to %String'); returning nullptr lets the caller
+       * fall back to runtime (dynamic) initialization instead. */
+      if (llvm::CastInst::castIsValid(llvm::Instruction::BitCast,
+                                      inner->getType(), destTy)) {
+        return llvm::ConstantExpr::getBitCast(inner, destTy);
+      }
+      return nullptr;
     }
   }
 
@@ -865,7 +904,7 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
         (numStr[1] == 'x' || numStr[1] == 'X')) {
       isHex = true;
       radix = 16;
-      numStr = numStr.substr(2); // Remove "0x"
+      numStr = numStr.substr(2);
     }
 
     while (!numStr.empty()) {
@@ -920,7 +959,6 @@ llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
     SymbolInfo sym = cgCtx.lookupDetailed(lookupName);
 
     if (sym.value) {
-      /* Resolve scalar values directly from global variable initializers */
       if (auto *gv = llvm::dyn_cast<llvm::GlobalVariable>(sym.value)) {
         if (gv->isConstant() && gv->hasInitializer()) {
           return gv->getInitializer();
@@ -1233,7 +1271,7 @@ llvm::Value *CodeGen::visit(const ImplicitCastNode *node) {
     argVal = dispatch(node->expr);
     if (ctorFunc && argVal && ctorFunc->arg_size() > 1) {
       llvm::Type *paramTy = ctorFunc->getFunctionType()->getParamType(1);
-      argVal = createImplicitCast(argVal, paramTy);
+      argVal = createImplicitCast(argVal, paramTy, node->expr->exprType);
     }
   }
 
@@ -1499,8 +1537,9 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
     if (varNode->resolvedDecl &&
         varNode->resolvedDecl->kind == NodeKind::VarDecl) {
       auto *varDecl = static_cast<const VarDeclNode *>(varNode->resolvedDecl);
-      if ((varDecl->isStatic || varDecl->isExtern) &&
-          !varDecl->mangledName.empty()) {
+      /* Namespace-scoped globals carry a mangled symbol (namespace-mangled,
+       * like C++); look them up under that name. */
+      if (!varDecl->mangledName.empty()) {
         lookupName = varDecl->mangledName;
       }
     }
@@ -1567,7 +1606,7 @@ llvm::Value *CodeGen::visit(const NumberNode *node) {
       (numStr[1] == 'x' || numStr[1] == 'X')) {
     isHex = true;
     radix = 16;
-    numStr = numStr.substr(2); // Remove "0x"
+    numStr = numStr.substr(2);
   }
 
   while (!numStr.empty()) {
@@ -1734,8 +1773,6 @@ llvm::Value *CodeGen::visit(const VariableNode *node) {
                           node->name);
   }
 
-  /* Return direct pointer evaluation if identifier statically targets a
-   * function declaration */
   if (node->resolvedDecl &&
       node->resolvedDecl->kind == NodeKind::FunctionDecl) {
     return getOrCreateFunction(
@@ -1882,7 +1919,6 @@ llvm::Value *CodeGen::visit(const IfNode *node) {
       builder.CreateBr(mergeBB);
     }
   } else {
-    /* Cleanup orphaned block explicitly */
     delete elseBB;
   }
 
@@ -1992,7 +2028,6 @@ llvm::Value *CodeGen::visit(const SwitchNode *node) {
       llvm::BasicBlock::Create(ctx, "switch.end", theFunction);
   llvm::BasicBlock *defaultBB = endBB;
 
-  /* Phase 1: Pre-allocate basic blocks to map the switch table targets */
   std::vector<llvm::BasicBlock *> caseBlocks;
   for (size_t i = 0; i < node->cases.size(); ++i) {
     llvm::BasicBlock *bb =
@@ -2011,7 +2046,6 @@ llvm::Value *CodeGen::visit(const SwitchNode *node) {
    * 'continue' commands */
   cgCtx.pushLoop(nullptr, endBB);
 
-  /* Phase 2: Emit block internals and configure explicit fallthrough links */
   for (size_t i = 0; i < node->cases.size(); ++i) {
     const auto *c = node->cases[i];
 
@@ -2051,7 +2085,6 @@ llvm::Value *CodeGen::visit(const SwitchNode *node) {
     }
   }
 
-  /* Secure block termination if the final case lacks a break/return */
   if (!builder.GetInsertBlock()->getTerminator()) {
     builder.CreateBr(endBB);
   }
@@ -2603,6 +2636,15 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
         }
       }
 
+      /* The constant still does not fit the global's type: the initializer
+       * requires runtime construction (e.g. 'const String s = "..."', where
+       * the literal decays to a pointer but the global is a record). Falling
+       * back to dynamic initialization keeps the module verifier happy —
+       * previously this produced an invalid 'bitcast ptr to %String'. */
+      if (initConst && initConst->getType() != ty) {
+        initConst = nullptr;
+      }
+
       if (!initConst) {
         /* Local statics natively permit runtime initialization via guards.
          * Globals are mapped to module startup ctors. */
@@ -2725,8 +2767,6 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
         diEmitter.pushScope(initF->getSubprogram());
       }
 
-      /* Contextually bind cleanup routines executed throughout dynamic parsing
-       * block safely avoiding scope leaks or unreachable logic */
       {
         CGScopeGuard initGuard(cgCtx);
 
@@ -3144,8 +3184,8 @@ llvm::Value *CodeGen::visit(const AssignNode *node) {
                       unqualTargetTy->getKind() == TypeKind::Union ||
                       unqualTargetTy->getKind() == TypeKind::Array);
 
-  /* Map assignment to deep memory copy for aggregate types to preserve locality
-   * and prevent SSA explosion. evaluates L-values to support references */
+  /* Aggregate assignment lowers to a deep memory copy: preserves locality and
+   * avoids SSA explosion. L-values are evaluated to support references. */
   if (isAggregate) {
     llvm::Value *rvalAddr = getLValue(node->value);
     if (rvalAddr) {
@@ -3468,6 +3508,17 @@ llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
 
 llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
 
+  /* Top-level (module-scope) calls have no IR builder insert point;
+   * previously they crashed inside CreateGlobalString while lowering
+   * their arguments. */
+  if (!builder.GetInsertBlock()) {
+    diags.report({DiagLevel::Error, node->line, node->column, node->length,
+                  "Top-level function calls are not supported. Wrap the "
+                  "expression in a function body.",
+                  currentFilePath});
+    return nullptr;
+  }
+
   if (node->isSuperCall) {
     if (!node->resolvedFunc)
       return nullptr;
@@ -3522,7 +3573,7 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
 
       if (llArgIdx < calleeTy->getNumParams()) {
         llvm::Type *paramTy = calleeTy->getParamType(llArgIdx);
-        argVal = createImplicitCast(argVal, paramTy);
+        argVal = createImplicitCast(argVal, paramTy, arg->exprType);
       }
       argsArgs.push_back(argVal);
       llArgIdx++;
@@ -3547,8 +3598,6 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
     llvm::Value *callee = func;
     llvm::FunctionType *calleeTy = func->getFunctionType();
 
-    /* Identify if the member access is strictly a constructor invocation
-     * by resolving its structural declaration target. */
     bool isConstructorViaMA = false;
     if (node->target->kind == NodeKind::MemberAccess) {
       auto ma = static_cast<const MemberAccessNode *>(node->target);
@@ -3707,10 +3756,33 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
         if (func && argVal) {
           if (llArgIdx < calleeTy->getNumParams()) {
             llvm::Type *paramTy = calleeTy->getParamType(llArgIdx);
-            argVal = createImplicitCast(argVal, paramTy);
+            argVal = createImplicitCast(argVal, paramTy, arg->exprType);
           } else if (func->isVarArg()) {
-            if (argVal->getType()->isFloatTy()) {
+            /* Variadic arguments must be widened per the C ABI: sub-32-bit
+             * integers are sign/zero-extended to 32 bits and float32 is
+             * promoted to float64. Passing them raw would make the callee's
+             * va_arg read garbage (e.g. %d on an i8 value). */
+            const Type *argU = arg->exprType->getUnqualifiedType();
+            if (argU->getKind() == TypeKind::Builtin) {
+              auto bKind = static_cast<const BuiltinType *>(argU)
+                               ->getBuiltinKind();
+              if (bKind == BuiltinKind::Float32 ||
+                  argVal->getType()->isFloatTy()) {
+                argVal = builder.CreateFPExt(argVal, builder.getDoubleTy());
+              } else if (argVal->getType()->isIntegerTy() &&
+                         argVal->getType()->getIntegerBitWidth() < 32) {
+                bool isSigned = (bKind >= BuiltinKind::Int8 &&
+                                 bKind <= BuiltinKind::Int64);
+                argVal = builder.CreateIntCast(argVal, builder.getInt32Ty(),
+                                               isSigned);
+              }
+            } else if (argVal->getType()->isFloatTy()) {
               argVal = builder.CreateFPExt(argVal, builder.getDoubleTy());
+            } else if (argVal->getType()->isIntegerTy() &&
+                       argVal->getType()->getIntegerBitWidth() < 32) {
+              /* Non-builtin (e.g. typedef) integer: zero-extend by default. */
+              argVal = builder.CreateIntCast(argVal, builder.getInt32Ty(),
+                                             false);
             }
           }
         }
@@ -3825,7 +3897,31 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
       }
 
       if (argIdx < llvmFTy->getNumParams()) {
-        argVal = createImplicitCast(argVal, llvmFTy->getParamType(argIdx));
+        argVal = createImplicitCast(argVal, llvmFTy->getParamType(argIdx),
+                                    arg->exprType);
+      } else if (llvmFTy->isVarArg()) {
+        /* Widen variadic arguments to at least 32 bits (C ABI): sub-32-bit
+         * integers are sign/zero-extended, float32 promotes to float64. */
+        const Type *argU = arg->exprType->getUnqualifiedType();
+        if (argU->getKind() == TypeKind::Builtin) {
+          auto bKind =
+              static_cast<const BuiltinType *>(argU)->getBuiltinKind();
+          if (bKind == BuiltinKind::Float32 ||
+              argVal->getType()->isFloatTy()) {
+            argVal = builder.CreateFPExt(argVal, builder.getDoubleTy());
+          } else if (argVal->getType()->isIntegerTy() &&
+                     argVal->getType()->getIntegerBitWidth() < 32) {
+            bool isSigned = (bKind >= BuiltinKind::Int8 &&
+                             bKind <= BuiltinKind::Int64);
+            argVal = builder.CreateIntCast(argVal, builder.getInt32Ty(),
+                                           isSigned);
+          }
+        } else if (argVal->getType()->isFloatTy()) {
+          argVal = builder.CreateFPExt(argVal, builder.getDoubleTy());
+        } else if (argVal->getType()->isIntegerTy() &&
+                   argVal->getType()->getIntegerBitWidth() < 32) {
+          argVal = builder.CreateIntCast(argVal, builder.getInt32Ty(), false);
+        }
       }
       argsArgs.push_back(argVal);
       argIdx++;
@@ -3912,7 +4008,7 @@ llvm::Value *CodeGen::visit(const CastNode *node) {
       argVal = dispatch(node->expr);
       if (ctorFunc && argVal && ctorFunc->arg_size() > 1) {
         llvm::Type *paramTy = ctorFunc->getFunctionType()->getParamType(1);
-        argVal = createImplicitCast(argVal, paramTy);
+        argVal = createImplicitCast(argVal, paramTy, node->expr->exprType);
       }
     }
 
@@ -3948,7 +4044,7 @@ llvm::Value *CodeGen::visit(const CastNode *node) {
     return nullptr;
 
   llvm::Type *destTy = getLLVMType(node->targetType);
-  return createImplicitCast(src, destTy);
+  return createImplicitCast(src, destTy, node->expr->exprType);
 }
 
 llvm::Value *CodeGen::visit(const ReturnNode *node) {
@@ -4166,7 +4262,6 @@ llvm::Value *CodeGen::visit(const ReturnNode *node) {
                       cleanupIt->type);
     }
 
-    /* Ensure deterministic lifetime closure upon early returns */
     for (auto lifeIt = scope.lifetimes.rbegin();
          lifeIt != scope.lifetimes.rend(); ++lifeIt) {
       emitLifetimeEnd(lifeIt->allocaInst, lifeIt->size);
@@ -4219,8 +4314,18 @@ llvm::Value *CodeGen::visit(const ModuleNode *node) {
 
               llvm::Constant *init = nullptr;
 
+              /* Record-typed globals may be dynamically initialized on the
+               * defining side (const String = "..."), in which case the
+               * definition is writable; mirror that so both modules agree on
+               * the global's immutability. */
+              const Type *unqualTy = varDecl->type->getUnqualifiedType();
+              bool recordTy = unqualTy->getKind() == TypeKind::Struct ||
+                              unqualTy->getKind() == TypeKind::Class ||
+                              unqualTy->getKind() == TypeKind::Union;
+
               gvar = new llvm::GlobalVariable(mod, ty,
-                                              varDecl->type->isConstQualified(),
+                                              varDecl->type->isConstQualified() &&
+                                                  !recordTy,
                                               linkage, init, bindName);
             }
             cgCtx.bind(bindName, gvar, true);
@@ -4249,8 +4354,16 @@ llvm::Value *CodeGen::visit(const ModuleNode *node) {
                     if (f->isStatic)
                       staticFields.push_back(f);
                 } else if (auto *ns = llvm::dyn_cast<NamespaceDeclNode>(n)) {
-                  for (const auto *inner : ns->statements)
+                  for (const auto *inner : ns->statements) {
+                    /* Namespace-level variables/constants are globals from
+                     * the consumer's perspective; declare them externally so
+                     * qualified member access ('NS.CONST') resolves. */
+                    if (auto *vd = llvm::dyn_cast<VarDeclNode>(inner)) {
+                      if (vd->isGlobal || vd->isExtern)
+                        staticFields.push_back(vd);
+                    }
                     collectStatics(inner);
+                  }
                 }
               };
           collectStatics(stmt);
@@ -4306,8 +4419,6 @@ llvm::Value *CodeGen::visit(const ModuleNode *node) {
     }
   }
 
-  /* Pass 2: Traverse and generate instructions for expressions, methods, and
-   * functions. */
   for (const auto &stmt : node->statements) {
     dispatch(stmt);
   }
@@ -4565,7 +4676,7 @@ llvm::Value *CodeGen::visit(const NewExprNode *node) {
           if (ctorFunc && argVal && llArgIdx < ctorFunc->arg_size()) {
             llvm::Type *paramTy =
                 ctorFunc->getFunctionType()->getParamType(llArgIdx);
-            argVal = createImplicitCast(argVal, paramTy);
+            argVal = createImplicitCast(argVal, paramTy, arg->exprType);
           }
         }
 
@@ -4606,7 +4717,6 @@ llvm::Value *CodeGen::visit(const DeleteExprNode *node) {
       llvm::BasicBlock::Create(ctx, "delete.notnull", theFunction);
   llvm::BasicBlock *mergeBB = llvm::BasicBlock::Create(ctx, "delete.cont");
 
-  // Prevent SIGSEGV by ensuring the pointer is valid before dereferencing
   llvm::Value *isNotNull = builder.CreateIsNotNull(ptr, "ptr.notnull");
   builder.CreateCondBr(isNotNull, deleteBB, mergeBB);
 
@@ -4662,7 +4772,6 @@ llvm::Value *CodeGen::visit(const DeleteExprNode *node) {
       llvm::AllocaInst *idxAlloca =
           TmpB.CreateAlloca(builder.getInt64Ty(), nullptr, "delete.idx");
 
-      // Initialize loop counter with the array count to traverse backwards
       builder.CreateStore(count, idxAlloca);
       builder.CreateBr(condBB);
 
@@ -4685,7 +4794,6 @@ llvm::Value *CodeGen::visit(const DeleteExprNode *node) {
       builder.SetInsertPoint(endBB);
     }
 
-    // Free the original un-offset memory block
     builder.CreateCall(freeFunc, {rawPtr});
   } else {
     if (node->ptr->exprType && node->ptr->exprType->isPointerType()) {
@@ -4850,7 +4958,6 @@ void CodeGen::emitDefaultInitialization(llvm::Value *ptr, const Type *type) {
   llvm::Type *llTy = getLLVMType(type);
   uint64_t size = mod.getDataLayout().getTypeAllocSize(llTy);
 
-  /* Warn if the stack allocation exceeds typical OS stack limits (e.g., 8MB) */
   if (size >= 8388608) {
     diags.report({DiagLevel::Warning, 0, 0, 0,
                   "Massive memory allocation detected (" +
@@ -5094,9 +5201,6 @@ void CodeGen::emitScopeCleanups() {
   }
 }
 
-/* ================================================================== */
-/* Async / coroutine support                                           */
-/* ================================================================== */
 
 bool CodeGen::unwrapFutureType(const Type *t, const Type **outValue) {
   if (!t)

@@ -747,8 +747,6 @@ void handleHover(const json &req) {
             if (!ma->enumMember->docString.empty())
               hoverText += "\n---\n" + std::string(ma->enumMember->docString);
           } else if (ma->resolvedDecl) {
-            /* Extract resolved target to handle namespaces, types, and standard
-             * functions */
             declTarget = ma->resolvedDecl;
             if (auto *funcDecl =
                     llvm::dyn_cast<FunctionDeclNode>(ma->resolvedDecl)) {
@@ -952,8 +950,6 @@ void handleSignatureHelp(const json &req) {
           targetFunc = maNode->resolvedMethod;
         } else if (maNode->resolvedDecl &&
                    maNode->resolvedDecl->kind == NodeKind::FunctionDecl) {
-          /* Fallback to gracefully retrieve functions accessed externally via
-           * namespace resolution */
           targetFunc =
               static_cast<const FunctionDeclNode *>(maNode->resolvedDecl);
         }
@@ -1070,8 +1066,6 @@ void handleDefinition(const json &req) {
         } else if (ma->isEnumMember) {
           targetDecl = ma->enumMember;
         } else if (ma->resolvedDecl) {
-          /* Support direct go-to-definition resolution for entities scoped
-           * within namespaces */
           targetDecl = ma->resolvedDecl;
         } else {
           const Type *baseTy = ma->object->exprType;
@@ -2243,8 +2237,7 @@ void processFile(const std::string &uri, std::string text) {
     projectConfigCache[projRootStr] = modConfig;
   }
 
-  /* Flag the current configuration to allow builder API resolution if
-   * applicable */
+  /* build.utp files load the builder API through the module loader. */
   if (currentPath.filename() == "build.utp") {
     modConfig.isBuildScript = true;
   }

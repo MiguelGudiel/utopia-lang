@@ -24,6 +24,7 @@ struct _Tm {
   #if !_WIN32 && !__APPLE__
   int64 tm_gmtoff;
   uint8* tm_zone;
+  #endif
 }
 
 @extern("time")

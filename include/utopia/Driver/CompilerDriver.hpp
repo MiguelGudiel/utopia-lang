@@ -14,6 +14,7 @@ struct CompileOptions {
   std::string outputName;
   std::string target;
   std::string sourcePath;
+  std::vector<std::string> resolvedSources;
   std::string outputPath;
   std::string projectRoot;
   std::string mainProjectRoot;

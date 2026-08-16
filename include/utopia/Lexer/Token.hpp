@@ -17,33 +17,33 @@ enum class TokenType : uint8_t {
   ANNOTATION_KW,
   STATIC_KW,
   REQUIRED_KW,
-  PUBLIC_KW,    /* public */
-  PRIVATE_KW,   /* private */
-  PROTECTED_KW, /* protected */
-  VAR_KW,       /* var */
+  PUBLIC_KW,
+  PRIVATE_KW,
+  PROTECTED_KW,
+  VAR_KW,
   FOR_KW,
   WHILE_KW,
   IF_KW,
   ELSE_KW,
-  SWITCH_KW,    /*switch*/
-  CASE_KW,      /*case:*/
-  DEFAULT_KW,   /*default:*/
-  BREAK_KW,     /*break*/
-  CONTINUE_KW,  /*continue*/
-  NAMESPACE_KW, /* namespace */
-  USING_KW,     /* using */
+  SWITCH_KW,
+  CASE_KW,
+  DEFAULT_KW,
+  BREAK_KW,
+  CONTINUE_KW,
+  NAMESPACE_KW,
+  USING_KW,
   ELLIPSIS,
   AS,
   PLUS,
   MINUS,
   STAR,
   SLASH,
-  PERCENT, // %
+  PERCENT,
   AMPERSAND,
-  PIPE,   // |
-  CARET,  // ^
-  LSHIFT, // <<
-  RSHIFT, // >>
+  PIPE,
+  CARET,
+  LSHIFT,
+  RSHIFT,
   LOGICAL_AND,
   LOGICAL_OR,
   EQ,
@@ -54,53 +54,53 @@ enum class TokenType : uint8_t {
   GE,
   BANG,
   AT,
-  STRUCT_KW,     /* struct */
-  UNION_KW,      /* union */
-  CLASS_KW,      /* class */
-  ABSTRACT_KW,   /* abstract */
-  EXTENDS_KW,    /* extends */
-  IMPLEMENTS_KW, /* implements */
-  SUPER_KW,      /* super */
+  STRUCT_KW,
+  UNION_KW,
+  CLASS_KW,
+  ABSTRACT_KW,
+  EXTENDS_KW,
+  IMPLEMENTS_KW,
+  SUPER_KW,
   THIS_KW,
   DOT,
   TILDE,
   ASSIGN,
-  PLUS_EQ,      // +=
-  MINUS_EQ,     // -=
-  STAR_EQ,      // *=
-  SLASH_EQ,     // /=
-  PERCENT_EQ,   // %=
-  AMPERSAND_EQ, // &=
-  PIPE_EQ,      // |=
-  CARET_EQ,     // ^=
-  LSHIFT_EQ,    // <<=
-  RSHIFT_EQ,    // >>=
+  PLUS_EQ,
+  MINUS_EQ,
+  STAR_EQ,
+  SLASH_EQ,
+  PERCENT_EQ,
+  AMPERSAND_EQ,
+  PIPE_EQ,
+  CARET_EQ,
+  LSHIFT_EQ,
+  RSHIFT_EQ,
   ARROW,
   COLON,
-  QUESTION, /* ? */
+  QUESTION,
   TRUE_KW,
   FALSE_KW,
   LPAREN,
   RPAREN,
   LBRACE,
   RBRACE,
-  LBRACKET,   /* [ */
-  RBRACKET,   /* ] */
-  NEW_KW,     /* new */
-  DELETE_KW,  /* delete */
-  NULL_KW,    /* null */
-  TYPEDEF_KW, /* typedef */
-  ENUM_KW,    /* enum */
+  LBRACKET,
+  RBRACKET,
+  NEW_KW,
+  DELETE_KW,
+  NULL_KW,
+  TYPEDEF_KW,
+  ENUM_KW,
   FUNCTION_KW,
-  OPERATOR_KW, /* operator */
-  ASYNC_KW,    /* async */
-  AWAIT_KW,    /* await */
+  OPERATOR_KW,
+  ASYNC_KW,
+  AWAIT_KW,
   COMMA,
   SEMICOLON,
   RETURN,
   COMMENT,
-  PLUS_PLUS,   /*++*/
-  MINUS_MINUS, /*--*/
+  PLUS_PLUS,
+  MINUS_MINUS,
   UNKNOWN
 };
 

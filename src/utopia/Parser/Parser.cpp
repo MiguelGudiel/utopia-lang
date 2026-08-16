@@ -188,8 +188,7 @@ bool Parser::isDeclaration() {
           break;
       }
 
-      /* Scan active usings to resolve external types properly in declarations
-       */
+      /* Usings may qualify types declared in imported modules. */
       for (const auto &u : activeUsings) {
         if (resolveType(u + "." + typeNameStr))
           return true;
@@ -280,7 +279,7 @@ const Type *Parser::parseType(bool inNewExpr) {
       }
     }
 
-    /* Scan active usings to map unqualified type access to proper imports */
+    /* Usings may qualify types declared in imported modules. */
     if (!ty) {
       for (const auto &u : activeUsings) {
         ty = resolveType(u + "." + std::string(base));
@@ -543,7 +542,7 @@ llvm::ArrayRef<AnnotationNode *> Parser::parseAnnotations() {
 AnnotationNode *Parser::parseAnnotation() {
   int line = currentToken().line;
   int col = currentToken().column;
-  advance(); /* consume '@' */
+  advance();
 
   std::string_view name = currentToken().value;
   if (currentToken().type == TokenType::IDENTIFIER ||
@@ -628,9 +627,6 @@ Parser::parseParameterList(bool &isVariadic, bool &hasTrailingComma,
 
     if (!inNamedBlock && match(TokenType::LBRACE)) {
       inNamedBlock = true;
-      if (currentToken().type == TokenType::RBRACE) {
-        // Empty named block permitted
-      }
     }
 
     if (inNamedBlock && currentToken().type == TokenType::RBRACE) {
@@ -755,10 +751,6 @@ Parser::parseParameterList(bool &isVariadic, bool &hasTrailingComma,
   return params;
 }
 
-/*
- * Abstracted body parsing mechanism to handle both traditional blocks
- * and expression-bodied functions transparently.
- */
 BlockNode *Parser::parseFunctionBody(const Type *returnType) {
   if (match(TokenType::ARROW)) {
     int line = currentToken().line;
@@ -774,8 +766,6 @@ BlockNode *Parser::parseFunctionBody(const Type *returnType) {
     block->isExpressionBody = true;
     ASTNode *stmt = expr;
 
-    /* Transparently inject a ReturnNode if the function intrinsically expects a
-     * value */
     if (returnType && !returnType->isVoid()) {
       stmt = astCtx.create<ReturnNode>(expr, line, col, endCol - col);
     }
@@ -817,8 +807,7 @@ void Parser::checkRecordMemberRedefinition(
           }
         }
 
-        /* Method const qualifier evaluates into the overload resolution
-         * signature */
+        /* The const qualifier is part of the overload-resolution signature. */
         if (sameSignature && m->isConst != newMethod->isConst) {
           sameSignature = false;
         }
@@ -871,7 +860,7 @@ DeclNode *
 Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
   int line = currentToken().line;
   int col = currentToken().column;
-  advance(); /* consume 'annotation' */
+  advance();
 
   expect(TokenType::CLASS_KW, "Expected 'class' after 'annotation'");
 
@@ -926,8 +915,8 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
       int cCol = currentToken().column;
       int ctorIdCol = peekToken().column;
 
-      advance(); /* const */
-      advance(); /* name */
+      advance();
+      advance();
       expect(TokenType::LPAREN, "Expected '('");
 
       bool isVariadic = false;
@@ -1089,7 +1078,7 @@ std::string Parser::getFQName(std::string_view name) const {
 NamespaceDeclNode *Parser::parseNamespaceDecl(bool &isFileScoped) {
   int line = currentToken().line;
   int col = currentToken().column;
-  advance(); /* 'namespace' */
+  advance();
 
   std::string nameStr;
   while (true) {
@@ -1122,7 +1111,7 @@ NamespaceDeclNode *Parser::parseNamespaceDecl(bool &isFileScoped) {
 
   namespaceStack.push_back(std::string(name));
 
-  /* Snapshot active usings for the current namespace block boundaries */
+  /* Usings declared inside the namespace must not leak out of it. */
   size_t prevUsings = activeUsings.size();
 
   std::vector<ASTNode *> stmts;
@@ -1137,7 +1126,6 @@ NamespaceDeclNode *Parser::parseNamespaceDecl(bool &isFileScoped) {
     }
   }
 
-  /* Secure scope closure over usings */
   activeUsings.resize(prevUsings);
   namespaceStack.pop_back();
 
@@ -1150,7 +1138,7 @@ NamespaceDeclNode *Parser::parseNamespaceDecl(bool &isFileScoped) {
 UsingNode *Parser::parseUsing() {
   int line = currentToken().line;
   int col = currentToken().column;
-  advance(); /* 'using' */
+  advance();
 
   std::string nameStr;
   while (true) {
@@ -1166,7 +1154,6 @@ UsingNode *Parser::parseUsing() {
   int endCol = tokens[cursor - 1].column + tokens[cursor - 1].value.length();
   expect(TokenType::SEMICOLON, "Expected ';'");
 
-  /* Register the using directive in the active parsing scope */
   activeUsings.push_back(std::string(name));
 
   auto node = astCtx.create<UsingNode>(name, line, col, endCol - col);
@@ -1313,7 +1300,7 @@ ASTNode *Parser::parseStatement() {
 DeclNode *Parser::parseTypedefDecl() {
   int line = currentToken().line;
   int col = currentToken().column;
-  advance(); /* consume 'typedef' */
+  advance();
 
   std::string_view name = currentToken().value;
   int idCol = currentToken().column;
@@ -1329,11 +1316,32 @@ DeclNode *Parser::parseTypedefDecl() {
   /* Fallback peek to distinguish known types from plain function identifiers */
   const Type *knownBase = nullptr;
   if (currentToken().type == TokenType::IDENTIFIER) {
-    knownBase = astCtx.getBuiltinTypeByName(currentToken().value);
-    if (!knownBase)
-      knownBase = astCtx.getRecordType(currentToken().value);
-    if (!knownBase)
-      knownBase = astCtx.getTypeAlias(currentToken().value);
+    auto resolveKnown = [&](std::string_view tn) -> const Type * {
+      const Type *t = astCtx.getBuiltinTypeByName(tn);
+      if (!t)
+        t = astCtx.getRecordType(tn);
+      if (!t)
+        t = astCtx.getTypeAlias(tn);
+      if (!t)
+        t = astCtx.getEnumTypeByName(tn);
+      return t;
+    };
+    knownBase = resolveKnown(currentToken().value);
+    /* Enums, records and aliases from other modules register under their
+     * fully-qualified name (NS.Type); walk the enclosing namespaces. */
+    if (!knownBase) {
+      std::string ns = getCurrentNamespace();
+      while (!ns.empty()) {
+        knownBase = resolveKnown(ns + "." + std::string(currentToken().value));
+        if (knownBase)
+          break;
+        size_t pos = ns.find_last_of('.');
+        if (pos != std::string::npos)
+          ns = ns.substr(0, pos);
+        else
+          break;
+      }
+    }
   }
 
   if (knownBase || currentToken().type == TokenType::CONST_KW ||
@@ -1389,12 +1397,11 @@ BlockNode *Parser::parseStatementAsBlock() {
   int startLine = currentToken().line;
   int startCol = currentToken().column;
 
-  /* Snapshot active usings to prevent leakage from single-statement blocks */
+  /* Usings declared inside the single-statement block must not leak out. */
   size_t prevUsings = activeUsings.size();
 
   auto stmt = parseStatement();
 
-  /* Restore active usings state to preserve lexical boundary */
   activeUsings.resize(prevUsings);
 
   auto block = astCtx.create<BlockNode>(startLine, startCol);
@@ -1444,7 +1451,7 @@ IfNode *Parser::parseIfStatement() {
 ForNode *Parser::parseForStatement() {
   int line = currentToken().line;
   int col = currentToken().column;
-  advance(); // consume 'for'
+  advance();
 
   expect(TokenType::LPAREN, "Expected '(' after 'for'");
 
@@ -1487,7 +1494,7 @@ ForNode *Parser::parseForStatement() {
 WhileNode *Parser::parseWhileStatement() {
   int line = currentToken().line;
   int col = currentToken().column;
-  advance(); // consume 'while'
+  advance();
 
   expect(TokenType::LPAREN, "Expected '(' after 'while'");
   auto cond = parseExpression();
@@ -1504,7 +1511,7 @@ WhileNode *Parser::parseWhileStatement() {
 SwitchNode *Parser::parseSwitchStatement() {
   int line = currentToken().line;
   int col = currentToken().column;
-  advance(); /* consume 'switch' */
+  advance();
 
   expect(TokenType::LPAREN, "Expected '(' after 'switch'");
   auto cond = parseExpression();
@@ -1515,7 +1522,7 @@ SwitchNode *Parser::parseSwitchStatement() {
   std::vector<CaseNode *> cases;
   bool hasDefault = false;
 
-  /* Snapshot active usings for the switch block to guard against leakages */
+  /* Usings declared inside the switch must not leak out of it. */
   size_t prevUsings = activeUsings.size();
 
   while (currentToken().type != TokenType::RBRACE &&
@@ -1590,7 +1597,6 @@ SwitchNode *Parser::parseSwitchStatement() {
   int endCol = currentToken().column + 1;
   expect(TokenType::RBRACE, "Expected '}' at end of switch block");
 
-  /* Restore usings state upon evaluating the switch terminator */
   activeUsings.resize(prevUsings);
 
   if (!closingDoc.empty() && !cases.empty()) {
@@ -2302,7 +2308,7 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind, bool isAbstract) {
       } else if (isAbstract && currentToken().type == TokenType::SEMICOLON) {
         int endLine = currentToken().line;
         int endCol = currentToken().column + 1;
-        advance(); /* consume ';' */
+        advance();
         method->length = endCol - mCol;
         method->endLine = endLine;
         method->isAbstract = true;
@@ -2476,7 +2482,7 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind, bool isAbstract) {
 DeclNode *Parser::parseEnumDecl() {
   int line = currentToken().line;
   int col = currentToken().column;
-  advance(); /* consume 'enum' */
+  advance();
 
   std::string_view name = currentToken().value;
   int idCol = currentToken().column;
@@ -2642,7 +2648,7 @@ DeclNode *Parser::parseDeclarationOrFunction(
              peekToken().type == TokenType::IDENTIFIER &&
              (peekToken(2).type == TokenType::ASSIGN ||
               peekToken(2).type == TokenType::SEMICOLON)) {
-    advance(); /* Consume 'const' */
+    advance();
     isImplicitlyTyped = true;
     isConstDecl = true;
     nodeType = astCtx.getConstType(astCtx.AutoTy);
@@ -2892,8 +2898,7 @@ BlockNode *Parser::parseBlock() {
   auto block = astCtx.create<BlockNode>(startLine, startCol);
   std::vector<ASTNode *> statements;
 
-  /* Snapshot active usings to prevent leakage into outer architectural scopes
-   */
+  /* Usings declared inside the block must not leak into enclosing scopes. */
   size_t prevUsings = activeUsings.size();
 
   while (currentToken().type != TokenType::RBRACE &&
@@ -2913,7 +2918,6 @@ BlockNode *Parser::parseBlock() {
   int endCol = currentToken().column + 1;
   expect(TokenType::RBRACE, "Expected '}'");
 
-  /* Restore usings state to pre-block snapshot */
   activeUsings.resize(prevUsings);
 
   if (!closingDoc.empty() && !statements.empty()) {
@@ -2990,7 +2994,7 @@ ExprNode *Parser::parseAssignment() {
 ExprNode *Parser::parseArrayLiteral() {
   int line = currentToken().line;
   int col = currentToken().column;
-  advance(); /* Consume '[' */
+  advance();
 
   std::vector<ExprNode *> elements;
   bool hasTrailingComma = false;
@@ -3042,7 +3046,6 @@ ExprNode *Parser::parseCast() {
         tokens[cursor - 1].value.data() + tokens[cursor - 1].value.length();
     std::string_view rawTypeStr(typeStart, typeEnd - typeStart);
 
-    /* Securely calculate the end column using the parsed type's last token */
     int endCol = tokens[cursor - 1].column + tokens[cursor - 1].value.length();
 
     left = astCtx.create<CastNode>(left, targetType, line, col, endCol - col);
@@ -3078,7 +3081,7 @@ ExprNode *Parser::parsePostfix() {
       }
 
       if (isTemplateCall) {
-        advance(); /* Consume '<' */
+        advance();
         std::vector<const Type *> tArgs;
         if (currentToken().type != TokenType::GT) {
           do {

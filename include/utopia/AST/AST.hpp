@@ -218,7 +218,7 @@ struct DeclNode : public ASTNode {
   bool hasPrivateMod = false;
   bool hasProtectedMod = false;
   std::string_view declFilePath;
-  std::string_view fqName; // Fully Qualified Name (ej. mi.name.space.Class)
+  std::string_view fqName; // Fully qualified name (e.g. 'NS.Class')
 
   /* Exact token location for LSP tooling */
   int identifierColumn = 0;
@@ -227,7 +227,6 @@ struct DeclNode : public ASTNode {
   bool isTemplate = false;
   llvm::ArrayRef<std::string_view> templateParams;
 
-  /* Resolved attributes */
   uint64_t alignment = 0;
   bool isPacked = false;
 
@@ -758,6 +757,9 @@ struct ModuleNode : public ASTNode {
       : ASTNode(NodeKind::Module), filePath(path) {}
 
   bool canSee(std::string_view targetFilePath) const;
+  bool canSeeHelper(
+      std::string_view targetFilePath,
+      std::unordered_set<const ModuleNode *> &visited) const;
   bool exports(std::string_view targetFilePath,
                std::unordered_set<const ModuleNode *> &visited) const;
 

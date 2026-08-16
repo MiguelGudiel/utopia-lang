@@ -9,11 +9,22 @@
 namespace utopia {
 
 /*
- * Strips indirection to evaluate core type compatibility, now safely stripping
- * both LValue and RValue references.
+ * Strips indirection to evaluate core type compatibility, including both
+ * LValue and RValue references.
  */
 bool canImplicitlyCast(const Type *from, const Type *to,
                        bool allowUserDefined = true);
+
+/*
+ * Picks the most specific single-parameter conversion constructor of a
+ * record type for converting `from`, or returns nullptr when none is
+ * compatible. The best match is the ctor whose parameter type is closest to
+ * the source type (exact match first, then matching signedness and smallest
+ * width delta); a naive first-match selection always picks the narrowest
+ * ctor (e.g. String(int8)) and truncates wider values.
+ */
+const FunctionDeclNode *findBestConversionCtor(const Type *from,
+                                               const RecordType *recTy);
 
 class SemaPass {
 public:

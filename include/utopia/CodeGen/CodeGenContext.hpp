@@ -14,7 +14,7 @@ struct SymbolInfo {
   bool isDirectAddress = true;
 };
 
-/* Static mapping of a destroyer pending broadcast */
+/* Pending destructor invocation for an object instance. */
 struct CleanupInfo {
   llvm::Value *instancePtr = nullptr;
   const FunctionDeclNode *destructor = nullptr;

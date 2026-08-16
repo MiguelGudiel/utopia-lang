@@ -5,5 +5,7 @@ build:
   target: executable
   source_dirs:
     - src/
+  linker_flags:
+    - "-lm"
   sources:
     - "main.utp"

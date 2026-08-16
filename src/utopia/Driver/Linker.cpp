@@ -16,6 +16,12 @@ bool Linker::link(const std::vector<std::string> &objPaths,
   std::string cmd;
 
   if (targetType == "static_library") {
+    /* 'llvm-ar rcs' replaces members but never removes members that are not
+     * part of the update list: archives rebuilt for a different target (e.g.
+     * Android after a host build) kept stale objects of the previous
+     * architecture. Remove the archive first so it only contains the current
+     * compilation results. */
+    std::remove(outPath.c_str());
     cmd = "\"" + arPath + "\" rcs \"" + outPath + "\" ";
     for (const auto &obj : objPaths) {
       cmd += "\"" + obj + "\" ";

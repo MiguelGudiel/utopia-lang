@@ -18,21 +18,31 @@ bool ModuleNode::exports(
 }
 
 bool ModuleNode::canSee(std::string_view targetFilePath) const {
+  std::unordered_set<const ModuleNode *> visited;
+  return canSeeHelper(targetFilePath, visited);
+}
+
+bool ModuleNode::canSeeHelper(
+    std::string_view targetFilePath,
+    std::unordered_set<const ModuleNode *> &visited) const {
+  if (visited.contains(this))
+    return false;
+  visited.insert(this);
+
   if (this->filePath == targetFilePath)
     return true;
 
-  std::unordered_set<const ModuleNode *> visited;
-  visited.insert(this);
-
-  /* Only traverse explicitly imported modules for local scope visibility.
-   * Exported modules are isolated from local access unless explicitly imported,
-   * matching strict module encapsulation semantics. */
+  /* Traverse the full transitive import graph so symbols and namespaces
+   * declared in transitively imported modules are visible downstream
+   * (imports behave transitively, like most mainstream languages). */
   for (const auto *imp : importedModules) {
-    if (imp->filePath == targetFilePath)
+    if (imp->canSeeHelper(targetFilePath, visited))
       return true;
-    /* Allow transitive visibility ONLY through the dependency's explicit
-     * exports */
-    if (imp->exports(targetFilePath, visited))
+  }
+
+  /* Re-exported modules remain reachable without a direct import. */
+  for (const auto *exp : exportedModules) {
+    if (exp->canSeeHelper(targetFilePath, visited))
       return true;
   }
 

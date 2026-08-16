@@ -97,15 +97,14 @@ public:
     }
   }
 
-  /* Retrieves the current number of using directives to snapshot the scope */
   size_t getUsingsCount() const {
     if (symTable.getScopes().empty())
       return 0;
     return symTable.getCurrentScope().usings.size();
   }
 
-  /* Restores the using directives count to drop local usages from outer scopes
-   */
+  /* Truncates the current scope's usings back to a snapshot taken with
+   * getUsingsCount(), dropping directives added in between. */
   void resizeUsings(size_t count) {
     if (!symTable.getScopes().empty()) {
       const_cast<Scope &>(symTable.getCurrentScope()).usings.resize(count);
@@ -156,8 +155,7 @@ public:
             }
           }
 
-          /* Method const qualifier evaluates into the overload resolution
-           * signature */
+          /* The const qualifier is part of the overload-resolution signature. */
           if (sameSignature && funcA->isMethod && funcB->isMethod) {
             if (funcA->isConst != funcB->isConst) {
               sameSignature = false;
@@ -172,8 +170,7 @@ public:
           }
         } else if (decl->kind == NodeKind::NamespaceDecl &&
                    existing->kind == NodeKind::NamespaceDecl) {
-          /* Allow namespace reopening safely by skipping duplicate registration
-           */
+          /* Namespace reopening is allowed. */
           return;
         } else if (!isRecordAndCtor) {
           reportError(decl->line, decl->column, decl->length,

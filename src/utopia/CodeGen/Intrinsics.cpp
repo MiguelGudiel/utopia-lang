@@ -22,7 +22,6 @@ llvm::IRBuilder<> &Intrinsic::getBuilder(CodeGen &cg) const {
 
 llvm::Module &Intrinsic::getModule(CodeGen &cg) const { return cg.mod; }
 
-/* Intrinsic Implementations */
 
 class SizeofTypeIntrinsic : public Intrinsic {
 public:
@@ -100,7 +99,6 @@ public:
   }
 };
 
-/* Registry Implementation */
 
 namespace {
 

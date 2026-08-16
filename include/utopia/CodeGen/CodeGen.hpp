@@ -89,6 +89,8 @@ public:
   llvm::Value *visit(const AwaitExprNode *node);
 
   llvm::Value *createImplicitCast(llvm::Value *src, llvm::Type *destTy);
+  llvm::Value *createImplicitCast(llvm::Value *src, llvm::Type *destTy,
+                                  const Type *srcType);
   void emitLoopCleanups(size_t targetDepth);
 
   /* Async support (shared with the Future intrinsics). */
@@ -211,7 +213,6 @@ private:
 
   llvm::Constant *getOrCreateVTable(const ClassType *classTy);
 
-  /* Lifetime Intrinsic Emission */
   void emitLifetimeStart(llvm::AllocaInst *allocaInst, uint64_t size);
   void emitLifetimeEnd(llvm::AllocaInst *allocaInst, uint64_t size);
 

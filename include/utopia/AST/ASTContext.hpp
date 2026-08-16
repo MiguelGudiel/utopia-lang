@@ -223,7 +223,8 @@ public:
       return Float32Ty;
     }
 
-    /* Handle USize dynamically to preserve the underlying 8x8 fast matrix */
+    /* USize keeps its width unless combined with a 64-bit type, which
+     * promotes it to UInt64. */
     if (k1 == BuiltinKind::USize && k2 == BuiltinKind::USize) {
       return USizeTy;
     }

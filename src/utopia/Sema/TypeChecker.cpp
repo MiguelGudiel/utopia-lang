@@ -3,8 +3,6 @@
 #include "utopia/Common/Logger.hpp"
 #include "utopia/Sema/EffectAnalyzer.hpp"
 #include "utopia/Sema/Sema.hpp"
-#include <llvm/Support/Debug.h>
-#include <llvm/Support/raw_ostream.h>
 #include <string>
 
 namespace utopia {
@@ -38,8 +36,6 @@ static const Type *getExpectedFunctionPtrType(const Type *t) {
   return isFunctionPointerType(u) ? t : nullptr;
 }
 
-/* Operator categorization limits large evaluation chains during semantic passes
- */
 enum class OpCategory {
   Logical,
   Relational,
@@ -47,6 +43,60 @@ enum class OpCategory {
   Arithmetic,
   Unknown
 };
+
+/* Reconstructs the namespace a declaration lives in from its fully-qualified
+ * name. Template instantiation type-checks the cloned body from the call site,
+ * where the namespace stack is empty, so lookups inside generic bodies fail to
+ * resolve namespace-scoped symbols. Pushing the original namespace during
+ * instantiation restores the intended lookup context.
+ *
+ * fqName forms handled:
+ *   "fn"                    -> ""                 (file scope)
+ *   "NS.fn"                 -> "NS"
+ *   "NS.Rec.fn" (method)    -> "NS"               (record name is stripped)
+ */
+static std::string getDeclNamespace(const DeclNode *decl) {
+  std::string fq(decl->fqName);
+
+  /* Methods and constructors do not carry a parser-set fqName; their
+   * namespace is derived from the enclosing record's qualified name
+   * ("A.B.Rec" -> "A.B"). */
+  if (auto *fn = llvm::dyn_cast<FunctionDeclNode>(decl)) {
+    if (fn->parentRecord) {
+      std::string recName(fn->parentRecord->getName());
+      size_t recDot = recName.find_last_of('.');
+      if (fq.empty()) {
+        return (recDot == std::string::npos) ? "" : recName.substr(0, recDot);
+      }
+      if (fq.substr(0, fq.find_last_of('.')) == recName) {
+        return (recDot == std::string::npos) ? "" : recName.substr(0, recDot);
+      }
+    }
+  }
+
+  size_t lastDot = fq.find_last_of('.');
+  if (lastDot == std::string::npos)
+    return "";
+  return fq.substr(0, lastDot);
+}
+
+/* Pushes every namespace segment of 'ns' (e.g. "A.B" -> push "A", push "B")
+ * and returns the number of segments pushed, so callers can pop them back. */
+static size_t pushDeclNamespace(SemaContext *ctx, const std::string &ns) {
+  size_t count = 0;
+  size_t start = 0;
+  while (start < ns.size()) {
+    size_t dot = ns.find('.', start);
+    std::string part = (dot == std::string::npos) ? ns.substr(start)
+                                                  : ns.substr(start, dot - start);
+    ctx->pushNamespace(ctx->astCtx.copyString(part));
+    count++;
+    if (dot == std::string::npos)
+      break;
+    start = dot + 1;
+  }
+  return count;
+}
 
 static const std::unordered_map<std::string_view, OpCategory> opCategoryMap = {
     {"&&", OpCategory::Logical},         {"||", OpCategory::Logical},
@@ -327,8 +377,18 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
        * the enclosing lexical scope, which would collide with user variables
        * named like a field (e.g. a local 'ptr' vs. unique_ptr's 'ptr'). */
       ctx->pushScope();
+
+      /* Type-check the clone from the namespace where the template was
+       * declared, otherwise generic method bodies cannot resolve
+       * namespace-scoped symbols. */
+      std::string instNs = getDeclNamespace(tmplDecl);
+      size_t nsDepth = pushDeclNamespace(ctx, instNs);
+
       dcp.dispatch(instDecl);
       dispatch(instDecl);
+
+      for (size_t i = 0; i < nsDepth; ++i)
+        ctx->popNamespace();
       ctx->popScope();
 
       /* Re-register the instantiated declaration at module scope so member
@@ -785,7 +845,6 @@ SemaResult TypeCheckPass::visit(const StructDeclNode *node) {
   if (node->isOpaque)
     return ctx->astCtx.VoidTy;
 
-  /* Validate structural decorators */
   for (const auto *ann : node->annotations) {
     if (ann->name == "align") {
       if (ann->args.size() != 1 || !llvm::isa<NumberNode>(ann->args[0]) ||
@@ -876,7 +935,6 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
   if (node->isOpaque)
     return ctx->astCtx.VoidTy;
 
-  // Resolution regarding the base inheritance
   if (node->baseClass) {
     const_cast<ClassDeclNode *>(node)->baseClass =
         resolveIfTemplate(node->baseClass);
@@ -915,7 +973,6 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
     }
   }
 
-  /* Validate structural decorators */
   for (const auto *ann : node->annotations) {
     if (ann->name == "align") {
       if (ann->args.size() != 1 || !llvm::isa<NumberNode>(ann->args[0]) ||
@@ -1357,7 +1414,6 @@ SemaResult TypeCheckPass::visit(const EnumDeclNode *node) {
       int64_t val = 0;
       auto *init = mem->initializer;
 
-      // Basic compile-time evaluation for enum values
       if (init->kind == NodeKind::Number) {
         val =
             std::stoll(std::string(static_cast<const NumberNode *>(init)->raw),
@@ -1500,8 +1556,18 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
           ctx->setCurrentFile(instDecl->declFilePath);
 
           ctx->pushScope();
+
+          /* Same namespace restoration as the record-template path: generic
+           * method/function bodies must resolve symbols from the namespace
+           * where the template was originally declared. */
+          std::string instNs = getDeclNamespace(tmplDecl);
+          size_t nsDepth = pushDeclNamespace(ctx, instNs);
+
           dcp.dispatch(instDecl);
           dispatch(instDecl);
+
+          for (size_t i = 0; i < nsDepth; ++i)
+            ctx->popNamespace();
           ctx->popScope();
 
           ctx->symTable.addGlobalSymbol(instDecl->fqName, instDecl);
@@ -1923,7 +1989,6 @@ SemaResult TypeCheckPass::visit(const UnaryOpNode *node) {
       node->op == "+" || node->op == "~" || node->op == "!" ||
       node->op == "*") {
     if (auto *opDecl = resolveOverloadedOperator(*exprType, node->op, {})) {
-      /* Enforce visibility constraint on unary overloaded operators */
       if (!opDecl->isPublic(opDecl->name) &&
           ctx->getCurrentRecordContext() != opDecl->parentRecord) {
         return ctx->reportError(node->line, node->column, node->length,
@@ -2044,8 +2109,9 @@ SemaResult TypeCheckPass::visit(const BinaryOpNode *node) {
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,
                                      "Invalid operands for binary operation"});
 
-  if (auto *opDecl = resolveOverloadedOperator(*lhs, node->op, {node->right})) {
-    /* Enforce visibility constraint on binary overloaded operators */
+  const FunctionDeclNode *opDecl =
+      resolveOverloadedOperator(*lhs, node->op, {node->right});
+  if (opDecl) {
     if (!opDecl->isPublic(opDecl->name) &&
         ctx->getCurrentRecordContext() != opDecl->parentRecord) {
       return ctx->reportError(node->line, node->column, node->length,
@@ -2064,6 +2130,44 @@ SemaResult TypeCheckPass::visit(const BinaryOpNode *node) {
     node->overloadedOperator = opDecl;
     node->exprType = opDecl->returnType;
     return opDecl->returnType;
+  }
+
+  /* String literals type as 'const uint8*', so 'lit' + 'lit' does not find
+   * String's overloaded operator+; convert both operands to String so the
+   * concatenation resolves like 'StringVar + lit'. */
+  if (node->op == "+") {
+    const Type *strTy = ctx->astCtx.getRecordType("String");
+    auto isStringish = [this](const Type *t) {
+      const Type *u = t->getUnqualifiedType();
+      if (u->isPointerType()) {
+        const Type *p = static_cast<const PointerType *>(u)
+                            ->getPointeeType()
+                            ->getUnqualifiedType();
+        return p->getKind() == TypeKind::Builtin &&
+               static_cast<const BuiltinType *>(p)->getBuiltinKind() ==
+                   BuiltinKind::UInt8;
+      }
+      if (u->getKind() == TypeKind::Array) {
+        return static_cast<const ArrayType *>(u)
+                   ->getElementType()
+                   ->getUnqualifiedType() == ctx->astCtx.UInt8Ty;
+      }
+      if (auto *rec = llvm::dyn_cast<RecordType>(u))
+        return rec->getName() == "String";
+      return false;
+    };
+    if (strTy && isStringish(*lhs) && isStringish(*rhs)) {
+      const_cast<BinaryOpNode *>(node)->left =
+          performImplicitConversion(node->left, strTy);
+      const_cast<BinaryOpNode *>(node)->right =
+          performImplicitConversion(node->right, strTy);
+      opDecl = resolveOverloadedOperator(strTy, node->op, {node->right});
+      if (opDecl) {
+        node->overloadedOperator = opDecl;
+        node->exprType = opDecl->returnType;
+        return opDecl->returnType;
+      }
+    }
   }
 
   OpCategory cat = OpCategory::Unknown;
@@ -2217,7 +2321,6 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
         "Variables with inferred type must be initialized.");
   }
 
-  /* Evaluate Initializer & Infer Type (if required) */
   if (node->initializer) {
     bool pushedExpected = false;
     if (!isAuto) {
@@ -2278,7 +2381,6 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
     }
   }
 
-  /* Core Type Validations */
   if (declType->getKind() == TypeKind::TemplateParam) {
     auto err = ctx->reportError(node->line, node->column, node->length,
                                 "Unknown type: '" + declType->toString() + "'");
@@ -2407,7 +2509,6 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
     }
   }
 
-  /* Process Annotations */
   for (const auto *ann : node->annotations) {
     if (ann->name == "weak") {
       const_cast<VarDeclNode *>(node)->isWeak = true;
@@ -2444,7 +2545,6 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
     const_cast<VarDeclNode *>(node)->isGlobal = true;
   }
 
-  /* Validate Initialization state */
   if (declType->isConstQualified() && !node->initializer &&
       !declType->isReferenceType() &&
       declType->getKind() != TypeKind::RValueReference && !node->isExtern) {
@@ -2466,7 +2566,6 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
     }
   }
 
-  /* Semantic checks on the initializer against the resolved type */
   if (node->initializer) {
     const Type *initTy = node->initializer->exprType;
 
@@ -2645,6 +2744,11 @@ SemaResult TypeCheckPass::visit(const AssignNode *node) {
   auto lhsType = dispatch(node->target);
   ctx->isAssignTarget = prevAssignTarget;
 
+  /* Propagate the failure instead of dereferencing an empty expected, which
+   * previously crashed the compiler on a failed LHS expression. */
+  if (!lhsType)
+    return lhsType;
+
   bool pushedExpected = false;
   if (const Type *expFn = getExpectedFunctionPtrType(*lhsType)) {
     ctx->pushExpectedFunctionType(expFn);
@@ -2667,8 +2771,6 @@ SemaResult TypeCheckPass::visit(const AssignNode *node) {
   if (!(*lhsType)->getUnqualifiedType()->isPointerType()) {
     if (auto *opDecl =
             resolveOverloadedOperator(*lhsType, node->op, {node->value})) {
-      /* Enforce visibility constraint on assignment and compound assignment
-       * operators */
       if (!opDecl->isPublic(opDecl->name) &&
           ctx->getCurrentRecordContext() != opDecl->parentRecord) {
         return ctx->reportError(node->line, node->column, node->length,
@@ -3223,7 +3325,15 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
           }
         }
       } else {
-        if (currCtx == declaringRecTy) {
+        /* Private members are file-scoped (enforced across module
+         * boundaries, matching the VariableNode access paths): any code
+         * declared in the same file as the owning record may access
+         * them, so sibling classes (e.g. shared_ptr/weak_ptr) can
+         * cooperate within one module. */
+        const DeclNode *ownerDecl =
+            declaringRecTy ? declaringRecTy->getDeclaration() : nullptr;
+        if (currCtx == declaringRecTy ||
+            (ownerDecl && ownerDecl->declFilePath == ctx->currentFile)) {
           canAccess = true;
         }
       }
@@ -3326,7 +3436,8 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
                 }
               }
             } else {
-              if (currCtx && currCtx->getDeclaration() == staticAccessDecl) {
+              if ((currCtx && currCtx->getDeclaration() == staticAccessDecl) ||
+                  f->declFilePath == ctx->currentFile) {
                 canAccess = true;
               }
             }
@@ -3353,7 +3464,6 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
       std::vector<ExprNode *> bestResolvedArgs;
 
       const DeclNode *currentRecDecl = recDecl;
-      // Recursive escalation for method and template resolution
       while (currentRecDecl) {
         llvm::ArrayRef<FunctionDeclNode *> methods;
         if (auto *cDecl = llvm::dyn_cast<ClassDeclNode>(currentRecDecl))
@@ -3468,7 +3578,16 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
                 ctx->setCurrentRecordContext(recordTy);
                 ctx->setCurrentFile(fnDecl->declFilePath);
 
+                /* Restore the namespace the method template was declared in
+                 * (see getDeclNamespace): generic bodies must resolve
+                 * namespace-scoped symbols from their declaration site. */
+                std::string instNs = getDeclNamespace(tmplDecl);
+                size_t nsDepth = pushDeclNamespace(ctx, instNs);
+
                 dispatch(fnDecl);
+
+                for (size_t i = 0; i < nsDepth; ++i)
+                  ctx->popNamespace();
 
                 ctx->setCurrentFile(prevFile);
                 ctx->setCurrentRecordContext(prevContext);
@@ -3524,7 +3643,8 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
                 }
               }
             } else {
-              if (currCtx && currCtx->getDeclaration() == currentRecDecl) {
+              if ((currCtx && currCtx->getDeclaration() == currentRecDecl) ||
+                  method->declFilePath == ctx->currentFile) {
                 canAccess = true;
               }
             }
@@ -3743,7 +3863,6 @@ static bool guaranteesReturn(const ASTNode *node) {
 SemaResult TypeCheckPass::visit(const NamespaceDeclNode *node) {
   ctx->pushNamespace(node->name);
 
-  /* Snapshot using directives to prevent leaking from this namespace block */
   size_t prevUsings = ctx->getUsingsCount();
 
   bool hasErrors = false;
@@ -3754,7 +3873,6 @@ SemaResult TypeCheckPass::visit(const NamespaceDeclNode *node) {
     checkNodiscard(stmt);
   }
 
-  /* Restore previous using directives count */
   ctx->resizeUsings(prevUsings);
   ctx->popNamespace();
 
@@ -3766,7 +3884,6 @@ SemaResult TypeCheckPass::visit(const NamespaceDeclNode *node) {
 }
 
 SemaResult TypeCheckPass::visit(const UsingNode *node) {
-  /* Register the using directive within the current active lexical scope */
   ctx->addUsing(node->name);
   return ctx->astCtx.VoidTy;
 }
@@ -3894,7 +4011,6 @@ const FunctionDeclNode *TypeCheckPass::instantiateMethodTemplate(
     }
     mangledName += "_p_" + paramStr;
   }
-  llvm::dbgs() << "[dbg instMethod] " << tmplDecl->name << " -> " << mangledName << "\n";
   std::string_view mangledView = ctx->astCtx.copyString(mangledName);
 
   /* Reuse an existing instantiation when present. */
@@ -3921,8 +4037,6 @@ const FunctionDeclNode *TypeCheckPass::instantiateMethodTemplate(
   ASTCloner cloner(ctx->astCtx, templateArgMap);
   DeclNode *instDecl = static_cast<DeclNode *>(cloner.dispatch(tmplDecl));
   if (!instDecl || instDecl->kind != NodeKind::FunctionDecl) {
-    llvm::dbgs() << "[dbg instMethod] clone failed for " << tmplDecl->name
-                 << "\n";
     return nullptr;
   }
 
@@ -3984,7 +4098,16 @@ const FunctionDeclNode *TypeCheckPass::instantiateMethodTemplate(
   ctx->setCurrentRecordContext(recordTy);
   ctx->setCurrentFile(fnDecl->declFilePath);
 
+  /* Restore the namespace the method template was declared in so its body
+   * can resolve namespace-scoped symbols (same fix as the record/function
+   * template instantiation paths). */
+  std::string instNs = getDeclNamespace(tmplDecl);
+  size_t nsDepth = pushDeclNamespace(ctx, instNs);
+
   dispatch(fnDecl);
+
+  for (size_t i = 0; i < nsDepth; ++i)
+    ctx->popNamespace();
 
   ctx->setCurrentFile(prevFile);
   ctx->setCurrentRecordContext(prevContext);
@@ -4275,13 +4398,6 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
       argTypes.push_back(*argType);
     }
   }
-  if (node->target->kind == NodeKind::MemberAccess &&
-      static_cast<const MemberAccessNode *>(node->target)->memberName == "delayed") {
-    llvm::dbgs() << "[dbg delayed call] argTypes:";
-    for (auto &t : argTypes) llvm::dbgs() << " [" << t->toString() << "]";
-    llvm::dbgs() << "\n";
-  }
-
   if (hasErrors) {
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,
                                      "Argument evaluation failed."});
@@ -4547,11 +4663,6 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
     }
 
     if (!errors.empty()) {
-      llvm::dbgs() << "[dbg checkMatch errors] f=" << fDecl->name << " p0="
-                   << (fDecl->params.empty() ? "?" : fDecl->params[0]->type->toString())
-                   << " errors:";
-      for (auto &e : errors) llvm::dbgs() << " [" << e << "]";
-      llvm::dbgs() << "\n";
       return errors;
     }
 
@@ -4991,9 +5102,6 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
         }
 
         if (bestMatch) {
-          llvm::dbgs() << "[dbg ctor-call] " << bestMatch->name
-                       << " isCtor=" << isConstructorCall
-                       << " exprTy=" << (isConstructorCall ? constructorRecTy->toString() : bestMatch->returnType->toString()) << "\n";
           const_cast<FunctionCallNode *>(node)->resolvedFunc = bestMatch;
           const_cast<FunctionCallNode *>(node)->args =
               ctx->astCtx.copyArray<ExprNode *>(bestResolvedArgs);
@@ -5427,6 +5535,12 @@ SemaResult TypeCheckPass::visit(const CastNode *node) {
 
   bool isSrcNumeric = srcUnqual->isNumeric();
   bool isDestNumeric = destUnqual->isNumeric();
+  bool isSrcBool = srcUnqual->getKind() == TypeKind::Builtin &&
+                   static_cast<const BuiltinType *>(srcUnqual)
+                       ->getBuiltinKind() == BuiltinKind::Bool;
+  bool isDestBool = destUnqual->getKind() == TypeKind::Builtin &&
+                    static_cast<const BuiltinType *>(destUnqual)
+                        ->getBuiltinKind() == BuiltinKind::Bool;
   bool isSrcPtr = srcUnqual->isPointerType();
   bool isDestPtr = destUnqual->isPointerType();
   bool isSrcEnum = srcUnqual->getKind() == TypeKind::Enum;
@@ -5435,7 +5549,8 @@ SemaResult TypeCheckPass::visit(const CastNode *node) {
   if ((isSrcNumeric && isDestNumeric) || (isSrcPtr && isDestPtr) ||
       (isSrcPtr && isDestNumeric) || (isSrcNumeric && isDestPtr) ||
       (isSrcEnum && isDestNumeric) || (isSrcNumeric && isDestEnum) ||
-      (isSrcEnum && isDestEnum) ||
+      (isSrcEnum && isDestEnum) || (isSrcBool && isDestNumeric) ||
+      (isSrcNumeric && isDestBool) || (isSrcBool && isDestBool) ||
       destType->getKind() == TypeKind::RValueReference ||
       destType->isReferenceType()) {
 
@@ -5453,38 +5568,25 @@ SemaResult TypeCheckPass::visit(const CastNode *node) {
 
   /* Explore explicit user-defined conversions via constructors.
    * Enables syntax like `Primitive as CustomType` if a matching constructor
-   * exists. */
+   * exists. The most specific constructor (exact type match first, then
+   * closest width / signedness) is selected. */
   if (destUnqual->getKind() == TypeKind::Class ||
       destUnqual->getKind() == TypeKind::Struct ||
       destUnqual->getKind() == TypeKind::Union) {
     auto *recTy = static_cast<const RecordType *>(destUnqual);
-    if (auto *decl = recTy->getDeclaration()) {
-      llvm::ArrayRef<FunctionDeclNode *> ctors;
-      if (decl->kind == NodeKind::ClassDecl) {
-        ctors = static_cast<const ClassDeclNode *>(decl)->constructors;
-      } else if (decl->kind == NodeKind::StructDecl) {
-        ctors = static_cast<const StructDeclNode *>(decl)->constructors;
-      } else if (decl->kind == NodeKind::UnionDecl) {
-        ctors = static_cast<const UnionDeclNode *>(decl)->constructors;
+    if (const FunctionDeclNode *ctor =
+            findBestConversionCtor(*srcType, recTy)) {
+      if (!ctor->isPublic(ctor->name) &&
+          ctx->getCurrentRecordContext() != recTy) {
+        return ctx->reportError(
+            node->line, node->column, node->length,
+            "Cannot cast to '" + destType->toString() +
+                "'. Conversion constructor is private.");
       }
-
-      for (auto *ctor : ctors) {
-        if (ctor->params.size() == 1 &&
-            canImplicitlyCast(*srcType, ctor->params[0]->type, false)) {
-          /* Enforce visibility constraint on conversion constructors */
-          if (!ctor->isPublic(ctor->name) &&
-              ctx->getCurrentRecordContext() != recTy) {
-            return ctx->reportError(
-                node->line, node->column, node->length,
-                "Cannot cast to '" + destType->toString() +
-                    "'. Conversion constructor is private.");
-          }
-          const_cast<CastNode *>(node)->conversionConstructor = ctor;
-          node->exprType = destType;
-          node->isLValue = false;
-          return destType;
-        }
-      }
+      const_cast<CastNode *>(node)->conversionConstructor = ctor;
+      node->exprType = destType;
+      node->isLValue = false;
+      return destType;
     }
   }
 
@@ -5602,7 +5704,6 @@ SemaResult TypeCheckPass::visit(const ModuleNode *node) {
     return ctx->astCtx.VoidTy;
   visitedModules.insert(node);
 
-  /* Snapshot using directives to prevent leaking from this module context */
   size_t prevUsings = ctx->getUsingsCount();
 
   bool hasErrors = false;
@@ -5634,7 +5735,6 @@ SemaResult TypeCheckPass::visit(const ModuleNode *node) {
   ctx->setCurrentFile(prevFile);
   ctx->currentModule = prevMod;
 
-  /* Restore using directives to cleanly separate module dependencies */
   ctx->resizeUsings(prevUsings);
 
   if (hasErrors) {
@@ -5658,7 +5758,6 @@ SemaResult TypeCheckPass::visit(const ArraySubscriptNode *node) {
   if (!(*baseType)->getUnqualifiedType()->isPointerType()) {
     if (auto *opDecl =
             resolveOverloadedOperator(*baseType, "[]", {node->index})) {
-      /* Enforce visibility constraint on array subscript operators */
       if (!opDecl->isPublic(opDecl->name) &&
           ctx->getCurrentRecordContext() != opDecl->parentRecord) {
         return ctx->reportError(node->line, node->column, node->length,
@@ -6396,7 +6495,6 @@ TypeCheckPass::resolveLambdaArgs(const FunctionType *fTy,
 }
 
 SemaResult TypeCheckPass::visit(const LambdaNode *node) {
-  /* 1. Resolve the expected signature from the assignment/argument context. */
   const Type *expected = ctx->getExpectedFunctionType();
   const FunctionType *expectedFn = nullptr;
   if (expected) {
@@ -6414,8 +6512,8 @@ SemaResult TypeCheckPass::visit(const LambdaNode *node) {
     }
   }
 
-  /* 2. Resolve parameter types: explicit types are kept; untyped parameters
-   * are filled from the expected signature. */
+  /* Parameter types: explicit types are kept; untyped parameters are filled
+   * from the expected signature. */
   bool missingContext = false;
   for (size_t i = 0; i < node->params.size(); ++i) {
     const_cast<ParamDeclNode *>(node->params[i])->type =
@@ -6437,9 +6535,8 @@ SemaResult TypeCheckPass::visit(const LambdaNode *node) {
     }
   }
 
-  /* 3. Resolve the return type: explicit > context > body inference. An
-   * 'auto' expected return (call-site inference) means the return type must
-   * come from the body. */
+  /* Return type precedence: explicit > context > body inference. An 'auto'
+   * expected return (call-site inference) forces inference from the body. */
   const Type *returnType = nullptr;
   if (node->explicitReturnType) {
     returnType = resolveIfTemplate(node->explicitReturnType);
@@ -6515,7 +6612,7 @@ SemaResult TypeCheckPass::visit(const LambdaNode *node) {
     }
   }
 
-  /* 4. Build the final body: '=> expr' becomes 'return expr;' unless the
+  /* Lower the expression body: '=> expr' becomes 'return expr;' unless the
    * lambda returns void. */
   BlockNode *finalBody = node->body;
   if (node->isExpressionBody) {
@@ -6531,8 +6628,8 @@ SemaResult TypeCheckPass::visit(const LambdaNode *node) {
     finalBody = block;
   }
 
-  /* 5. Lambdas lower to function pointers: reject captures of the enclosing
-   * function's stack. */
+  /* Lambdas lower to function pointers, so captures of the enclosing
+   * function's stack are rejected. */
   LambdaCaptureChecker captureChecker(*ctx, node);
   captureChecker.check(finalBody);
   for (const auto *v : captureChecker.violations) {
@@ -6546,7 +6643,6 @@ SemaResult TypeCheckPass::visit(const LambdaNode *node) {
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,
                                      "Lambda capture error"});
 
-  /* 6. Synthesize the function declaration and type-check the body. */
   std::string nameStr =
       "__lambda_" + std::to_string(ctx->lambdaCounter++);  std::string_view name = ctx->astCtx.copyString(nameStr);
   auto *fnDecl = ctx->astCtx.create<FunctionDeclNode>(
@@ -6566,7 +6662,6 @@ SemaResult TypeCheckPass::visit(const LambdaNode *node) {
                                      "Errors in lambda body"});
   }
 
-  /* 7. Validate the signature against the expected one. */
   if (expectedFn) {
     if (node->params.size() != expectedFn->getParamTypes().size()) {
       return ctx->reportError(

@@ -182,8 +182,7 @@ ModuleNode *ModuleLoader::loadModule(const std::string &importURI,
   moduleCache[key] = module;
 
   for (std::string_view imp : module->rawImports) {
-    /* Cache hits are guaranteed here, fulfilling local module linkages. */
-    ModuleNode *loaded = loadModule(std::string(imp), absPath.parent_path());
+      ModuleNode *loaded = loadModule(std::string(imp), absPath.parent_path());
     if (loaded) {
       if (std::find(resolvedImports.begin(), resolvedImports.end(), loaded) ==
           resolvedImports.end()) {

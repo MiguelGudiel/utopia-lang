@@ -3,6 +3,94 @@
 
 namespace utopia {
 
+/* Scores how close a conversion-constructor parameter type is to the source
+ * type: exact match wins, then same signedness, then smallest width delta.
+ * A naive first-match selection would always pick the narrowest ctor (e.g.
+ * String(int8)) for `x as String`, truncating every wider value. */
+static int conversionCtorScore(const Type *src, const Type *param) {
+  const Type *s = src->getUnqualifiedType();
+  const Type *p = param->getUnqualifiedType();
+  if (s == p)
+    return 1000;
+  if (!s->isNumeric() || !p->isNumeric())
+    return 0;
+  if (s->getKind() != TypeKind::Builtin || p->getKind() != TypeKind::Builtin)
+    return 0;
+
+  auto sKind = static_cast<const BuiltinType *>(s)->getBuiltinKind();
+  auto pKind = static_cast<const BuiltinType *>(p)->getBuiltinKind();
+
+  auto sizeOf = [](BuiltinKind k) {
+    switch (k) {
+    case BuiltinKind::Int8:
+    case BuiltinKind::UInt8:
+      return 1;
+    case BuiltinKind::Int16:
+    case BuiltinKind::UInt16:
+      return 2;
+    case BuiltinKind::Int32:
+    case BuiltinKind::UInt32:
+      return 4;
+    default:
+      return 8;
+    }
+  };
+  auto isSignedKind = [](BuiltinKind k) {
+    return k >= BuiltinKind::Int8 && k <= BuiltinKind::Int64;
+  };
+  auto diff = [](int a, int b) { return a > b ? a - b : b - a; };
+
+  if (s->isInteger() && p->isInteger()) {
+    int score = 500;
+    if (isSignedKind(sKind) == isSignedKind(pKind))
+      score += 100;
+    score -= diff(sizeOf(sKind), sizeOf(pKind)) * 50;
+    return score;
+  }
+  if (s->isFloat() && p->isFloat()) {
+    return 400 - diff(sizeOf(sKind), sizeOf(pKind)) * 50;
+  }
+  if (s->isInteger() && p->isFloat())
+    return 100;
+  if (s->isFloat() && p->isInteger())
+    return 50;
+  return 0;
+}
+
+const FunctionDeclNode *findBestConversionCtor(const Type *from,
+                                               const RecordType *recTy) {
+  if (!recTy)
+    return nullptr;
+  auto *decl = recTy->getDeclaration();
+  if (!decl)
+    return nullptr;
+
+  llvm::ArrayRef<FunctionDeclNode *> ctors;
+  if (auto *classDecl = llvm::dyn_cast<ClassDeclNode>(decl))
+    ctors = classDecl->constructors;
+  else if (auto *structDecl = llvm::dyn_cast<StructDeclNode>(decl))
+    ctors = structDecl->constructors;
+  else if (auto *unionDecl = llvm::dyn_cast<UnionDeclNode>(decl))
+    ctors = unionDecl->constructors;
+  else
+    return nullptr;
+
+  const FunctionDeclNode *best = nullptr;
+  int bestScore = -1;
+  for (auto *ctor : ctors) {
+    if (!ctor || ctor->params.size() != 1)
+      continue;
+    if (!canImplicitlyCast(from, ctor->params[0]->type, false))
+      continue;
+    int score = conversionCtorScore(from, ctor->params[0]->type);
+    if (score > bestScore) {
+      bestScore = score;
+      best = ctor;
+    }
+  }
+  return best;
+}
+
 bool canImplicitlyCast(const Type *from, const Type *to,
                        bool allowUserDefined) {
   if (!from || !to)
@@ -107,25 +195,10 @@ bool canImplicitlyCast(const Type *from, const Type *to,
     }
   }
 
-  /* Process user-defined single-argument conversion constructors */
   if (allowUserDefined) {
     if (auto *recTy = llvm::dyn_cast<RecordType>(unqualTo)) {
-      if (auto *decl = recTy->getDeclaration()) {
-        llvm::ArrayRef<FunctionDeclNode *> ctors;
-        if (auto *classDecl = llvm::dyn_cast<ClassDeclNode>(decl))
-          ctors = classDecl->constructors;
-        else if (auto *structDecl = llvm::dyn_cast<StructDeclNode>(decl))
-          ctors = structDecl->constructors;
-        else if (auto *unionDecl = llvm::dyn_cast<UnionDeclNode>(decl))
-          ctors = unionDecl->constructors;
-
-        for (auto *ctor : ctors) {
-          if (ctor->params.size() == 1) {
-            if (canImplicitlyCast(from, ctor->params[0]->type, false))
-              return true;
-          }
-        }
-      }
+      if (findBestConversionCtor(from, recTy) != nullptr)
+        return true;
     }
   }
 
@@ -415,44 +488,29 @@ ExprNode *TypeCheckPass::performImplicitConversion(ExprNode *expr,
   /* Intercept and rewrite aggregate initialization to invoke conversion
    * constructors */
   if (auto *recTy = llvm::dyn_cast<RecordType>(unqualTo)) {
-    if (auto *decl = recTy->getDeclaration()) {
-      llvm::ArrayRef<FunctionDeclNode *> ctors;
-      if (auto *classDecl = llvm::dyn_cast<ClassDeclNode>(decl))
-        ctors = classDecl->constructors;
-      else if (auto *structDecl = llvm::dyn_cast<StructDeclNode>(decl))
-        ctors = structDecl->constructors;
-      else if (auto *unionDecl = llvm::dyn_cast<UnionDeclNode>(decl))
-        ctors = unionDecl->constructors;
-
-      for (auto *ctor : ctors) {
-        if (ctor->params.size() == 1) {
-          if (canImplicitlyCast(expr->exprType, ctor->params[0]->type, false)) {
-            /* Enforce visibility constraint on implicit conversions */
-            if (!ctor->isPublic(ctor->name) &&
-                ctx->getCurrentRecordContext() != recTy) {
-              ctx->diags.report({DiagLevel::Error, expr->line, expr->column,
-                                 expr->length,
-                                 "Implicit conversion failed. Conversion "
-                                 "constructor is private.",
-                                 std::string(ctx->currentFile), expr->endLine});
-              return expr;
-            }
-
-            ExprNode *innerExpr = expr;
-            if (expr->exprType->getUnqualifiedType() !=
-                ctor->params[0]->type->getUnqualifiedType()) {
-              innerExpr =
-                  performImplicitConversion(expr, ctor->params[0]->type);
-            }
-
-            auto *castNode = ctx->astCtx.create<ImplicitCastNode>(
-                innerExpr, to, ctor, expr->line, expr->column, expr->length);
-            castNode->exprType = to;
-            castNode->isLValue = to->isReferenceType();
-            return castNode;
-          }
-        }
+    if (const FunctionDeclNode *ctor =
+            findBestConversionCtor(expr->exprType, recTy)) {
+          if (!ctor->isPublic(ctor->name) &&
+          ctx->getCurrentRecordContext() != recTy) {
+        ctx->diags.report({DiagLevel::Error, expr->line, expr->column,
+                           expr->length,
+                           "Implicit conversion failed. Conversion "
+                           "constructor is private.",
+                           std::string(ctx->currentFile), expr->endLine});
+        return expr;
       }
+
+      ExprNode *innerExpr = expr;
+      if (expr->exprType->getUnqualifiedType() !=
+          ctor->params[0]->type->getUnqualifiedType()) {
+        innerExpr = performImplicitConversion(expr, ctor->params[0]->type);
+      }
+
+      auto *castNode = ctx->astCtx.create<ImplicitCastNode>(
+          innerExpr, to, ctor, expr->line, expr->column, expr->length);
+      castNode->exprType = to;
+      castNode->isLValue = to->isReferenceType();
+      return castNode;
     }
   }
 

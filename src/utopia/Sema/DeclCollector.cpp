@@ -106,14 +106,13 @@ void DeclCollectorPass::visit(const NamespaceDeclNode *node) {
 
   ctx->pushNamespace(node->name);
 
-  /* Snapshot using directives to prevent leaking from this namespace block */
+  /* Usings declared inside the namespace must not leak into outer scopes. */
   size_t prevUsings = ctx->getUsingsCount();
 
   for (auto *stmt : node->statements) {
     dispatch(stmt);
   }
 
-  /* Restore previous using directives count */
   ctx->resizeUsings(prevUsings);
   ctx->popNamespace();
 }
@@ -133,7 +132,7 @@ void DeclCollectorPass::visit(const ModuleNode *node) {
     return;
   visitedModules.insert(node);
 
-  /* Snapshot using directives to prevent leaking imports from this module */
+  /* Usings declared inside the module must not leak into outer scopes. */
   size_t prevUsings = ctx->getUsingsCount();
 
   for (const auto *imp : node->importedModules) {
@@ -165,7 +164,6 @@ void DeclCollectorPass::visit(const ModuleNode *node) {
   ctx->setCurrentFile(prevFile);
   ctx->currentModule = prevMod;
 
-  /* Restore using directives to avoid polluting the global context */
   ctx->resizeUsings(prevUsings);
 }
 
@@ -349,6 +347,15 @@ void DeclCollectorPass::visit(const VarDeclNode *node) {
     const_cast<VarDeclNode *>(node)->isExtern = true;
     const_cast<VarDeclNode *>(node)->mangledName =
         std::string(node->externAlias);
+  } else if (!ctx->getCurrentNamespace().empty()) {
+    /* Namespace-scoped variables must not use their plain name as the
+     * symbol: 'namespace GL { PFN... glCreateShader; }' collides with a
+     * statically linked extern of the same name from another module (e.g.
+     * GLES's @extern("glCreateShader")), and the linker then resolves the
+     * function call to the data object. Mangle with the namespace, like
+     * C++ does. */
+    const_cast<VarDeclNode *>(node)->mangledName =
+        Mangler::mangle(node, std::string(""));
   }
 
   ctx->addDecl(node->fqName, node);

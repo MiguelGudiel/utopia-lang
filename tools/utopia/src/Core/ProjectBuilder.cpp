@@ -94,7 +94,15 @@ bool buildProject(const fs::path &projRoot, CompileOptions &parentOptions,
   }
 
   if (!globalOpts.targetTriple.empty()) {
-    options.linkerFlags.push_back("--target=" + globalOpts.targetTriple);
+    std::string linkTriple = globalOpts.targetTriple;
+    /* The NDK clang requires the API level in the target triple
+     * ('aarch64-linux-android21') to locate the sysroot crt and platform
+     * libraries. */
+    if (linkTriple.find("android") != std::string::npos &&
+        linkTriple.find("android") + 7 == linkTriple.size()) {
+      linkTriple += "21";
+    }
+    options.linkerFlags.push_back("--target=" + linkTriple);
   }
 
   for (const auto &inc : config.includeDirs) {
@@ -166,6 +174,13 @@ bool buildProject(const fs::path &projRoot, CompileOptions &parentOptions,
   }
 
   options.sourcePath = config.resolvedSources.front().path;
+  /* Every resolved source becomes a root translation unit. The driver
+   * compiles each one (deduplicating shared imports), so files listed
+   * in `sources`/`source_dirs` that are not reachable from the first
+   * source are no longer silently dropped. */
+  for (const auto &src : config.resolvedSources) {
+    options.resolvedSources.push_back(src.path);
+  }
   options.outputPath =
       (fs::path(options.outputDir) / config.outputName).string();
 

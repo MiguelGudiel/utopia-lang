@@ -16,6 +16,7 @@
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/TargetParser/Host.h>
 #include <llvm/TargetParser/Triple.h>
+#include <regex>
 #include <unordered_set>
 
 namespace utopia {
@@ -81,12 +82,8 @@ bool CompilerDriver::run() {
 
   Logger::debug("[Driver] Starting compilation for: " + options.sourcePath);
 
-  fs::path entryPath = fs::absolute(options.sourcePath);
-  std::string entryStr = entryPath.string();
-
   DiagnosticsEngine diagEngine;
   ASTContext astCtx;
-  ModuleNode *root = nullptr;
 
   ModuleLoaderConfig modConfig;
   modConfig.projectRoot = options.projectRoot;
@@ -168,12 +165,30 @@ bool CompilerDriver::run() {
 
   ModuleLoader loader(astCtx, modConfig, diagEngine);
 
+  /* Load every resolved source as a root translation unit. Previously
+   * only the first source was compiled; additional roots were silently
+   * dropped unless reachable through imports from the first one. */
+  std::vector<ModuleNode *> roots;
   {
     ScopedTimer timer("Lexer + Parser + Module Loading");
-    root = loader.loadModule(entryStr);
+    std::vector<std::string> entryFiles = options.resolvedSources;
+    if (entryFiles.empty())
+      entryFiles.push_back(options.sourcePath);
+
+    std::unordered_set<std::string> seenEntries;
+    for (const auto &entry : entryFiles) {
+      std::string absEntry = fs::absolute(entry).string();
+      if (!seenEntries.insert(absEntry).second)
+        continue;
+
+      ModuleNode *m = loader.loadModule(absEntry);
+      if (!m)
+        continue;
+      roots.push_back(m);
+    }
   }
 
-  if (!root || diagEngine.hasErrors()) {
+  if (roots.empty() || diagEngine.hasErrors()) {
     std::cerr << "[Fatal] Syntax or import errors found." << std::endl;
     return false;
   }
@@ -181,7 +196,7 @@ bool CompilerDriver::run() {
   Logger::debug("[Driver] AST generated successfully.");
 
   if (options.doFormat) {
-    std::string formatted = Formatter::format(root);
+    std::string formatted = Formatter::format(roots.front());
     std::ofstream outFile(options.sourcePath);
     outFile << formatted;
     std::cout << "\033[1;32m[Format Success]\033[0m Formatted "
@@ -191,12 +206,20 @@ bool CompilerDriver::run() {
 
   {
     ScopedTimer timer("Semantic Analysis Pipeline");
-    SemaContext semaCtx(astCtx, diagEngine, entryStr);
+    /* A single SemaContext and pipeline are shared across all roots: the
+     * passes track visited modules internally, so each module is type-checked
+     * exactly once even when roots share imports. (Running a fresh pipeline
+     * per root is not idempotent: the first run mutates the AST — e.g. it
+     * reorders call arguments and clears named-argument bookkeeping — which
+     * breaks overload resolution on a second pass over the same module.) */
+    SemaContext semaCtx(astCtx, diagEngine, roots.front()->filePath);
     SemaPipeline pipeline;
 
-    if (!pipeline.run(root, semaCtx) || diagEngine.hasErrors()) {
-      std::cerr << "[Fatal] Semantic errors found." << std::endl;
-      return false;
+    for (const ModuleNode *rootMod : roots) {
+      if (!pipeline.run(rootMod, semaCtx) || diagEngine.hasErrors()) {
+        std::cerr << "[Fatal] Semantic errors found." << std::endl;
+        return false;
+      }
     }
     Logger::debug("[Driver] Semantic Analysis passed.");
   }
@@ -212,14 +235,13 @@ bool CompilerDriver::run() {
       return true;
     compiledModules.insert(modNode);
 
-    /* Traverse standard explicit imports */
+    /* Explicit imports first, then re-exports: both must compile so the
+     * backend generates their objects. */
     for (const auto *imp : modNode->importedModules) {
       if (!self(imp, self))
         return false;
     }
 
-    /* Traverse re-exported dependencies to guarantee backend object generation
-     */
     for (const auto *exp : modNode->exportedModules) {
       if (!self(exp, self))
         return false;
@@ -284,8 +306,10 @@ bool CompilerDriver::run() {
 
   {
     ScopedTimer timer("IR Generation & Code Emission");
-    if (!compileTranslationUnit(root, compileTranslationUnit)) {
-      return false;
+    for (const ModuleNode *rootMod : roots) {
+      if (!compileTranslationUnit(rootMod, compileTranslationUnit)) {
+        return false;
+      }
     }
   }
 
@@ -368,8 +392,8 @@ bool CompilerDriver::run() {
   } else {
     ScopedTimer timer("Linking");
 
-    /* Changed linker from clang++ to clang to avoid implicitly linking C++
-     * standard libraries for a C-compatible language. */
+    /* Link with 'clang' instead of 'clang++' so the C++ standard library is
+     * not implicitly linked for a C-compatible language. */
     std::string compilerPath = "clang";
     std::string arPath = "llvm-ar";
 
@@ -381,12 +405,21 @@ bool CompilerDriver::run() {
       fs::path sysrootPath(options.sysroot);
       fs::path binDir = sysrootPath.parent_path() / "bin";
 
-      /* Changed wrapper resolution to use clang */
-      fs::path wrapperBin = binDir / (options.targetTriple + "-clang");
+      /* The NDK clang needs the API level in the target triple
+       * ('aarch64-linux-android21'); without it the sysroot crt files and
+       * platform libraries cannot be located. */
+      std::string linkTriple = options.targetTriple;
+      if (linkTriple.find("android") != std::string::npos &&
+          !std::regex_search(linkTriple, std::regex("android\\d+$"))) {
+        linkTriple += "21";
+      }
+
+      /* Prefer the target-prefixed clang wrapper when present. */
+      fs::path wrapperBin = binDir / (linkTriple + "-clang");
       if (fs::exists(wrapperBin)) {
         compilerPath = wrapperBin.string();
       } else {
-        /* Changed fallback resolution to use clang */
+        /* Fall back to the plain 'clang' binary. */
         fs::path clangBin = binDir / "clang";
         if (fs::exists(clangBin)) {
           compilerPath = clangBin.string();
