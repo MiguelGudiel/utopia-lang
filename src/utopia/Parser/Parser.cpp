@@ -2602,7 +2602,11 @@ DeclNode *Parser::parseEnumDecl() {
                                           endCol - col);
   node->fqName = fqName;
   node->members = astCtx.copyArray<EnumMemberNode *>(members);
-  node->enumType = astCtx.getEnumType(name, underlyingType);
+  /* Register with the fully qualified name: the type system deduplicates
+   * EnumType by name, and keeping a second instance under the simple name
+   * makes the simple-name lookup shadow the namespace-qualified one
+   * (breaking enum assignability inside namespaces). */
+  node->enumType = astCtx.getEnumType(fqName, underlyingType);
   node->endLine = endLine;
   node->identifierColumn = idCol;
   node->identifierLength = idLen;

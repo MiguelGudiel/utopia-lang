@@ -202,8 +202,55 @@ bool canImplicitlyCast(const Type *from, const Type *to,
     }
   }
 
-  if (llvm::isa<EnumType>(unqualFrom) && llvm::isa<EnumType>(unqualTo)) {
-    return unqualFrom == unqualTo;
+  if (llvm::isa<EnumType>(unqualFrom)) {
+    if (llvm::isa<EnumType>(unqualTo))
+      return unqualFrom == unqualTo;
+    /* Enums convert implicitly to their underlying integer type (and
+     * promote like it), as documented: "Enums convert to their underlying
+     * integer type and participate in integer arithmetic." Narrowing
+     * conversions (e.g. int32-backed enum to uint8) are NOT implicit. */
+    if (!unqualTo->isInteger())
+      return false;
+    const Type *underlying =
+        static_cast<const EnumType *>(unqualFrom)->getUnderlyingType();
+    if (unqualTo == underlying)
+      return true;
+    auto intWidth = [](const Type *t) {
+      auto k = static_cast<const BuiltinType *>(t)
+                   ->getBuiltinKind();
+      switch (k) {
+      case BuiltinKind::Int8:
+      case BuiltinKind::UInt8:
+        return 1;
+      case BuiltinKind::Int16:
+      case BuiltinKind::UInt16:
+        return 2;
+      case BuiltinKind::Int32:
+      case BuiltinKind::UInt32:
+        return 4;
+      default:
+        return 8;
+      }
+    };
+    auto isUnsigned = [](const Type *t) {
+      auto k = static_cast<const BuiltinType *>(t)
+                   ->getBuiltinKind();
+      switch (k) {
+      case BuiltinKind::UInt8:
+      case BuiltinKind::UInt16:
+      case BuiltinKind::UInt32:
+      case BuiltinKind::UInt64:
+      case BuiltinKind::USize:
+        return true;
+      default:
+        return false;
+      }
+    };
+    if (intWidth(unqualTo) > intWidth(underlying))
+      return true;
+    if (intWidth(unqualTo) == intWidth(underlying))
+      return isUnsigned(unqualTo) == isUnsigned(underlying);
+    return false;
   }
 
   if (auto *arrFrom = llvm::dyn_cast<ArrayType>(unqualFrom)) {

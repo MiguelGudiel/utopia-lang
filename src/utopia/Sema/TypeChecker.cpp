@@ -643,6 +643,23 @@ void TypeCheckPass::checkDeprecated(const DeclNode *decl, const ASTNode *node) {
   }
 }
 
+/* The numeric type an expression behaves as in arithmetic: references
+ * resolve to their pointee and enums act as their underlying integer
+ * type. */
+static const Type *effectiveNumericType(const Type *t) {
+  if (!t)
+    return t;
+  if (t->isReferenceType()) {
+    t = static_cast<const ReferenceType *>(t)->getPointeeType();
+  } else if (t->getKind() == TypeKind::RValueReference) {
+    t = static_cast<const RValueReferenceType *>(t)->getPointeeType();
+  }
+  const Type *unqual = t->getUnqualifiedType();
+  if (auto *eTy = llvm::dyn_cast<EnumType>(unqual))
+    return eTy->getUnderlyingType();
+  return t;
+}
+
 SemaResult TypeCheckPass::visit(const AnnotationDeclNode *node) {
   bool hasErrors = false;
   for (const auto *field : node->fields) {
@@ -2192,7 +2209,8 @@ SemaResult TypeCheckPass::visit(const BinaryOpNode *node) {
     }
 
     if (node->op != "==" && node->op != "!=") {
-      if (!(*lhs)->isNumeric() || !(*rhs)->isNumeric()) {
+      if (!effectiveNumericType(*lhs)->isNumeric() ||
+          !effectiveNumericType(*rhs)->isNumeric()) {
         return ctx->reportError(
             node->line, node->column, node->length,
             "Relational inequalities require numeric operands.");
@@ -2200,8 +2218,10 @@ SemaResult TypeCheckPass::visit(const BinaryOpNode *node) {
     }
 
     const Type *res = nullptr;
-    if ((*lhs)->isNumeric() && (*rhs)->isNumeric()) {
-      res = ctx->astCtx.getPromotedNumericType(*lhs, *rhs);
+    if (effectiveNumericType(*lhs)->isNumeric() &&
+        effectiveNumericType(*rhs)->isNumeric()) {
+      res = ctx->astCtx.getPromotedNumericType(effectiveNumericType(*lhs),
+                                               effectiveNumericType(*rhs));
       checkImplicitCastWarning(*lhs, res, node->left);
       checkImplicitCastWarning(*rhs, res, node->right);
     } else {
@@ -2214,13 +2234,15 @@ SemaResult TypeCheckPass::visit(const BinaryOpNode *node) {
   }
 
   if (cat == OpCategory::BitwiseOrModulo) {
-    if (!(*lhs)->isInteger() || !(*rhs)->isInteger()) {
+    if (!effectiveNumericType(*lhs)->isInteger() ||
+        !effectiveNumericType(*rhs)->isInteger()) {
       return ctx->reportError(
           node->line, node->column, node->length,
           "Bitwise and modulo operations require integer operands.");
     }
   } else if (cat == OpCategory::Arithmetic) {
-    if (!(*lhs)->isNumeric() || !(*rhs)->isNumeric()) {
+    if (!effectiveNumericType(*lhs)->isNumeric() ||
+        !effectiveNumericType(*rhs)->isNumeric()) {
       return ctx->reportError(node->line, node->column, node->length,
                               "Binary arithmetic operations are currently "
                               "restricted to numeric types.");
@@ -2237,8 +2259,10 @@ SemaResult TypeCheckPass::visit(const BinaryOpNode *node) {
   }
 
   const Type *res = nullptr;
-  if ((*lhs)->isNumeric() && (*rhs)->isNumeric()) {
-    res = ctx->astCtx.getPromotedNumericType(*lhs, *rhs);
+  if (effectiveNumericType(*lhs)->isNumeric() &&
+      effectiveNumericType(*rhs)->isNumeric()) {
+    res = ctx->astCtx.getPromotedNumericType(effectiveNumericType(*lhs),
+                                             effectiveNumericType(*rhs));
     checkImplicitCastWarning(*lhs, res, node->left);
     checkImplicitCastWarning(*rhs, res, node->right);
   } else {
@@ -2825,13 +2849,15 @@ SemaResult TypeCheckPass::visit(const AssignNode *node) {
     }
 
     if (cat == AssignCategory::BitwiseOrModulo) {
-      if (!(*lhsType)->isInteger() || !(*rhsType)->isInteger()) {
+      if (!effectiveNumericType(*lhsType)->isInteger() ||
+          !effectiveNumericType(*rhsType)->isInteger()) {
         return ctx->reportError(
             node->line, node->column, node->length,
             "Bitwise and modulo assignments require integer operands.");
       }
     } else if (cat == AssignCategory::Arithmetic) {
-      if (!(*lhsType)->isNumeric() || !(*rhsType)->isNumeric()) {
+      if (!effectiveNumericType(*lhsType)->isNumeric() ||
+          !effectiveNumericType(*rhsType)->isNumeric()) {
         return ctx->reportError(
             node->line, node->column, node->length,
             "Arithmetic assignments require numeric operands.");
@@ -4712,9 +4738,17 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
 
     auto *baseCDecl = static_cast<const ClassDeclNode *>(baseDecl);
     std::string_view targetMethodName = currFunc->name;
-    bool isConstructorCall =
-        (currFunc->parentRecord &&
-         currFunc->name == currFunc->parentRecord->getName());
+    /* Constructors are named after the record's SIMPLE name; the record
+     * type carries the fully qualified name ('Demo.Player'), so compare
+     * against the last name component. */
+    bool isConstructorCall = false;
+    if (currFunc->parentRecord) {
+      std::string recName = std::string(currFunc->parentRecord->getName());
+      size_t dot = recName.find_last_of('.');
+      std::string simpleName =
+          (dot == std::string::npos) ? recName : recName.substr(dot + 1);
+      isConstructorCall = (currFunc->name == simpleName);
+    }
 
     std::vector<const FunctionDeclNode *> candidates;
     if (isConstructorCall) {
@@ -5246,15 +5280,79 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
         std::vector<std::vector<std::string>> overloadErrors;
         std::vector<ExprNode *> bestResolvedArgs;
 
-        llvm::ArrayRef<FunctionDeclNode *> methods;
-        if (recDecl->kind == NodeKind::ClassDecl)
-          methods = static_cast<const ClassDeclNode *>(recDecl)->methods;
-        else if (recDecl->kind == NodeKind::StructDecl)
-          methods = static_cast<const StructDeclNode *>(recDecl)->methods;
-        else
-          methods = static_cast<const UnionDeclNode *>(recDecl)->methods;
+        /* Collect methods from the whole hierarchy (most-derived first,
+         * then base classes and interfaces): inherited methods must be
+         * callable on derived-typed receivers, not only through base
+         * pointers or 'super'. Private base/interface methods are only
+         * visible from their declaring file, mirroring the direct-call
+         * rule (the receiver's own methods keep their existing rules). */
+        std::vector<const FunctionDeclNode *> allMethods;
+        if (recDecl->kind == NodeKind::ClassDecl) {
+          const ClassDeclNode *curClass =
+              static_cast<const ClassDeclNode *>(recDecl);
+          bool isRoot = true;
+          while (curClass) {
+            for (const auto *m : curClass->methods) {
+              if (!isRoot && !m->isPublic(m->name) &&
+                  !m->isProtected(m->name) &&
+                  m->declFilePath != ctx->currentFile)
+                continue;
+              allMethods.push_back(m);
+            }
+            for (const auto *iface : curClass->interfaces) {
+              if (const auto *iType = llvm::dyn_cast<ClassType>(
+                      iface->getUnqualifiedType())) {
+                const ClassDeclNode *ifaceDecl =
+                    llvm::dyn_cast_or_null<ClassDeclNode>(
+                        iType->getDeclaration());
+                while (ifaceDecl) {
+                  for (const auto *m : ifaceDecl->methods) {
+                    if (!m->isPublic(m->name) && !m->isProtected(m->name) &&
+                        m->declFilePath != ctx->currentFile)
+                      continue;
+                    allMethods.push_back(m);
+                  }
+                  if (ifaceDecl->baseClass) {
+                    if (const auto *pType = llvm::dyn_cast<ClassType>(
+                            ifaceDecl->baseClass->getUnqualifiedType())) {
+                      ifaceDecl =
+                          llvm::dyn_cast_or_null<ClassDeclNode>(
+                              pType->getDeclaration());
+                    } else {
+                      break;
+                    }
+                  } else {
+                    break;
+                  }
+                }
+              }
+            }
+            if (curClass->baseClass) {
+              if (const auto *pType = llvm::dyn_cast<ClassType>(
+                      curClass->baseClass->getUnqualifiedType())) {
+                curClass = llvm::dyn_cast_or_null<ClassDeclNode>(
+                    pType->getDeclaration());
+                isRoot = false;
+              } else {
+                break;
+              }
+            } else {
+              break;
+            }
+          }
+        } else if (recDecl->kind == NodeKind::StructDecl) {
+          for (const auto *m :
+               static_cast<const StructDeclNode *>(recDecl)->methods) {
+            allMethods.push_back(m);
+          }
+        } else {
+          for (const auto *m :
+               static_cast<const UnionDeclNode *>(recDecl)->methods) {
+            allMethods.push_back(m);
+          }
+        }
 
-        for (const auto *method : methods) {
+        for (const auto *method : allMethods) {
           if (method->name == ma->memberName) {
             /* Method-level templates can be called without explicit type
              * arguments: bind the method's template parameters positionally

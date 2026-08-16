@@ -150,7 +150,11 @@ TypeCheckPass::resolveOverloadedOperator(const Type *lhsType,
         int currentScore = 0;
 
         const Type *lhsParamType = fDecl->params[0]->type;
-        if (!canImplicitlyCast(lhsType, lhsParamType)) {
+        /* The left operand must convert DIRECTLY (no conversion
+         * constructors): otherwise implicit enum->underlying conversions
+         * would make e.g. 'String(int32)' reachable from an enum and
+         * hijack built-in arithmetic like 'enumValue + 1'. */
+        if (!canImplicitlyCast(lhsType, lhsParamType, false)) {
           continue;
         }
 

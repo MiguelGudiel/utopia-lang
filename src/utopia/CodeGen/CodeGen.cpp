@@ -10,6 +10,15 @@
 
 namespace utopia {
 
+/* Forward declarations (defined below with the record helpers). */
+static bool isTriviallyCopyable(
+    const Type *t, llvm::SmallPtrSetImpl<const RecordType *> &visited);
+static const FunctionDeclNode *getCustomDestructor(const Type *t);
+static const FunctionDeclNode *findAssignmentOperator(const Type *t);
+static const FunctionDeclNode *findCopyOrMoveCtor(const Type *t,
+                                                  bool preferMove);
+
+
 namespace {
 enum class BinOpCode {
   Add,
@@ -556,7 +565,7 @@ void CodeGen::emitLoopCleanups(size_t targetDepth) {
     for (auto cleanupIt = scopeIt->cleanups.rbegin();
          cleanupIt != scopeIt->cleanups.rend(); ++cleanupIt) {
       emitCleanupCall(cleanupIt->instancePtr, cleanupIt->destructor,
-                      cleanupIt->type);
+                      cleanupIt->type, cleanupIt->guard);
     }
     for (auto lifeIt = scopeIt->lifetimes.rbegin();
          lifeIt != scopeIt->lifetimes.rend(); ++lifeIt) {
@@ -1416,6 +1425,31 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
     condV = createImplicitCast(condV, builder.getInt1Ty());
 
     llvm::Function *theFunction = builder.GetInsertBlock()->getParent();
+
+    const Type *lvalTy = node->exprType;
+    const Type *unqualLval = lvalTy->getUnqualifiedType();
+    bool lvalNeedsOwn =
+        (unqualLval->getKind() == TypeKind::Struct ||
+         unqualLval->getKind() == TypeKind::Class ||
+         unqualLval->getKind() == TypeKind::Union);
+    llvm::Value *trueGuard = nullptr;
+    llvm::Value *falseGuard = nullptr;
+    if (lvalNeedsOwn) {
+      llvm::SmallPtrSet<const RecordType *, 8> visited;
+      lvalNeedsOwn = !isTriviallyCopyable(unqualLval, visited);
+      /* Initialized in the entry (which dominates both branches): an
+       * uninitialized flag would be UNDEF on the other path and the
+       * optimizer would assume the destructor always runs. */
+      llvm::AllocaInst *tg =
+          createEntryBlockAlloca(builder.getInt1Ty(), "ternary.lval.tguard");
+      llvm::AllocaInst *fg =
+          createEntryBlockAlloca(builder.getInt1Ty(), "ternary.lval.fguard");
+      builder.CreateStore(builder.getInt1(false), tg);
+      builder.CreateStore(builder.getInt1(false), fg);
+      trueGuard = tg;
+      falseGuard = fg;
+    }
+
     llvm::BasicBlock *trueBB =
         llvm::BasicBlock::Create(ctx, "ternary.lval.true", theFunction);
     llvm::BasicBlock *falseBB =
@@ -1426,19 +1460,63 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
     builder.CreateCondBr(condV, trueBB, falseBB);
 
     builder.SetInsertPoint(trueBB);
+    size_t trueCleanups = cgCtx.getCleanupCount();
     llvm::Value *trueLVal = getLValue(ternary->trueExpr);
-    if (!trueLVal)
-      return nullptr;
+    if (!trueLVal) {
+      /* Fall back to materializing the branch value in a temporary:
+       * aborting here would leave the condition branch dangling. */
+      llvm::Value *val = dispatch(ternary->trueExpr);
+      if (!val)
+        return nullptr;
+      trueLVal = materializeTernaryBranchValue(val, ternary->trueExpr);
+    }
+    if (lvalNeedsOwn) {
+      /* Own a deep copy: the branch temporaries die below, so the
+       * merged lvalue cannot point into them. The copy must run while
+       * the branch temporary is still alive; its cleanup is registered
+       * after the branch cleanups are flushed. */
+      llvm::AllocaInst *owned = createEntryBlockAlloca(
+          getLLVMType(lvalTy), "ternary.lval.owned");
+      emitDefaultInitialization(owned, lvalTy);
+      emitMemberWiseCopy(owned, trueLVal, lvalTy, false);
+      builder.CreateStore(builder.getInt1(true), trueGuard);
+      trueLVal = owned;
+    }
     trueLVal = createImplicitCast(trueLVal, builder.getPtrTy());
+    emitBranchCleanups(trueCleanups);
+    if (lvalNeedsOwn) {
+      if (const FunctionDeclNode *dtor = getCustomDestructor(unqualLval)) {
+        cgCtx.addCleanup(trueLVal, dtor, lvalTy, trueGuard);
+      }
+    }
     trueBB = builder.GetInsertBlock();
     builder.CreateBr(mergeBB);
 
     theFunction->insert(theFunction->end(), falseBB);
     builder.SetInsertPoint(falseBB);
+    size_t falseCleanups = cgCtx.getCleanupCount();
     llvm::Value *falseLVal = getLValue(ternary->falseExpr);
-    if (!falseLVal)
-      return nullptr;
+    if (!falseLVal) {
+      llvm::Value *val = dispatch(ternary->falseExpr);
+      if (!val)
+        return nullptr;
+      falseLVal = materializeTernaryBranchValue(val, ternary->falseExpr);
+    }
+    if (lvalNeedsOwn) {
+      llvm::AllocaInst *owned = createEntryBlockAlloca(
+          getLLVMType(lvalTy), "ternary.lval.owned");
+      emitDefaultInitialization(owned, lvalTy);
+      emitMemberWiseCopy(owned, falseLVal, lvalTy, false);
+      builder.CreateStore(builder.getInt1(true), falseGuard);
+      falseLVal = owned;
+    }
     falseLVal = createImplicitCast(falseLVal, builder.getPtrTy());
+    emitBranchCleanups(falseCleanups);
+    if (lvalNeedsOwn) {
+      if (const FunctionDeclNode *dtor = getCustomDestructor(unqualLval)) {
+        cgCtx.addCleanup(falseLVal, dtor, lvalTy, falseGuard);
+      }
+    }
     falseBB = builder.GetInsertBlock();
     builder.CreateBr(mergeBB);
 
@@ -1565,6 +1643,22 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
     if (unNode->op == "*") {
       return dispatch(unNode->expr);
     }
+  }
+
+  if (llvm::isa<ImplicitCastNode>(node) || llvm::isa<CastNode>(node)) {
+    /* Cast results are not naturally addressable: the cast visit builds
+     * an owned temporary (tracked via lastTemporaryAlloca) — return its
+     * address (e.g. for ternary lvalues or reference arguments). */
+    lastTemporaryAlloca = nullptr;
+    llvm::Value *val = dispatch(node);
+    if (lastTemporaryAlloca) {
+      llvm::Value *tmp = lastTemporaryAlloca;
+      lastTemporaryAlloca = nullptr;
+      return tmp;
+    }
+    if (!val)
+      return nullptr;
+    return materializeTernaryBranchValue(val, node);
   }
 
   if (node->exprType &&
@@ -2483,6 +2577,30 @@ llvm::Value *CodeGen::visit(const TernaryOpNode *node) {
   condV = createImplicitCast(condV, builder.getInt1Ty());
 
   llvm::Function *theFunction = builder.GetInsertBlock()->getParent();
+
+  /* The ternary value is loaded into the phi, but the branch temporaries
+   * die at their branch ends: records with destructor-bearing members
+   * need an owned deep copy so the merged value does not dangle. */
+  const Type *valTy = node->exprType;
+  const Type *unqualVal = valTy->getUnqualifiedType();
+  bool valueNeedsOwn =
+      (unqualVal->getKind() == TypeKind::Struct ||
+       unqualVal->getKind() == TypeKind::Class ||
+       unqualVal->getKind() == TypeKind::Union);
+  if (valueNeedsOwn) {
+    llvm::SmallPtrSet<const RecordType *, 8> visited;
+    valueNeedsOwn = !isTriviallyCopyable(unqualVal, visited);
+  }
+
+  /* Guards for the owned branch copies: initialized false so the
+   * scope-end cleanups only run for the branch that actually executed. */
+  llvm::AllocaInst *trueGuard =
+      createEntryBlockAlloca(builder.getInt1Ty(), "ternary.true.guard");
+  llvm::AllocaInst *falseGuard =
+      createEntryBlockAlloca(builder.getInt1Ty(), "ternary.false.guard");
+  builder.CreateStore(builder.getInt1(false), trueGuard);
+  builder.CreateStore(builder.getInt1(false), falseGuard);
+
   llvm::BasicBlock *trueBB =
       llvm::BasicBlock::Create(ctx, "ternary.true", theFunction);
   llvm::BasicBlock *falseBB = llvm::BasicBlock::Create(ctx, "ternary.false");
@@ -2491,22 +2609,57 @@ llvm::Value *CodeGen::visit(const TernaryOpNode *node) {
   builder.CreateCondBr(condV, trueBB, falseBB);
 
   builder.SetInsertPoint(trueBB);
+  size_t trueCleanups = cgCtx.getCleanupCount();
   llvm::Value *trueV = dispatch(node->trueExpr);
   if (!trueV && !node->exprType->isVoid())
     return nullptr;
   if (!node->exprType->isVoid() && trueV) {
-    trueV = createImplicitCast(trueV, getLLVMType(node->exprType));
+    if (valueNeedsOwn) {
+      /* Deep-copy inside the branch, BEFORE the branch temporaries are
+       * destroyed: the loaded value shares their buffers. The owned copy
+       * is registered for destruction after the flush so it survives. */
+      llvm::Value *owned = materializeTernaryBranchValue(trueV,
+                                                         node->trueExpr);
+      trueV = builder.CreateLoad(getLLVMType(node->exprType), owned);
+      emitBranchCleanups(trueCleanups);
+      if (const FunctionDeclNode *dtor =
+              getCustomDestructor(unqualVal)) {
+        builder.CreateStore(builder.getInt1(true), trueGuard);
+        cgCtx.addCleanup(owned, dtor, valTy, trueGuard);
+      }
+    } else {
+      trueV = createImplicitCast(trueV, getLLVMType(node->exprType));
+      emitBranchCleanups(trueCleanups);
+    }
+  } else {
+    emitBranchCleanups(trueCleanups);
   }
   trueBB = builder.GetInsertBlock();
   builder.CreateBr(mergeBB);
 
   theFunction->insert(theFunction->end(), falseBB);
   builder.SetInsertPoint(falseBB);
+  size_t falseCleanups = cgCtx.getCleanupCount();
   llvm::Value *falseV = dispatch(node->falseExpr);
   if (!falseV && !node->exprType->isVoid())
     return nullptr;
   if (!node->exprType->isVoid() && falseV) {
-    falseV = createImplicitCast(falseV, getLLVMType(node->exprType));
+    if (valueNeedsOwn) {
+      llvm::Value *owned = materializeTernaryBranchValue(falseV,
+                                                         node->falseExpr);
+      falseV = builder.CreateLoad(getLLVMType(node->exprType), owned);
+      emitBranchCleanups(falseCleanups);
+      if (const FunctionDeclNode *dtor =
+              getCustomDestructor(unqualVal)) {
+        builder.CreateStore(builder.getInt1(true), falseGuard);
+        cgCtx.addCleanup(owned, dtor, valTy, falseGuard);
+      }
+    } else {
+      falseV = createImplicitCast(falseV, getLLVMType(node->exprType));
+      emitBranchCleanups(falseCleanups);
+    }
+  } else {
+    emitBranchCleanups(falseCleanups);
   }
   falseBB = builder.GetInsertBlock();
   builder.CreateBr(mergeBB);
@@ -2824,13 +2977,27 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
                               currentFilePath});
               }
             } else if (isAggregate) {
-              /* Fallback generic memcpy for records lacking a custom destructor
-               */
               llvm::Value *rvalAddr = getLValue(node->initializer);
               if (rvalAddr) {
-                llvm::Align align = mod.getDataLayout().getABITypeAlign(ty);
-                uint64_t allocSize = mod.getDataLayout().getTypeAllocSize(ty);
-                builder.CreateMemCpy(gvar, align, rvalAddr, align, allocSize);
+                llvm::SmallPtrSet<const RecordType *, 8> copyVisited;
+                bool trivialCopyable = isTriviallyCopyable(node->type,
+                                                           copyVisited);
+                if (!trivialCopyable) {
+                  /* Records with destructor-bearing members must be copied
+                   * member-wise: a plain memcpy would share String buffers
+                   * and double-free. */
+                  llvm::Align align = mod.getDataLayout().getABITypeAlign(ty);
+                  uint64_t allocSize = mod.getDataLayout().getTypeAllocSize(ty);
+                  builder.CreateMemSet(gvar, builder.getInt8(0), allocSize,
+                                       align);
+                  emitMemberWiseCopy(gvar, rvalAddr, node->type, false);
+                } else {
+                  llvm::Align align = mod.getDataLayout().getABITypeAlign(ty);
+                  uint64_t allocSize =
+                      mod.getDataLayout().getTypeAllocSize(ty);
+                  builder.CreateMemCpy(gvar, align, rvalAddr, align,
+                                       allocSize);
+                }
               } else {
                 lastTemporaryAlloca = nullptr;
                 llvm::Value *initVal = dispatch(node->initializer);
@@ -2984,11 +3151,24 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
                           currentFilePath});
           }
         } else if (isAggregate) {
-          /* Fallback generic memcpy for records lacking a custom destructor */
           llvm::Value *rvalAddr = getLValue(node->initializer);
           if (rvalAddr) {
-            llvm::Align align = mod.getDataLayout().getABITypeAlign(ty);
-            builder.CreateMemCpy(alloca, align, rvalAddr, align, allocSize);
+            llvm::SmallPtrSet<const RecordType *, 8> copyVisited;
+            bool trivialCopyable = isTriviallyCopyable(node->type,
+                                                       copyVisited);
+            if (!trivialCopyable) {
+              /* Member-wise copy for records with destructor-bearing
+               * members (deep-copies String fields instead of sharing
+               * their buffers). */
+              llvm::Align align = mod.getDataLayout().getABITypeAlign(ty);
+              builder.CreateMemSet(alloca, builder.getInt8(0), allocSize,
+                                   align);
+              emitMemberWiseCopy(alloca, rvalAddr, node->type, false);
+            } else {
+              llvm::Align align = mod.getDataLayout().getABITypeAlign(ty);
+              builder.CreateMemCpy(alloca, align, rvalAddr, align,
+                                   allocSize);
+            }
           } else {
             lastTemporaryAlloca = nullptr;
             llvm::Value *initVal = dispatch(node->initializer);
@@ -3184,8 +3364,9 @@ llvm::Value *CodeGen::visit(const AssignNode *node) {
                       unqualTargetTy->getKind() == TypeKind::Union ||
                       unqualTargetTy->getKind() == TypeKind::Array);
 
-  /* Aggregate assignment lowers to a deep memory copy: preserves locality and
-   * avoids SSA explosion. L-values are evaluated to support references. */
+  /* Aggregate assignment lowers to a memory copy (deep, member-wise, when
+   * the record holds destructor-bearing members: a bit-copy would share
+   * String buffers and double-free). */
   if (isAggregate) {
     llvm::Value *rvalAddr = getLValue(node->value);
     if (rvalAddr) {
@@ -3193,7 +3374,13 @@ llvm::Value *CodeGen::visit(const AssignNode *node) {
       uint64_t size = mod.getDataLayout().getTypeAllocSize(llvmDestTy);
       llvm::Align align = mod.getDataLayout().getABITypeAlign(llvmDestTy);
 
-      builder.CreateMemCpy(lval, align, rvalAddr, align, size);
+      llvm::SmallPtrSet<const RecordType *, 8> copyVisited;
+      bool trivialCopyable = isTriviallyCopyable(unqualTargetTy, copyVisited);
+      if (!trivialCopyable) {
+        emitMemberWiseCopy(lval, rvalAddr, unqualTargetTy, true);
+      } else {
+        builder.CreateMemCpy(lval, align, rvalAddr, align, size);
+      }
       return nullptr;
     }
   }
@@ -3208,9 +3395,21 @@ llvm::Value *CodeGen::visit(const AssignNode *node) {
     return nullptr;
   }
 
+  /* Reference-typed l-values store through the pointee type: writing
+   * with the reference's own (pointer) type would store 8 bytes into a
+   * 4-byte slot and corrupt the stack. */
+  const Type *assignTargetTy = node->target->exprType;
+  if (assignTargetTy->isReferenceType()) {
+    assignTargetTy = static_cast<const ReferenceType *>(assignTargetTy)
+                         ->getPointeeType();
+  } else if (assignTargetTy->getKind() == TypeKind::RValueReference) {
+    assignTargetTy = static_cast<const RValueReferenceType *>(assignTargetTy)
+                         ->getPointeeType();
+  }
+
   if (node->op != "=") {
-    llvm::Type *valTy = getLLVMType(node->target->exprType);
-    llvm::Value *oldVal = createTBAALoad(valTy, lval, node->target->exprType);
+    llvm::Type *valTy = getLLVMType(assignTargetTy);
+    llvm::Value *oldVal = createTBAALoad(valTy, lval, assignTargetTy);
     llvm::Value *castedRval = createImplicitCast(rval, valTy);
     std::string_view binOp = node->op.substr(0, node->op.length() - 1);
 
@@ -3269,7 +3468,7 @@ llvm::Value *CodeGen::visit(const AssignNode *node) {
       }
     }
   } else {
-    llvm::Type *destTy = getLLVMType(node->target->exprType);
+    llvm::Type *destTy = getLLVMType(assignTargetTy);
     rval = createImplicitCast(rval, destTy);
   }
 
@@ -4125,7 +4324,7 @@ llvm::Value *CodeGen::visit(const ReturnNode *node) {
         for (auto cleanupIt = scope.cleanups.rbegin();
              cleanupIt != scope.cleanups.rend(); ++cleanupIt) {
           emitCleanupCall(cleanupIt->instancePtr, cleanupIt->destructor,
-                          cleanupIt->type);
+                          cleanupIt->type, cleanupIt->guard);
         }
         for (auto lifeIt = scope.lifetimes.rbegin();
              lifeIt != scope.lifetimes.rend(); ++lifeIt) {
@@ -4195,7 +4394,7 @@ llvm::Value *CodeGen::visit(const ReturnNode *node) {
       for (auto cleanupIt = scope.cleanups.rbegin();
            cleanupIt != scope.cleanups.rend(); ++cleanupIt) {
         emitCleanupCall(cleanupIt->instancePtr, cleanupIt->destructor,
-                        cleanupIt->type);
+                        cleanupIt->type, cleanupIt->guard);
       }
       for (auto lifeIt = scope.lifetimes.rbegin();
            lifeIt != scope.lifetimes.rend(); ++lifeIt) {
@@ -4238,13 +4437,41 @@ llvm::Value *CodeGen::visit(const ReturnNode *node) {
 
       /* RVO / Return Escape: Prevent local variables and constructed
        * temporaries from being destroyed if they are being returned by value */
+      bool returnEscaped = false;
       if (node->value->kind == NodeKind::Variable) {
         if (llvm::Value *lval = getLValue(node->value)) {
           cgCtx.removeCleanup(lval);
+          returnEscaped = true;
         }
       } else if (lastTemporaryAlloca) {
         cgCtx.removeCleanup(lastTemporaryAlloca);
         lastTemporaryAlloca = nullptr;
+        returnEscaped = true;
+      }
+
+      /* Any other expression (ternaries, calls, ...) yields a value that
+       * may share storage with an object destroyed by the scope cleanups
+       * below: deep-copy non-trivially-copyable records into an unowned
+       * temporary so the returned value owns its buffers (the caller's
+       * copy frees them). Escaped values already own their storage. */
+      if (!returnEscaped) {
+        const Type *retUnqual =
+            currentFunc ? currentFunc->returnType->getUnqualifiedType()
+                        : nullptr;
+        if (retUnqual && (retUnqual->getKind() == TypeKind::Struct ||
+                          retUnqual->getKind() == TypeKind::Class ||
+                          retUnqual->getKind() == TypeKind::Union)) {
+          llvm::SmallPtrSet<const RecordType *, 8> visited;
+          if (!isTriviallyCopyable(retUnqual, visited)) {
+            llvm::AllocaInst *owned = createEntryBlockAlloca(
+                getLLVMType(retUnqual), "ret.owned");
+            llvm::AllocaInst *srcTmp = createEntryBlockAlloca(
+                getLLVMType(retUnqual), "ret.owned.src");
+            createTBAAStore(retVal, srcTmp, retUnqual);
+            emitMemberWiseCopy(owned, srcTmp, retUnqual, false);
+            retVal = builder.CreateLoad(getLLVMType(retUnqual), owned);
+          }
+        }
       }
     }
   }
@@ -4259,7 +4486,7 @@ llvm::Value *CodeGen::visit(const ReturnNode *node) {
     for (auto cleanupIt = scope.cleanups.rbegin();
          cleanupIt != scope.cleanups.rend(); ++cleanupIt) {
       emitCleanupCall(cleanupIt->instancePtr, cleanupIt->destructor,
-                      cleanupIt->type);
+                      cleanupIt->type, cleanupIt->guard);
     }
 
     for (auto lifeIt = scope.lifetimes.rbegin();
@@ -4551,8 +4778,18 @@ llvm::Value *CodeGen::visit(const NewExprNode *node) {
   llvm::Value *typedMem =
       builder.CreateBitCast(userMem, getLLVMType(node->exprType));
 
+  const Type *elemUnqual = node->allocatedType->getUnqualifiedType();
+  bool elemIsRecord = elemUnqual->getKind() == TypeKind::Class ||
+                      elemUnqual->getKind() == TypeKind::Struct ||
+                      elemUnqual->getKind() == TypeKind::Union;
+
   if (node->arraySize) {
-    if (node->hasParens) {
+    /* Records must be zero-initialized (at minimum) so member-wise copies
+     * and destructors see valid state. This is unconditional: the
+     * optimizer may legally remove a default-constructor loop whose
+     * allocations are provably freed again, but a memset of the block
+     * cannot be dropped. */
+    if (node->hasParens || elemIsRecord) {
       llvm::Value *memsetSize = builder.CreateSub(sizeVal, builder.getInt64(8));
       builder.CreateMemSet(userMem, builder.getInt8(0), memsetSize,
                            llvm::Align(1));
@@ -4560,7 +4797,6 @@ llvm::Value *CodeGen::visit(const NewExprNode *node) {
 
     /* Default-construct every element of a record array so its state is
      * valid before use and before 'delete[]' runs the element destructors. */
-    const Type *elemUnqual = node->allocatedType->getUnqualifiedType();
     const FunctionDeclNode *elemCtor = nullptr;
     if (elemUnqual->getKind() == TypeKind::Class ||
         elemUnqual->getKind() == TypeKind::Struct ||
@@ -4584,8 +4820,12 @@ llvm::Value *CodeGen::visit(const NewExprNode *node) {
       }
     }
 
-    if (elemCtor) {
-      llvm::Function *ctorFunc = getOrCreateFunction(elemCtor);
+    if (elemCtor ||
+        (elemUnqual->getKind() == TypeKind::Class ||
+         elemUnqual->getKind() == TypeKind::Struct ||
+         elemUnqual->getKind() == TypeKind::Union)) {
+      llvm::Function *ctorFunc =
+          elemCtor ? getOrCreateFunction(elemCtor) : nullptr;
       llvm::Function *theFunction = builder.GetInsertBlock()->getParent();
 
       llvm::BasicBlock *condBB =
@@ -4612,7 +4852,14 @@ llvm::Value *CodeGen::visit(const NewExprNode *node) {
       builder.SetInsertPoint(bodyBB);
       llvm::Value *elemPtr = builder.CreateInBoundsGEP(
           getLLVMType(elemUnqual), typedMem, idxVal);
-      builder.CreateCall(ctorFunc, {elemPtr});
+      if (ctorFunc) {
+        builder.CreateCall(ctorFunc, {elemPtr});
+      } else {
+        /* Records without an explicit default constructor still need
+         * their members constructed (e.g. String): a bare malloc leaves
+         * garbage that crashes on assignment/destruction. */
+        emitDefaultInitialization(elemPtr, elemUnqual);
+      }
       llvm::Value *nextIdx = builder.CreateAdd(idxVal, builder.getInt64(1));
       builder.CreateStore(nextIdx, idxAlloca);
       builder.CreateBr(condBB);
@@ -5140,9 +5387,27 @@ void CodeGen::emitArrayLiteralInit(llvm::Value *targetAddr,
 }
 
 void CodeGen::emitCleanupCall(llvm::Value *ptr, const FunctionDeclNode *dtor,
-                              const Type *type) {
+                              const Type *type, llvm::Value *guard) {
   if (!ptr || !dtor)
     return;
+
+  if (guard) {
+    /* Conditional cleanup: only run the destructor when the flag is
+     * set (the object may never have been constructed). */
+    llvm::Function *theFn = builder.GetInsertBlock()->getParent();
+    llvm::BasicBlock *doDtorBB =
+        llvm::BasicBlock::Create(ctx, "dtor.guard.run", theFn);
+    llvm::BasicBlock *skipBB =
+        llvm::BasicBlock::Create(ctx, "dtor.guard.skip", theFn);
+    llvm::Value *flag = builder.CreateLoad(builder.getInt1Ty(), guard,
+                                           "dtor.guard");
+    builder.CreateCondBr(flag, doDtorBB, skipBB);
+    builder.SetInsertPoint(doDtorBB);
+    emitCleanupCall(ptr, dtor, type);
+    builder.CreateBr(skipBB);
+    builder.SetInsertPoint(skipBB);
+    return;
+  }
 
   /* Dynamically unroll and destruct static arrays in reverse order */
   if (type && type->getUnqualifiedType()->getKind() == TypeKind::Array) {
@@ -5187,6 +5452,22 @@ void CodeGen::emitCleanupCall(llvm::Value *ptr, const FunctionDeclNode *dtor,
 
   llvm::Function *dtorFunc = getOrCreateFunction(dtor);
   builder.CreateCall(dtorFunc, {ptr});
+}
+
+/* Destroys and unregisters the cleanups registered since 'cleanupCount'
+ * (used by the ternary: branch temporaries must die at the end of their
+ * branch, not unconditionally at scope exit — only one branch runs).
+ * Guarded cleanups (owned copies of nested ternaries) are left in the
+ * scope: they own their object until scope end. */
+void CodeGen::emitBranchCleanups(size_t cleanupCount) {
+  while (cgCtx.getCleanupCount() > cleanupCount) {
+    const auto &cleanups = cgCtx.getCurrentScope().cleanups;
+    if (cleanups.back().guard)
+      break;
+    emitCleanupCall(cleanups.back().instancePtr, cleanups.back().destructor,
+                    cleanups.back().type);
+    cgCtx.popCleanup();
+  }
 }
 
 void CodeGen::emitScopeCleanups() {
@@ -5284,6 +5565,165 @@ static const FunctionDeclNode *getCustomDestructor(const Type *t) {
   if (!dtor || dtor->isImplicit)
     return nullptr;
   return dtor;
+}
+
+
+/* True when the record can be bit-copied safely: no custom destructor
+ * anywhere in its member graph. */
+static bool isTriviallyCopyable(
+    const Type *t,
+    llvm::SmallPtrSetImpl<const RecordType *> &visited) {
+  const Type *u = t->getUnqualifiedType();
+  if (u->getKind() == TypeKind::Array) {
+    return isTriviallyCopyable(
+        static_cast<const ArrayType *>(u)->getElementType(), visited);
+  }
+  if (u->getKind() != TypeKind::Class && u->getKind() != TypeKind::Struct &&
+      u->getKind() != TypeKind::Union)
+    return true;
+  auto *recTy = static_cast<const RecordType *>(u);
+  if (getCustomDestructor(recTy))
+    return false;
+  if (!visited.insert(recTy).second)
+    return true; /* already on the walk: assume copyable to break cycles */
+  for (const auto &f : recTy->getFields()) {
+    if (!isTriviallyCopyable(f.type, visited))
+      return false;
+  }
+  return true;
+}
+
+/* Finds 'operator=' on a record (single parameter of the record type). */
+static const FunctionDeclNode *findAssignmentOperator(const Type *t) {
+  const Type *u = t->getUnqualifiedType();
+  if (u->getKind() != TypeKind::Class && u->getKind() != TypeKind::Struct &&
+      u->getKind() != TypeKind::Union)
+    return nullptr;
+  auto *recTy = static_cast<const RecordType *>(u);
+  const DeclNode *decl = recTy->getDeclaration();
+  if (!decl)
+    return nullptr;
+  llvm::ArrayRef<FunctionDeclNode *> methods;
+  if (decl->kind == NodeKind::ClassDecl)
+    methods = static_cast<const ClassDeclNode *>(decl)->methods;
+  else if (decl->kind == NodeKind::StructDecl)
+    methods = static_cast<const StructDeclNode *>(decl)->methods;
+  else if (decl->kind == NodeKind::UnionDecl)
+    methods = static_cast<const UnionDeclNode *>(decl)->methods;
+  for (auto *m : methods) {
+    if (m->name != "operator=" || m->params.size() != 1)
+      continue;
+    const Type *p0 = m->params[0]->type;
+    const Type *pointee = nullptr;
+    if (p0->isReferenceType()) {
+      pointee = static_cast<const ReferenceType *>(p0)->getPointeeType();
+    } else if (p0->getKind() == TypeKind::RValueReference) {
+      pointee = static_cast<const RValueReferenceType *>(p0)->getPointeeType();
+    } else {
+      pointee = p0;
+    }
+    if (pointee->getUnqualifiedType() == u)
+      return m;
+  }
+  return nullptr;
+}
+
+
+/* Materializes a ternary branch value into an owned temporary, deep-copying
+ * records with destructor-bearing members (a plain value store would share
+ * String buffers with the branch temporaries, which die immediately). */
+llvm::Value *
+CodeGen::materializeTernaryBranchValue(llvm::Value *val, const ExprNode *expr) {
+  llvm::AllocaInst *tmp = createEntryBlockAlloca(val->getType(),
+                                                 "tmp.ternary.branch");
+  const Type *valTy = expr->exprType;
+  const Type *unqual = valTy->getUnqualifiedType();
+  bool isAggregate = unqual->getKind() == TypeKind::Struct ||
+                     unqual->getKind() == TypeKind::Class ||
+                     unqual->getKind() == TypeKind::Union;
+  if (isAggregate) {
+    llvm::SmallPtrSet<const RecordType *, 8> visited;
+    if (!isTriviallyCopyable(unqual, visited)) {
+      llvm::AllocaInst *srcTmp = createEntryBlockAlloca(val->getType(),
+                                                        "tmp.ternary.branch.src");
+      createTBAAStore(val, srcTmp, valTy);
+      emitMemberWiseCopy(tmp, srcTmp, unqual, false);
+      return tmp;
+    }
+  }
+  createTBAAStore(val, tmp, valTy);
+  return tmp;
+}
+
+void CodeGen::emitMemberWiseCopy(llvm::Value *dst, llvm::Value *src,
+                                 const Type *type, bool isAssignment) {
+  const Type *unqual = type->getUnqualifiedType();
+  const Type *elem = unqual;
+  while (elem->getKind() == TypeKind::Array)
+    elem = static_cast<const ArrayType *>(elem)->getElementType();
+  bool isAggregate = elem->getKind() == TypeKind::Class ||
+                     elem->getKind() == TypeKind::Struct ||
+                     elem->getKind() == TypeKind::Union;
+
+  /* Arrays: copy every element (elements with destructors route through
+   * their own copy ctor / operator=). */
+  if (unqual->getKind() == TypeKind::Array) {
+    const auto *arrTy = static_cast<const ArrayType *>(unqual);
+    llvm::Type *llArrTy = getLLVMType(unqual);
+    uint64_t count = arrTy->getSize();
+    for (uint64_t i = 0; i < count; i++) {
+      /* Two indices: the first GEPs the array itself, the second scales
+       * by the element size (a single index would scale by the whole
+       * array type). */
+      llvm::Value *zero = builder.getInt64(0);
+      llvm::Value *idx = builder.getInt64(i);
+      llvm::Value *dstE = builder.CreateInBoundsGEP(llArrTy, dst, {zero, idx},
+                                                    "cpy.arr.dst");
+      llvm::Value *srcE = builder.CreateInBoundsGEP(llArrTy, src, {zero, idx},
+                                                    "cpy.arr.src");
+      emitMemberWiseCopy(dstE, srcE, arrTy->getElementType(), isAssignment);
+    }
+    return;
+  }
+
+  if (!isAggregate) {
+    /* Primitive (and pointer) members: plain value copy. */
+    llvm::Value *v = builder.CreateLoad(getLLVMType(type), src, "cpy.prim");
+    builder.CreateStore(v, dst);
+    return;
+  }
+
+  /* Records with a copy constructor (or assignment operator) are copied
+   * through it; records that are trivially copyable are bit-copied. */
+  {
+    llvm::SmallPtrSet<const RecordType *, 8> visited;
+    if (isTriviallyCopyable(type, visited)) {
+      llvm::Value *v = builder.CreateLoad(getLLVMType(type), src, "cpy.whole");
+      builder.CreateStore(v, dst);
+      return;
+    }
+    if (isAssignment) {
+      if (const FunctionDeclNode *op = findAssignmentOperator(elem)) {
+        llvm::Function *fn = getOrCreateFunction(op);
+        builder.CreateCall(fn, {dst, src});
+        return;
+      }
+    } else {
+      if (const FunctionDeclNode *cc = findCopyOrMoveCtor(type, false)) {
+        llvm::Function *fn = getOrCreateFunction(cc);
+        builder.CreateCall(fn, {dst, src});
+        return;
+      }
+    }
+  }
+
+  auto *recTy = static_cast<const RecordType *>(unqual);
+  llvm::Type *llTy = getLLVMType(unqual);
+  for (const auto &f : recTy->getFields()) {
+    llvm::Value *dstF = builder.CreateStructGEP(llTy, dst, f.index, "cpy.dst");
+    llvm::Value *srcF = builder.CreateStructGEP(llTy, src, f.index, "cpy.src");
+    emitMemberWiseCopy(dstF, srcF, f.type, isAssignment);
+  }
 }
 
 /* Finds the copy or move constructor for a record type; 'preferMove' picks

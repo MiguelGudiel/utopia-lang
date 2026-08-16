@@ -19,6 +19,10 @@ struct CleanupInfo {
   llvm::Value *instancePtr = nullptr;
   const FunctionDeclNode *destructor = nullptr;
   const Type *type = nullptr;
+  /* Optional i1 flag that must be true for the cleanup to run: used for
+   * temporaries created conditionally (e.g. ternary branches), where the
+   * object may never have been constructed. */
+  llvm::Value *guard = nullptr;
 };
 
 struct LifetimeInfo {
@@ -53,9 +57,19 @@ public:
 
   /* Registers a dynamic object for later destruction upon exiting the block */
   void addCleanup(llvm::Value *ptr, const FunctionDeclNode *dtor,
-                  const Type *type = nullptr) {
+                  const Type *type = nullptr, llvm::Value *guard = nullptr) {
     if (!scopes.empty()) {
-      scopes.back().cleanups.push_back({ptr, dtor, type});
+      scopes.back().cleanups.push_back({ptr, dtor, type, guard});
+    }
+  }
+
+  size_t getCleanupCount() const {
+    return scopes.empty() ? 0 : scopes.back().cleanups.size();
+  }
+
+  void popCleanup() {
+    if (!scopes.empty() && !scopes.back().cleanups.empty()) {
+      scopes.back().cleanups.pop_back();
     }
   }
 

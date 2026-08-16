@@ -228,8 +228,17 @@ private:
   void emitArrayDefaultConstruct(llvm::Value *ptr, const Type *arrayType,
                                  const FunctionDeclNode *ctor);
   void emitCleanupCall(llvm::Value *ptr, const FunctionDeclNode *dtor,
-                       const Type *type = nullptr);
+                       const Type *type = nullptr,
+                       llvm::Value *guard = nullptr);
   void emitScopeCleanups();
+  void emitBranchCleanups(size_t cleanupCount);
+  /* Emits a per-member copy (construction or assignment) for records
+   * that are not trivially copyable, so members with destructors
+   * (e.g. String) are deep-copied instead of bit-copied. */
+  void emitMemberWiseCopy(llvm::Value *dst, llvm::Value *src,
+                          const Type *type, bool isAssignment);
+  llvm::Value *materializeTernaryBranchValue(llvm::Value *val,
+                                             const ExprNode *expr);
 };
 
 } // namespace utopia
