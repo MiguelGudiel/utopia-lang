@@ -36,10 +36,17 @@ public:
   bool hasErrors() const { return errorCount > 0; }
   const std::vector<Diagnostic> &getDiagnostics() const { return diagnostics; }
 
-  // Generates a JSON array compatible with LSP publishDiagnostics
-  nlohmann::json toJSON() const {
+  // Generates a JSON array compatible with LSP publishDiagnostics. When
+  // 'fileFilter' is non-empty, only diagnostics reported for that file (or
+  // without a file) are kept: tree-wide analyses produce diagnostics for
+  // imported modules, which must be attributed to those documents instead
+  // of the document that triggered the analysis.
+  nlohmann::json toJSON(const std::string &fileFilter = "") const {
     auto j = nlohmann::json::array();
     for (const auto &d : diagnostics) {
+      if (!fileFilter.empty() && !d.filePath.empty() &&
+          d.filePath != fileFilter)
+        continue;
       int lspLine = d.line > 0 ? d.line - 1 : 0;
       int lspCol = d.column > 0 ? d.column - 1 : 0;
       int lspEndLine = (d.endLine > 0) ? d.endLine - 1 : lspLine;

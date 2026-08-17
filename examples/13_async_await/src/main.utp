@@ -88,7 +88,7 @@ int main() async {
   List<int> values = await Future.wait<int>(futures);
   print("wait: %d %d %d\n", values[0], values[1], values[2]);
 
-  /* The fire-and-forget future settled while we were awaiting. */
+  /* The fire-and-forget future settled while the awaits above ran. */
   print("background after work: %d\n", backgroundWork);
 
   return 0;

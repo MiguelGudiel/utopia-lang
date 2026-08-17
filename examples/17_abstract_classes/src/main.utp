@@ -1,0 +1,97 @@
+/*
+ * Abstract classes: methods declared without a body become abstract, and
+ * only abstract classes may declare them. An abstract class cannot be
+ * instantiated; concrete subclasses must implement every abstract method
+ * before they can be constructed.
+ */
+
+abstract class Shape {
+  protected int32 _x = 0;
+  protected int32 _y = 0;
+
+  /* Abstract: no body, no implementation. */
+  public float64 area();
+
+  /* Abstract methods may carry @virtual explicitly; being abstract is
+   * enough to reserve the vtable slot. */
+  @virtual
+  public String describe();
+
+  /* Concrete methods are inherited as-is. */
+  public void move(int32 dx, int32 dy) {
+    this._x += dx;
+    this._y += dy;
+  }
+
+  public String position() {
+    return "(" + String(this._x) + ", " + String(this._y) + ")";
+  }
+}
+
+class Circle extends Shape {
+  private float64 _r;
+
+  Circle(float64 r) {
+    this._r = r;
+  }
+
+  @override
+  public float64 area() {
+    return 3.14159265 * this._r * this._r;
+  }
+
+  @override
+  public String describe() {
+    return "circle";
+  }
+}
+
+class Square extends Shape {
+  private float64 _side;
+
+  Square(float64 side) {
+    this._side = side;
+  }
+
+  @override
+  public float64 area() {
+    return this._side * this._side;
+  }
+
+  @override
+  public String describe() {
+    return "square";
+  }
+}
+
+float64 totalArea(Shape** shapes, usize count) {
+  float64 total = 0;
+  for (usize i = 0; i < count; i++) {
+    total += shapes[i].area();
+  }
+  return total;
+}
+
+int32 main() {
+  /* Abstract classes reject 'new': uncommenting the next line is a
+   * compile-time error. */
+  // Shape* s = new Shape();
+
+  Circle* circle = new Circle(2.0);
+  Square* square = new Square(3.0);
+  circle.move(1, 2);
+
+  Shape*[2] shapes;
+  shapes[0] = circle;
+  shapes[1] = square;
+
+  for (usize i = 0; i < 2; i++) {
+    print("%s at %s: %.1f\n", shapes[i].describe().c_str(),
+          shapes[i].position().c_str(), shapes[i].area());
+  }
+  print("total: %.1f\n", totalArea(shapes, 2));
+
+  delete circle;
+  delete square;
+  return 0;
+}

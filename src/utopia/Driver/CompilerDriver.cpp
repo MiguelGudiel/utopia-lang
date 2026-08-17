@@ -196,11 +196,15 @@ bool CompilerDriver::run() {
   Logger::debug("[Driver] AST generated successfully.");
 
   if (options.doFormat) {
-    std::string formatted = Formatter::format(roots.front());
-    std::ofstream outFile(options.sourcePath);
-    outFile << formatted;
-    std::cout << "\033[1;32m[Format Success]\033[0m Formatted "
-              << options.sourcePath << std::endl;
+    /* Format every root translation unit: 'roots' are deduplicated by
+     * absolute path, so each resolved source is written exactly once. */
+    for (const ModuleNode *root : roots) {
+      std::string formatted = Formatter::format(root);
+      std::ofstream outFile(std::string(root->filePath));
+      outFile << formatted;
+      std::cout << "\033[1;32m[Format Success]\033[0m Formatted "
+                << root->filePath << std::endl;
+    }
     return true;
   }
 

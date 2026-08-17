@@ -166,6 +166,10 @@ bool canImplicitlyCast(const Type *from, const Type *to,
       std::string_view marker = "ListLiteralView_";
       size_t pos = recName.find(marker);
       if (pos != std::string_view::npos) {
+        /* Empty or un-typed literals ('[]', 'void[0]') bind to any view:
+         * the constructor just sees a zero-length range. */
+        if (arrFrom->getSize() == 0 || arrFrom->getElementType()->isVoid())
+          return true;
         std::string expectedSuffix = std::string(marker);
         std::string argStr = arrFrom->getElementType()->toString();
         for (char &c : argStr) {
@@ -190,6 +194,22 @@ bool canImplicitlyCast(const Type *from, const Type *to,
                   BuiltinKind::UInt8 &&
               recName.ends_with(std::string(marker) + "String")) {
             return true;
+          }
+        }
+        /* Nested array/map literals as elements ('[[1, 2], [3, 4]]' into
+         * List<List<int32>>): the element type must convert to the view's
+         * template argument, which the conversion pass below uses to retype
+         * each element. The element conversion may itself need the
+         * conversion-constructor path (e.g. a map literal to Map<K, V>),
+         * so user-defined conversions stay enabled here. */
+        if (recTo->isTemplateInstantiation() &&
+            recTo->getTemplateArgs().size() == 1) {
+          const Type *elemUnqual =
+              arrFrom->getElementType()->getUnqualifiedType();
+          if (llvm::isa<ArrayType>(elemUnqual) ||
+              llvm::isa<MapLiteralType>(elemUnqual)) {
+            return canImplicitlyCast(arrFrom->getElementType(),
+                                     recTo->getTemplateArgs()[0], true);
           }
         }
       }
@@ -636,6 +656,16 @@ ExprNode *TypeCheckPass::performImplicitConversion(ExprNode *expr,
               static_cast<const BuiltinType *>(pointee)->getBuiltinKind() ==
                   BuiltinKind::UInt8) {
             viewTy = ctx->astCtx.getRecordType("String");
+          }
+        } else if (recTo->isTemplateInstantiation() &&
+                   recTo->getTemplateArgs().size() == 1) {
+          /* Nested literal elements ('[[1, 2], [3, 4]]'): retype each
+           * element to the view's template argument, mirroring the
+           * nested-value rule of the MapLiteralView conversion. */
+          const Type *elemUnqual = elemTy->getUnqualifiedType();
+          if (llvm::isa<ArrayType>(elemUnqual) ||
+              llvm::isa<MapLiteralType>(elemUnqual)) {
+            viewTy = recTo->getTemplateArgs()[0]->getUnqualifiedType();
           }
         }
         if (viewTy) {

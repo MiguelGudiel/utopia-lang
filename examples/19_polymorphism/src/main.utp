@@ -1,0 +1,103 @@
+/*
+ * Polymorphism and virtual dispatch: calls through base-class and
+ * interface pointers resolve at run time through the object's vtable, so
+ * a single call site can invoke any implementation. Polymorphic classes
+ * embed a vtable pointer (the first field of the object) that every
+ * constructor installs.
+ */
+
+abstract class Animal implements NoiseMaker {
+  protected String _name;
+  protected int32 _weight;
+
+  Animal(String name, int32 weight) {
+    this._name = name;
+    this._weight = weight;
+  }
+
+  /* Abstract: subclasses must provide it. */
+  public String species();
+
+  /* Virtual with a default implementation: subclasses may override. */
+  @virtual
+  public String movement() {
+    return "moves";
+  }
+
+  public String name() {
+    return this._name;
+  }
+
+  public int32 weight() {
+    return this._weight;
+  }
+}
+
+abstract class NoiseMaker {
+  public String makeNoise();
+}
+
+class Dog extends Animal {
+  Dog(String name, int32 weight) : super(name, weight) {
+  }
+
+  @override
+  public String species() {
+    return "dog";
+  }
+
+  @override
+  public String movement() {
+    return "runs";
+  }
+
+  @override
+  public String makeNoise() {
+    return "woof";
+  }
+}
+
+class Snake extends Animal {
+  Snake(String name, int32 weight) : super(name, weight) {
+  }
+
+  @override
+  public String species() {
+    return "snake";
+  }
+
+  @override
+  public String makeNoise() {
+    return "hiss";
+  }
+
+  /* No movement() override: inherits the default from Animal. */
+}
+
+void describe(Animal* a) {
+  /* Virtual calls: dispatch follows the runtime type. */
+  print("%s is a %s that %s (%d kg)\n",
+        a.name().c_str(), a.species().c_str(), a.movement().c_str(),
+        a.weight());
+}
+
+void announce(NoiseMaker* n) {
+  print("  goes '%s'\n", n.makeNoise().c_str());
+}
+
+int32 main() {
+  Animal*[2] zoo;
+  zoo[0] = new Dog("Rex", 24);
+  zoo[1] = new Snake("Kaa", 3);
+
+  for (usize i = 0; i < 2; i++) {
+    describe(zoo[i]);
+    /* The vtable slot for makeNoise matches the slot the implementing
+     * classes assigned, regardless of their other methods. */
+    announce(zoo[i]);
+  }
+
+  delete zoo[0];
+  delete zoo[1];
+  return 0;
+}

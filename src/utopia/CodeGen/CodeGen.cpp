@@ -148,8 +148,13 @@ llvm::Type *CodeGen::getLLVMType(const Type *type) {
              llvm::isa<RValueReferenceType>(type)) {
     return builder.getPtrTy();
   } else if (auto *arrTy = llvm::dyn_cast<ArrayType>(type)) {
-    return llvm::ArrayType::get(getLLVMType(arrTy->getElementType()),
-                                arrTy->getSize());
+    /* Empty literals type their element as 'void' ('void[0]'), which LLVM
+     * rejects inside an array type; a zero-length array of i8 is used
+     * instead (mirrors the MapLiteralType lowering below). */
+    llvm::Type *elemLL = getLLVMType(arrTy->getElementType());
+    if (elemLL->isVoidTy())
+      elemLL = builder.getInt8Ty();
+    return llvm::ArrayType::get(elemLL, arrTy->getSize());
   } else if (auto *mapTy = llvm::dyn_cast<MapLiteralType>(type)) {
     /* The literal is lowered to two parallel arrays: keys and values. Empty
      * literals type their key/value as 'void', which LLVM rejects inside an
@@ -2629,6 +2634,49 @@ llvm::Value *CodeGen::visit(const BinaryOpNode *node) {
     return res;
   }
 
+  /* '&&' and '||' must short-circuit: the right operand is evaluated only
+   * when the left operand does not decide the outcome. Evaluating both
+   * operands eagerly keeps side effects (and, for 'j >= 0 && a[j] < key',
+   * out-of-range dereferences) from firing on the skipped branch. */
+  if (node->op == "&&" || node->op == "||") {
+    const bool isAnd = node->op == "&&";
+    llvm::Value *lhsVal = dispatch(node->left);
+    if (!lhsVal) {
+      diags.report({DiagLevel::Error, node->line, node->column, node->length,
+                    "Failed to generate logical operand.", currentFilePath});
+      return nullptr;
+    }
+    lhsVal = createImplicitCast(lhsVal, builder.getInt1Ty());
+
+    llvm::Function *theFunction = builder.GetInsertBlock()->getParent();
+    llvm::BasicBlock *lhsBB = builder.GetInsertBlock();
+    llvm::BasicBlock *rhsBB =
+        llvm::BasicBlock::Create(ctx, "logical.rhs", theFunction);
+    llvm::BasicBlock *mergeBB =
+        llvm::BasicBlock::Create(ctx, "logical.merge");
+
+    builder.CreateCondBr(lhsVal, isAnd ? rhsBB : mergeBB,
+                         isAnd ? mergeBB : rhsBB);
+
+    builder.SetInsertPoint(rhsBB);
+    llvm::Value *rhsVal = dispatch(node->right);
+    if (!rhsVal) {
+      diags.report({DiagLevel::Error, node->line, node->column, node->length,
+                    "Failed to generate logical operand.", currentFilePath});
+      return nullptr;
+    }
+    rhsVal = createImplicitCast(rhsVal, builder.getInt1Ty());
+    builder.CreateBr(mergeBB);
+
+    theFunction->insert(theFunction->end(), mergeBB);
+    builder.SetInsertPoint(mergeBB);
+    llvm::PHINode *phi = builder.CreatePHI(builder.getInt1Ty(), 2);
+    phi->addIncoming(builder.getInt1(isAnd ? 0 : 1), lhsBB);
+    phi->addIncoming(rhsVal, rhsBB);
+    lastTemporaryAlloca = nullptr;
+    return phi;
+  }
+
   llvm::Value *L = dispatch(node->left);
   llvm::Value *R = dispatch(node->right);
   lastTemporaryAlloca = nullptr;
@@ -2666,17 +2714,6 @@ llvm::Value *CodeGen::visit(const BinaryOpNode *node) {
       return builder.CreateInBoundsGEP(getLLVMType(pointee), ptrV, idx64,
                                        "ptr.offset");
     }
-  }
-
-  if (node->op == "&&") {
-    L = createImplicitCast(L, builder.getInt1Ty());
-    R = createImplicitCast(R, builder.getInt1Ty());
-    return builder.CreateLogicalAnd(L, R);
-  }
-  if (node->op == "||") {
-    L = createImplicitCast(L, builder.getInt1Ty());
-    R = createImplicitCast(R, builder.getInt1Ty());
-    return builder.CreateLogicalOr(L, R);
   }
 
   if (node->promotedType) {
@@ -3869,6 +3906,108 @@ llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
 
   if (node->superCall) {
     dispatch(node->superCall);
+  }
+
+  /* Field initializers ('int32 _base = 1000;') run after super
+   * construction and before the constructor body, which may overwrite
+   * them. Without this the parser's implicit default constructor (empty
+   * body) would never apply them. */
+  {
+    const DeclNode *decl =
+        node->parentRecord ? node->parentRecord->getDeclaration() : nullptr;
+    llvm::ArrayRef<VarDeclNode *> fields;
+    bool isCtor = false;
+    if (decl) {
+      if (decl->kind == NodeKind::ClassDecl) {
+        const auto *c = static_cast<const ClassDeclNode *>(decl);
+        for (const auto *ctor : c->constructors) {
+          if (ctor == node) {
+            isCtor = true;
+            break;
+          }
+        }
+        fields = c->fields;
+      } else if (decl->kind == NodeKind::StructDecl) {
+        const auto *s = static_cast<const StructDeclNode *>(decl);
+        for (const auto *ctor : s->constructors) {
+          if (ctor == node) {
+            isCtor = true;
+            break;
+          }
+        }
+        fields = s->fields;
+      } else if (decl->kind == NodeKind::UnionDecl) {
+        const auto *u = static_cast<const UnionDeclNode *>(decl);
+        for (const auto *ctor : u->constructors) {
+          if (ctor == node) {
+            isCtor = true;
+            break;
+          }
+        }
+        fields = u->fields;
+      }
+    }
+
+    if (isCtor) {
+      SymbolInfo thisSym = cgCtx.lookupDetailed("this");
+      if (thisSym.value) {
+        llvm::Value *thisPtr =
+            builder.CreateLoad(builder.getPtrTy(), thisSym.value, "this.val");
+        llvm::Type *llRecTy = getLLVMType(node->parentRecord);
+        for (auto *f : fields) {
+          if (!f->initializer)
+            continue;
+          const FieldInfo *fInfo = node->parentRecord->getField(f->varName);
+          if (!fInfo)
+            continue;
+          llvm::Value *gep = builder.CreateStructGEP(
+              llRecTy, thisPtr, fInfo->index, f->varName);
+
+          const Type *fUnqual = f->type->getUnqualifiedType();
+          bool isAggregate = fUnqual->getKind() == TypeKind::Struct ||
+                             fUnqual->getKind() == TypeKind::Class ||
+                             fUnqual->getKind() == TypeKind::Union;
+          if (isAggregate) {
+            /* A shallow struct store would alias the initializer's
+             * temporary and double-free when its cleanup runs; records
+             * with destructor-bearing members are copied member-wise
+             * (deep copy), like local variable initialization. */
+            llvm::Value *rvalAddr = getLValue(f->initializer);
+            if (!rvalAddr) {
+              lastTemporaryAlloca = nullptr;
+              llvm::Value *initVal = dispatch(f->initializer);
+              if (lastTemporaryAlloca) {
+                rvalAddr = lastTemporaryAlloca;
+                lastTemporaryAlloca = nullptr;
+              } else if (initVal) {
+                rvalAddr = createEntryBlockAlloca(getLLVMType(f->type),
+                                                  "tmp.field.init");
+                createTBAAStore(initVal, rvalAddr, f->type);
+              }
+            }
+            if (rvalAddr) {
+              llvm::Align align = mod.getDataLayout().getABITypeAlign(
+                  getLLVMType(f->type));
+              uint64_t allocSize =
+                  mod.getDataLayout().getTypeAllocSize(getLLVMType(f->type));
+              builder.CreateMemSet(gep, builder.getInt8(0), allocSize, align);
+              llvm::SmallPtrSet<const RecordType *, 8> copyVisited;
+              if (isTriviallyCopyable(f->type, copyVisited)) {
+                builder.CreateMemCpy(gep, align, rvalAddr, align, allocSize);
+              } else {
+                emitMemberWiseCopy(gep, rvalAddr, f->type, false);
+              }
+            }
+          } else {
+            llvm::Value *initVal = dispatch(f->initializer);
+            if (!initVal)
+              continue;
+            initVal = createImplicitCast(initVal, getLLVMType(f->type));
+            createTBAAStore(initVal, gep, f->type);
+          }
+        }
+      }
+    }
   }
 
   /* Automatically invoke destructors for aggregate fields inside destructors */
@@ -5177,6 +5316,23 @@ llvm::Value *CodeGen::visit(const NewExprNode *node) {
                       elemUnqual->getKind() == TypeKind::Struct ||
                       elemUnqual->getKind() == TypeKind::Union;
 
+  /* Constructors never store the vtable themselves (and may even zero the
+   * object), so it must be written after construction completes. Storing it
+   * last also guarantees the most-derived vtable survives base-constructor
+   * delegation. */
+  auto storeVTableIfPolymorphic = [&](llvm::Value *objPtr, const Type *ty) {
+    const Type *u = ty->getUnqualifiedType();
+    if (u->getKind() != TypeKind::Class)
+      return;
+    auto *classTy = static_cast<const ClassType *>(u);
+    if (!classTy->getIsPolymorphic())
+      return;
+    llvm::Constant *vtable = getOrCreateVTable(classTy);
+    llvm::Value *vptrGep = builder.CreateStructGEP(getLLVMType(u), objPtr, 0,
+                                                   "vptr");
+    builder.CreateStore(vtable, vptrGep);
+  };
+
   if (node->arraySize) {
     /* Records must be zero-initialized (at minimum) so member-wise copies
      * and destructors see valid state. This is unconditional: the
@@ -5248,6 +5404,7 @@ llvm::Value *CodeGen::visit(const NewExprNode *node) {
           getLLVMType(elemUnqual), typedMem, idxVal);
       if (ctorFunc) {
         builder.CreateCall(ctorFunc, {elemPtr});
+        storeVTableIfPolymorphic(elemPtr, elemUnqual);
       } else {
         /* Records without an explicit default constructor still need
          * their members constructed (e.g. String): a bare malloc leaves
@@ -5279,6 +5436,25 @@ llvm::Value *CodeGen::visit(const NewExprNode *node) {
      * value-initialize (zero) as well. */
     if (node->placementExpr || !node->resolvedConstructor) {
       emitDefaultInitialization(typedMem, node->allocatedType);
+    }
+
+    /* The parser-synthesized implicit constructor has an empty body and
+     * exists only to satisfy call syntax: constructing through it must
+     * value-initialize (zero + field initializers + vptr) instead, since a
+     * bare malloc would leave every field undefined. */
+    if (node->resolvedConstructor && node->resolvedConstructor->isImplicit) {
+      emitDefaultInitialization(typedMem, node->allocatedType);
+    } else if (node->resolvedConstructor && !node->placementExpr) {
+      /* Explicit constructors may assign through operators that free the
+       * previous buffer (e.g. String::operator=): the object came straight
+       * from malloc and holds garbage, so zero it before the body runs.
+       * Placement new is excluded: Memory.construct zeroes there. */
+      llvm::Align allocAlign = mod.getDataLayout().getABITypeAlign(
+          getLLVMType(node->allocatedType));
+      uint64_t allocSize =
+          mod.getDataLayout().getTypeAllocSize(getLLVMType(node->allocatedType));
+      builder.CreateMemSet(typedMem, builder.getInt8(0), allocSize,
+                           allocAlign);
     }
 
     if (node->implicitCopyInit) {
@@ -5362,6 +5538,7 @@ llvm::Value *CodeGen::visit(const NewExprNode *node) {
       }
 
       builder.CreateCall(ctorFunc, argsArgs);
+      storeVTableIfPolymorphic(typedMem, elemUnqual);
     }
   }
 
@@ -5590,6 +5767,10 @@ llvm::Constant *CodeGen::getOrCreateVTable(const ClassType *classTy) {
   auto *cDecl = llvm::cast<ClassDeclNode>(classTy->getDeclaration());
   std::vector<const FunctionDeclNode *> vtableMethods;
 
+  /* Walks the base chain and every interface so inherited implementations
+   * land in the correct (globally shared) slots. Own methods are processed
+   * last, so the most-derived implementation overwrites any abstract slot
+   * from an interface. */
   auto collectMethods = [&](const ClassDeclNode *node, auto &self) -> void {
     if (node->baseClass) {
       if (auto *pType = llvm::dyn_cast<ClassType>(
@@ -5597,6 +5778,15 @@ llvm::Constant *CodeGen::getOrCreateVTable(const ClassType *classTy) {
         if (auto *pDecl = llvm::dyn_cast_or_null<ClassDeclNode>(
                 pType->getDeclaration())) {
           self(pDecl, self);
+        }
+      }
+    }
+    for (const auto *iface : node->interfaces) {
+      if (auto *iType =
+              llvm::dyn_cast<ClassType>(iface->getUnqualifiedType())) {
+        if (auto *iDecl = llvm::dyn_cast_or_null<ClassDeclNode>(
+                iType->getDeclaration())) {
+          self(iDecl, self);
         }
       }
     }
@@ -5698,26 +5888,64 @@ void CodeGen::emitDefaultInitialization(llvm::Value *ptr, const Type *type) {
       }
 
       if (fieldDecl->initializer) {
-        llvm::Value *initVal = dispatch(fieldDecl->initializer);
-        if (initVal) {
-          llvm::Type *destTy = getLLVMType(fieldDecl->type);
-          initVal = createImplicitCast(initVal, destTy);
+        const Type *fTy = fieldDecl->type;
+        const Type *fUnqual = fTy->getUnqualifiedType();
+        bool fIsAggregate = fUnqual->getKind() == TypeKind::Struct ||
+                            fUnqual->getKind() == TypeKind::Class ||
+                            fUnqual->getKind() == TypeKind::Union;
 
-          llvm::Value *gep = ptr;
-          uint64_t offset = 0;
+        llvm::Value *gep = ptr;
+        uint64_t offset = 0;
 
-          if (type->getKind() != TypeKind::Union) {
-            auto *fInfo = recTy->getField(fieldDecl->varName);
-            uint32_t fIdx = fInfo ? fInfo->index : 0;
-            gep = builder.CreateStructGEP(llTy, ptr, fIdx,
-                                          std::string(fieldDecl->varName));
-            offset = layout->getElementOffset(fIdx);
+        if (type->getKind() != TypeKind::Union) {
+          auto *fInfo = recTy->getField(fieldDecl->varName);
+          uint32_t fIdx = fInfo ? fInfo->index : 0;
+          gep = builder.CreateStructGEP(llTy, ptr, fIdx,
+                                        std::string(fieldDecl->varName));
+          offset = layout->getElementOffset(fIdx);
+        }
+
+        llvm::MDNode *tbaaTag = tbaaManager.getTBAAStructAccessTag(
+            *this, type, fTy, offset);
+
+        if (fIsAggregate) {
+          /* Records with destructor-bearing members need a deep copy: a
+           * shallow struct store would alias the initializer temporary and
+           * double-free when its cleanup runs. The destination field is
+           * zeroed first (String::operator= frees the previous buffer). */
+          llvm::Value *rvalAddr = getLValue(fieldDecl->initializer);
+          if (!rvalAddr) {
+            lastTemporaryAlloca = nullptr;
+            llvm::Value *val = dispatch(fieldDecl->initializer);
+            if (lastTemporaryAlloca) {
+              rvalAddr = lastTemporaryAlloca;
+              lastTemporaryAlloca = nullptr;
+            } else if (val) {
+              rvalAddr = createEntryBlockAlloca(getLLVMType(fTy),
+                                                "tmp.field.init");
+              createTBAAStore(val, rvalAddr, fTy);
+            }
           }
-
-          llvm::MDNode *tbaaTag = tbaaManager.getTBAAStructAccessTag(
-              *this, type, fieldDecl->type, offset);
-
-          createTBAAStore(initVal, gep, tbaaTag);
+          if (rvalAddr) {
+            llvm::Align fAlign = mod.getDataLayout().getABITypeAlign(
+                getLLVMType(fTy));
+            uint64_t fSize =
+                mod.getDataLayout().getTypeAllocSize(getLLVMType(fTy));
+            builder.CreateMemSet(gep, builder.getInt8(0), fSize, fAlign);
+            llvm::SmallPtrSet<const RecordType *, 8> copyVisited;
+            if (isTriviallyCopyable(fTy, copyVisited)) {
+              builder.CreateMemCpy(gep, fAlign, rvalAddr, fAlign, fSize);
+            } else {
+              emitMemberWiseCopy(gep, rvalAddr, fTy, false);
+            }
+          }
+        } else {
+          llvm::Value *initVal = dispatch(fieldDecl->initializer);
+          if (initVal) {
+            llvm::Type *destTy = getLLVMType(fTy);
+            initVal = createImplicitCast(initVal, destTy);
+            createTBAAStore(initVal, gep, tbaaTag);
+          }
         }
       }
     }

@@ -141,6 +141,38 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
   if (!t)
     return nullptr;
 
+  /* Namespace-qualified lookup without the module-visibility filter, mirroring
+   * the parser's global resolution. See the placeholder recovery below. */
+  auto lookupUnfiltered = [](SemaContext *semaCtx,
+                             std::string_view name) {
+    auto res = semaCtx->symTable.lookupExact(name);
+    if (!res.empty())
+      return res;
+
+    std::string ns = semaCtx->getCurrentNamespace();
+    while (!ns.empty()) {
+      res = semaCtx->symTable.lookupExact(ns + "." + std::string(name));
+      if (!res.empty())
+        return res;
+      size_t pos = ns.find_last_of('.');
+      if (pos != std::string_view::npos) {
+        ns = ns.substr(0, pos);
+      } else {
+        break;
+      }
+    }
+
+    for (auto it = semaCtx->symTable.getScopes().rbegin();
+         it != semaCtx->symTable.getScopes().rend(); ++it) {
+      for (const auto &u : it->usings) {
+        res = semaCtx->symTable.lookupExact(u + "." + std::string(name));
+        if (!res.empty())
+          return res;
+      }
+    }
+    return res;
+  };
+
   /* Resolve template instantiations hidden behind reference, const and
    * pointer wrappers ('const Map<K, V>&'): the instantiated parameter types
    * of a template class method must compare equal to the record type the
@@ -185,6 +217,16 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
    * (T, R, ...) have no declaration and stay untouched. */
   if (auto *tp = llvm::dyn_cast<TemplateParamType>(t)) {
     auto decls = ctx->lookup(tp->getName());
+    if (decls.empty()) {
+      /* The parser resolves type names globally, so the placeholder must
+       * recover the same way: the visibility-filtered lookup can miss a
+       * type whose declaring module was parsed later (or is only reachable
+       * through a sibling import). Without this fallback the resolution
+       * would depend on parse order and produce false mismatches (e.g. an
+       * '@override' check comparing a placeholder name against the resolved
+       * type name). */
+      decls = lookupUnfiltered(ctx, tp->getName());
+    }
     for (const auto *d : decls) {
       if (d->kind == NodeKind::ClassDecl ||
           d->kind == NodeKind::StructDecl ||
@@ -1166,37 +1208,6 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
   }
 
   // VTable Layout & Method Override checking
-  uint32_t currentVTableIdx = 0;
-  std::unordered_map<std::string_view, uint32_t> vtableLayout;
-
-  if (node->baseClass && !hasErrors) {
-    if (auto *pType =
-            llvm::dyn_cast<ClassType>(node->baseClass->getUnqualifiedType())) {
-      if (auto *pDecl =
-              llvm::dyn_cast_or_null<ClassDeclNode>(pType->getDeclaration())) {
-        auto collectVTable = [&](const ClassDeclNode *cd, auto &self) -> void {
-          if (cd->baseClass) {
-            if (auto *pt = llvm::dyn_cast<ClassType>(
-                    cd->baseClass->getUnqualifiedType())) {
-              if (auto *pd = llvm::dyn_cast_or_null<ClassDeclNode>(
-                      pt->getDeclaration())) {
-                self(pd, self);
-              }
-            }
-          }
-          for (auto *m : cd->methods) {
-            if (m->isVirtual || m->isOverride) {
-              if (!vtableLayout.contains(m->name)) {
-                vtableLayout[m->name] = currentVTableIdx++;
-              }
-            }
-          }
-        };
-        collectVTable(pDecl, collectVTable);
-      }
-    }
-  }
-
   auto signaturesMatch = [&](const FunctionDeclNode *a,
                              const FunctionDeclNode *b) {
     if (a->name != b->name)
@@ -1303,13 +1314,11 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
         foundInBaseOrIface || explicitOverride;
 
     if (method->isOverride || method->isVirtual) {
-      if (vtableLayout.contains(method->name)) {
-        const_cast<FunctionDeclNode *>(method)->vtableIndex =
-            vtableLayout[method->name];
-      } else {
-        const_cast<FunctionDeclNode *>(method)->vtableIndex = currentVTableIdx;
-        vtableLayout[method->name] = currentVTableIdx++;
-      }
+      /* Same-named methods share a global slot (base, interface and
+       * override alike); the registry re-stamps every indexed method when a
+       * new name shifts the earlier ranks. */
+      const_cast<FunctionDeclNode *>(method)->vtableIndex =
+          ctx->assignVTableSlot(const_cast<FunctionDeclNode *>(method));
     }
   }
 
@@ -1383,7 +1392,11 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
     }
   }
 
-  classTy->setBaseClass(hasErrors ? nullptr : node->baseClass);
+  /* The base class must survive unrelated class-body errors: dropping it
+   * here would break upcasting (derived-to-base pointer conversions) and
+   * produce misleading cascade errors after any method-level diagnostic.
+   * Resolution failures already null node->baseClass above. */
+  classTy->setBaseClass(node->baseClass);
   classTy->setIsPolymorphic(isPolymorphic);
   classTy->setIsAbstract(node->isAbstract);
 

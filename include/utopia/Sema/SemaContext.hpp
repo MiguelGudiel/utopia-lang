@@ -3,6 +3,7 @@
 #include "utopia/Common/Diagnostics.hpp"
 #include "utopia/Common/Types.hpp"
 #include "utopia/Sema/SymbolTable.hpp"
+#include <algorithm>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -269,12 +270,48 @@ public:
   void exitSwitch() { switchDepth--; }
   bool isInBreakable() const { return loopDepth > 0 || switchDepth > 0; }
 
+  /* Virtual-method slot registry. Every polymorphic method in the program
+   * is assigned a slot derived from its (sorted) name, shared by every
+   * class hierarchy: dispatch through a base class or an interface pointer
+   * loads the slot the interface itself was assigned, so all implementors
+   * must agree on that slot. Name keys keep the assignment independent of
+   * declaration order; inserting a name between existing ones re-ranks the
+   * later names, which forces re-stamping every indexed method. */
+  uint32_t assignVTableSlot(FunctionDeclNode *method) {
+    std::string key(method->name);
+    auto it = vtableSlots.find(key);
+    if (it != vtableSlots.end()) {
+      method->vtableIndex = it->second;
+      if (std::find(vtableIndexedMethods.begin(), vtableIndexedMethods.end(),
+                    method) == vtableIndexedMethods.end()) {
+        vtableIndexedMethods.push_back(method);
+      }
+      return it->second;
+    }
+
+    auto pos = std::lower_bound(vtableSlotNames.begin(),
+                                vtableSlotNames.end(), key);
+    vtableSlotNames.insert(pos, key);
+    for (size_t i = 0; i < vtableSlotNames.size(); i++) {
+      vtableSlots[vtableSlotNames[i]] = static_cast<uint32_t>(i);
+    }
+    for (auto *indexed : vtableIndexedMethods) {
+      indexed->vtableIndex = vtableSlots[std::string(indexed->name)];
+    }
+    method->vtableIndex = vtableSlots[key];
+    vtableIndexedMethods.push_back(method);
+    return method->vtableIndex;
+  }
+
 private:
   std::vector<ErrorInfo> errors;
   const Type *currentFunctionReturn;
   const RecordType *currentRecordContext = nullptr;
   int loopDepth = 0;
   int switchDepth = 0;
+  std::unordered_map<std::string, uint32_t> vtableSlots;
+  std::vector<std::string> vtableSlotNames;
+  std::vector<FunctionDeclNode *> vtableIndexedMethods;
 };
 
 class ScopeGuard {

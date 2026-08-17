@@ -2268,7 +2268,9 @@ void processFile(const std::string &uri, std::string text) {
   sendResponse(
       {{"jsonrpc", "2.0"},
        {"method", "textDocument/publishDiagnostics"},
-       {"params", {{"uri", uri}, {"diagnostics", newState.diags->toJSON()}}}});
+       {"params",
+        {{"uri", uri},
+         {"diagnostics", newState.diags->toJSON(filePath)}}}});
 
   {
     std::unique_lock<std::shared_mutex> lock(docMutex);

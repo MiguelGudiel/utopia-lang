@@ -1,0 +1,85 @@
+/*
+ * Class inheritance: 'extends', constructor delegation via 'super(...)',
+ * protected members, and the '@virtual' / '@override' annotations that
+ * opt a method into the vtable.
+ *
+ * A base method is only overridable when it is marked @virtual (or is
+ * abstract); @override on the derived side is validated against the base
+ * hierarchy at compile time.
+ */
+
+class Vehicle {
+  protected String _model;
+  protected int32 _speed = 0;
+
+  Vehicle(String model) {
+    this._model = model;
+  }
+
+  public String describe() {
+    return this._model;
+  }
+
+  /* Concrete default implementation; derived classes may replace it. */
+  @virtual
+  public void accelerate(int32 delta) {
+    this._speed += delta;
+  }
+
+  @virtual
+  public int32 speed() {
+    return this._speed;
+  }
+}
+
+class Car extends Vehicle {
+  private int32 _wheels;
+
+  /* Delegates to Vehicle's constructor before the Car body runs. */
+  Car(String model, int32 wheels) : super(model) {
+    this._wheels = wheels;
+  }
+
+  /* Overrides share the base slot, so calls through a Vehicle* land here. */
+  @override
+  public void accelerate(int32 delta) {
+    this._speed += delta * 2;
+  }
+
+  public int32 wheels() {
+    return this._wheels;
+  }
+}
+
+class Bicycle extends Vehicle {
+  Bicycle(String model) : super(model) {
+  }
+
+  /* Keeps the base behavior; no override needed. */
+}
+
+int32 main() {
+  Car* car = new Car("sedan", 4);
+  Bicycle* bike = new Bicycle("fixie");
+
+  /* The field initializer (speed = 0) and the base constructor ran before
+   * the Car body. */
+  print("car: %s, %d wheels, speed %d\n",
+        car.describe().c_str(), car.wheels(), car.speed());
+
+  car.accelerate(10);
+  print("after accelerate(10): %d\n", car.speed());
+
+  /* Virtual dispatch through a base pointer: accelerate(5) reaches
+   * Car::accelerate (x2), while Bicycle keeps the Vehicle version. */
+  Vehicle* v = car;
+  v.accelerate(5);
+  print("through Vehicle*: %d\n", car.speed());
+
+  bike.accelerate(3);
+  print("bike speed: %d\n", bike.speed());
+
+  delete car;
+  delete bike;
+  return 0;
+}

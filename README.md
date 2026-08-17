@@ -129,6 +129,7 @@ The `examples/` directory contains small, self-contained programs demonstrating 
 - Enums and `switch` statements
 - Recursion
 - Classes and object lifetime
+- Inheritance, `super` delegation, and virtual/override methods
 - Dynamic memory allocation
 - Functions, named parameters, and default arguments
 - Generics/templates
@@ -136,6 +137,12 @@ The `examples/` directory contains small, self-contained programs demonstrating 
 - Smart pointers with Rust-style auto-deref (`unique_ptr`, `shared_ptr`, `weak_ptr`)
 - Dart-style lambdas with inferred signatures (`() => 5`, `(x) => x * 2`)
 - Dart-style async/await (`Future<T>`, `await`, fire-and-forget, `runOnThread`, `then`, `wait`)
+- The extended standard library (`Duration`, `Stopwatch`, `DateTime`, `Random`, `Math`)
+- `List<T>` operations, copies, and the functional methods (`map`, `where`, `reduce`)
+- `Map<K, V>`, `HashMap`, and `SplayTreeMap` with `{key: value}` literals
+- Abstract classes and abstract methods
+- Multiple interfaces via `implements`
+- Polymorphism and virtual dispatch through base and interface pointers
 
 Each example is a standalone project with its own `build.yaml` manifest.
 
@@ -177,7 +184,7 @@ Repository layout:
 - `src/`, `include/` — compiler library (lexer, parser, semantic analysis, LLVM codegen)
 - `tools/utopia/` — command-line driver
 - `libs/` — prelude, standard library, and build-script library shipped with the toolchain
-- `examples/` — sample programs (including `10_smart_pointers`)
+- `examples/` — sample programs (including `11_smart_pointers`)
 - `tests/` — test suite
 - `docs/` — full language documentation
 

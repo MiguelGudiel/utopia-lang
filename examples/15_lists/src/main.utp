@@ -1,0 +1,95 @@
+/*
+ * List<T>: the growable array type (std::vector semantics, deep copies).
+ * Covers literals, indexing, insertion/removal, iteration, and the
+ * functional methods (forEach / map / where / reduce).
+ */
+
+void basicOps() {
+  List<int32> nums = [10, 20, 30];
+  print("len: %llu, nums[1]: %d\n", nums.length(), nums[1]);
+
+  nums.add(40);
+  nums.insert(0, 5);
+  print("after add/insert: %d %d %d %d\n",
+        nums[0], nums[1], nums[2], nums[3]);
+
+  nums[2] = 99;
+  print("after assign: %d\n", nums[2]);
+
+  bool removed = nums.remove(20);
+  int32 popped = nums.removeAt(0);
+  print("removed 20: %d, popped: %d, len: %llu\n",
+        removed, popped, nums.length());
+
+  print("contains 99: %d, indexOf 99: %lld, last: %d\n",
+        nums.contains(99), nums.indexOf(99), nums.last());
+
+  List<int32> part = nums.sublist(0, 2);
+  print("sublist: %d %d\n", part[0], part[1]);
+
+  print("joined: %s\n", nums.join(", ").c_str());
+}
+
+void iteration() {
+  List<String> names = ["ada", "grace", "linus"];
+
+  for (usize i = 0; i < names.length(); i++) {
+    print("  %s", names[i].c_str());
+  }
+  print("\n");
+
+  names.forEach((name) {
+    print("  forEach: %s\n", name.c_str());
+  });
+
+  /* The callback's return type must be given explicitly when it differs
+   * from the list's element type (no inference for method templates yet). */
+  List<int32> lens = names.map<int32>((name) {
+    return name.length() as int32;
+  });
+  print("lengths: %d %d %d\n", lens[0], lens[1], lens[2]);
+
+  List<String> short_ = names.where((name) {
+    return name.length() <= 4;
+  });
+  print("short names: %s\n", short_.join(", ").c_str());
+
+  List<int32> numbers = [1, 2, 3, 4];
+  int32 total = numbers.reduce((a, b) {
+    return a + b;
+  });
+  print("sum: %d\n", total);
+}
+
+void copiesAndSorting() {
+  /* Assignment deep-copies: the two lists never share storage. */
+  List<String> original = ["b", "a", "c"];
+  List<String> copy = original;
+  original.add("d");
+  print("original len: %llu, copy len: %llu\n",
+        original.length(), copy.length());
+
+  copy.sort();
+  print("sorted copy: %s\n", copy.join(", ").c_str());
+
+  List<int32> scores = [50, 10, 40, 30, 20];
+  scores.sort((a, b) {
+    return a > b;
+  });
+  print("descending: %d %d %d\n", scores[0], scores[1], scores[2]);
+
+  /* Empty literals bind to any List<T>. */
+  List<int32> empty = [];
+  print("empty: %llu\n", empty.length());
+
+  /* Lists of lists. */
+  List<List<int32>> grid = [[1, 2], [3, 4]];
+  print("grid[1][0]: %d\n", grid[1][0]);
+}
+
+int32 main() {
+  basicOps();
+  iteration();
+  copiesAndSorting();
+  return 0;
+}

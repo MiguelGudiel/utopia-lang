@@ -28,7 +28,7 @@ utopia run path/to/project
 ## Example
 
 ```sh
-utopia run examples/10_smart_pointers
+utopia run examples/11_smart_pointers
 ```
 
 prints the smart pointer demo without producing a binary.
