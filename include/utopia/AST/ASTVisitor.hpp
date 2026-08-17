@@ -115,6 +115,9 @@ public:
     case NodeKind::Cast:
       return static_cast<Derived *>(this)->visit(
           static_cast<const CastNode *>(node));
+    case NodeKind::Is:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const IsExprNode *>(node));
     case NodeKind::ParamDecl:
       return static_cast<Derived *>(this)->visit(
           static_cast<const ParamDeclNode *>(node));

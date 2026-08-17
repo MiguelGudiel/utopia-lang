@@ -36,6 +36,7 @@ public:
   void visit(const ReturnNode *n);
   void visit(const IfNode *n);
   void visit(const CastNode *n);
+  void visit(const IsExprNode *n);
   void visit(const VarDeclNode *n);
   void visit(const ArrayLiteralNode *n);
   void visit(const MapLiteralNode *n);

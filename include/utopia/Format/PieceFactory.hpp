@@ -98,6 +98,7 @@ public:
   Piece *visit(const FunctionCallNode *node);
   Piece *visit(const ReturnNode *node);
   Piece *visit(const CastNode *node);
+  Piece *visit(const IsExprNode *node);
   Piece *visit(const ParamDeclNode *node);
   Piece *visit(const UnionDeclNode *node);
   Piece *visit(const StructDeclNode *node);

@@ -216,6 +216,15 @@ ASTNode *ASTCloner::visit(const CastNode *n) {
   return node;
 }
 
+ASTNode *ASTCloner::visit(const IsExprNode *n) {
+  auto *node = ctx.create<IsExprNode>(static_cast<ExprNode *>(dispatch(n->expr)),
+                                      cloneType(n->targetType), n->line,
+                                      n->column, n->length);
+  node->isNegated = n->isNegated;
+  node->rawTargetTypeStr = n->rawTargetTypeStr;
+  return node;
+}
+
 ASTNode *ASTCloner::visit(const NewExprNode *n) {
   auto *node = ctx.create<NewExprNode>(
       cloneType(n->allocatedType),

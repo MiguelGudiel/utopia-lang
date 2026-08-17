@@ -88,9 +88,11 @@ private:
 
   std::string_view parseOperatorName();
 
-  const Type *parseType(bool inNewExpr = false);
+  const Type *parseType(bool inNewExpr = false,
+                        bool allowRValueRef = true);
   const Type *applyArrayDeclarator(const Type *baseType);
-  const Type *parseTypeModifiers(const Type *baseType, bool inNewExpr);
+  const Type *parseTypeModifiers(const Type *baseType, bool inNewExpr,
+                                 bool allowRValueRef = true);
 
   std::string consumeComments();
   ExprNode *parseArrayLiteral();

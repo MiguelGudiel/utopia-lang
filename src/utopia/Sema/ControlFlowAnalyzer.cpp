@@ -376,6 +376,7 @@ void ControlFlowPass::visit(const FunctionCallNode *node) {
 }
 
 void ControlFlowPass::visit(const CastNode *node) { dispatch(node->expr); }
+void ControlFlowPass::visit(const IsExprNode *node) { dispatch(node->expr); }
 void ControlFlowPass::visit(const AwaitExprNode *node) {
   dispatch(node->expr);
 }

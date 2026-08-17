@@ -230,6 +230,8 @@ Token Lexer::parseToken() {
       return {TokenType::ELSE_KW, id, startLine, startCol};
     if (id == "as")
       return {TokenType::AS, id, startLine, startCol};
+    if (id == "is")
+      return {TokenType::IS_KW, id, startLine, startCol};
     if (id == "const")
       return {TokenType::CONST_KW, id, startLine, startCol};
     if (id == "var")

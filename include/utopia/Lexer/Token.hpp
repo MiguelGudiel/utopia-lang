@@ -34,6 +34,7 @@ enum class TokenType : uint8_t {
   USING_KW,
   ELLIPSIS,
   AS,
+  IS_KW,
   PLUS,
   MINUS,
   STAR,

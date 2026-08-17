@@ -4253,9 +4253,12 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
               builder.CreateStructGEP(structLlTy, objPtr, 0, "vptr.gep");
           llvm::Value *vptr =
               builder.CreateLoad(builder.getPtrTy(), vptrGep, "vptr");
+          /* Slot 0 of the vtable holds the RTTI type descriptor; methods
+           * start at index 1. */
           llvm::Value *methodGep = builder.CreateInBoundsGEP(
               builder.getPtrTy(), vptr,
-              builder.getInt32(node->resolvedFunc->vtableIndex), "method.gep");
+              builder.getInt32(node->resolvedFunc->vtableIndex + 1),
+              "method.gep");
           callee =
               builder.CreateLoad(builder.getPtrTy(), methodGep, "method.ptr");
         }
@@ -4640,6 +4643,117 @@ llvm::Value *CodeGen::visit(const CastNode *node) {
 
   llvm::Type *destTy = getLLVMType(node->targetType);
   return createImplicitCast(src, destTy, node->expr->exprType);
+}
+
+llvm::Value *CodeGen::visit(const IsExprNode *node) {
+  /* Statically-decided tests emit a constant. */
+  if (node->staticResult >= 0) {
+    return builder.getInt1(node->staticResult != 0);
+  }
+
+  llvm::Value *objPtr = nullptr;
+  const Type *operandTy = node->expr->exprType->getUnqualifiedType();
+  if (operandTy->isPointerType()) {
+    objPtr = dispatch(node->expr);
+  } else {
+    /* Reference-typed operands: the lvalue is the referenced object. */
+    objPtr = getLValue(node->expr);
+  }
+  if (!objPtr)
+    return nullptr;
+
+  llvm::Constant *targetTD = getOrCreateTypeInfo(
+      llvm::cast<ClassType>(node->targetType->getUnqualifiedType()));
+
+  llvm::Function *F = builder.GetInsertBlock()->getParent();
+  llvm::BasicBlock *nullBlock = llvm::BasicBlock::Create(ctx, "is.null", F);
+  llvm::BasicBlock *loopCondBlock = llvm::BasicBlock::Create(ctx, "is.cond", F);
+  llvm::BasicBlock *loopBodyBlock = llvm::BasicBlock::Create(ctx, "is.body", F);
+  llvm::BasicBlock *ifaceCondBlock =
+      llvm::BasicBlock::Create(ctx, "is.iface.cond", F);
+  llvm::BasicBlock *ifaceBodyBlock =
+      llvm::BasicBlock::Create(ctx, "is.iface.body", F);
+  llvm::BasicBlock *ifaceNextBlock =
+      llvm::BasicBlock::Create(ctx, "is.iface.next", F);
+  llvm::BasicBlock *parentBlock = llvm::BasicBlock::Create(ctx, "is.parent", F);
+  llvm::BasicBlock *foundBlock = llvm::BasicBlock::Create(ctx, "is.found", F);
+  llvm::BasicBlock *failBlock = llvm::BasicBlock::Create(ctx, "is.fail", F);
+  llvm::BasicBlock *contBlock = llvm::BasicBlock::Create(ctx, "is.cont", F);
+
+  /* 'null is T' is false. */
+  builder.CreateCondBr(builder.CreateIsNull(objPtr), failBlock, nullBlock);
+
+  builder.SetInsertPoint(nullBlock);
+  const ClassType *operandClass = node->operandClassType
+                                      ? node->operandClassType
+                                      : llvm::cast<ClassType>(
+                                            node->targetType->getUnqualifiedType());
+  llvm::Value *vptr = builder.CreateLoad(
+      builder.getPtrTy(),
+      builder.CreateStructGEP(getLLVMType(operandClass), objPtr, 0,
+                              "is.vptr.gep"),
+      "is.vptr");
+  llvm::Value *td = builder.CreateLoad(builder.getPtrTy(), vptr, "is.td");
+  builder.CreateBr(loopCondBlock);
+
+  /* Walk the dynamic type chain: descriptor, then its interfaces, then the
+   * parent descriptor, until the chain ends. */
+  builder.SetInsertPoint(loopCondBlock);
+  llvm::PHINode *tdPhi = builder.CreatePHI(builder.getPtrTy(), 2, "is.td.phi");
+  tdPhi->addIncoming(td, nullBlock);
+  builder.CreateCondBr(builder.CreateIsNull(tdPhi), failBlock, loopBodyBlock);
+
+  builder.SetInsertPoint(loopBodyBlock);
+  builder.CreateCondBr(builder.CreateICmpEQ(tdPhi, targetTD), foundBlock,
+                       ifaceCondBlock);
+
+  builder.SetInsertPoint(ifaceCondBlock);
+  llvm::AllocaInst *iPtr =
+      createEntryBlockAlloca(builder.getInt32Ty(), "is.iface.idx");
+  builder.CreateStore(builder.getInt32(1), iPtr);
+  builder.CreateBr(ifaceBodyBlock);
+
+  builder.SetInsertPoint(ifaceBodyBlock);
+  llvm::Value *i = builder.CreateLoad(builder.getInt32Ty(), iPtr, "is.i");
+  llvm::Value *ifaceSlot = builder.CreateInBoundsGEP(
+      builder.getPtrTy(), tdPhi, i, "is.iface.gep");
+  llvm::Value *ifaceTD = builder.CreateLoad(builder.getPtrTy(), ifaceSlot,
+                                            "is.iface.td");
+  builder.CreateCondBr(builder.CreateIsNull(ifaceTD), parentBlock,
+                       ifaceNextBlock);
+
+  builder.SetInsertPoint(ifaceNextBlock);
+  llvm::Value *nextI =
+      builder.CreateAdd(i, builder.getInt32(1), "is.iface.idx.next");
+  builder.CreateStore(nextI, iPtr);
+  builder.CreateCondBr(builder.CreateICmpEQ(ifaceTD, targetTD), foundBlock,
+                       ifaceBodyBlock);
+
+  builder.SetInsertPoint(parentBlock);
+  llvm::Value *parentTd =
+      builder.CreateLoad(builder.getPtrTy(),
+                         builder.CreateInBoundsGEP(builder.getPtrTy(), tdPhi,
+                                                   builder.getInt32(0),
+                                                   "is.parent.gep"),
+                         "is.parent.td");
+  tdPhi->addIncoming(parentTd, parentBlock);
+  builder.CreateBr(loopCondBlock);
+
+  builder.SetInsertPoint(foundBlock);
+  builder.CreateBr(contBlock);
+
+  builder.SetInsertPoint(failBlock);
+  builder.CreateBr(contBlock);
+
+  builder.SetInsertPoint(contBlock);
+  llvm::Value *result = builder.CreatePHI(builder.getInt1Ty(), 2, "is.result");
+  llvm::cast<llvm::PHINode>(result)->addIncoming(builder.getTrue(), foundBlock);
+  llvm::cast<llvm::PHINode>(result)->addIncoming(builder.getFalse(), failBlock);
+
+  if (node->isNegated) {
+    result = builder.CreateXor(result, builder.getTrue(), "is.negated");
+  }
+  return result;
 }
 
 llvm::Value *CodeGen::visit(const ReturnNode *node) {
@@ -5802,7 +5916,10 @@ llvm::Constant *CodeGen::getOrCreateVTable(const ClassType *classTy) {
 
   collectMethods(cDecl, collectMethods);
 
+  /* Slot 0 is reserved for the RTTI type descriptor (see
+   * getOrCreateTypeInfo); virtual dispatch indexes methods from slot 1. */
   std::vector<llvm::Constant *> vtablePointers;
+  vtablePointers.push_back(getOrCreateTypeInfo(classTy));
   for (auto *m : vtableMethods) {
     if (m) {
       if (m->isAbstract) {
@@ -5827,6 +5944,63 @@ llvm::Constant *CodeGen::getOrCreateVTable(const ClassType *classTy) {
                                       llvm::GlobalValue::LinkOnceODRLinkage,
                                       vtableInit, vtableName);
   return gv;
+}
+
+llvm::Constant *CodeGen::getOrCreateTypeInfo(const ClassType *classTy) {
+  std::string infoName = "_ZTI" + std::string(classTy->getName());
+  std::replace(infoName.begin(), infoName.end(), '.', '_');
+
+  if (llvm::GlobalVariable *gv = mod.getGlobalVariable(infoName)) {
+    return gv;
+  }
+
+  auto *cDecl = llvm::cast<ClassDeclNode>(classTy->getDeclaration());
+
+  /* Slot 0: the parent's descriptor (null at the root of the hierarchy). */
+  llvm::Constant *parentTD = llvm::ConstantPointerNull::get(builder.getPtrTy());
+  if (cDecl->baseClass) {
+    if (auto *pType = llvm::dyn_cast<ClassType>(
+            cDecl->baseClass->getUnqualifiedType())) {
+      if (pType->getIsPolymorphic()) {
+        parentTD = getOrCreateTypeInfo(pType);
+      }
+    }
+  }
+
+  /* Remaining slots: every (transitively) implemented interface descriptor,
+   * terminated by null. The closure is computed at compile time so the
+   * runtime walk only needs a flat list per class. */
+  std::vector<llvm::Constant *> ifaceTDs;
+  std::function<void(const ClassDeclNode *)> collectIfaces =
+      [&](const ClassDeclNode *decl) {
+        if (!decl)
+          return;
+        for (const Type *iface : decl->interfaces) {
+          if (auto *iType =
+                  llvm::dyn_cast<ClassType>(iface->getUnqualifiedType())) {
+            llvm::Constant *iTD = getOrCreateTypeInfo(iType);
+            if (std::find(ifaceTDs.begin(), ifaceTDs.end(), iTD) ==
+                ifaceTDs.end()) {
+              ifaceTDs.push_back(iTD);
+            }
+            collectIfaces(
+                llvm::dyn_cast_or_null<ClassDeclNode>(iType->getDeclaration()));
+          }
+        }
+      };
+  collectIfaces(cDecl);
+
+  std::vector<llvm::Constant *> slots;
+  slots.push_back(parentTD);
+  slots.insert(slots.end(), ifaceTDs.begin(), ifaceTDs.end());
+  slots.push_back(llvm::ConstantPointerNull::get(builder.getPtrTy()));
+
+  llvm::ArrayType *infoTy = llvm::ArrayType::get(builder.getPtrTy(), slots.size());
+  llvm::Constant *init = llvm::ConstantArray::get(infoTy, slots);
+
+  return new llvm::GlobalVariable(mod, infoTy, true,
+                                  llvm::GlobalValue::LinkOnceODRLinkage, init,
+                                  infoName);
 }
 
 void CodeGen::emitDefaultInitialization(llvm::Value *ptr, const Type *type) {

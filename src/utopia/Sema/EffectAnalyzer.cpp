@@ -209,6 +209,12 @@ void EffectAnalyzer::visit(const CastNode *n) {
   dispatch(n->expr);
 }
 
+void EffectAnalyzer::visit(const IsExprNode *n) {
+  /* A type test only reads the vtable pointer of the object. */
+  readsMem = true;
+  dispatch(n->expr);
+}
+
 void EffectAnalyzer::visit(const VarDeclNode *n) {
   if (n->initializer)
     dispatch(n->initializer);

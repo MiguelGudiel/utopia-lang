@@ -1925,6 +1925,15 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
   node->exprType = ty;
   node->isLValue = true;
   checkDeprecated(target, node);
+
+  /* Apply an active 'is' type promotion: 'if (x is T)' narrows the variable
+   * to T (preserving pointer/reference indirection) inside the block. */
+  for (const auto &p : promotions) {
+    if (p.active && p.decl == target) {
+      node->exprType = p.type;
+      return p.type;
+    }
+  }
   return ty;
 }
 
@@ -1941,17 +1950,66 @@ SemaResult TypeCheckPass::visit(const IfNode *node) {
                             "Condition must evaluate to a boolean type.");
   }
 
+  /* Dart-style type promotion: 'if (x is T) { ... }' narrows the variable's
+   * type inside the block, and 'if (x is! T) { } else { }' narrows it inside
+   * the else block. */
+  std::vector<Promotion> thenP, elseP;
+  collectPromotions(node->condition, thenP, elseP);
+
+  size_t promoDepth = promotions.size();
+  promotions.insert(promotions.end(), thenP.begin(), thenP.end());
   auto thenRes = dispatch(node->thenBlock);
+  promotions.resize(promoDepth);
   if (!thenRes)
     return thenRes;
 
   if (node->elseBlock) {
+    promotions.insert(promotions.end(), elseP.begin(), elseP.end());
     auto elseRes = dispatch(node->elseBlock);
+    promotions.resize(promoDepth);
     if (!elseRes)
       return elseRes;
   }
 
   return ctx->astCtx.VoidTy;
+}
+
+void TypeCheckPass::collectPromotions(const ExprNode *cond,
+                                      std::vector<Promotion> &thenP,
+                                      std::vector<Promotion> &elseP) {
+  if (!cond)
+    return;
+
+  if (auto *isNode = llvm::dyn_cast<IsExprNode>(cond)) {
+    auto *var = llvm::dyn_cast<VariableNode>(isNode->expr);
+    if (!var || !var->resolvedDecl || !isNode->promotionType)
+      return;
+    if (!isNode->isNegated) {
+      /* 'x is T' true ⇒ x is T inside the then block. */
+      thenP.push_back({var->resolvedDecl, isNode->promotionType, true});
+    } else {
+      /* 'x is! T' false ⇒ x is T inside the else block. */
+      elseP.push_back({var->resolvedDecl, isNode->promotionType, true});
+    }
+    return;
+  }
+
+  auto *bop = llvm::dyn_cast<BinaryOpNode>(cond);
+  if (!bop || (bop->op != "&&" && bop->op != "||"))
+    return;
+
+  std::vector<Promotion> tL, eL, tR, eR;
+  collectPromotions(bop->left, tL, eL);
+  collectPromotions(bop->right, tR, eR);
+  if (bop->op == "&&") {
+    /* 'A && B' true ⇒ both sides are true. */
+    thenP = tL;
+    thenP.insert(thenP.end(), tR.begin(), tR.end());
+  } else {
+    /* 'A || B' false ⇒ both sides are false. */
+    elseP = eL;
+    elseP.insert(elseP.end(), eR.begin(), eR.end());
+  }
 }
 
 SemaResult TypeCheckPass::visit(const ForNode *node) {
@@ -2923,6 +2981,27 @@ SemaResult TypeCheckPass::visit(const AssignNode *node) {
   }
   auto lhsType = dispatch(node->target);
   ctx->isAssignTarget = prevAssignTarget;
+
+  /* An assignment invalidates any active 'is' promotion of the target
+   * variable: 'if (x is T) { x = other; ... }' must not keep treating x as
+   * T. The target is re-typed with its declared type afterwards so the
+   * assignment itself type-checks against the declared variable type. */
+  if (node->op == "=") {
+    if (auto *targetVar = llvm::dyn_cast<VariableNode>(node->target)) {
+      if (targetVar->resolvedDecl) {
+        bool invalidated = false;
+        for (auto &p : promotions) {
+          if (p.active && p.decl == targetVar->resolvedDecl) {
+            p.active = false;
+            invalidated = true;
+          }
+        }
+        if (invalidated) {
+          lhsType = dispatch(node->target);
+        }
+      }
+    }
+  }
 
   /* Propagate the failure instead of dereferencing an empty expected, which
    * previously crashed the compiler on a failed LHS expression. */
@@ -5898,6 +5977,123 @@ SemaResult TypeCheckPass::visit(const CastNode *node) {
                           "Invalid cast: unsupported type conversion");
 }
 
+SemaResult TypeCheckPass::visit(const IsExprNode *node) {
+  const_cast<IsExprNode *>(node)->targetType =
+      resolveIfTemplate(node->targetType);
+
+  auto srcRes = dispatch(node->expr);
+  if (!srcRes) {
+    return std::unexpected(ErrorInfo{node->line, node->column, node->length,
+                                     "Cascading error in 'is' expression"});
+  }
+
+  const Type *srcType = (*srcRes)->getUnqualifiedType();
+  const Type *target = node->targetType->getUnqualifiedType();
+
+  /* Strip pointer/reference indirection to reach the operand's record type.
+   * The indirection is preserved in the promotion type so the narrowed
+   * variable keeps working in member access and calls. */
+  const Type *operandBase = srcType;
+  bool isIndirect = false;
+  const Type *promotedTy = node->targetType;
+  if (operandBase->isPointerType()) {
+    operandBase = static_cast<const PointerType *>(operandBase)
+                      ->getPointeeType()
+                      ->getUnqualifiedType();
+    isIndirect = true;
+    promotedTy = ctx->astCtx.getPointerType(node->targetType);
+  } else if (operandBase->isReferenceType()) {
+    operandBase = static_cast<const ReferenceType *>(operandBase)
+                      ->getPointeeType()
+                      ->getUnqualifiedType();
+    isIndirect = true;
+    promotedTy = ctx->astCtx.getReferenceType(node->targetType);
+  } else if (operandBase->getKind() == TypeKind::RValueReference) {
+    operandBase = static_cast<const RValueReferenceType *>(operandBase)
+                      ->getPointeeType()
+                      ->getUnqualifiedType();
+    isIndirect = true;
+    promotedTy = ctx->astCtx.getRValueReferenceType(node->targetType);
+  }
+
+  /* True when 'sub' is 'super' or a subclass of it (including interfaces). */
+  auto isSubtype = [](const ClassType *sub, const ClassType *super,
+                      auto &self) -> bool {
+    if (!sub || !super)
+      return false;
+    if (sub == super)
+      return true;
+    if (sub->getBaseClass()) {
+      if (auto *pBase = llvm::dyn_cast<ClassType>(
+              sub->getBaseClass()->getUnqualifiedType())) {
+        if (self(pBase, super, self))
+          return true;
+      }
+    }
+    for (const Type *iface : sub->getInterfaces()) {
+      if (auto *pIface =
+              llvm::dyn_cast<ClassType>(iface->getUnqualifiedType())) {
+        if (self(pIface, super, self))
+          return true;
+      }
+    }
+    return false;
+  };
+
+  bool srcIsClass = operandBase->getKind() == TypeKind::Class;
+  bool targetIsClass = target->getKind() == TypeKind::Class;
+
+  int result = -1; /* -1: runtime check required */
+  if (srcIsClass && targetIsClass) {
+    const ClassType *srcClass = static_cast<const ClassType *>(operandBase);
+    const ClassType *tgtClass = static_cast<const ClassType *>(target);
+    if (isSubtype(srcClass, tgtClass, isSubtype)) {
+      /* The static type is already compatible: always true. */
+      result = 1;
+    } else if (isSubtype(tgtClass, srcClass, isSubtype)) {
+      /* The object's dynamic type may be a subclass: inspect it at runtime. */
+      if (!isIndirect) {
+        /* A by-value object's dynamic type is exactly its static type. */
+        result = 0;
+      } else if (!srcClass->getIsPolymorphic()) {
+        return ctx->reportError(
+            node->line, node->column, node->length,
+            "Cannot test '" + (*srcRes)->toString() + "' with 'is " +
+                node->targetType->toString() +
+                "': the class is not polymorphic, so the dynamic type cannot "
+                "be inspected at runtime. Mark a method '@virtual' or add an "
+                "interface to make it polymorphic.");
+      } else {
+        const_cast<IsExprNode *>(node)->operandClassType = srcClass;
+      }
+    } else if (tgtClass->getIsAbstract() && isIndirect &&
+               srcClass->getIsPolymorphic()) {
+      /* Interface target: the static class does not implement it, but a
+       * subclass of the static type may, so the dynamic type decides. */
+      const_cast<IsExprNode *>(node)->operandClassType = srcClass;
+    } else {
+      /* Unrelated types (a class can never be a sibling class): false. */
+      result = 0;
+    }
+  } else {
+    /* Non-class types carry no runtime identity: the answer is static. */
+    result = ctx->isSameType(operandBase, target) ? 1 : 0;
+  }
+
+  if (result >= 0) {
+    const_cast<IsExprNode *>(node)->staticResult =
+        node->isNegated ? 1 - result : result;
+  }
+
+  if (node->expr->kind == NodeKind::Variable) {
+    const_cast<IsExprNode *>(node)->promotionType = promotedTy;
+  }
+
+  node->exprType = ctx->astCtx.BoolTy;
+  node->isLValue = false;
+  return ctx->astCtx.BoolTy;
+}
+
 SemaResult TypeCheckPass::visit(const ReturnNode *node) {
   const Type *expectedRet = ctx->getFunctionReturnType();
 
@@ -7126,6 +7322,9 @@ struct LambdaCaptureChecker {
       break;
     case NodeKind::Cast:
       walk(static_cast<const CastNode *>(node)->expr);
+      break;
+    case NodeKind::Is:
+      walk(static_cast<const IsExprNode *>(node)->expr);
       break;
     case NodeKind::MemberAccess:
       walk(static_cast<const MemberAccessNode *>(node)->object);

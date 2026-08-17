@@ -55,7 +55,8 @@ enum class NodeKind : uint8_t {
   Lambda,
   Await,
   NamespaceDecl,
-  Using
+  Using,
+  Is
 };
 
 struct ASTNode {
@@ -127,6 +128,7 @@ struct ExprNode : public ASTNode {
     case NodeKind::TypeLiteral:
     case NodeKind::Lambda:
     case NodeKind::Await:
+    case NodeKind::Is:
       return true;
     default:
       return false;
@@ -660,6 +662,40 @@ struct CastNode : public ExprNode {
 
   static bool classof(const ASTNode *node) {
     return node->kind == NodeKind::Cast;
+  }
+};
+
+/* Dart/C#-style type test: 'expr is Type' and 'expr is! Type'. Returns
+ * whether the dynamic type of the expression is 'targetType' or a subtype
+ * of it. When the static type cannot decide the answer, Sema marks the node
+ * for a runtime vtable-based check ('needsRuntimeCheck') and resolves the
+ * promoted target type for 'if (x is T)' type promotion. */
+struct IsExprNode : public ExprNode {
+  ExprNode *expr;
+  const Type *targetType;
+  bool isNegated = false;
+  std::string_view rawTargetTypeStr;
+
+  /* Set by Sema when the result is known at compile time (0 = false,
+   * 1 = true, -1 = runtime check required). Already accounts for
+   * 'isNegated'. */
+  mutable int staticResult = -1;
+
+  /* The operand's resolved class type (behind pointer/reference), used by
+   * codegen to reach the object's vtable. */
+  const ClassType *operandClassType = nullptr;
+
+  /* The type a variable referenced by this test is promoted to inside an
+   * 'if' block, preserving the operand's pointer/reference indirection
+   * ('x is T' with 'x: Base*' promotes x to 'T*'). Null when the operand is
+   * not a simple variable. */
+  mutable const Type *promotionType = nullptr;
+
+  IsExprNode(ExprNode *e, const Type *target, int l, int c, int len)
+      : ExprNode(NodeKind::Is, l, c, len), expr(e), targetType(target) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Is;
   }
 };
 

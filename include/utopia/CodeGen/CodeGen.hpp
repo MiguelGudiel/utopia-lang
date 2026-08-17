@@ -67,6 +67,7 @@ public:
   llvm::Value *visit(const ContinueNode *node);
   llvm::Value *visit(const ReturnNode *node);
   llvm::Value *visit(const CastNode *node);
+  llvm::Value *visit(const IsExprNode *node);
   llvm::Value *visit(const ParamDeclNode *node);
   llvm::Value *visit(const ModuleNode *node);
   llvm::Value *visit(const MemberAccessNode *node);
@@ -214,6 +215,12 @@ private:
                                                llvm::StructType *structTy);
 
   llvm::Constant *getOrCreateVTable(const ClassType *classTy);
+
+  /* RTTI descriptor for a polymorphic class: a constant array of pointers
+   * laid out as [parent descriptor or null, interface descriptors..., null].
+   * Stored at the front of the class's vtable so 'expr is T' can walk the
+   * dynamic type chain at runtime. */
+  llvm::Constant *getOrCreateTypeInfo(const ClassType *classTy);
 
   void emitLifetimeStart(llvm::AllocaInst *allocaInst, uint64_t size);
   void emitLifetimeEnd(llvm::AllocaInst *allocaInst, uint64_t size);

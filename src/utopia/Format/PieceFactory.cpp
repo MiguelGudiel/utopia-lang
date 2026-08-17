@@ -14,10 +14,10 @@ static bool isExpressionStatement(NodeKind kind) {
          kind == NodeKind::Number || kind == NodeKind::String ||
          kind == NodeKind::Delete || kind == NodeKind::New ||
          kind == NodeKind::DestructorCall || kind == NodeKind::Cast ||
-         kind == NodeKind::ArrayLiteral || kind == NodeKind::MapLiteral ||
-         kind == NodeKind::ArraySubscript || kind == NodeKind::MemberAccess ||
-         kind == NodeKind::Lambda || kind == NodeKind::Null ||
-         kind == NodeKind::Await;
+         kind == NodeKind::Is || kind == NodeKind::ArrayLiteral ||
+         kind == NodeKind::MapLiteral || kind == NodeKind::ArraySubscript ||
+         kind == NodeKind::MemberAccess || kind == NodeKind::Lambda ||
+         kind == NodeKind::Null || kind == NodeKind::Await;
 }
 
 static int getActualStartLine(const ASTNode *node) {
@@ -892,6 +892,21 @@ Piece *PieceFactory::visit(const CastNode *node) {
           dispatchExpr(node->expr),
           create<ConcatPiece>(std::vector<const Piece *>{
               create<TextPiece>("as "), create<TextPiece>(typeStr)})},
+      Indent::Expression);
+}
+
+Piece *PieceFactory::visit(const IsExprNode *node) {
+  std::string typeStr = node->rawTargetTypeStr.empty()
+                            ? node->targetType->toString()
+                            : std::string(node->rawTargetTypeStr);
+
+  /* `foo is Type` / `foo is! Type` becomes Infix(`foo`, `is Type`). */
+  std::string op = node->isNegated ? "is! " : "is ";
+  return create<InfixPiece>(
+      std::vector<const Piece *>{
+          dispatchExpr(node->expr),
+          create<ConcatPiece>(std::vector<const Piece *>{
+              create<TextPiece>(op), create<TextPiece>(typeStr)})},
       Indent::Expression);
 }
 

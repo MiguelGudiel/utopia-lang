@@ -207,11 +207,12 @@ bool Parser::isDeclaration() {
   return false;
 }
 
-const Type *Parser::parseTypeModifiers(const Type *baseType, bool inNewExpr) {
+const Type *Parser::parseTypeModifiers(const Type *baseType, bool inNewExpr,
+                                       bool allowRValueRef) {
   const Type *ty = baseType;
   while (currentToken().type == TokenType::STAR ||
          currentToken().type == TokenType::AMPERSAND ||
-         currentToken().type == TokenType::LOGICAL_AND ||
+         (allowRValueRef && currentToken().type == TokenType::LOGICAL_AND) ||
          currentToken().type == TokenType::CONST_KW ||
          (!inNewExpr && currentToken().type == TokenType::LBRACKET)) {
     if (currentToken().type == TokenType::CONST_KW) {
@@ -223,7 +224,7 @@ const Type *Parser::parseTypeModifiers(const Type *baseType, bool inNewExpr) {
     } else if (currentToken().type == TokenType::AMPERSAND) {
       ty = astCtx.getReferenceType(ty);
       advance();
-    } else if (currentToken().type == TokenType::LOGICAL_AND) {
+    } else if (allowRValueRef && currentToken().type == TokenType::LOGICAL_AND) {
       ty = astCtx.getRValueReferenceType(ty);
       advance();
     } else if (!inNewExpr && currentToken().type == TokenType::LBRACKET) {
@@ -233,7 +234,7 @@ const Type *Parser::parseTypeModifiers(const Type *baseType, bool inNewExpr) {
   return ty;
 }
 
-const Type *Parser::parseType(bool inNewExpr) {
+const Type *Parser::parseType(bool inNewExpr, bool allowRValueRef) {
   bool isConst = match(TokenType::CONST_KW);
 
   if (currentToken().type != TokenType::TYPE_KW &&
@@ -329,7 +330,7 @@ const Type *Parser::parseType(bool inNewExpr) {
     ty = astCtx.getConstType(ty);
   }
 
-  ty = parseTypeModifiers(ty, inNewExpr);
+  ty = parseTypeModifiers(ty, inNewExpr, allowRValueRef);
 
   if (match(TokenType::FUNCTION_KW)) {
     expect(TokenType::LPAREN, "Expected '(' after 'Function'");
@@ -347,7 +348,7 @@ const Type *Parser::parseType(bool inNewExpr) {
     ty = astCtx.getFunctionType(ty, astCtx.copyArray<const Type *>(paramTypes));
     ty = astCtx.getPointerType(ty);
 
-    ty = parseTypeModifiers(ty, inNewExpr);
+    ty = parseTypeModifiers(ty, inNewExpr, allowRValueRef);
   }
 
   return ty;
@@ -1686,16 +1687,46 @@ ExprNode *Parser::parseEquality() {
 
 ExprNode *Parser::parseRelational() {
   auto left = parseShift();
-  while (currentToken().type == TokenType::LT ||
-         currentToken().type == TokenType::GT ||
-         currentToken().type == TokenType::LE ||
-         currentToken().type == TokenType::GE) {
-    int line = left->line;
-    int col = left->column;
-    std::string_view op = currentToken().value;
-    advance();
-    auto right = parseShift();
-    left = astCtx.create<BinaryOpNode>(op, left, right, line, col);
+  while (true) {
+    if (currentToken().type == TokenType::LT ||
+        currentToken().type == TokenType::GT ||
+        currentToken().type == TokenType::LE ||
+        currentToken().type == TokenType::GE) {
+      int line = left->line;
+      int col = left->column;
+      std::string_view op = currentToken().value;
+      advance();
+      auto right = parseShift();
+      left = astCtx.create<BinaryOpNode>(op, left, right, line, col);
+      continue;
+    }
+
+    if (currentToken().type == TokenType::IS_KW) {
+      int line = left->line;
+      int col = left->column;
+      advance();
+
+      /* 'is!' negates the type test: 'expr is! Type'. */
+      bool negate = match(TokenType::BANG);
+
+      /* '&&' is not treated as the rvalue-reference suffix here: 'x is T &&
+       * y' must parse as '(x is T) && y'. */
+      const char *typeStart = currentToken().value.data();
+      const Type *targetType = parseType(false, /*allowRValueRef=*/false);
+      const char *typeEnd =
+          tokens[cursor - 1].value.data() + tokens[cursor - 1].value.length();
+      std::string_view rawTypeStr(typeStart, typeEnd - typeStart);
+
+      int endCol = tokens[cursor - 1].column + tokens[cursor - 1].value.length();
+      auto isNode =
+          astCtx.create<IsExprNode>(left, targetType, line, col, endCol - col);
+      isNode->isNegated = negate;
+      isNode->rawTargetTypeStr = rawTypeStr;
+      left = isNode;
+      continue;
+    }
+
+    break;
   }
   return left;
 }

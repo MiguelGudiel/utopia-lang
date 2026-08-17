@@ -158,6 +158,12 @@ public:
     return isHit(n) ? n : nullptr;
   }
 
+  const ASTNode *visit(const IsExprNode *n) {
+    if (auto found = find(n->expr))
+      return found;
+    return isHit(n) ? n : nullptr;
+  }
+
   const ASTNode *visit(const ImplicitCastNode *n) {
     if (auto found = find(n->expr))
       return found;

@@ -79,6 +79,7 @@ public:
   void visit(const ContinueNode *node) {}
   void visit(const ReturnNode *) {}
   void visit(const CastNode *) {}
+  void visit(const IsExprNode *) {}
   void visit(const ParamDeclNode *) {}
   void visit(const MemberAccessNode *) {}
   void visit(const ArraySubscriptNode *) {}
@@ -101,6 +102,22 @@ private:
   const FunctionDeclNode *
   resolveOverloadedOperator(const Type *lhsType, std::string_view opName,
                             const std::vector<ExprNode *> &args);
+
+  /* Dart-style type promotion: 'if (x is T) { ... }' narrows the type of the
+   * resolved declaration to T (with the operand's pointer/reference
+   * indirection preserved) while the block is checked. */
+  struct Promotion {
+    const DeclNode *decl;
+    const Type *type;
+    bool active;
+  };
+  std::vector<Promotion> promotions;
+
+  /* Collects the promotions implied by a boolean condition: 'thenP' applies
+   * when the condition is true, 'elseP' when it is false. Handles 'is' /
+   * 'is!' directly and '&&' / '||' compositions. */
+  void collectPromotions(const ExprNode *cond, std::vector<Promotion> &thenP,
+                         std::vector<Promotion> &elseP);
 
 public:
   bool run(const ModuleNode *module, SemaContext &context) override;
@@ -140,6 +157,7 @@ public:
   SemaResult visit(const ContinueNode *node);
   SemaResult visit(const ReturnNode *node);
   SemaResult visit(const CastNode *node);
+  SemaResult visit(const IsExprNode *node);
   SemaResult visit(const ParamDeclNode *node);
   SemaResult visit(const ModuleNode *node);
   SemaResult visit(const UnionDeclNode *node);
@@ -234,6 +252,7 @@ public:
   void visit(const LambdaNode *) {}
   void visit(const FunctionCallNode *node);
   void visit(const CastNode *node);
+  void visit(const IsExprNode *node);
   void visit(const MemberAccessNode *node);
   void visit(const ArraySubscriptNode *node);
   void visit(const ArrayLiteralNode *node);

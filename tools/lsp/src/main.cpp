@@ -229,6 +229,7 @@ public:
     }
   }
   void visit(const CastNode *) {}
+  void visit(const IsExprNode *) {}
   void visit(const NewExprNode *) {}
   void visit(const DeleteExprNode *) {}
   void visit(const DestructorCallNode *) {}
@@ -779,6 +780,29 @@ void handleHover(const json &req) {
             } else {
               hoverText =
                   "```utopia\n" + castNode->targetType->toString() + "\n```";
+            }
+          }
+        }
+      } else if (auto *isNode = llvm::dyn_cast_or_null<IsExprNode>(node)) {
+        if (isNode && isNode->targetType) {
+          std::string hoveredChain;
+          if (!isNode->rawTargetTypeStr.empty()) {
+            hoveredChain = getHoveredTypeComponent(
+                doc.text, isNode->rawTargetTypeStr, isNode->line,
+                isNode->column, line, col);
+          }
+          if (!hoveredChain.empty() && doc.sema) {
+            declTarget = resolveWithCollector(hoveredChain);
+            if (declTarget)
+              hoverText = getHoverTextForDecl(declTarget);
+          }
+          if (hoverText.empty()) {
+            if (auto typeDecl = getTypeDeclaration(isNode->targetType)) {
+              declTarget = typeDecl;
+              hoverText = getHoverTextForDecl(typeDecl);
+            } else {
+              hoverText =
+                  "```utopia\n" + isNode->targetType->toString() + "\n```";
             }
           }
         }
@@ -2889,6 +2913,12 @@ public:
     dispatch(n->falseExpr);
   }
   void visit(const CastNode *n) {
+    dispatch(n->expr);
+    if (!n->rawTargetTypeStr.empty()) {
+      highlightTypeString(n->rawTargetTypeStr, n->line, n->column);
+    }
+  }
+  void visit(const IsExprNode *n) {
     dispatch(n->expr);
     if (!n->rawTargetTypeStr.empty()) {
       highlightTypeString(n->rawTargetTypeStr, n->line, n->column);

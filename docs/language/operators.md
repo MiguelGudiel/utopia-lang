@@ -55,6 +55,54 @@ cond ? a : b
 expr as Type
 ```
 
+### Type tests: `is` and `is!`
+
+`is` evaluates whether an expression can be treated as a given class type — the
+object's dynamic type is `Type` or a subtype of it. `is!` is the negated test:
+
+```utp
+Object obj = getAnimal();       // assume Animal* or similar
+if (obj is Dog) {
+  // true when the object is a Dog or a subclass of Dog
+}
+if (obj is! Cat) {
+  // true when the object is not a Cat (nor a subclass)
+}
+```
+
+Semantics:
+
+- **Compile-time results**: when the static type already decides the answer
+  (`Derived*` with `is Base`, exact type matches, or unrelated types), no
+  runtime code is emitted — the result is constant.
+- **Runtime checks**: when the static type is a polymorphic base of the tested
+  type (or the tested type is an interface the static type may implement), the
+  check walks the object's vtable-based type descriptor chain.
+- `null is T` is always `false`.
+- A runtime check requires a polymorphic class (a class with `@virtual`
+  methods or interfaces); otherwise the compiler reports an error.
+
+#### Type promotion
+
+Like Dart, `is` inside an `if` condition narrows the variable's type for the
+rest of the block — no new variable is needed:
+
+```utp
+void describe(Animal* a) {
+  if (a is Dog) {
+    // Inside this block a is treated as Dog*, so Dog-only members work:
+    print("barks: %s\n", a.makeNoise().c_str());
+  }
+  if (a is! Dog) { ... } else {
+    // In the else of an `is!` test the variable is promoted as well.
+  }
+}
+```
+
+Promotion also flows through `&&` (`if (a is Dog && ...)`) and `||` chains
+(the `else` of `a is! T || ...` promotes), and is invalidated by an assignment
+to the variable inside the block.
+
 ## Operator overloading
 
 Operators are overloaded with `operator<op>` methods on records, or as free functions for operands where neither side is the record.
