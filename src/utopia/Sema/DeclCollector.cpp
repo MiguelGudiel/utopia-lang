@@ -207,6 +207,19 @@ void DeclCollectorPass::visit(const FunctionDeclNode *node) {
       const_cast<FunctionDeclNode *>(node)->declFilePath = ctx->currentFile;
     }
     collectMethodAnnotations(const_cast<FunctionDeclNode *>(node), ctx);
+    /* Templates with '@intrinsic' (e.g. 'hash<T>') keep their intrinsic
+     * name so instantiations lower to the compiler builtin. */
+    for (const auto *ann : node->annotations) {
+      if (ann->name == "intrinsic") {
+        const_cast<FunctionDeclNode *>(node)->isIntrinsic = true;
+        if (!ann->args.empty() && ann->args[0]->kind == NodeKind::String) {
+          const_cast<FunctionDeclNode *>(node)->intrinsicName =
+              static_cast<const StringNode *>(ann->args[0])->value;
+        } else {
+          const_cast<FunctionDeclNode *>(node)->intrinsicName = node->name;
+        }
+      }
+    }
     ctx->templateRegistry[node->name] = node;
     ctx->templateRegistry[node->fqName] = node;
     return;

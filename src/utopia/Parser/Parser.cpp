@@ -3054,6 +3054,41 @@ ExprNode *Parser::parseArrayLiteral() {
   return node;
 }
 
+ExprNode *Parser::parseMapLiteral() {
+  int line = currentToken().line;
+  int col = currentToken().column;
+  advance();
+
+  std::vector<ExprNode *> keys;
+  std::vector<ExprNode *> values;
+  bool hasTrailingComma = false;
+
+  if (currentToken().type != TokenType::RBRACE &&
+      currentToken().type != TokenType::EOF_TOK) {
+    do {
+      if (currentToken().type == TokenType::RBRACE) {
+        hasTrailingComma = true;
+        break;
+      }
+      auto key = parseExpression();
+      expect(TokenType::COLON,
+             "Expected ':' between key and value in map literal");
+      auto value = parseExpression();
+      keys.push_back(key);
+      values.push_back(value);
+    } while (match(TokenType::COMMA));
+  }
+
+  int endCol = currentToken().column + 1;
+  expect(TokenType::RBRACE, "Expected '}' at end of map literal");
+
+  auto node = astCtx.create<MapLiteralNode>(
+      astCtx.copyArray<ExprNode *>(keys), astCtx.copyArray<ExprNode *>(values),
+      line, col, endCol - col);
+  node->hasTrailingComma = hasTrailingComma;
+  return node;
+}
+
 ExprNode *Parser::parseTerm() {
   auto left = parseCast();
   while (currentToken().type == TokenType::STAR ||
@@ -3380,6 +3415,10 @@ ExprNode *Parser::parsePrimary() {
 
   if (currentToken().type == TokenType::LBRACKET) {
     return parseArrayLiteral();
+  }
+
+  if (currentToken().type == TokenType::LBRACE) {
+    return parseMapLiteral();
   }
 
   if (match(TokenType::LPAREN)) {

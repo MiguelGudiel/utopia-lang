@@ -136,6 +136,9 @@ public:
     case NodeKind::ArrayLiteral:
       return static_cast<Derived *>(this)->visit(
           static_cast<const ArrayLiteralNode *>(node));
+    case NodeKind::MapLiteral:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const MapLiteralNode *>(node));
     case NodeKind::New:
       return static_cast<Derived *>(this)->visit(
           static_cast<const NewExprNode *>(node));

@@ -150,6 +150,19 @@ llvm::Type *CodeGen::getLLVMType(const Type *type) {
   } else if (auto *arrTy = llvm::dyn_cast<ArrayType>(type)) {
     return llvm::ArrayType::get(getLLVMType(arrTy->getElementType()),
                                 arrTy->getSize());
+  } else if (auto *mapTy = llvm::dyn_cast<MapLiteralType>(type)) {
+    /* The literal is lowered to two parallel arrays: keys and values. Empty
+     * literals type their key/value as 'void', which LLVM rejects inside an
+     * array type; a zero-length array of i8 is used instead. */
+    auto elemLL = [&](const Type *t) {
+      llvm::Type *lt = getLLVMType(t);
+      return lt->isVoidTy() ? builder.getInt8Ty() : lt;
+    };
+    llvm::Type *keysArr = llvm::ArrayType::get(
+        elemLL(mapTy->getKeyType()), mapTy->getSize());
+    llvm::Type *valuesArr = llvm::ArrayType::get(
+        elemLL(mapTy->getValueType()), mapTy->getSize());
+    return llvm::StructType::get(ctx, {keysArr, valuesArr});
   } else if (auto *rec = llvm::dyn_cast<RecordType>(type)) {
     llvm::StructType *structTy =
         llvm::StructType::getTypeByName(ctx, rec->getName());
@@ -772,6 +785,7 @@ llvm::Value *CodeGen::materializeByValueArg(const ExprNode *arg,
   llvm::Value *src = nullptr;
   lastTemporaryAlloca = nullptr;
   src = getLValue(arg);
+  bool srcOwnsRvalue = false;
   if (!src) {
     llvm::Value *val = dispatch(arg);
     if (lastTemporaryAlloca) {
@@ -780,12 +794,36 @@ llvm::Value *CodeGen::materializeByValueArg(const ExprNode *arg,
     } else if (val) {
       src = createEntryBlockAlloca(val->getType(), "tmp.arg.src");
       createTBAAStore(val, src, arg->exprType);
+      /* The dispatched rvalue (e.g. a call result) owns its storage: after
+       * the copy/move below its buffers must be released. */
+      srcOwnsRvalue = !arg->isLValue;
     }
   }
 
   if (src) {
     llvm::Function *ctorFunc = getOrCreateFunction(copyOrMove);
     builder.CreateCall(ctorFunc, {tmp, src});
+    if (srcOwnsRvalue) {
+      const Type *srcUnqual = arg->exprType->getUnqualifiedType();
+      if (srcUnqual->getKind() == TypeKind::Class ||
+          srcUnqual->getKind() == TypeKind::Struct ||
+          srcUnqual->getKind() == TypeKind::Union) {
+        auto *srcRecTy = static_cast<const RecordType *>(srcUnqual);
+        auto *srcDecl = srcRecTy->getDeclaration();
+        const FunctionDeclNode *srcDtor = nullptr;
+        if (srcDecl) {
+          if (srcDecl->kind == NodeKind::ClassDecl)
+            srcDtor = static_cast<const ClassDeclNode *>(srcDecl)->destructor;
+          else if (srcDecl->kind == NodeKind::StructDecl)
+            srcDtor = static_cast<const StructDeclNode *>(srcDecl)->destructor;
+          else if (srcDecl->kind == NodeKind::UnionDecl)
+            srcDtor = static_cast<const UnionDeclNode *>(srcDecl)->destructor;
+        }
+        if (srcDtor && !srcDtor->isImplicit) {
+          emitCleanupCall(src, srcDtor, arg->exprType);
+        }
+      }
+    }
   }
   /* The by-value argument is transferred to the callee, which owns it and
    * registers the destructor cleanup for the parameter. Do NOT register a
@@ -1231,7 +1269,62 @@ llvm::Value *CodeGen::visit(const ImplicitCastNode *node) {
         return temp;
       }
     }
-  }
+
+    if (unqualTarget->getKind() == TypeKind::Struct &&
+        unqualExpr->getKind() == TypeKind::MapLiteral) {
+      auto *recTy = static_cast<const RecordType *>(unqualTarget);
+      if (recTy->getName().find("MapLiteralView_") !=
+          std::string_view::npos) {
+        auto *mapExpr = static_cast<const MapLiteralType *>(unqualExpr);
+        llvm::Type *llTy = getLLVMType(node->targetType);
+        llvm::AllocaInst *temp = createEntryBlockAlloca(llTy, "llv.tmp");
+        emitDefaultInitialization(temp, node->targetType);
+
+        /* The map literal was lowered to {[N x K], [N x V]}; decay both
+         * arrays to pointers and store them (plus the length) in the view. */
+        llvm::Value *mapPtr = dispatch(node->expr);
+        uint64_t mapSize = mapExpr->getSize();
+        llvm::Type *mapLLTy = getLLVMType(mapExpr);
+
+        auto elemLL = [&](const Type *t) {
+          llvm::Type *lt = getLLVMType(t);
+          return lt->isVoidTy() ? builder.getInt8Ty() : lt;
+        };
+        llvm::Type *keysArrTy = llvm::ArrayType::get(
+            elemLL(mapExpr->getKeyType()), mapSize);
+        llvm::Type *valuesArrTy = llvm::ArrayType::get(
+            elemLL(mapExpr->getValueType()), mapSize);
+
+        llvm::Value *keysField =
+            builder.CreateStructGEP(mapLLTy, mapPtr, 0);
+        llvm::Value *decayedKeys =
+            builder.CreateInBoundsGEP(keysArrTy, keysField,
+                                      {builder.getInt32(0), builder.getInt32(0)});
+        llvm::Value *viewKeys = builder.CreateStructGEP(llTy, temp, 0);
+        builder.CreateStore(decayedKeys, viewKeys);
+
+        llvm::Value *valuesField =
+            builder.CreateStructGEP(mapLLTy, mapPtr, 1);
+        llvm::Value *decayedValues =
+            builder.CreateInBoundsGEP(valuesArrTy, valuesField,
+                                      {builder.getInt32(0), builder.getInt32(0)});
+        llvm::Value *viewValues = builder.CreateStructGEP(llTy, temp, 1);
+        builder.CreateStore(decayedValues, viewValues);
+
+        llvm::Value *lenField = builder.CreateStructGEP(llTy, temp, 2);
+        builder.CreateStore(builder.getInt64(mapSize), lenField);
+
+        if (!node->exprType->isVoid()) {
+          if (node->exprType->isReferenceType() ||
+              node->exprType->getKind() == TypeKind::RValueReference) {
+            return temp;
+          }
+          return createTBAALoad(llTy, temp, node->exprType);
+        }
+        return temp;
+      }
+    }
+  } else {
 
   const Type *objectType = node->targetType;
   if (objectType->isReferenceType()) {
@@ -1270,7 +1363,6 @@ llvm::Value *CodeGen::visit(const ImplicitCastNode *node) {
 
       if (dtor) {
         cgCtx.addCleanup(temp, dtor, objectType);
-        lastTemporaryAlloca = temp;
       }
     }
   }
@@ -1305,6 +1397,12 @@ llvm::Value *CodeGen::visit(const ImplicitCastNode *node) {
   argsArgs.push_back(argVal);
   builder.CreateCall(ctorFunc, argsArgs);
 
+  /* Track this cast's own temporary: 'node->expr' is evaluated above and
+   * may leave a stale temporary from a nested expression (e.g. String
+   * conversions inside a map literal) in lastTemporaryAlloca. Consumers of
+   * getLValue expect it to name the temporary of THE cast itself. */
+  lastTemporaryAlloca = temp;
+
   if (!node->exprType->isVoid()) {
     if (node->exprType->isReferenceType() ||
         node->exprType->getKind() == TypeKind::RValueReference) {
@@ -1314,6 +1412,7 @@ llvm::Value *CodeGen::visit(const ImplicitCastNode *node) {
   }
 
   return temp;
+  }
 }
 
 llvm::Function *CodeGen::getOrCreateGlobalInitFunc() {
@@ -1582,7 +1681,35 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
       std::vector<llvm::Value *> argsArgs;
       argsArgs.push_back(objPtr);
 
-      llvm::Value *idxVal = dispatch(subNode->index);
+      /* By-value struct arguments must be materialized (copy/move-constructed)
+       * like ordinary call arguments: passing the raw value shares the
+       * temporary's storage with the callee's parameter and both destruct it. */
+      bool isRefParam = false;
+      const Type *paramDeclTy = nullptr;
+      if (!subNode->overloadedOperator->params.empty()) {
+        paramDeclTy = subNode->overloadedOperator->params[0]->type;
+        isRefParam = paramDeclTy->isReferenceType() ||
+                     paramDeclTy->getKind() == TypeKind::RValueReference;
+      }
+      llvm::Value *idxVal = nullptr;
+      if (isRefParam) {
+        idxVal = getLValue(subNode->index);
+        if (!idxVal) {
+          llvm::Value *val = dispatch(subNode->index);
+          idxVal = createEntryBlockAlloca(val->getType(), "tmp.op.arg");
+          builder.CreateStore(val, idxVal);
+        }
+      } else {
+        idxVal = paramDeclTy ? materializeByValueArg(subNode->index,
+                                                     paramDeclTy)
+                             : nullptr;
+        if (!idxVal) {
+          lastTemporaryAlloca = nullptr;
+          idxVal = dispatch(subNode->index);
+          lastTemporaryAlloca = nullptr;
+        }
+      }
+
       llvm::Type *paramTy =
           getLLVMType(subNode->overloadedOperator->params[0]->type);
       idxVal = createImplicitCast(idxVal, paramTy);
@@ -3183,6 +3310,7 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
 
         if (isAggregate && node->copyCtor) {
           llvm::Value *rvalAddr = getLValue(node->initializer);
+          bool srcOwnsRvalue = false;
           if (!rvalAddr) {
             /* Map to the underlying temporary object to enable safe moves */
             lastTemporaryAlloca = nullptr;
@@ -3193,6 +3321,9 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
             } else if (initVal) {
               rvalAddr = createEntryBlockAlloca(ty, "tmp.copy.src");
               createTBAAStore(initVal, rvalAddr, node->type);
+              /* A dispatched rvalue (e.g. a call result) owns its storage:
+               * release it after the copy below. */
+              srcOwnsRvalue = !node->initializer->isLValue;
             }
           }
 
@@ -3206,6 +3337,26 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
                                  align);
             llvm::Function *ctorFunc = getOrCreateFunction(node->copyCtor);
             builder.CreateCall(ctorFunc, {alloca, rvalAddr});
+            if (srcOwnsRvalue) {
+              auto *srcRecTy =
+                  static_cast<const RecordType *>(baseUnqualTy);
+              auto *srcDecl = srcRecTy->getDeclaration();
+              const FunctionDeclNode *srcDtor = nullptr;
+              if (srcDecl) {
+                if (srcDecl->kind == NodeKind::ClassDecl)
+                  srcDtor =
+                      static_cast<const ClassDeclNode *>(srcDecl)->destructor;
+                else if (srcDecl->kind == NodeKind::StructDecl)
+                  srcDtor =
+                      static_cast<const StructDeclNode *>(srcDecl)->destructor;
+                else if (srcDecl->kind == NodeKind::UnionDecl)
+                  srcDtor =
+                      static_cast<const UnionDeclNode *>(srcDecl)->destructor;
+              }
+              if (srcDtor && !srcDtor->isImplicit) {
+                emitCleanupCall(rvalAddr, srcDtor, node->type);
+              }
+            }
           } else {
             diags.report({DiagLevel::Error, node->line, node->column,
                           node->length,
@@ -3546,6 +3697,44 @@ llvm::Value *CodeGen::visit(const ArrayLiteralNode *node) {
   emitArrayLiteralInit(tempArr, node->exprType, node);
   return builder.CreateInBoundsGEP(allocTy, tempArr,
                                    {builder.getInt32(0), builder.getInt32(0)});
+}
+
+llvm::Value *CodeGen::visit(const MapLiteralNode *node) {
+  const auto *mapTy = static_cast<const MapLiteralType *>(node->exprType);
+  llvm::Type *allocTy = getLLVMType(node->exprType);
+  llvm::AllocaInst *tempMap = createEntryBlockAlloca(allocTy, "map.literal");
+
+  const Type *keyTy = mapTy->getKeyType();
+  const Type *valTy = mapTy->getValueType();
+  auto elemLL = [&](const Type *t) {
+    llvm::Type *lt = getLLVMType(t);
+    return lt->isVoidTy() ? builder.getInt8Ty() : lt;
+  };
+  llvm::Type *keysArrTy =
+      llvm::ArrayType::get(elemLL(keyTy), mapTy->getSize());
+  llvm::Type *valuesArrTy =
+      llvm::ArrayType::get(elemLL(valTy), mapTy->getSize());
+
+  llvm::Value *keysField = builder.CreateStructGEP(allocTy, tempMap, 0);
+  llvm::Value *valuesField = builder.CreateStructGEP(allocTy, tempMap, 1);
+
+  for (size_t i = 0; i < node->keys.size(); i++) {
+    llvm::Value *keyPtr = builder.CreateInBoundsGEP(
+        keysArrTy, keysField, {builder.getInt32(0), builder.getInt32(i)});
+    llvm::Value *keyVal = dispatch(node->keys[i]);
+    if (keyVal) {
+      keyVal = createImplicitCast(keyVal, getLLVMType(keyTy));
+      createTBAAStore(keyVal, keyPtr, keyTy);
+    }
+    llvm::Value *valPtr = builder.CreateInBoundsGEP(
+        valuesArrTy, valuesField, {builder.getInt32(0), builder.getInt32(i)});
+    llvm::Value *valVal = dispatch(node->values[i]);
+    if (valVal) {
+      valVal = createImplicitCast(valVal, getLLVMType(valTy));
+      createTBAAStore(valVal, valPtr, valTy);
+    }
+  }
+  return tempMap;
 }
 
 llvm::Value *CodeGen::visit(const NullNode *node) {
@@ -4503,25 +4692,69 @@ llvm::Value *CodeGen::visit(const ReturnNode *node) {
         retVal = createImplicitCast(retVal, destTy);
       }
 
-      /* RVO / Return Escape: Prevent local variables and constructed
-       * temporaries from being destroyed if they are being returned by value */
+      /* RVO / Return Escape: a returned local (or temporary) is moved into
+       * an owned return value so ownership transfers without a deep copy,
+       * while the source keeps its cleanup and destructs as a moved-from
+       * object (freeing nothing). Removing the cleanup instead would orphan
+       * the buffers whenever the returned value is deep-copied by an
+       * intermediate caller (e.g. 'return a() + b();'). */
       bool returnEscaped = false;
       if (node->value->kind == NodeKind::Variable) {
         if (llvm::Value *lval = getLValue(node->value)) {
-          cgCtx.removeCleanup(lval);
-          returnEscaped = true;
+          const Type *retUnqual =
+              currentFunc ? currentFunc->returnType->getUnqualifiedType()
+                          : nullptr;
+          if (retUnqual &&
+              (retUnqual->getKind() == TypeKind::Struct ||
+               retUnqual->getKind() == TypeKind::Class ||
+               retUnqual->getKind() == TypeKind::Union)) {
+            if (const FunctionDeclNode *mv =
+                    findCopyOrMoveCtor(retUnqual, true)) {
+              llvm::AllocaInst *owned = createEntryBlockAlloca(
+                  getLLVMType(retUnqual), "ret.owned");
+              emitDefaultInitialization(owned, retUnqual);
+              llvm::Function *mvFunc = getOrCreateFunction(mv);
+              builder.CreateCall(mvFunc, {owned, lval});
+              retVal = builder.CreateLoad(getLLVMType(retUnqual), owned);
+              returnEscaped = true;
+            }
+          }
         }
       } else if (lastTemporaryAlloca) {
-        cgCtx.removeCleanup(lastTemporaryAlloca);
+        /* A temporary (e.g. a cast result): move out of it so ownership
+         * transfers, and keep its cleanup (the moved-from temporary frees
+         * nothing). */
+        const Type *retUnqual =
+            currentFunc ? currentFunc->returnType->getUnqualifiedType()
+                        : nullptr;
+        if (retUnqual &&
+            (retUnqual->getKind() == TypeKind::Struct ||
+             retUnqual->getKind() == TypeKind::Class ||
+             retUnqual->getKind() == TypeKind::Union)) {
+          if (const FunctionDeclNode *mv =
+                  findCopyOrMoveCtor(retUnqual, true)) {
+            llvm::AllocaInst *owned = createEntryBlockAlloca(
+                getLLVMType(retUnqual), "ret.owned");
+            emitDefaultInitialization(owned, retUnqual);
+            llvm::Function *mvFunc = getOrCreateFunction(mv);
+            builder.CreateCall(mvFunc, {owned, lastTemporaryAlloca});
+            retVal = builder.CreateLoad(getLLVMType(retUnqual), owned);
+            returnEscaped = true;
+          }
+        }
+        if (!returnEscaped) {
+          cgCtx.removeCleanup(lastTemporaryAlloca);
+        }
         lastTemporaryAlloca = nullptr;
-        returnEscaped = true;
       }
 
       /* Any other expression (ternaries, calls, ...) yields a value that
        * may share storage with an object destroyed by the scope cleanups
-       * below: deep-copy non-trivially-copyable records into an unowned
-       * temporary so the returned value owns its buffers (the caller's
-       * copy frees them). Escaped values already own their storage. */
+       * below. Rvalues (e.g. call results) OWN their storage: move them so
+       * the buffers are not orphaned. Lvalues (e.g. 'obj.field') may share
+       * storage with a scope object: deep-copy into an unowned temporary so
+       * the returned value owns its buffers and the scope object stays
+       * intact (the caller's copy frees them). */
       if (!returnEscaped) {
         const Type *retUnqual =
             currentFunc ? currentFunc->returnType->getUnqualifiedType()
@@ -4533,11 +4766,26 @@ llvm::Value *CodeGen::visit(const ReturnNode *node) {
           if (!isTriviallyCopyable(retUnqual, visited)) {
             llvm::AllocaInst *owned = createEntryBlockAlloca(
                 getLLVMType(retUnqual), "ret.owned");
-            llvm::AllocaInst *srcTmp = createEntryBlockAlloca(
-                getLLVMType(retUnqual), "ret.owned.src");
-            createTBAAStore(retVal, srcTmp, retUnqual);
-            emitMemberWiseCopy(owned, srcTmp, retUnqual, false);
-            retVal = builder.CreateLoad(getLLVMType(retUnqual), owned);
+            if (!node->value->isLValue) {
+              if (const FunctionDeclNode *mv =
+                      findCopyOrMoveCtor(retUnqual, true)) {
+                llvm::AllocaInst *srcTmp = createEntryBlockAlloca(
+                    getLLVMType(retUnqual), "ret.owned.src");
+                createTBAAStore(retVal, srcTmp, retUnqual);
+                emitDefaultInitialization(owned, retUnqual);
+                llvm::Function *mvFunc = getOrCreateFunction(mv);
+                builder.CreateCall(mvFunc, {owned, srcTmp});
+                retVal = builder.CreateLoad(getLLVMType(retUnqual), owned);
+                returnEscaped = true;
+              }
+            }
+            if (!returnEscaped) {
+              llvm::AllocaInst *srcTmp = createEntryBlockAlloca(
+                  getLLVMType(retUnqual), "ret.owned.src");
+              createTBAAStore(retVal, srcTmp, retUnqual);
+              emitMemberWiseCopy(owned, srcTmp, retUnqual, false);
+              retVal = builder.CreateLoad(getLLVMType(retUnqual), owned);
+            }
           }
         }
       }
@@ -4771,7 +5019,40 @@ llvm::Value *CodeGen::visit(const ArraySubscriptNode *node) {
     std::vector<llvm::Value *> argsArgs;
     argsArgs.push_back(objPtr);
 
-    llvm::Value *idxVal = dispatch(node->index);
+    /* By-value struct arguments must be materialized (copy/move-constructed)
+     * like ordinary call arguments: passing the raw value shares the
+     * temporary's storage with the callee's parameter and both destruct it. */
+    bool isRefParam = false;
+    const Type *paramDeclTy = nullptr;
+    if (!node->overloadedOperator->params.empty()) {
+      paramDeclTy = node->overloadedOperator->params[0]->type;
+      isRefParam = paramDeclTy->isReferenceType() ||
+                   paramDeclTy->getKind() == TypeKind::RValueReference;
+    }
+    llvm::Value *idxVal = nullptr;
+    if (isRefParam) {
+      idxVal = getLValue(node->index);
+      if (!idxVal) {
+        lastTemporaryAlloca = nullptr;
+        llvm::Value *val = dispatch(node->index);
+        if (lastTemporaryAlloca) {
+          idxVal = lastTemporaryAlloca;
+          lastTemporaryAlloca = nullptr;
+        } else if (val) {
+          idxVal = createEntryBlockAlloca(val->getType(), "tmp.op.arg");
+          builder.CreateStore(val, idxVal);
+        }
+      }
+    } else {
+      idxVal = paramDeclTy ? materializeByValueArg(node->index, paramDeclTy)
+                           : nullptr;
+      if (!idxVal) {
+        lastTemporaryAlloca = nullptr;
+        idxVal = dispatch(node->index);
+        lastTemporaryAlloca = nullptr;
+      }
+    }
+
     llvm::Type *paramTy = func->getFunctionType()->getParamType(1);
     idxVal = createImplicitCast(idxVal, paramTy);
     argsArgs.push_back(idxVal);

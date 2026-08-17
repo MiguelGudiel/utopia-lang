@@ -82,6 +82,7 @@ public:
   llvm::Value *visit(const DestructorCallNode *node);
   llvm::Value *visit(const TypeLiteralNode *node);
   llvm::Value *visit(const ArrayLiteralNode *node);
+  llvm::Value *visit(const MapLiteralNode *node);
   llvm::Value *visit(const NullNode *node);
   llvm::Value *visit(const LambdaNode *node);
   llvm::Value *visit(const EnumDeclNode *node);

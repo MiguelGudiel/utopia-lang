@@ -81,6 +81,7 @@ Utopia combines a C/C++-style memory and execution model with a modern, Dart-ins
 
 - **`String`**: construction from any primitive, `+`/`==`/`!=` operators, indexing, `length()`, `c_str()`, `toInt()`/`toFloat()`, `clear()`, `push_back()`
 - **`List<T>`**: dynamic generic list with `push()`, indexing, copy semantics, and array-literal initialization
+- **`Map<K, V>` / `HashMap<K, V>` / `SplayTreeMap<K, V>`**: Dart-style maps with map-literal initialization (`{"key": value}`) — `Map` preserves insertion order (LinkedHashMap, O(1) average lookups), `HashMap` is an unordered open-addressing table, and `SplayTreeMap` keeps keys sorted (O(log n) amortized); all deep-copy on assignment and accept the same literal
 - **`Console`**: `print`, `printLine`, `readLine`, `clear`; global `print(format, ...)` with `printf`-style formatting
 - **`Math`**: numeric limits constants (`INT32_MAX`, `FLOAT64_MIN`, ...)
 - **`Memory`**: `malloc`/`free` bindings and type reflection (`Type`, `MethodInfo`)

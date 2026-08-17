@@ -141,6 +141,42 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
   if (!t)
     return nullptr;
 
+  /* Resolve template instantiations hidden behind reference, const and
+   * pointer wrappers ('const Map<K, V>&'): the instantiated parameter types
+   * of a template class method must compare equal to the record type the
+   * caller passes, otherwise calls between the class's own methods fail
+   * with an unresolved 'Map<String, int32>' vs 'Map_String_int32' mismatch. */
+  if (auto *refTy = llvm::dyn_cast<ReferenceType>(t)) {
+    const Type *pointee = resolveIfTemplate(refTy->getPointeeType());
+    return pointee == refTy->getPointeeType()
+               ? t
+               : ctx->astCtx.getReferenceType(pointee);
+  }
+  if (auto *rvRefTy = llvm::dyn_cast<RValueReferenceType>(t)) {
+    const Type *pointee = resolveIfTemplate(rvRefTy->getPointeeType());
+    return pointee == rvRefTy->getPointeeType()
+               ? t
+               : ctx->astCtx.getRValueReferenceType(pointee);
+  }
+  if (auto *ptrTy = llvm::dyn_cast<PointerType>(t)) {
+    const Type *pointee = resolveIfTemplate(ptrTy->getPointeeType());
+    return pointee == ptrTy->getPointeeType()
+               ? t
+               : ctx->astCtx.getPointerType(pointee);
+  }
+  if (auto *cTy = llvm::dyn_cast<ConstType>(t)) {
+    const Type *base = resolveIfTemplate(cTy->getBaseType());
+    return base == cTy->getBaseType()
+               ? t
+               : ctx->astCtx.getConstType(base);
+  }
+  if (auto *arrTy = llvm::dyn_cast<ArrayType>(t)) {
+    const Type *elem = resolveIfTemplate(arrTy->getElementType());
+    return elem == arrTy->getElementType()
+               ? t
+               : ctx->astCtx.getArrayType(elem, arrTy->getSize());
+  }
+
   /* The parser falls back to a template parameter placeholder when a type
    * name cannot be resolved at parse time (e.g. a cross-module reference
    * whose module is parsed later). At semantic time such placeholders can
@@ -1805,6 +1841,18 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
     else if (auto *typedefDecl = llvm::dyn_cast<TypedefDeclNode>(target))
       repTy = typedefDecl->aliasType;
 
+    /* A template record in value position ('sizeof(_Entry<K, V>)') must
+     * resolve to its instantiation, not the raw template: the raw record's
+     * fields still hold template parameters, which would reach codegen. */
+    if (repTy && !node->templateArgs.empty() &&
+        llvm::isa<RecordType>(repTy->getUnqualifiedType())) {
+      const Type *instTy = ctx->astCtx.getTemplateInstType(
+          static_cast<const RecordType *>(repTy->getUnqualifiedType())
+              ->getName(),
+          node->templateArgs);
+      repTy = resolveIfTemplate(instTy);
+    }
+
     const_cast<VariableNode *>(node)->resolvedDecl = target;
     const_cast<VariableNode *>(node)->representedType = repTy;
     node->exprType = ctx->astCtx.TypeValTy;
@@ -2272,6 +2320,39 @@ SemaResult TypeCheckPass::visit(const BinaryOpNode *node) {
         return ctx->reportError(
             node->line, node->column, node->length,
             "Relational inequalities require numeric operands.");
+      }
+    } else {
+      /* '=='/'!=' on records or arrays requires an overloaded operator:
+       * LLVM cannot lower a struct/array comparison and emitting one would
+       * crash code generation. Enums and primitives compare directly. */
+      auto stripRef = [](const Type *t) {
+        const Type *u = t->getUnqualifiedType();
+        if (u->isReferenceType())
+          return static_cast<const ReferenceType *>(u)
+              ->getPointeeType()
+              ->getUnqualifiedType();
+        if (u->getKind() == TypeKind::RValueReference)
+          return static_cast<const RValueReferenceType *>(u)
+              ->getPointeeType()
+              ->getUnqualifiedType();
+        return u;
+      };
+      const Type *lUnqual = stripRef(*lhs);
+      const Type *rUnqual = stripRef(*rhs);
+      auto needsOverloadedEq = [](const Type *t) {
+        TypeKind k = t->getKind();
+        return k == TypeKind::Struct || k == TypeKind::Class ||
+               k == TypeKind::Union || k == TypeKind::Array;
+      };
+      if ((needsOverloadedEq(lUnqual) || needsOverloadedEq(rUnqual)) &&
+          !opDecl) {
+        return ctx->reportError(
+            node->line, node->column, node->length,
+            "Type '" +
+                (needsOverloadedEq(lUnqual) ? lUnqual->toString()
+                                            : rUnqual->toString()) +
+                "' does not define operator '" + std::string(node->op) +
+                "'; declare an overloaded operator to compare it.");
       }
     }
 
@@ -4646,6 +4727,10 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
 
     for (size_t p = 0; p < expectedParams; ++p) {
       const Type *paramType = fDecl->params[p]->type;
+      /* A not-yet-visited template-class method's parameters may still hold
+       * unresolved template instantiations ('const Map<K, V>&'); resolve
+       * them here so calls between the class's own methods match. */
+      paramType = resolveIfTemplate(paramType);
 
       if (paramType->getKind() == TypeKind::Array) {
         paramType = ctx->astCtx.getPointerType(
@@ -4911,9 +4996,9 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
     emitRValueRefWarnings(bestMatch, bestResolvedArgs);
 
     const_cast<FunctionCallNode *>(node)->isSuperCall = true;
-    node->exprType = bestMatch->effectiveReturnType
+    node->exprType = resolveIfTemplate(bestMatch->effectiveReturnType
                          ? bestMatch->effectiveReturnType
-                         : bestMatch->returnType;
+                         : bestMatch->returnType);
     node->isLValue = node->exprType->isReferenceType();
     return node->exprType;
   }
@@ -5244,9 +5329,10 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
             node->exprType = constructorRecTy;
             node->isLValue = false;
           } else {
-            node->exprType = bestMatch->effectiveReturnType
-                                 ? bestMatch->effectiveReturnType
-                                 : bestMatch->returnType;
+            node->exprType = resolveIfTemplate(
+                bestMatch->effectiveReturnType
+                    ? bestMatch->effectiveReturnType
+                    : bestMatch->returnType);
             node->isLValue = (node->exprType->isReferenceType());
           }
 
@@ -5503,9 +5589,10 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
             return lambdaRes;
           }
 
-          node->exprType = bestMatch->effectiveReturnType
-                               ? bestMatch->effectiveReturnType
-                               : bestMatch->returnType;
+          node->exprType = resolveIfTemplate(
+              bestMatch->effectiveReturnType
+                  ? bestMatch->effectiveReturnType
+                  : bestMatch->returnType);
           node->isLValue = (node->exprType->isReferenceType());
 
           checkDeprecated(bestMatch, node);
@@ -5901,6 +5988,82 @@ SemaResult TypeCheckPass::visit(const ArrayLiteralNode *node) {
       ctx->astCtx.getArrayType(elemType, node->elements.size());
   node->exprType = arrType;
   return arrType;
+}
+
+SemaResult TypeCheckPass::visit(const MapLiteralNode *node) {
+  const Type *keyType = nullptr;
+  const Type *valueType = nullptr;
+  bool hasErrors = false;
+
+  if (node->keys.size() != node->values.size()) {
+    return ctx->reportError(node->line, node->column, node->length,
+                            "Map literal has mismatched keys and values.");
+  }
+
+  auto unifyTypes = [&](const Type *&unified, const Type *candidate,
+                        const ASTNode *at, std::string_view what) {
+    if (!unified) {
+      unified = candidate;
+    } else if (!canImplicitlyCast(candidate, unified)) {
+      if (canImplicitlyCast(unified, candidate)) {
+        unified = candidate;
+      } else {
+        (void)ctx->reportError(at->line, at->column, at->length,
+                               "Map literal " + std::string(what) +
+                                   " type mismatch: '" +
+                                   unified->toString() + "' vs '" +
+                                   candidate->toString() + "'.");
+        hasErrors = true;
+      }
+    }
+  };
+
+  for (size_t i = 0; i < node->keys.size(); i++) {
+    auto keyRes = dispatch(node->keys[i]);
+    if (!keyRes) {
+      hasErrors = true;
+    } else {
+      unifyTypes(keyType, *keyRes, node->keys[i], "key");
+    }
+    auto valRes = dispatch(node->values[i]);
+    if (!valRes) {
+      hasErrors = true;
+    } else {
+      unifyTypes(valueType, *valRes, node->values[i], "value");
+    }
+  }
+
+  if (hasErrors) {
+    return std::unexpected(ErrorInfo{node->line, node->column, node->length,
+                                     "Errors in map literal entries"});
+  }
+
+  if (!keyType) {
+    keyType = ctx->astCtx.VoidTy;
+  }
+  if (!valueType) {
+    valueType = ctx->astCtx.VoidTy;
+  }
+
+  std::vector<ExprNode *> promotedKeys;
+  std::vector<ExprNode *> promotedValues;
+  for (const auto *key : node->keys) {
+    promotedKeys.push_back(
+        performImplicitConversion(const_cast<ExprNode *>(key), keyType));
+  }
+  for (const auto *value : node->values) {
+    promotedValues.push_back(
+        performImplicitConversion(const_cast<ExprNode *>(value), valueType));
+  }
+  const_cast<MapLiteralNode *>(node)->keys =
+      ctx->astCtx.copyArray<ExprNode *>(promotedKeys);
+  const_cast<MapLiteralNode *>(node)->values =
+      ctx->astCtx.copyArray<ExprNode *>(promotedValues);
+
+  const Type *mapType =
+      ctx->astCtx.getMapLiteralType(keyType, valueType, node->keys.size());
+  node->exprType = mapType;
+  return mapType;
 }
 
 SemaResult TypeCheckPass::visit(const ModuleNode *node) {

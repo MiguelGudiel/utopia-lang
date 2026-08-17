@@ -65,6 +65,7 @@ public:
   Piece *visit(const MemberAccessNode *node);
   Piece *visit(const ArraySubscriptNode *node);
   Piece *visit(const ArrayLiteralNode *node);
+  Piece *visit(const MapLiteralNode *node);
   Piece *visit(const NewExprNode *node);
   Piece *visit(const DeleteExprNode *node);
   Piece *visit(const DestructorCallNode *node);

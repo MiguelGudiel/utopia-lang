@@ -94,6 +94,7 @@ private:
 
   std::string consumeComments();
   ExprNode *parseArrayLiteral();
+  ExprNode *parseMapLiteral();
   NamespaceDeclNode *parseNamespaceDecl(bool &isFileScoped);
   UsingNode *parseUsing();
   bool isDeclaration();

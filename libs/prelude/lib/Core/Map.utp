@@ -1,0 +1,442 @@
+import "../Memory/Core.utp";
+export "MapLiteralView.utp";
+
+/* Internal: flat entry with the insertion-order list links (prev/next,
+ * sentinel at index 0) and the bucket chain link. */
+struct _LinkedMapEntry<K, V> {
+  K key;
+  V value;
+  int64 prev;
+  int64 next;
+  int64 chain;
+}
+
+
+/*
+ * Map<K, V> is Utopia's default map: a hash table with LinkedHashMap
+ * semantics, like Dart's Map. Insertion order is preserved (iteration runs
+ * through a doubly-linked list of entries), and lookups are O(1) on average
+ * through a power-of-two bucket table (separate chaining).
+ *
+ * Complexity (n = entries, load factor kept at 3/4):
+ *   - get/set/put/containsKey/remove: O(1) average, O(n) worst case
+ *   - iteration (forEach/keys/values): O(n), in insertion order
+ *   - copy/assignment: O(n) deep copy
+ *
+ * Storage: a single flat array of entries (index 0 is a sentinel that forms
+ * the head/tail of the insertion-order list; live entries are compacted at
+ * indices 1..n on growth, so there is no per-entry allocation) plus a
+ * power-of-two array of bucket heads. Removed entries go to a free list and
+ * are reused by later inserts.
+ *
+ * Keys are compared with '==' and hashed with the prelude's hash<T>, so a
+ * key type must provide an overloaded operator==. Insertions that grow the
+ * table move the entries: like C++'s std::unordered_map, references into
+ * the map are invalidated by inserting elements (until the table stops
+ * growing).
+ */
+class Map<K, V> {
+  RawMemory _entries; /* _LinkedMapEntry<K,V>[]; index 0 = list sentinel */
+  int64 _entryCount;  /* live entries, excluding the sentinel */
+  int64 _entryCap;    /* entries array capacity */
+  RawMemory _buckets; /* int64[] bucket heads; -1 = empty */
+  int64 _bucketMask;  /* buckets capacity - 1 (power of two) */
+  int64 _freeHead;    /* free-list head (holes in the entries array) */
+
+  Map() {
+    this._init();
+  }
+
+  Map(MapLiteralView<K, V> view) {
+    this._init();
+    for (usize i = 0; i < view.length; i++) {
+      this.put(view.keys[i], view.values[i]);
+    }
+  }
+
+  /* Deep copy: keys and values are copy-constructed one by one, so the two
+   * maps never share storage (same semantics as List). */
+  Map(const Map<K, V>& other) {
+    this._init();
+    this._copyFrom(other);
+  }
+
+  ~Map() {
+    this._destroyAll();
+    if (this._entries.ptr != null) {
+      free(this._entries);
+    }
+    if (this._buckets.ptr != null) {
+      free(this._buckets);
+    }
+  }
+
+  void operator=(const Map<K, V>& other) {
+    if (this == &other) return;
+    this._destroyAll();
+    this._copyFrom(other);
+  }
+
+  /* INTERNAL HELPERS */
+
+  void _init() {
+    this._entryCap = 8;
+    this._entries =
+        alloc((this._entryCap as usize) * sizeof(_LinkedMapEntry<K, V>),
+              alignof(_LinkedMapEntry<K, V>));
+    this._entryPtr(0)[0].prev = 0;
+    this._entryPtr(0)[0].next = 0;
+    this._entryCount = 0;
+    this._freeHead = -1;
+    this._bucketMask = 3;
+    this._buckets = alloc((4 as usize) * 8, 8);
+    for (usize i = 0; i < 4; i++) {
+      ((this._buckets.ptr + (i as usize) * 8) as int64*)[0] = -1;
+    }
+  }
+
+  @inline
+  _LinkedMapEntry<K, V>* _entryPtr(int64 i) {
+    return (this._entries.ptr + (i as usize) * sizeof(_LinkedMapEntry<K, V>))
+        as _LinkedMapEntry<K, V>*;
+  }
+
+  @inline
+  int64 _bucketAt(int64 i) {
+    return ((this._buckets.ptr + (i as usize) * 8) as int64*)[0];
+  }
+
+  @inline
+  void _setBucket(int64 i, int64 v) {
+    ((this._buckets.ptr + (i as usize) * 8) as int64*)[0] = v;
+  }
+
+  @inline
+  int64 _hashIdx(K key) {
+    return (hash<K>(key) as int64) & this._bucketMask;
+  }
+
+  /* Index of the entry holding 'key', or -1 when absent. */
+  int64 _findIndex(K key) {
+    int64 e = this._bucketAt(this._hashIdx(key));
+    while (e != -1) {
+      if (this._entryPtr(e)[0].key == key) {
+        return e;
+      }
+      e = this._entryPtr(e)[0].chain;
+    }
+    return -1;
+  }
+
+  /* Doubles the entries array, compacting live entries (linked-list order)
+   * to indices 1..n and resetting the free list, then rebuilds the buckets
+   * for the new indices. */
+  void _growEntries() {
+    int64 newCap = this._entryCap * 2;
+    RawMemory newRaw = alloc((newCap as usize) * sizeof(_LinkedMapEntry<K, V>),
+                             alignof(_LinkedMapEntry<K, V>));
+    _LinkedMapEntry<K, V>* newSent =
+        (newRaw.ptr) as _LinkedMapEntry<K, V>*;
+    newSent[0].prev = 0;
+    newSent[0].next = 0;
+
+    int64 src = this._entryPtr(0)[0].next;
+    int64 dst = 1;
+    while (src != 0) {
+      _LinkedMapEntry<K, V>* s = this._entryPtr(src);
+      _LinkedMapEntry<K, V>* d =
+          (newRaw.ptr + (dst as usize) * sizeof(_LinkedMapEntry<K, V>))
+              as _LinkedMapEntry<K, V>*;
+      _construct<K>(&(d[0].key), s[0].key as K&&);
+      _construct<V>(&(d[0].value), s[0].value as V&&);
+      d[0].prev = dst - 1;
+      d[0].next = dst + 1;
+      d[0].chain = -1;
+      int64 nextSrc = s[0].next;
+      destruct(&(s[0].key));
+      destruct(&(s[0].value));
+      src = nextSrc;
+      dst++;
+    }
+    int64 last = dst - 1;
+    if (last >= 1) {
+      ((newRaw.ptr + (last as usize) * sizeof(_LinkedMapEntry<K, V>))
+           as _LinkedMapEntry<K, V>*)[0]
+          .next = 0;
+      newSent[0].prev = last;
+      newSent[0].next = 1;
+    }
+
+    free(this._entries);
+    this._entries = newRaw;
+    this._entryCap = newCap;
+    this._freeHead = -1;
+    this._rebuildBuckets();
+  }
+
+  /* Rebuilds every bucket chain from the insertion-order list. */
+  void _rebuildBuckets() {
+    for (usize i = 0; i <= (this._bucketMask as usize); i++) {
+      this._setBucket(i as int64, -1);
+    }
+    int64 e = this._entryPtr(0)[0].next;
+    while (e != 0) {
+      int64 h = this._hashIdx(this._entryPtr(e)[0].key);
+      this._entryPtr(e)[0].chain = this._bucketAt(h);
+      this._setBucket(h, e);
+      e = this._entryPtr(e)[0].next;
+    }
+  }
+
+  /* Doubles the bucket table and re-chains every entry. */
+  void _growBuckets() {
+    int64 newMask = this._bucketMask * 2 + 1;
+    RawMemory newBuckets = alloc(((newMask + 1) as usize) * 8, 8);
+    free(this._buckets);
+    this._buckets = newBuckets;
+    this._bucketMask = newMask;
+    this._rebuildBuckets();
+  }
+
+  /* A free entry index (reused holes first, then the next slot after the
+   * compacted live range). */
+  int64 _newSlot() {
+    if (this._freeHead != -1) {
+      int64 e = this._freeHead;
+      this._freeHead = this._entryPtr(e)[0].chain;
+      return e;
+    }
+    if (this._entryCount + 2 > this._entryCap) {
+      this._growEntries();
+    }
+    return this._entryCount + 1;
+  }
+
+  /* Inserts a new entry and links it into the bucket chain and the
+   * insertion-order list. 'key' and 'value' are copy/move-constructed. */
+  void _insertNew(K key, V value) {
+    int64 e = this._newSlot();
+    _construct<K>(&(this._entryPtr(e)[0].key), key);
+    _construct<V>(&(this._entryPtr(e)[0].value), value);
+    this._linkEntry(e);
+  }
+
+  /* Links the entry at index 'e' (already constructed) into the structure. */
+  void _linkEntry(int64 e) {
+    int64 h = this._hashIdx(this._entryPtr(e)[0].key);
+    this._entryPtr(e)[0].chain = this._bucketAt(h);
+    this._setBucket(h, e);
+    int64 last = this._entryPtr(0)[0].prev;
+    this._entryPtr(e)[0].prev = last;
+    this._entryPtr(e)[0].next = 0;
+    this._entryPtr(last)[0].next = e;
+    this._entryPtr(0)[0].prev = e;
+    this._entryCount++;
+    if (this._entryCount * 4 >= (this._bucketMask + 1) * 3) {
+      this._growBuckets();
+    }
+  }
+
+  /* Destructs every live key/value (the free-list holes are already
+   * destructed). */
+  void _destroyAll() {
+    if (this._entries.ptr == null) {
+      return;
+    }
+    int64 e = this._entryPtr(0)[0].next;
+    while (e != 0) {
+      int64 n = this._entryPtr(e)[0].next;
+      destruct(&(this._entryPtr(e)[0].key));
+      destruct(&(this._entryPtr(e)[0].value));
+      e = n;
+    }
+  }
+
+  /* Structural copy of 'other' (keys/values are copy-constructed). */
+  void _copyFrom(const Map<K, V>& other) {
+    if (other._entries.ptr == null) {
+      return;
+    }
+    this._entryCap = other._entryCap;
+    free(this._entries);
+    this._entries =
+        alloc((this._entryCap as usize) * sizeof(_LinkedMapEntry<K, V>),
+              alignof(_LinkedMapEntry<K, V>));
+    this._bucketMask = other._bucketMask;
+    free(this._buckets);
+    this._buckets = alloc(((this._bucketMask + 1) as usize) * 8, 8);
+    for (usize i = 0; i <= (this._bucketMask as usize); i++) {
+      this._setBucket(i as int64, other._bucketAt(i as int64));
+    }
+    this._entryCount = other._entryCount;
+    this._freeHead = other._freeHead;
+
+    for (int64 i = 0; i < other._entryCap; i++) {
+      _LinkedMapEntry<K, V>* s = other._entryPtr(i);
+      _LinkedMapEntry<K, V>* d = this._entryPtr(i);
+      d[0].prev = s[0].prev;
+      d[0].next = s[0].next;
+      d[0].chain = s[0].chain;
+      if (i == 0) {
+        continue;
+      }
+    }
+
+    /* Copy the key/value of every live entry (walk the insertion-order
+     * list): after removals and hole reuse the live entries are not
+     * contiguous, so no slot-range shortcut is valid. */
+    int64 e = other._entryPtr(0)[0].next;
+    while (e != 0) {
+      _LinkedMapEntry<K, V>* s = other._entryPtr(e);
+      _LinkedMapEntry<K, V>* d = this._entryPtr(e);
+      _construct<K>(&(d[0].key), s[0].key);
+      _construct<V>(&(d[0].value), s[0].value);
+      e = s[0].next;
+    }
+  }
+
+  /* PUBLIC API*/
+
+  @inline
+  usize length() {
+    return this._entryCount as usize;
+  }
+
+  @inline
+  bool isEmpty() {
+    return this._entryCount == 0;
+  }
+
+  @inline
+  bool isNotEmpty() {
+    return this._entryCount != 0;
+  }
+
+  /* Indexes 'key', default-constructing and inserting a new entry when it
+   * is absent (like C++'s std::map operator[]). */
+  V& operator[](K key) {
+    int64 e = this._findIndex(key);
+    if (e == -1) {
+      e = this._newSlot();
+      _construct<K>(&(this._entryPtr(e)[0].key), key);
+      this._linkEntry(e);
+      _construct<V>(&(this._entryPtr(e)[0].value));
+    }
+    return this._entryPtr(e)[0].value;
+  }
+
+  /* Inserts 'value' for 'key', replacing any existing value. */
+  void put(K key, V value) {
+    int64 e = this._findIndex(key);
+    if (e != -1) {
+      destruct(&(this._entryPtr(e)[0].value));
+      _construct<V>(&(this._entryPtr(e)[0].value), value);
+      return;
+    }
+    this._insertNew(key, value);
+  }
+
+  /* True when 'key' is present. */
+  bool containsKey(K key) {
+    return this._findIndex(key) != -1;
+  }
+
+  /* True when at least one entry holds a value equal to 'value'. */
+  bool containsValue<T2, T3>(V value) {
+    int64 e = this._entryPtr(0)[0].next;
+    while (e != 0) {
+      if (this._entryPtr(e)[0].value == value) {
+        return true;
+      }
+      e = this._entryPtr(e)[0].next;
+    }
+    return false;
+  }
+
+  /* Removes 'key'; returns whether an entry was removed. */
+  bool remove(K key) {
+    int64 e = this._findIndex(key);
+    if (e == -1) {
+      return false;
+    }
+    int64 h = this._hashIdx(key);
+    int64 prev = -1;
+    int64 cur = this._bucketAt(h);
+    while (cur != -1) {
+      if (cur == e) {
+        if (prev == -1) {
+          this._setBucket(h, this._entryPtr(cur)[0].chain);
+        } else {
+          this._entryPtr(prev)[0].chain = this._entryPtr(cur)[0].chain;
+        }
+        break;
+      }
+      prev = cur;
+      cur = this._entryPtr(cur)[0].chain;
+    }
+    int64 p = this._entryPtr(e)[0].prev;
+    int64 n = this._entryPtr(e)[0].next;
+    this._entryPtr(p)[0].next = n;
+    this._entryPtr(n)[0].prev = p;
+    destruct(&(this._entryPtr(e)[0].key));
+    destruct(&(this._entryPtr(e)[0].value));
+    this._entryPtr(e)[0].chain = this._freeHead;
+    this._freeHead = e;
+    this._entryCount--;
+    return true;
+  }
+
+  /* Removes every entry, keeping the allocated storage for reuse. */
+  void clear() {
+    if (this._entries.ptr == null) {
+      return;
+    }
+    int64 e = this._entryPtr(0)[0].next;
+    while (e != 0) {
+      int64 n = this._entryPtr(e)[0].next;
+      destruct(&(this._entryPtr(e)[0].key));
+      destruct(&(this._entryPtr(e)[0].value));
+      this._entryPtr(e)[0].chain = this._freeHead;
+      this._freeHead = e;
+      e = n;
+    }
+    this._entryPtr(0)[0].prev = 0;
+    this._entryPtr(0)[0].next = 0;
+    this._entryCount = 0;
+    for (usize i = 0; i <= (this._bucketMask as usize); i++) {
+      this._setBucket(i as int64, -1);
+    }
+  }
+
+  /* Runs 'fn' for every entry, in insertion order (Dart semantics). */
+  void forEach(void Function(K, V) fn) {
+    int64 e = this._entryPtr(0)[0].next;
+    while (e != 0) {
+      fn(this._entryPtr(e)[0].key, this._entryPtr(e)[0].value);
+      e = this._entryPtr(e)[0].next;
+    }
+  }
+
+  /* All keys, in insertion order. */
+  List<K> keys() {
+    List<K> result;
+    int64 e = this._entryPtr(0)[0].next;
+    while (e != 0) {
+      result.push(this._entryPtr(e)[0].key);
+      e = this._entryPtr(e)[0].next;
+    }
+    return result;
+  }
+
+  /* All values, in insertion order. */
+  List<V> values() {
+    List<V> result;
+    int64 e = this._entryPtr(0)[0].next;
+    while (e != 0) {
+      result.push(this._entryPtr(e)[0].value);
+      e = this._entryPtr(e)[0].next;
+    }
+    return result;
+  }
+}
+

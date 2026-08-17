@@ -38,6 +38,7 @@ public:
   void visit(const CastNode *n);
   void visit(const VarDeclNode *n);
   void visit(const ArrayLiteralNode *n);
+  void visit(const MapLiteralNode *n);
   void visit(const TypeLiteralNode *n);
 
   void visit(const NumberNode *) {}

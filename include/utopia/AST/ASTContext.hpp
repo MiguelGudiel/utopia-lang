@@ -324,6 +324,21 @@ public:
     return arrTy;
   }
 
+  /* Returns the canonical map-literal type for the given key/value types
+   * and entry count. */
+  const MapLiteralType *getMapLiteralType(const Type *keyType,
+                                          const Type *valueType,
+                                          uint64_t size) {
+    for (const auto *mapTy : mapLiteralTypes) {
+      if (mapTy->getKeyType() == keyType && mapTy->getValueType() == valueType &&
+          mapTy->getSize() == size)
+        return mapTy;
+    }
+    auto *mapTy = create<MapLiteralType>(keyType, valueType, size);
+    mapLiteralTypes.push_back(mapTy);
+    return mapTy;
+  }
+
   const FunctionType *getFunctionType(const Type *ret,
                                       llvm::ArrayRef<const Type *> params) {
     auto *mem = allocator.Allocate<FunctionType>();
@@ -375,6 +390,7 @@ public:
 private:
   llvm::BumpPtrAllocator allocator;
   std::vector<const ArrayType *> arrayTypes;
+  std::vector<const MapLiteralType *> mapLiteralTypes;
   std::unordered_map<const Type *, const PointerType *> pointerTypes;
   std::unordered_map<const Type *, const ReferenceType *> referenceTypes;
   std::unordered_map<const Type *, const RValueReferenceType *>

@@ -626,6 +626,17 @@ Piece *PieceFactory::visit(const ArrayLiteralNode *node) {
                            create<TextPiece>("]"), node->hasTrailingComma);
 }
 
+Piece *PieceFactory::visit(const MapLiteralNode *node) {
+  std::vector<Piece *> entries;
+  for (size_t i = 0; i < node->keys.size(); i++) {
+    entries.push_back(create<ConcatPiece>(std::vector<Piece *>{
+        dispatchExpr(node->keys[i]), create<TextPiece>(": "),
+        dispatchExpr(node->values[i])}));
+  }
+  return create<ListPiece>(create<TextPiece>("{"), std::move(entries),
+                           create<TextPiece>("}"), node->hasTrailingComma);
+}
+
 Piece *PieceFactory::visit(const ArraySubscriptNode *node) {
   return create<ConcatPiece>(
       std::vector<Piece *>{dispatchExpr(node->base), create<TextPiece>("["),

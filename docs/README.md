@@ -40,6 +40,7 @@ This book is organized like the documentation of other systems languages, so you
 | [Overview](stdlib/index.md) | The prelude and `utopia:` modules |
 | [String](stdlib/string.md) | Dynamic string type |
 | [List](stdlib/list.md) | Generic dynamic array |
+| [Map](stdlib/map.md) | `Map`, `HashMap` and `SplayTreeMap` with map literals |
 | [Console](stdlib/console.md) | Terminal I/O and formatted printing |
 | [Math](stdlib/math.md) | Numeric limits |
 | [Memory & Reflection](stdlib/memory.md) | `malloc`/`free` and `sizeof`/`typeof` |

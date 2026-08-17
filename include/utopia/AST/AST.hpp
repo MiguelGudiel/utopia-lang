@@ -42,6 +42,7 @@ enum class NodeKind : uint8_t {
   MemberAccess,
   ArraySubscript,
   ArrayLiteral,
+  MapLiteral,
   New,
   Delete,
   DestructorCall,
@@ -903,6 +904,23 @@ struct ArrayLiteralNode : public ExprNode {
 
   static bool classof(const ASTNode *node) {
     return node->kind == NodeKind::ArrayLiteral;
+  }
+};
+
+struct MapLiteralNode : public ExprNode {
+  llvm::ArrayRef<ExprNode *> keys;
+  llvm::ArrayRef<ExprNode *> values;
+
+  /* Indicates whether the node was parsed with a trailing comma to force
+   * formatting splits. */
+  bool hasTrailingComma = false;
+
+  MapLiteralNode(llvm::ArrayRef<ExprNode *> ks, llvm::ArrayRef<ExprNode *> vs,
+                 int l, int c, int len)
+      : ExprNode(NodeKind::MapLiteral, l, c, len), keys(ks), values(vs) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::MapLiteral;
   }
 };
 

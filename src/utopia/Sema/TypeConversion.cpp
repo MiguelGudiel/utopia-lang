@@ -176,6 +176,105 @@ bool canImplicitlyCast(const Type *from, const Type *to,
         if (recName.ends_with(expectedSuffix)) {
           return true;
         }
+        /* String literals type as 'const uint8*', so '[ "a" ]' only binds to
+         * List<String> by promoting the elements (the view name 'String'
+         * stays unambiguous in the mangled suffix). */
+        if (arrFrom->getElementType()->getUnqualifiedType()->isPointerType()) {
+          const Type *pointee = static_cast<const PointerType *>(
+                                    arrFrom->getElementType()
+                                        ->getUnqualifiedType())
+                                    ->getPointeeType()
+                                    ->getUnqualifiedType();
+          if (pointee->getKind() == TypeKind::Builtin &&
+              static_cast<const BuiltinType *>(pointee)->getBuiltinKind() ==
+                  BuiltinKind::UInt8 &&
+              recName.ends_with(std::string(marker) + "String")) {
+            return true;
+          }
+        }
+      }
+    }
+  }
+
+  /* Implicit MapLiteral to MapLiteralView intrinsic resolution: the literal
+   * '{k1: v1, ...}' converts to 'MapLiteralView<K, V>' (its instantiated
+   * record carries the key/value template arguments). Empty or un-typed
+   * literals bind to any view, mirroring the empty-array rule for
+   * ListLiteralView. String literal keys/values ('const uint8*') promote to
+   * String, and nested literal values (map/array literals) are allowed: the
+   * conversion pass re-types them to the view's K/V. */
+  if (auto *mapFrom = llvm::dyn_cast<MapLiteralType>(unqualFrom)) {
+    if (auto *recTo = llvm::dyn_cast<RecordType>(unqualTo)) {
+      std::string_view recName = recTo->getName();
+      std::string_view marker = "MapLiteralView_";
+      if (recName.find(marker) != std::string_view::npos) {
+        if (mapFrom->getSize() == 0 ||
+            mapFrom->getKeyType()->isVoid() ||
+            mapFrom->getValueType()->isVoid()) {
+          return true;
+        }
+        const Type *viewKeyTy = nullptr;
+        const Type *viewValTy = nullptr;
+        if (recTo->isTemplateInstantiation() &&
+            recTo->getTemplateArgs().size() == 2) {
+          viewKeyTy = recTo->getTemplateArgs()[0]->getUnqualifiedType();
+          viewValTy = recTo->getTemplateArgs()[1]->getUnqualifiedType();
+        }
+        if (!viewKeyTy || !viewValTy) {
+          return false;
+        }
+        auto isStringLiteralType = [](const Type *t) {
+          const Type *u = t->getUnqualifiedType();
+          if (!u->isPointerType())
+            return false;
+          const Type *pointee = static_cast<const PointerType *>(u)
+                                    ->getPointeeType()
+                                    ->getUnqualifiedType();
+          return pointee->getKind() == TypeKind::Builtin &&
+                 static_cast<const BuiltinType *>(pointee)->getBuiltinKind() ==
+                     BuiltinKind::UInt8;
+        };
+        auto isStringType = [](const Type *t) {
+          const Type *u = t->getUnqualifiedType();
+          return (u->getKind() == TypeKind::Struct ||
+                  u->getKind() == TypeKind::Class) &&
+                 static_cast<const RecordType *>(u)->getName() == "String";
+        };
+
+        /* Exact match on both the key and the value. */
+        if (mapFrom->getKeyType()->getUnqualifiedType() == viewKeyTy &&
+            mapFrom->getValueType()->getUnqualifiedType() == viewValTy) {
+          return true;
+        }
+        /* String literal keys/values promote to String. */
+        if (isStringLiteralType(mapFrom->getKeyType()) &&
+            isStringType(viewKeyTy) &&
+            mapFrom->getValueType()->getUnqualifiedType() == viewValTy) {
+          return true;
+        }
+        if (isStringLiteralType(mapFrom->getValueType()) &&
+            isStringType(viewValTy) &&
+            mapFrom->getKeyType()->getUnqualifiedType() == viewKeyTy) {
+          return true;
+        }
+        if (isStringLiteralType(mapFrom->getKeyType()) &&
+            isStringLiteralType(mapFrom->getValueType()) &&
+            isStringType(viewKeyTy) && isStringType(viewValTy)) {
+          return true;
+        }
+        /* Nested map/array literal values convert to the target value type
+         * (e.g. '{1: {"a": 2}}' into Map<int, Map<String, int>>). The key
+         * must match exactly or be a string literal promoting to String. */
+        bool keyMatches = mapFrom->getKeyType()->getUnqualifiedType() ==
+                              viewKeyTy ||
+                          (isStringLiteralType(mapFrom->getKeyType()) &&
+                           isStringType(viewKeyTy));
+        if (keyMatches &&
+            (llvm::isa<MapLiteralType>(mapFrom->getValueType()) ||
+             llvm::isa<ArrayType>(mapFrom->getValueType())) &&
+            viewValTy->getUnqualifiedType()->getKind() == TypeKind::Class) {
+          return true;
+        }
       }
     }
   }
@@ -267,7 +366,12 @@ bool canImplicitlyCast(const Type *from, const Type *to,
   }
 
   if (unqualFrom == unqualTo) {
-    if (!baseFrom->isConstQualified() || baseTo->isConstQualified())
+    /* By-value targets copy their argument, so a const-qualified source may
+     * pass through (the copy drops const safely, like C++). Only binding to
+     * a mutable reference would let the callee mutate the source. */
+    bool toIsRef = baseTo->isReferenceType() ||
+                   baseTo->getKind() == TypeKind::RValueReference;
+    if (!toIsRef || !baseFrom->isConstQualified() || baseTo->isConstQualified())
       return true;
   }
 
@@ -519,6 +623,115 @@ ExprNode *TypeCheckPass::performImplicitConversion(ExprNode *expr,
   if (llvm::isa<ArrayType>(unqualFrom)) {
     if (auto *recTo = llvm::dyn_cast<RecordType>(unqualTo)) {
       if (recTo->getName().find("ListLiteralView_") != std::string_view::npos) {
+        const Type *elemTy = static_cast<const ArrayType *>(unqualFrom)
+                                 ->getElementType();
+        const Type *viewTy = nullptr;
+        if (recTo->getName().ends_with("ListLiteralView_String") &&
+            elemTy->getUnqualifiedType()->isPointerType()) {
+          const Type *pointee = static_cast<const PointerType *>(
+                                    elemTy->getUnqualifiedType())
+                                    ->getPointeeType()
+                                    ->getUnqualifiedType();
+          if (pointee->getKind() == TypeKind::Builtin &&
+              static_cast<const BuiltinType *>(pointee)->getBuiltinKind() ==
+                  BuiltinKind::UInt8) {
+            viewTy = ctx->astCtx.getRecordType("String");
+          }
+        }
+        if (viewTy) {
+          /* Promote string literal elements to String so the literal is
+           * laid out as String storage (string literals type as
+           * 'const uint8*'). */
+          auto *lit = const_cast<ArrayLiteralNode *>(
+              static_cast<const ArrayLiteralNode *>(expr));
+          std::vector<ExprNode *> promoted;
+          for (const auto *elem : lit->elements) {
+            promoted.push_back(performImplicitConversion(
+                const_cast<ExprNode *>(elem), viewTy));
+          }
+          lit->elements = ctx->astCtx.copyArray<ExprNode *>(promoted);
+          lit->exprType = ctx->astCtx.getArrayType(
+              viewTy, lit->elements.size());
+        }
+        auto *castNode = ctx->astCtx.create<ImplicitCastNode>(
+            expr, to, nullptr, expr->line, expr->column, expr->length);
+        castNode->exprType = to;
+        castNode->isLValue = false;
+        return castNode;
+      }
+    }
+  }
+
+  /* Intercept MapLiteral to MapLiteralView intrinsic conversion */
+  if (llvm::isa<MapLiteralType>(unqualFrom)) {
+    if (auto *recTo = llvm::dyn_cast<RecordType>(unqualTo)) {
+      if (recTo->getName().find("MapLiteralView_") != std::string_view::npos) {
+        auto *mapLit = static_cast<const MapLiteralType *>(unqualFrom);
+        const Type *keyTy = mapLit->getKeyType();
+        const Type *valTy = mapLit->getValueType();
+        const Type *strTy = ctx->astCtx.getRecordType("String");
+        auto isStringLiteralType = [](const Type *t) {
+          const Type *u = t->getUnqualifiedType();
+          if (!u->isPointerType())
+            return false;
+          const Type *pointee = static_cast<const PointerType *>(u)
+                                    ->getPointeeType()
+                                    ->getUnqualifiedType();
+          return pointee->getKind() == TypeKind::Builtin &&
+                 static_cast<const BuiltinType *>(pointee)->getBuiltinKind() ==
+                     BuiltinKind::UInt8;
+        };
+
+        const Type *viewKeyTy = nullptr;
+        const Type *viewValTy = nullptr;
+        if (recTo->isTemplateInstantiation() &&
+            recTo->getTemplateArgs().size() == 2) {
+          viewKeyTy = recTo->getTemplateArgs()[0]->getUnqualifiedType();
+          viewValTy = recTo->getTemplateArgs()[1]->getUnqualifiedType();
+        }
+
+        bool retypeKeys = false;
+        bool retypeValues = false;
+        if (viewKeyTy && viewValTy) {
+          if (keyTy->getUnqualifiedType() != viewKeyTy &&
+              isStringLiteralType(keyTy) && viewKeyTy == strTy) {
+            retypeKeys = true;
+          }
+          if (valTy->getUnqualifiedType() != viewValTy) {
+            if (isStringLiteralType(valTy) && viewValTy == strTy) {
+              retypeValues = true;
+            } else if (llvm::isa<MapLiteralType>(valTy) ||
+                       llvm::isa<ArrayType>(valTy)) {
+              /* Nested literal value ('{"a": {"b": 1}}'): convert each
+               * value expression to the target value type. */
+              retypeValues = true;
+            }
+          }
+        }
+
+        if (retypeKeys || retypeValues) {
+          auto *lit = const_cast<MapLiteralNode *>(
+              static_cast<const MapLiteralNode *>(expr));
+          if (retypeKeys) {
+            std::vector<ExprNode *> promotedKeys;
+            for (const auto *key : lit->keys) {
+              promotedKeys.push_back(performImplicitConversion(
+                  const_cast<ExprNode *>(key), viewKeyTy));
+            }
+            lit->keys = ctx->astCtx.copyArray<ExprNode *>(promotedKeys);
+          }
+          if (retypeValues) {
+            std::vector<ExprNode *> promotedValues;
+            for (const auto *value : lit->values) {
+              promotedValues.push_back(performImplicitConversion(
+                  const_cast<ExprNode *>(value), viewValTy));
+            }
+            lit->values = ctx->astCtx.copyArray<ExprNode *>(promotedValues);
+          }
+          lit->exprType = ctx->astCtx.getMapLiteralType(
+              retypeKeys ? viewKeyTy : keyTy,
+              retypeValues ? viewValTy : valTy, lit->keys.size());
+        }
         auto *castNode = ctx->astCtx.create<ImplicitCastNode>(
             expr, to, nullptr, expr->line, expr->column, expr->length);
         castNode->exprType = to;

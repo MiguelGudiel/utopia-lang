@@ -27,6 +27,11 @@ void Intrinsic::emitCleanupCall(CodeGen &cg, llvm::Value *ptr,
   cg.emitCleanupCall(ptr, dtor);
 }
 
+llvm::AllocaInst *Intrinsic::createEntryBlockAlloca(
+    CodeGen &cg, llvm::Type *type, const std::string &varName) const {
+  return cg.createEntryBlockAlloca(type, varName);
+}
+
 
 class SizeofTypeIntrinsic : public Intrinsic {
 public:
@@ -615,6 +620,143 @@ public:
   }
 };
 
+/* hash<T>(value): deterministic content hash used by HashMap/Map (like
+ * Dart's Object.hashCode). String hashes its buffer bytes; 'const uint8*'
+ * (string literal) hashes the null-terminated content; every other type
+ * hashes its raw in-memory bytes (sizeof(T)). The value is copied into a
+ * temporary and hashed through a byte pointer, so no type-specific
+ * lowering is needed. FNV-1a 64-bit. */
+class HashExprIntrinsic : public Intrinsic {
+public:
+  llvm::Value *evaluateRuntime(CodeGen &cg,
+                               const FunctionCallNode *node) const override {
+    if (node->args.size() != 1)
+      return nullptr;
+
+    llvm::IRBuilder<> &b = getBuilder(cg);
+    llvm::Module &mod = getModule(cg);
+
+    const Type *argTy = node->args[0]->exprType;
+    if (!argTy)
+      return nullptr;
+    const Type *unqual = argTy->getUnqualifiedType();
+    if (unqual->isReferenceType())
+      unqual = static_cast<const ReferenceType *>(unqual)
+                   ->getPointeeType()
+                   ->getUnqualifiedType();
+    else if (unqual->getKind() == TypeKind::RValueReference)
+      unqual = static_cast<const RValueReferenceType *>(unqual)
+                   ->getPointeeType()
+                   ->getUnqualifiedType();
+
+    llvm::Value *val = cg.dispatch(node->args[0]);
+    if (!val)
+      return nullptr;
+
+    llvm::Value *dataPtr = nullptr;
+    llvm::Value *len = nullptr;
+
+    const Type *pointeeTy = nullptr;
+    if (unqual->isPointerType()) {
+      const Type *p = static_cast<const PointerType *>(unqual)
+                          ->getPointeeType()
+                          ->getUnqualifiedType();
+      if (p->getKind() == TypeKind::Builtin &&
+          static_cast<const BuiltinType *>(p)->getBuiltinKind() ==
+              BuiltinKind::UInt8)
+        pointeeTy = p;
+    }
+
+    bool isString = (unqual->getKind() == TypeKind::Class ||
+                     unqual->getKind() == TypeKind::Struct) &&
+                    static_cast<const RecordType *>(unqual)->getName() ==
+                        "String";
+
+    if (isString) {
+      /* String { uint8* data; usize len; usize cap }: hash data[0..len). */
+      llvm::Type *llTy = getLLVMType(cg, unqual);
+      llvm::AllocaInst *tmp = createEntryBlockAlloca(cg, llTy, "hash.str.tmp");
+      b.CreateStore(val, tmp);
+      llvm::Value *dataField = b.CreateStructGEP(llTy, tmp, 0);
+      llvm::Value *lenField = b.CreateStructGEP(llTy, tmp, 1);
+      dataPtr = b.CreateLoad(b.getPtrTy(), dataField, "hash.str.data");
+      len = b.CreateLoad(b.getInt64Ty(), lenField, "hash.str.len");
+    } else if (pointeeTy) {
+      /* C string: hash until the terminating null. */
+      llvm::AllocaInst *tmp = createEntryBlockAlloca(cg, b.getPtrTy(),
+                                                        "hash.cstr.tmp");
+      b.CreateStore(val, tmp);
+      dataPtr = b.CreateLoad(b.getPtrTy(), tmp, "hash.cstr.ptr");
+      llvm::Function *fn = b.GetInsertBlock()->getParent();
+      llvm::BasicBlock *entryBB = b.GetInsertBlock();
+      llvm::BasicBlock *lenLoop =
+          llvm::BasicBlock::Create(mod.getContext(), "hash.lenloop", fn);
+      llvm::BasicBlock *lenExit =
+          llvm::BasicBlock::Create(mod.getContext(), "hash.lenexit", fn);
+      llvm::Value *i0 = b.getInt64(0);
+      b.CreateBr(lenLoop);
+      b.SetInsertPoint(lenLoop);
+      llvm::PHINode *phiI = b.CreatePHI(b.getInt64Ty(), 2, "i");
+      phiI->addIncoming(i0, entryBB);
+      llvm::Value *bytePtr = b.CreateInBoundsGEP(b.getInt8Ty(), dataPtr, phiI);
+      llvm::Value *byte = b.CreateLoad(b.getInt8Ty(), bytePtr, "c");
+      llvm::Value *nextI = b.CreateAdd(phiI, b.getInt64(1));
+      llvm::Value *done = b.CreateICmpEQ(byte, b.getInt8(0));
+      b.CreateCondBr(done, lenExit, lenLoop);
+      phiI->addIncoming(nextI, lenLoop);
+      b.SetInsertPoint(lenExit);
+      len = phiI;
+    } else {
+      /* Raw bytes: hash sizeof(T) bytes of the value's representation. */
+      llvm::Type *llTy = getLLVMType(cg, unqual);
+      llvm::AllocaInst *tmp = createEntryBlockAlloca(cg, llTy, "hash.tmp");
+      b.CreateStore(val, tmp);
+      dataPtr = b.CreateBitCast(tmp, b.getPtrTy());
+      uint64_t size = mod.getDataLayout().getTypeAllocSize(llTy);
+      len = b.getInt64(size);
+    }
+
+    /* FNV-1a 64: h = offset_basis; for each byte: h = (h ^ byte) * prime. */
+    constexpr uint64_t fnvOffsetBasis = 14695981039346656037ull;
+    constexpr uint64_t fnvPrime = 1099511628211ull;
+
+    llvm::Function *fn = b.GetInsertBlock()->getParent();
+    llvm::BasicBlock *entryBB = b.GetInsertBlock();
+    llvm::BasicBlock *loopBB =
+        llvm::BasicBlock::Create(mod.getContext(), "hash.loop", fn);
+    llvm::BasicBlock *exitBB =
+        llvm::BasicBlock::Create(mod.getContext(), "hash.exit", fn);
+
+    llvm::Value *h0 = b.getInt64(fnvOffsetBasis);
+    llvm::Value *i0 = b.getInt64(0);
+    b.CreateBr(loopBB);
+    b.SetInsertPoint(loopBB);
+    llvm::PHINode *phiH = b.CreatePHI(b.getInt64Ty(), 2, "h");
+    phiH->addIncoming(h0, entryBB);
+    llvm::PHINode *phiI = b.CreatePHI(b.getInt64Ty(), 2, "i");
+    phiI->addIncoming(i0, entryBB);
+    llvm::Value *bytePtr = b.CreateInBoundsGEP(b.getInt8Ty(), dataPtr, phiI);
+    llvm::Value *byte = b.CreateLoad(b.getInt8Ty(), bytePtr, "hash.byte");
+    llvm::Value *byte64 = b.CreateZExt(byte, b.getInt64Ty());
+    llvm::Value *mixed = b.CreateXor(phiH, byte64);
+    llvm::Value *nextH = b.CreateMul(mixed, b.getInt64(fnvPrime));
+    llvm::Value *nextI = b.CreateAdd(phiI, b.getInt64(1));
+    llvm::Value *more = b.CreateICmpULT(nextI, len);
+    b.CreateCondBr(more, loopBB, exitBB);
+    phiH->addIncoming(nextH, loopBB);
+    phiI->addIncoming(nextI, loopBB);
+    b.SetInsertPoint(exitBB);
+    llvm::PHINode *result = b.CreatePHI(b.getInt64Ty(), 1, "hash");
+    result->addIncoming(nextH, loopBB);
+    return result;
+  }
+
+  llvm::Constant *
+  evaluateConstant(CodeGen &cg, const FunctionCallNode *node) const override {
+    return nullptr;
+  }
+};
+
 IntrinsicRegistry::IntrinsicRegistry() {
   registerIntrinsic("sizeof_type", std::make_unique<SizeofTypeIntrinsic>());
   registerIntrinsic("sizeof_expr", std::make_unique<SizeofExprIntrinsic>());
@@ -626,6 +768,7 @@ IntrinsicRegistry::IntrinsicRegistry() {
   registerIntrinsic("memory_free", std::make_unique<MemoryFreeIntrinsic>());
   registerIntrinsic("memory_destruct",
                     std::make_unique<MemoryDestructIntrinsic>());
+  registerIntrinsic("hash_expr", std::make_unique<HashExprIntrinsic>());
   registerIntrinsic("future_value", std::make_unique<FutureValueIntrinsic>());
   registerIntrinsic("future_then", std::make_unique<FutureThenIntrinsic>());
   registerIntrinsic("future_runOnThread",

@@ -10,6 +10,9 @@ Utopia ships two layers of standard library:
 | --- | --- |
 | `String.utp` | The `String` type |
 | `Core/List.utp` | `List<T>`, `ListLiteralView<T>` |
+| `Core/Map.utp` | `Map<K, V>` (LinkedHashMap), `MapLiteralView<K, V>`, `hash<T>` |
+| `Core/HashMap.utp` | `HashMap<K, V>` (unordered hash table) |
+| `Core/SplayTreeMap.utp` | `SplayTreeMap<K, V>` (sorted by key) |
 | `IO/Console.utp` | `Console` class and the global `print` |
 | `Math/Limits.utp` | Numeric limits constants |
 | `Memory/Core.utp` | `malloc`/`free`, `Type` reflection, `sizeof`/`typeof` intrinsics |

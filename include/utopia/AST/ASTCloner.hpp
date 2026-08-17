@@ -44,6 +44,7 @@ public:
   ASTNode *visit(const AwaitExprNode *n);
   ASTNode *visit(const AssignNode *n);
   ASTNode *visit(const ArrayLiteralNode *n);
+  ASTNode *visit(const MapLiteralNode *n);
   ASTNode *visit(const ArraySubscriptNode *n);
   ASTNode *visit(const MemberAccessNode *n);
   ASTNode *visit(const FunctionCallNode *n);

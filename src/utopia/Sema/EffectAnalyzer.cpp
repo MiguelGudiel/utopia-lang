@@ -219,4 +219,11 @@ void EffectAnalyzer::visit(const ArrayLiteralNode *n) {
     dispatch(e);
 }
 
+void EffectAnalyzer::visit(const MapLiteralNode *n) {
+  for (auto *k : n->keys)
+    dispatch(k);
+  for (auto *v : n->values)
+    dispatch(v);
+}
+
 } // namespace utopia

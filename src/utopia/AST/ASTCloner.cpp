@@ -35,6 +35,11 @@ const Type *ASTCloner::cloneType(const Type *t) {
     auto *arr = static_cast<const ArrayType *>(t);
     return ctx.getArrayType(cloneType(arr->getElementType()), arr->getSize());
   }
+  case TypeKind::MapLiteral: {
+    auto *map = static_cast<const MapLiteralType *>(t);
+    return ctx.getMapLiteralType(cloneType(map->getKeyType()),
+                                 cloneType(map->getValueType()), map->getSize());
+  }
   case TypeKind::Function: {
     auto *f = static_cast<const FunctionType *>(t);
     std::vector<const Type *> pTypes;
@@ -154,6 +159,14 @@ ASTNode *ASTCloner::visit(const AssignNode *n) {
 ASTNode *ASTCloner::visit(const ArrayLiteralNode *n) {
   auto *node = ctx.create<ArrayLiteralNode>(cloneArray(n->elements), n->line,
                                             n->column, n->length);
+  node->hasTrailingComma = n->hasTrailingComma;
+  return node;
+}
+
+ASTNode *ASTCloner::visit(const MapLiteralNode *n) {
+  auto *node = ctx.create<MapLiteralNode>(cloneArray(n->keys),
+                                          cloneArray(n->values), n->line,
+                                          n->column, n->length);
   node->hasTrailingComma = n->hasTrailingComma;
   return node;
 }

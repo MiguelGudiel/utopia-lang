@@ -25,6 +25,7 @@ enum class TypeKind {
   Class,
   Union,
   Array,
+  MapLiteral,
   Function,
   Alias,
   Enum,
@@ -161,6 +162,28 @@ public:
   uint64_t getSize() const { return size; }
 
   static bool classof(const Type *t) { return t->getKind() == TypeKind::Array; }
+};
+
+/* The compiler-internal type of a '{k: v, ...}' literal. It carries the
+ * unified key/value types and the entry count so the literal can be lowered
+ * to two parallel arrays (keys and values) that back a MapLiteralView<K, V>.
+ * Like ArrayType, it only exists at expression level: there is no storage of
+ * MapLiteral type. */
+class MapLiteralType : public Type {
+  const Type *keyType;
+  const Type *valueType;
+  uint64_t size;
+
+public:
+  explicit MapLiteralType(const Type *k, const Type *v, uint64_t sz)
+      : Type(TypeKind::MapLiteral), keyType(k), valueType(v), size(sz) {}
+  const Type *getKeyType() const { return keyType; }
+  const Type *getValueType() const { return valueType; }
+  uint64_t getSize() const { return size; }
+
+  static bool classof(const Type *t) {
+    return t->getKind() == TypeKind::MapLiteral;
+  }
 };
 
 class RecordType : public Type {
@@ -421,6 +444,12 @@ inline std::string Type::toString() const {
            "[" +
            std::to_string(static_cast<const ArrayType *>(this)->getSize()) +
            "]";
+  }
+  if (kind == TypeKind::MapLiteral) {
+    auto *m = static_cast<const MapLiteralType *>(this);
+    return m->getKeyType()->toString() + " -> " +
+           m->getValueType()->toString() + "[" +
+           std::to_string(m->getSize()) + "]";
   }
   if (kind == TypeKind::Enum) {
     return std::string(static_cast<const EnumType *>(this)->getName());

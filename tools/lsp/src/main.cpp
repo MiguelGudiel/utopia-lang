@@ -215,6 +215,7 @@ public:
   void visit(const BinaryOpNode *) {}
   void visit(const TernaryOpNode *) {}
   void visit(const ArrayLiteralNode *) {}
+  void visit(const MapLiteralNode *) {}
   void visit(const ArraySubscriptNode *) {}
   void visit(const MemberAccessNode *) {}
   void visit(const FunctionCallNode *) {}
@@ -2899,6 +2900,12 @@ public:
   void visit(const ArrayLiteralNode *n) {
     for (auto *e : n->elements)
       dispatch(e);
+  }
+  void visit(const MapLiteralNode *n) {
+    for (auto *k : n->keys)
+      dispatch(k);
+    for (auto *v : n->values)
+      dispatch(v);
   }
   void visit(const NewExprNode *n) {
     if (!n->rawAllocatedTypeStr.empty()) {

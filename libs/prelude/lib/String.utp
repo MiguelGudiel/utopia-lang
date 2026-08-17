@@ -225,6 +225,28 @@ class String {
     return !(*this == str);
   }
 
+  /* Lexicographic ordering (used by SplayTreeMap and sorting). */
+  bool operator<(const String& other) {
+    usize n = this.len < other.len ? this.len : other.len;
+    for (usize i = 0; i < n; i++) {
+      if (this.data[i] < other.data[i]) return true;
+      if (this.data[i] > other.data[i]) return false;
+    }
+    return this.len < other.len;
+  }
+
+  bool operator>(const String& other) {
+    return other < *this;
+  }
+
+  bool operator<=(const String& other) {
+    return !(other < *this);
+  }
+
+  bool operator>=(const String& other) {
+    return !(*this < other);
+  }
+
   String operator+(const String& other) {
     String result;
     result.len = this.len + other.len;

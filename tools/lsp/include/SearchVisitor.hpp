@@ -211,6 +211,16 @@ public:
     return isHit(n) ? n : nullptr;
   }
 
+  const ASTNode *visit(const MapLiteralNode *n) {
+    for (auto *k : n->keys)
+      if (auto found = find(k))
+        return found;
+    for (auto *v : n->values)
+      if (auto found = find(v))
+        return found;
+    return isHit(n) ? n : nullptr;
+  }
+
   const ASTNode *visit(const NewExprNode *n) {
     if (n->arraySize)
       if (auto found = find(n->arraySize))

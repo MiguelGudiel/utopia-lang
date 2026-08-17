@@ -399,6 +399,15 @@ void ControlFlowPass::visit(const ArrayLiteralNode *node) {
   }
 }
 
+void ControlFlowPass::visit(const MapLiteralNode *node) {
+  for (auto *key : node->keys) {
+    dispatch(key);
+  }
+  for (auto *value : node->values) {
+    dispatch(value);
+  }
+}
+
 void ControlFlowPass::visit(const NewExprNode *node) {
   if (node->arraySize)
     dispatch(node->arraySize);

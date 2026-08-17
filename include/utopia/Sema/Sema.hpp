@@ -83,6 +83,7 @@ public:
   void visit(const MemberAccessNode *) {}
   void visit(const ArraySubscriptNode *) {}
   void visit(const ArrayLiteralNode *) {}
+  void visit(const MapLiteralNode *) {}
   void visit(const NewExprNode *) {}
   void visit(const DeleteExprNode *) {}
   void visit(const DestructorCallNode *) {}
@@ -150,6 +151,7 @@ public:
   SemaResult visit(const AnnotationNode *node);
   SemaResult visit(const ArraySubscriptNode *node);
   SemaResult visit(const ArrayLiteralNode *node);
+  SemaResult visit(const MapLiteralNode *node);
   SemaResult visit(const NewExprNode *node);
   SemaResult visit(const DeleteExprNode *node);
   SemaResult visit(const DestructorCallNode *node);
@@ -235,6 +237,7 @@ public:
   void visit(const MemberAccessNode *node);
   void visit(const ArraySubscriptNode *node);
   void visit(const ArrayLiteralNode *node);
+  void visit(const MapLiteralNode *node);
   void visit(const NewExprNode *node);
   void visit(const DeleteExprNode *node);
   void visit(const DestructorCallNode *node);

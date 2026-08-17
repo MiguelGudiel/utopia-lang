@@ -1,0 +1,44 @@
+/*
+ * Map literals and the three map types: Map (LinkedHashMap, insertion
+ * order), HashMap (unordered, fastest lookups) and SplayTreeMap (sorted by
+ * key). All of them accept the same '{key: value}' literal.
+ */
+int main() {
+  /* Map: insertion order is preserved (Dart's LinkedHashMap semantics). */
+  Map<String, int> scores = {"miguel": 9001, "ada": 42, "grace": 1337};
+  scores.put("linus", 8086);
+  scores["ada"]++;
+  print("scores len: %llu, ada: %d\n", scores.length(), scores["ada"]);
+
+  List<String> order = scores.keys();
+  print("insertion order: %s %s %s %s\n",
+        order[0].c_str(), order[1].c_str(), order[2].c_str(), order[3].c_str());
+
+  scores.forEach((name, score) {
+    print("  %s -> %d\n", name.c_str(), score);
+  });
+
+  /* HashMap: same literal, no order guarantees, fastest average lookups. */
+  HashMap<int, String> byId = {1: "one", 2: "two", 3: "three"};
+  byId.remove(2);
+  print("byId has 1: %d, has 2: %d\n", byId.containsKey(1), byId.containsKey(2));
+
+  /* SplayTreeMap: keys are kept sorted via operator<. */
+  SplayTreeMap<String, int> leaderboard = {"bob": 5, "ada": 10, "zoe": 3};
+  List<String> rank = leaderboard.keys();
+  print("sorted keys: %s %s %s\n", rank[0].c_str(), rank[1].c_str(), rank[2].c_str());
+
+  /* Nested literals and map values. */
+  Map<String, Map<String, int>> config = {
+    "audio": {"volume": 80, "sampleRate": 48000},
+    "video": {"width": 1920, "height": 1080}
+  };
+  print("config: %d x %d\n",
+        config["video"]["width"], config["video"]["height"]);
+
+  /* Deep-copy semantics: copies never share storage. */
+  Map<String, int> backup = scores;
+  scores.put("newcomer", 1);
+  print("backup len: %llu (scores: %llu)\n", backup.length(), scores.length());
+  return 0;
+}
