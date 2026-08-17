@@ -18,6 +18,7 @@ struct GlobalOptions {
   std::string stdlibRoot;
   std::string preludeRoot;
   std::string buildLibRoot;
+  std::string compilerId;
   std::vector<std::string> cliMacros;
 };
 

@@ -1,5 +1,6 @@
 #include "Commands/Build/BuildCommand.hpp"
 #include "CLI/OptionsParser.hpp"
+#include "Core/ArtifactCache.hpp"
 #include "Core/ProjectBuilder.hpp"
 #include "ProjectManager.hpp"
 #include <iostream>
@@ -26,6 +27,7 @@ int BuildCommand::execute(const std::vector<std::string> &args,
   }
 
   OptionsParser::resolveStandardPaths(executablePath, projRoot, globalOpts);
+  globalOpts.compilerId = ArtifactCache::computeCompilerId(executablePath);
 
   CompileOptions dummyOptions;
   if (!buildProject(projRoot, dummyOptions, false, "", globalOpts)) {

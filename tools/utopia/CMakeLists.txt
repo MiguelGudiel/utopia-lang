@@ -10,6 +10,7 @@ set(CLI_SOURCES
     src/Commands/Yip/YipCommand.cpp
     src/Network/HttpClient.cpp
     src/Core/EnvLoader.cpp
+    src/Core/ArtifactCache.cpp
 )
 
 add_executable(utopia ${CLI_SOURCES})
