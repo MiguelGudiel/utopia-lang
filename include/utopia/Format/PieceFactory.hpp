@@ -6,6 +6,11 @@
 
 namespace utopia {
 
+/* Tracks the contents of a nested tree of argument lists and collection
+ * literals to determine which should be eagerly split. Defined in
+ * PieceFactory.cpp. */
+struct ExpressionContents;
+
 class PieceFactory : public ASTVisitor<PieceFactory, Piece *> {
 public:
   std::vector<std::unique_ptr<Piece>> arena;
@@ -18,12 +23,47 @@ public:
     return raw;
   }
 
-  explicit PieceFactory(int pageWidth = 80) : pageWidth(pageWidth) {}
+  explicit PieceFactory(int pageWidth = 80);
 
-  Piece *extractChain(const ExprNode *node);
+  ~PieceFactory();
+
   Piece *dispatchExpr(const ExprNode *node);
 
   Piece *dispatchStmt(const ASTNode *node);
+
+  /* Builds a statement piece, appending `;` to expression statements. */
+  Piece *statementPiece(const ASTNode *node);
+
+  /* Whether [node] is an expression that may be block formatted when it
+   * appears as a list element. */
+  bool canBlockFormat(const ExprNode *node) const;
+
+  /* Given a list of arguments, determines which (if any) should be given block
+   * formatting. Returns its index or -1. */
+  int candidateBlockArgument(const llvm::ArrayRef<ExprNode *> &args,
+                             const llvm::ArrayRef<std::string_view> &names);
+
+  /* Builds a ListPiece for a bracket-delimited set of arguments or elements.
+   * If [allowBlockArgument] is true, one element may receive block formatting.
+   */
+  Piece *buildList(const llvm::ArrayRef<ExprNode *> &args,
+                   const llvm::ArrayRef<std::string_view> &names,
+                   const char *leftBracket, const char *rightBracket,
+                   ListStyle style = ListStyle{}, bool allowBlockArgument = false,
+                   bool blockShaped = true);
+
+  /* Builds a ChainPiece for a series of method calls and property accesses, or
+   * nullptr if there is no chain. */
+  Piece *buildChain(const ExprNode *node);
+
+  /* The number of spaces of leading indentation on the first line. */
+  int getPageWidth() const { return pageWidth; }
+
+  /* Depth of named-argument expression contexts. Set when visiting the value
+   * expression of a named argument. */
+  int namedArgDepth = 0;
+
+  std::unique_ptr<ExpressionContents> contents;
 
   Piece *visit(const NamespaceDeclNode *node);
   Piece *visit(const UsingNode *node);

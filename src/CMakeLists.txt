@@ -16,6 +16,7 @@ set(CORE_SOURCES
     utopia/Driver/Linker.cpp
     utopia/Format/PieceFactory.cpp
     utopia/Format/CodeWriter.cpp
+    utopia/Format/Solution.cpp
     utopia/Lexer/Lexer.cpp
     utopia/Lexer/Preprocessor.cpp
     utopia/Parser/Parser.cpp

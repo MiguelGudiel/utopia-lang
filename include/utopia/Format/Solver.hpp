@@ -1,152 +1,110 @@
 #pragma once
-#include "utopia/Format/Piece.hpp"
-#include <optional>
+#include "utopia/Format/SolutionCache.hpp"
 #include <queue>
 
 namespace utopia {
 
-struct Solution {
-  const BoundStateNode *boundStates = nullptr;
-  int cost = 0;
-  int overflow = 0;
-  bool isValid = true;
-  std::vector<const Piece *> overflowPieces;
-
-  bool operator>(const Solution &other) const {
-    if (cost != other.cost)
-      return cost > other.cost;
-    return overflow > other.overflow;
-  }
-};
-
+/* Selects states for each piece in a tree of pieces to find the best set of
+ * line splits that minimizes overflow characters and line splitting costs.
+ *
+ * This problem is combinatorial over the number of pieces and each of their
+ * possible states, so it isn't feasible to brute force. There are a few
+ * techniques we use to avoid that:
+ *
+ * -   The initial state for each piece has no line splits or only mandatory
+ *     ones. Thus, it tries solutions with a minimum number of line splits
+ *     first.
+ *
+ * -   Solutions are explored in priority order. We explore solutions with the
+ *     lowest cost first. This way, as soon as we find a solution with no
+ *     overflow characters, we know it will be the best solution and can stop.
+ *
+ * -   When selecting states for pieces to expand solutions, we only look at
+ *     pieces in the first line containing overflow characters or invalid
+ *     newlines.
+ *
+ * -   If a subtree Piece is sufficiently isolated from surrounding content
+ *     (usually this means it is on its own line), then we hoist that entire
+ *     subtree out, format it with a separate Solver, and then insert the
+ *     result into the Solution. We also memoize the result of doing this and
+ *     use it across different Solutions. This enables us to both divide and
+ *     conquer the Piece tree and solve portions separately, while also
+ *     reusing work across different solutions. */
 class Solver {
 public:
+  /* To ensure the solver doesn't go totally pathological on giant code, we cap
+   * it at a fixed number of attempts. If the optimal solution isn't found
+   * after this many tries, it just uses the best it found so far. */
   static constexpr int MaxAttempts = 10000;
 
-  Solution solve(const Piece *root, int pageWidth = 80, int baseIndent = 0) {
-    nodeArena.clear();
+  Solver(SolutionCache &cache, int pageWidth, int leadingIndent = 0,
+         int subsequentIndent = -1)
+      : cache(cache), pageWidth(pageWidth), leadingIndent(leadingIndent),
+        subsequentIndent(subsequentIndent >= 0 ? subsequentIndent
+                                               : leadingIndent) {}
 
-    const BoundStateNode *pinnedStates = nullptr;
+  /* Finds the best set of line splits for [root] piece and returns the
+   * resulting formatted code.
+   *
+   * If [rootState] is given, then [root] is bound to that state. */
+  Solution format(const Piece *root, const State *rootState = nullptr) {
+    Solution solution(&cache.arena, root, 0, nullptr, const_cast<State *>(rootState));
+    solution.format(cache, pageWidth, leadingIndent, subsequentIndent);
 
-    auto pinPieces = [&](auto &self, const Piece *p) -> void {
-      if (auto stateOpt = p->fixedState(pageWidth)) {
-        nodeArena.push_back({p, *stateOpt, pinnedStates});
-        pinnedStates = &nodeArena.back();
-      }
-      p->forEachChild([&](const Piece *child) { self(self, child); });
-    };
+    queue.push(solution);
 
-    pinPieces(pinPieces, root);
+    /* The lowest cost solution found so far that does overflow. */
+    Solution best = solution;
 
-    std::priority_queue<Solution, std::vector<Solution>, std::greater<Solution>>
-        queue;
-
-    Solution initial;
-    initial.boundStates = pinnedStates;
-    evaluateSolution(initial, root, pageWidth, baseIndent);
-    queue.push(initial);
-
-    Solution best = initial;
     int attempts = 0;
 
     while (!queue.empty() && attempts < MaxAttempts) {
-      Solution current = queue.top();
+      Solution current = std::move(queue.top());
       queue.pop();
 
-      if (current.isValid && current.overflow == 0) {
-        return current;
-      }
-
-      if (current.isValid && current.overflow < best.overflow) {
-        best = current;
-      } else if (current.isValid && current.overflow == best.overflow &&
-                 current.cost < best.cost) {
-        best = current;
-      }
-
-      std::vector<const Piece *> unbound;
-
-      for (const Piece *p : current.overflowPieces) {
-        bool found = false;
-        for (const BoundStateNode *n = current.boundStates; n != nullptr;
-             n = n->parent) {
-          if (n->piece == p) {
-            found = true;
-            break;
-          }
-        }
-
-        if (!found && !p->additionalStates().empty()) {
-          unbound.push_back(p);
-        }
-      }
-
-      for (const Piece *p : unbound) {
-        std::vector<State> statesToExplore = p->additionalStates();
-
-        for (const State &s : statesToExplore) {
-          Solution nextOpt = current;
-
-          for (const Piece *earlier : unbound) {
-            if (earlier == p)
-              break;
-            nodeArena.push_back({earlier, State::Unsplit, nextOpt.boundStates});
-            nextOpt.boundStates = &nodeArena.back();
-          }
-
-          nodeArena.push_back({p, s, nextOpt.boundStates});
-          nextOpt.boundStates = &nodeArena.back();
-
-          p->applyConstraints(s, [&](const Piece *child, State childState) {
-            nodeArena.push_back({child, childState, nextOpt.boundStates});
-            nextOpt.boundStates = &nodeArena.back();
-          });
-
-          evaluateSolution(nextOpt, root, pageWidth, baseIndent);
-          queue.push(nextOpt);
-        }
-      }
       attempts++;
+
+      if (current.isValid) {
+        /* Since we process the solutions from lowest cost up, as soon as we
+         * find a valid one that fits, it's the best. */
+        if (current.overflow == 0) {
+          best = std::move(current);
+          break;
+        }
+
+        /* If not, keep track of the least-bad one we've found so far. */
+        if (!best.isValid || current.overflow < best.overflow) {
+          best = std::move(current);
+        }
+      }
+
+      /* Otherwise, try to expand the solution to explore different splitting
+       * options. */
+      std::vector<Solution> expanded =
+          current.expand(cache, pageWidth, leadingIndent, subsequentIndent);
+      for (auto &e : expanded) {
+        queue.push(std::move(e));
+      }
     }
 
+    /* If we didn't find a solution without overflow, pick the least bad one.
+     */
     return best;
   }
 
 private:
-  /* Linear allocator mimicking a memory arena. References to elements inside
-   * std::deque are guaranteed not to be invalidated upon push_back. */
-  std::deque<BoundStateNode> nodeArena;
+  struct SolutionCompare {
+    bool operator()(const Solution &a, const Solution &b) const {
+      return a.isWorseThan(b);
+    }
+  };
 
-  void evaluateSolution(Solution &sol, const Piece *root, int pageWidth,
-                        int baseIndent) {
-    CodeWriter writer(pageWidth, baseIndent, true, sol.boundStates);
-    sol.cost = 0;
+  SolutionCache &cache;
+  int pageWidth;
+  int leadingIndent;
+  int subsequentIndent;
 
-    std::function<void(const Piece *, State)> formatTree =
-        [&](const Piece *p, State inheritedState) {
-          writer.pushPiece(p);
-          State s = inheritedState;
-
-          for (const BoundStateNode *n = sol.boundStates; n != nullptr;
-               n = n->parent) {
-            if (n->piece == p) {
-              s = n->state;
-              break;
-            }
-          }
-
-          sol.cost += p->stateCost(s);
-          p->format(writer, s, formatTree);
-          writer.popPiece();
-        };
-
-    formatTree(root, State::Unsplit);
-    writer.finish();
-
-    sol.overflow = writer.getOverflow();
-    sol.isValid = writer.isValid;
-    sol.overflowPieces = writer.getFirstOverflowPieces();
-  }
+  std::priority_queue<Solution, std::vector<Solution>, SolutionCompare> queue;
 };
 
 } // namespace utopia
