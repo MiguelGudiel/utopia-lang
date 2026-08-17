@@ -25,6 +25,16 @@ if (t.isPointer)  { ... }
 
 The reflected `Type` fields: `name`, `isClass`, `isStruct`, `isPrimitive`, `isEnum`, `isArray`, `isPointer`.
 
+## `alignof`
+
+Evaluated at compile time to a `usize` constant (honors `@align(N)`):
+
+```utp
+usize a = alignof(int32);     // 4
+usize b = alignof(Widget);    // record alignment
+usize c = alignof(T);         // template parameter (in generics)
+```
+
 ## `MethodInfo`
 
 Method reflection is available for records through the same machinery, enabling runtime inspection of a record's methods.

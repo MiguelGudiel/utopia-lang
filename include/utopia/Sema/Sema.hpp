@@ -85,6 +85,7 @@ public:
   void visit(const ArrayLiteralNode *) {}
   void visit(const NewExprNode *) {}
   void visit(const DeleteExprNode *) {}
+  void visit(const DestructorCallNode *) {}
   void visit(const TypeLiteralNode *) {}
   void visit(const NullNode *) {}
   void visit(const ImplicitCastNode *node) {}
@@ -151,6 +152,7 @@ public:
   SemaResult visit(const ArrayLiteralNode *node);
   SemaResult visit(const NewExprNode *node);
   SemaResult visit(const DeleteExprNode *node);
+  SemaResult visit(const DestructorCallNode *node);
   SemaResult visit(const TypeLiteralNode *node);
   SemaResult visit(const NullNode *node);
   SemaResult visit(const EnumDeclNode *node);
@@ -182,6 +184,19 @@ public:
                                const std::vector<ExprNode *> &resolvedArgs);
   SemaResult visit(const NamespaceDeclNode *node);
   SemaResult visit(const UsingNode *node);
+
+  /* Memory.construct<T>(ptr, args...): lowers the call into a placement
+   * NewExprNode so constructor resolution and codegen are shared with
+   * 'new'. 'node' keeps the original arguments (the destination pointer is
+   * node->args[0]); the lowered node is stored in node->loweredNew.
+   * 'templateArgs' carries the explicit type arguments (may be empty, in
+   * which case T is deduced from the destination pointer). */
+  SemaResult checkMemoryConstruct(const FunctionCallNode *node,
+                                  llvm::ArrayRef<const Type *> templateArgs);
+
+  /* Memory.destruct(ptr): verifies the argument is a typed pointer so the
+   * pointee's destructor can be resolved at codegen. */
+  SemaResult checkMemoryDestruct(const FunctionCallNode *node);
 };
 
 class ControlFlowPass : public SemaPass,
@@ -222,6 +237,7 @@ public:
   void visit(const ArrayLiteralNode *node);
   void visit(const NewExprNode *node);
   void visit(const DeleteExprNode *node);
+  void visit(const DestructorCallNode *node);
   void visit(const NamespaceDeclNode *node);
   void visit(const UsingNode *node);
   void visit(const AwaitExprNode *node);

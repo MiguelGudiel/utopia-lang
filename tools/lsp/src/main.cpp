@@ -230,6 +230,7 @@ public:
   void visit(const CastNode *) {}
   void visit(const NewExprNode *) {}
   void visit(const DeleteExprNode *) {}
+  void visit(const DestructorCallNode *) {}
   void visit(const ImplicitCastNode *) {}
   void visit(const ReturnNode *) {}
   void visit(const BreakNode *) {}
@@ -2909,6 +2910,7 @@ public:
       dispatch(a);
   }
   void visit(const DeleteExprNode *n) { dispatch(n->ptr); }
+  void visit(const DestructorCallNode *n) { dispatch(n->object); }
   void visit(const AnnotationNode *n) {
     for (auto *a : n->args)
       dispatch(a);

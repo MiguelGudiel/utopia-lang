@@ -44,6 +44,7 @@ enum class NodeKind : uint8_t {
   ArrayLiteral,
   New,
   Delete,
+  DestructorCall,
   Null,
   EnumDecl,
   EnumMember,
@@ -136,6 +137,7 @@ struct ParamDeclNode;
 struct BlockNode;
 struct FunctionDeclNode;
 struct FunctionCallNode;
+struct NewExprNode;
 
 struct LambdaNode : public ExprNode {
   /* Parameter list. Parameters may carry a null 'type' when the type is
@@ -627,6 +629,10 @@ struct FunctionCallNode : public ExprNode {
   bool hasRawArgs = false;
   bool isSuperCall = false;
 
+  /* Memory.construct<T>(ptr, args...): the type checker lowers the call
+   * into a placement NewExprNode that the codegen visits instead. */
+  NewExprNode *loweredNew = nullptr;
+
   /* Indicates whether the node was parsed with a trailing comma to force
    * formatting splits. */
   bool hasTrailingComma = false;
@@ -916,6 +922,22 @@ struct NewExprNode : public ExprNode {
    * formatting splits. */
   bool hasTrailingComma = false;
 
+  /* C++-style placement new: 'new (ptr) T(...)' constructs in existing
+   * memory instead of allocating. Only produced internally as the lowering
+   * target of Memory.construct<T>(ptr, args...). */
+  ExprNode *placementExpr = nullptr;
+
+  /* Set when constructing a record that has no user-defined constructors
+   * (trivially copyable) with a single value argument: the destination is
+   * bitwise-copied from the argument instead of going through a ctor. */
+  bool implicitCopyInit = false;
+
+  /* Resolved custom allocator / deallocator ('operator new' /
+   * 'operator delete' on the class or at file scope); null means the
+   * default malloc/free. */
+  const FunctionDeclNode *allocator = nullptr;
+  const FunctionDeclNode *deallocator = nullptr;
+
   NewExprNode(const Type *allocTy, ExprNode *arrSize,
               llvm::ArrayRef<ExprNode *> a, llvm::ArrayRef<std::string_view> n,
               bool hasParens, int l, int c, int len)
@@ -930,12 +952,28 @@ struct NewExprNode : public ExprNode {
 struct DeleteExprNode : public ExprNode {
   ExprNode *ptr;
   bool isArray;
+  const FunctionDeclNode *deallocator = nullptr;
 
   DeleteExprNode(ExprNode *p, bool isArr, int l, int c, int len)
       : ExprNode(NodeKind::Delete, l, c, len), ptr(p), isArray(isArr) {}
 
   static bool classof(const ASTNode *node) {
     return node->kind == NodeKind::Delete;
+  }
+};
+
+/* Manual destructor call: 'obj.~TypeName()'. */
+struct DestructorCallNode : public ExprNode {
+  ExprNode *object;
+  const Type *targetType;
+  const FunctionDeclNode *destructor = nullptr;
+
+  DestructorCallNode(ExprNode *obj, const Type *t, int l, int c, int len)
+      : ExprNode(NodeKind::DestructorCall, l, c, len), object(obj),
+        targetType(t) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::DestructorCall;
   }
 };
 

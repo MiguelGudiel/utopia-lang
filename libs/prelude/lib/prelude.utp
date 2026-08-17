@@ -1,3 +1,7 @@
+/* Memory/Core.utp must be parsed before Core/List.utp (and the String
+ * module that imports it): its template intrinsics (construct<T>) are
+ * registered at parse time, and List's body uses them. */
+export "Memory/Core.utp";
 export "String.utp";
 export "Core/Duration.utp";
 export "Core/Stopwatch.utp";
@@ -7,7 +11,6 @@ export "Core/Utility.utp";
 export "Core/List.utp";
 export "Math/Limits.utp";
 export "Math/Math.utp";
-export "Memory/Core.utp";
 export "System/OS.utp";
 export "IO/Console.utp";
 export "Async/Future.utp";

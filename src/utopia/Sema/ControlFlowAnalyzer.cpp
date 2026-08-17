@@ -409,6 +409,10 @@ void ControlFlowPass::visit(const NewExprNode *node) {
 
 void ControlFlowPass::visit(const DeleteExprNode *node) { dispatch(node->ptr); }
 
+void ControlFlowPass::visit(const DestructorCallNode *node) {
+  dispatch(node->object);
+}
+
 void ControlFlowPass::visit(const ImplicitCastNode *node) {
   dispatch(node->expr);
 }

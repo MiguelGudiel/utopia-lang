@@ -1,6 +1,6 @@
 # Memory & Type Reflection
 
-The prelude's `Memory/Core.utp` module exposes raw allocation and compile-time type reflection.
+The prelude's `Memory/Core.utp` module exposes raw allocation and compile-time type reflection. The `Memory` namespace (`utopia:memory`) provides the manual allocation API.
 
 ## Raw allocation
 
@@ -12,7 +12,55 @@ void* malloc(usize size);
 void free(void* ptr);
 ```
 
-You normally use `new`/`delete` instead; these bindings exist for FFI and low-level work.
+You normally use `new`/`delete` or `Memory.alloc` instead; these bindings exist for FFI and low-level work.
+
+## Manual memory API: `Memory.alloc` / `construct` / `destruct` / `free`
+
+```utp
+import "utopia:memory";
+using Memory;
+```
+
+### `Memory.alloc(size, align) -> RawMemory`
+
+Allocates `size` bytes aligned to `align` (a power of two) without
+constructing anything. Out-of-memory terminates the program (the same
+policy as `new`).
+
+```utp
+RawMemory raw = Memory.alloc(sizeof(Item) * 2, alignof(Item));
+```
+
+### `Memory.construct<T>(ptr, args...) -> T*`
+
+Constructs a `T` in existing memory and returns a `T*` aliasing `ptr`. The
+destination pointer may be typed, `void*`, or a byte pointer. Constructor
+arguments are forwarded; the storage is zeroed first so constructor
+assignments see valid member state. `T` can be deduced from a typed
+pointer:
+
+```utp
+Item* a = Memory.construct<Item>(raw.ptr, "x");
+Item* b = Memory.construct(a + 1, "y");   // T deduced as Item
+```
+
+### `Memory.destruct(ptr)`
+
+Runs the destructor of the pointee type, if it has one. Does not free the
+memory.
+
+### `Memory.free(raw)`
+
+Releases a block previously returned by `Memory.alloc()`. Call it exactly
+once per block.
+
+### `RawMemory`
+
+```utp
+struct RawMemory {
+  uint8* ptr;
+}
+```
 
 ## Type reflection
 
@@ -25,6 +73,16 @@ usize bytes = sizeof(int32);       // 4
 usize w = sizeof(Widget);          // record size
 usize elem = sizeof(T);            // template parameter
 ```
+
+### `alignof`
+
+```utp
+usize a = alignof(int32);          // 4
+usize b = alignof(Widget);         // record alignment
+usize c = alignof(T);              // template parameter
+```
+
+`alignof` honors the `@align(N)` annotation.
 
 ### `typeof`
 

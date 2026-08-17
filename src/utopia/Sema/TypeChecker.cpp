@@ -791,6 +791,12 @@ SemaResult TypeCheckPass::visit(const UnionDeclNode *node) {
           const_cast<UnionDeclNode *>(node)->alignment = alignVal;
         }
       }
+    } else if (ann->name == "alignas") {
+      auto err =
+          ctx->reportError(ann->line, ann->column, ann->length,
+                           "The @alignas annotation has been removed; use "
+                           "@align(N) instead.");
+      hasErrors = true;
     } else if (ann->name == "packed") {
       if (!ann->args.empty()) {
         auto err =
@@ -881,6 +887,12 @@ SemaResult TypeCheckPass::visit(const StructDeclNode *node) {
           const_cast<StructDeclNode *>(node)->alignment = alignVal;
         }
       }
+    } else if (ann->name == "alignas") {
+      auto err =
+          ctx->reportError(ann->line, ann->column, ann->length,
+                           "The @alignas annotation has been removed; use "
+                           "@align(N) instead.");
+      hasErrors = true;
     } else if (ann->name == "packed") {
       if (!ann->args.empty()) {
         auto err =
@@ -1009,6 +1021,12 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
           const_cast<ClassDeclNode *>(node)->alignment = alignVal;
         }
       }
+    } else if (ann->name == "alignas") {
+      auto err =
+          ctx->reportError(ann->line, ann->column, ann->length,
+                           "The @alignas annotation has been removed; use "
+                           "@align(N) instead.");
+      hasErrors = true;
     } else if (ann->name == "packed") {
       if (!ann->args.empty()) {
         auto err =
@@ -1472,6 +1490,10 @@ SemaResult TypeCheckPass::visit(const EnumMemberNode *node) {
 }
 
 SemaResult TypeCheckPass::visit(const TypeLiteralNode *node) {
+  /* Resolve template-instance placeholders ('Future<int32>') so
+   * sizeof/typeof/alignof see the concrete record type at codegen. */
+  const_cast<TypeLiteralNode *>(node)->representedType =
+      resolveIfTemplate(node->representedType);
   node->exprType = ctx->astCtx.TypeValTy;
   node->isLValue = false;
   return node->exprType;
@@ -2192,6 +2214,42 @@ SemaResult TypeCheckPass::visit(const BinaryOpNode *node) {
     cat = it->second;
   }
 
+  /* Pointer arithmetic: 'p + n', 'n + p', 'p - n'. The offset is element
+   * scaled in codegen (byte pointers step by byte). */
+  if (cat == OpCategory::Arithmetic &&
+      (node->op == "+" || node->op == "-")) {
+    const Type *lu = (*lhs)->getUnqualifiedType();
+    const Type *ru = (*rhs)->getUnqualifiedType();
+    bool lhsIsPtr = lu->isPointerType();
+    bool rhsIsPtr = ru->isPointerType();
+    bool lhsIsInt = lu->isInteger();
+    bool rhsIsInt = ru->isInteger();
+
+    if ((lhsIsPtr && rhsIsInt) || (lhsIsInt && rhsIsPtr)) {
+      if (node->op == "-" && !lhsIsPtr) {
+        return ctx->reportError(
+            node->line, node->column, node->length,
+            "Cannot subtract a pointer from an integer; the pointer must be "
+            "on the left of '-'.");
+      }
+      const Type *ptrTy = lhsIsPtr ? *lhs : *rhs;
+      const Type *pointee =
+          static_cast<const PointerType *>(ptrTy->getUnqualifiedType())
+              ->getPointeeType()
+              ->getUnqualifiedType();
+      if (pointee->isVoid()) {
+        return ctx->reportError(
+            node->line, node->column, node->length,
+            "Cannot perform arithmetic on a void*; use a byte pointer (e.g. "
+            "RawMemory.ptr).");
+      }
+      node->exprType = ptrTy;
+      node->promotedType = nullptr;
+      node->isLValue = false;
+      return node->exprType;
+    }
+  }
+
   if (cat == OpCategory::Logical) {
     if (!canImplicitlyCast(*lhs, ctx->astCtx.BoolTy) ||
         !canImplicitlyCast(*rhs, ctx->astCtx.BoolTy)) {
@@ -2536,6 +2594,10 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
   for (const auto *ann : node->annotations) {
     if (ann->name == "weak") {
       const_cast<VarDeclNode *>(node)->isWeak = true;
+    } else if (ann->name == "alignas") {
+      (void)ctx->reportError(ann->line, ann->column, ann->length,
+                             "The @alignas annotation has been removed; use "
+                             "@align(N) instead.");
     } else if (ann->name == "align") {
       if (ann->args.size() != 1 || !llvm::isa<NumberNode>(ann->args[0]) ||
           llvm::cast<NumberNode>(ann->args[0])->isFloat) {
@@ -3093,6 +3155,23 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
             }
           }
           decls = ctx->symTable.lookupExact(mangledView, ctx->currentModule);
+        } else if (tmplDecl && llvm::isa<FunctionDeclNode>(tmplDecl)) {
+          /* A template function called without explicit type arguments
+           * ('Memory.construct(ptr, ...)') resolves to the template
+           * declaration itself; call-site handling may deduce the type
+           * arguments from the arguments (see checkMemoryConstruct). */
+          const_cast<MemberAccessNode *>(node)->resolvedDecl = tmplDecl;
+          auto *tfn = static_cast<const FunctionDeclNode *>(tmplDecl);
+          std::vector<const Type *> pTypes;
+          for (auto *p : tfn->params)
+            pTypes.push_back(p->type);
+          const Type *funcTy = ctx->astCtx.getFunctionType(
+              tfn->effectiveReturnType ? tfn->effectiveReturnType
+                                       : tfn->returnType,
+              ctx->astCtx.copyArray<const Type *>(pTypes));
+          node->exprType = ctx->astCtx.getPointerType(funcTy);
+          node->isLValue = true;
+          return node->exprType;
         }
       }
       if (decls.empty()) {
@@ -5082,6 +5161,21 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
           } else if (targetDecl->kind == NodeKind::FunctionDecl) {
             auto fDecl = static_cast<const FunctionDeclNode *>(targetDecl);
 
+            /* Memory.construct<T>(ptr, args...) called unqualified (via
+             * 'using Memory;'): the argument checking is call-site specific,
+             * so intercept before the generic signature match. */
+            if (fDecl->isIntrinsic &&
+                fDecl->intrinsicName == "memory_construct") {
+              auto ctorRes =
+                  checkMemoryConstruct(node, varTarget->templateArgs);
+              if (ctorRes) {
+                bestScore = std::numeric_limits<int>::max();
+                bestMatch = fDecl;
+                overloadErrors.clear();
+              }
+              continue;
+            }
+
             if (!fDecl->isPublic(fDecl->name)) {
               if (fDecl->isMethod && !fDecl->isExtern) {
                 const RecordType *recTy = nullptr;
@@ -5540,6 +5634,18 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
                ma->resolvedDecl->kind == NodeKind::FunctionDecl) {
       const_cast<FunctionCallNode *>(node)->resolvedFunc =
           static_cast<const FunctionDeclNode *>(ma->resolvedDecl);
+
+      /* Memory.construct<T>(ptr, args...) / Memory.destruct(ptr) are
+       * compiler intrinsics with call-site-specific argument checking;
+       * intercept them before the generic function-pointer path. */
+      if (node->resolvedFunc->isIntrinsic) {
+        if (node->resolvedFunc->intrinsicName == "memory_construct") {
+          return checkMemoryConstruct(node, ma->templateArgs);
+        }
+        if (node->resolvedFunc->intrinsicName == "memory_destruct") {
+          return checkMemoryDestruct(node);
+        }
+      }
     }
   }
 
@@ -5899,6 +6005,136 @@ SemaResult TypeCheckPass::visit(const ArraySubscriptNode *node) {
   return node->exprType;
 }
 
+/* Finds a custom 'operator new' / 'operator delete' declared as a static
+ * method of the record, or at file scope in the current module. */
+static const FunctionDeclNode *findRecordAllocationOperator(
+    const RecordType *recTy, std::string_view opName) {
+  const DeclNode *decl = recTy->getDeclaration();
+  if (!decl)
+    return nullptr;
+  llvm::ArrayRef<FunctionDeclNode *> methods;
+  if (decl->kind == NodeKind::ClassDecl)
+    methods = static_cast<const ClassDeclNode *>(decl)->methods;
+  else if (decl->kind == NodeKind::StructDecl)
+    methods = static_cast<const StructDeclNode *>(decl)->methods;
+  else if (decl->kind == NodeKind::UnionDecl)
+    methods = static_cast<const UnionDeclNode *>(decl)->methods;
+  for (const auto *m : methods) {
+    if (m->name == opName && m->isStatic && !m->isImplicit) {
+      return m;
+    }
+  }
+  return nullptr;
+}
+
+SemaResult TypeCheckPass::checkMemoryConstruct(
+    const FunctionCallNode *node, llvm::ArrayRef<const Type *> templateArgs) {
+  /* The destination pointer must be the first argument. */
+  if (node->args.empty()) {
+    return ctx->reportError(
+        node->line, node->column, node->length,
+        "Memory.construct requires a destination pointer as its first "
+        "argument.");
+  }
+
+  const Type *ptrTy = node->args[0]->exprType;
+  if (!ptrTy || !ptrTy->getUnqualifiedType()->isPointerType()) {
+    return ctx->reportError(
+        node->line, node->column, node->length,
+        "Memory.construct requires a destination pointer as its first "
+        "argument.");
+  }
+
+  /* The constructed type: explicit type argument ('Memory.construct<Item>')
+   * or deduced from the destination pointer's pointee. */
+  const Type *T = nullptr;
+  if (!templateArgs.empty()) {
+    if (templateArgs.size() != 1) {
+      return ctx->reportError(node->line, node->column, node->length,
+                              "Memory.construct accepts a single type "
+                              "argument.");
+    }
+    T = resolveIfTemplate(templateArgs[0]);
+  } else {
+    const Type *pointee =
+        static_cast<const PointerType *>(
+            ptrTy->getUnqualifiedType())
+            ->getPointeeType()
+            ->getUnqualifiedType();
+    if (pointee->isVoid()) {
+      return ctx->reportError(
+          node->line, node->column, node->length,
+          "Memory.construct cannot deduce the constructed type from a void* "
+          "destination; pass it explicitly: Memory.construct<T>(ptr, ...).");
+    }
+    T = pointee;
+  }
+  if (!T || T->isVoid()) {
+    return ctx->reportError(node->line, node->column, node->length,
+                            "Memory.construct requires a valid constructed "
+                            "type.");
+  }
+
+  /* Lower to a placement NewExprNode: constructor overload resolution,
+   * argument conversions and codegen are shared with 'new'. */
+  std::vector<ExprNode *> ctorArgs(node->args.begin() + 1, node->args.end());
+  llvm::ArrayRef<ExprNode *> argsRef =
+      ctx->astCtx.copyArray<ExprNode *>(ctorArgs);
+
+  llvm::ArrayRef<std::string_view> namesRef = {};
+  if (node->argNames.size() == node->args.size()) {
+    std::vector<std::string_view> ctorNames(node->argNames.begin() + 1,
+                                            node->argNames.end());
+    namesRef = ctx->astCtx.copyArray<std::string_view>(ctorNames);
+  }
+
+  auto *newNode = ctx->astCtx.create<NewExprNode>(
+      T, nullptr, argsRef, namesRef, true, node->line, node->column,
+      node->length);
+  newNode->placementExpr = const_cast<ExprNode *>(node->args[0]);
+
+  auto res = visit(newNode);
+  if (!res) {
+    return std::unexpected(ErrorInfo{node->line, node->column, node->length,
+                                     "Cascading error in Memory.construct"});
+  }
+
+  const_cast<FunctionCallNode *>(node)->loweredNew = newNode;
+  node->exprType = newNode->exprType;
+  node->isLValue = false;
+  return node->exprType;
+}
+
+SemaResult TypeCheckPass::checkMemoryDestruct(const FunctionCallNode *node) {
+  if (node->args.size() != 1) {
+    return ctx->reportError(
+        node->line, node->column, node->length,
+        "Memory.destruct expects a single pointer argument.");
+  }
+
+  const Type *argTy = node->args[0]->exprType;
+  if (!argTy || !argTy->getUnqualifiedType()->isPointerType()) {
+    return ctx->reportError(
+        node->line, node->column, node->length,
+        "Memory.destruct expects a pointer to a constructed object.");
+  }
+
+  const Type *pointee =
+      static_cast<const PointerType *>(argTy->getUnqualifiedType())
+          ->getPointeeType()
+          ->getUnqualifiedType();
+  if (pointee->isVoid()) {
+    return ctx->reportError(
+        node->line, node->column, node->length,
+        "Memory.destruct cannot determine the destructor of a void*; pass a "
+        "typed pointer.");
+  }
+
+  node->exprType = ctx->astCtx.VoidTy;
+  node->isLValue = false;
+  return ctx->astCtx.VoidTy;
+}
+
 SemaResult TypeCheckPass::visit(const NewExprNode *node) {
   const_cast<NewExprNode *>(node)->allocatedType =
       resolveIfTemplate(node->allocatedType);
@@ -5906,6 +6142,91 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
   if (!checkTypeVisibility(node->allocatedType, node)) {
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,
                                      "Type visibility error"});
+  }
+
+  /* Construct-in-place (Memory.construct lowering): the destination may be
+   * a typed pointer, void*, or any byte pointer (e.g. RawMemory.ptr). */
+  if (node->placementExpr) {
+    auto placementType = dispatch(node->placementExpr);
+    if (!placementType) {
+      return std::unexpected(ErrorInfo{node->line, node->column,
+                                       node->length,
+                                       "Cascading error in Memory.construct"});
+    }
+    const Type *placeUnqual = (*placementType)->getUnqualifiedType();
+    if (!placeUnqual->isPointerType()) {
+      return ctx->reportError(
+          node->line, node->column, node->length,
+          "Memory.construct requires a destination pointer.");
+    }
+  }
+
+  /* Resolve the custom allocator / deallocator ('operator new' /
+   * 'operator delete' as a static class method or at file scope). */
+  {
+    const Type *allocBase = node->allocatedType->getUnqualifiedType();
+    while (allocBase->getKind() == TypeKind::Array) {
+      allocBase = static_cast<const ArrayType *>(allocBase)
+                      ->getElementType()
+                      ->getUnqualifiedType();
+    }
+
+    const FunctionDeclNode *allocOp = nullptr;
+    const FunctionDeclNode *deallocOp = nullptr;
+    if (allocBase->getKind() == TypeKind::Class ||
+        allocBase->getKind() == TypeKind::Struct ||
+        allocBase->getKind() == TypeKind::Union) {
+      auto *recTy = static_cast<const RecordType *>(allocBase);
+      allocOp = findRecordAllocationOperator(recTy, "operator new");
+      deallocOp = findRecordAllocationOperator(recTy, "operator delete");
+    }
+
+    if (!allocOp) {
+      for (const auto *d : ctx->lookup("operator new")) {
+        if (d->kind == NodeKind::FunctionDecl &&
+            static_cast<const FunctionDeclNode *>(d)->name == "operator new") {
+          allocOp = static_cast<const FunctionDeclNode *>(d);
+          break;
+        }
+      }
+    }
+    if (!deallocOp) {
+      for (const auto *d : ctx->lookup("operator delete")) {
+        if (d->kind == NodeKind::FunctionDecl &&
+            static_cast<const FunctionDeclNode *>(d)->name ==
+                "operator delete") {
+          deallocOp = static_cast<const FunctionDeclNode *>(d);
+          break;
+        }
+      }
+    }
+
+    if (allocOp) {
+      bool okFmt = allocOp->params.size() == 1 &&
+                   allocOp->params[0]->type->getUnqualifiedType()->isInteger() &&
+                   allocOp->returnType->getUnqualifiedType()->isPointerType();
+      if (!okFmt) {
+        return ctx->reportError(
+            node->line, node->column, node->length,
+            "'operator new' must be declared as "
+            "'void* operator new(usize size)'.");
+      }
+    }
+    if (deallocOp) {
+      bool okFmt = deallocOp->params.size() == 1 &&
+                   deallocOp->params[0]->type->getUnqualifiedType()
+                       ->isPointerType() &&
+                   deallocOp->returnType->getUnqualifiedType()->isVoid();
+      if (!okFmt) {
+        return ctx->reportError(
+            node->line, node->column, node->length,
+            "'operator delete' must be declared as "
+            "'void operator delete(void* ptr)'.");
+      }
+    }
+
+    const_cast<NewExprNode *>(node)->allocator = allocOp;
+    const_cast<NewExprNode *>(node)->deallocator = deallocOp;
   }
 
   if (node->arraySize) {
@@ -6157,6 +6478,64 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
       }
 
       if (!bestMatch) {
+        /* Trivially copyable fallback: a record without user-defined
+         * constructors or destructors accepts a single same-typed value
+         * argument with an implicit bitwise copy (e.g.
+         * 'Memory.construct<Point>(ptr, p)'). */
+        bool hasUserCtor = false;
+        for (const auto *ctor : ctors) {
+          if (!ctor->isImplicit) {
+            hasUserCtor = true;
+            break;
+          }
+        }
+        bool hasCustomDtor = false;
+        if (decl->kind == NodeKind::ClassDecl)
+          hasCustomDtor = static_cast<const ClassDeclNode *>(decl)->destructor &&
+                          !static_cast<const ClassDeclNode *>(decl)
+                               ->destructor->isImplicit;
+        else if (decl->kind == NodeKind::StructDecl)
+          hasCustomDtor =
+              static_cast<const StructDeclNode *>(decl)->destructor &&
+              !static_cast<const StructDeclNode *>(decl)
+                   ->destructor->isImplicit;
+        else if (decl->kind == NodeKind::UnionDecl)
+          hasCustomDtor = static_cast<const UnionDeclNode *>(decl)->destructor &&
+                          !static_cast<const UnionDeclNode *>(decl)
+                               ->destructor->isImplicit;
+
+        if (!hasUserCtor && !hasCustomDtor && node->args.size() == 1 &&
+            (node->argNames.empty() || node->argNames[0].empty())) {
+          const Type *argBase =
+              argTypes.empty() ? nullptr : argTypes[0];
+          if (argBase && argBase->isReferenceType())
+            argBase = static_cast<const ReferenceType *>(argBase)
+                          ->getPointeeType();
+          else if (argBase &&
+                   argBase->getKind() == TypeKind::RValueReference)
+            argBase = static_cast<const RValueReferenceType *>(argBase)
+                          ->getPointeeType();
+          const Type *argUnqual =
+              argBase ? argBase->getUnqualifiedType() : nullptr;
+          /* Types are not guaranteed to be pointer-identical across
+           * lookups; compare by kind and name. */
+          bool sameType =
+              argUnqual && argUnqual->getKind() == unqual->getKind();
+          if (sameType &&
+              (unqual->getKind() == TypeKind::Class ||
+               unqual->getKind() == TypeKind::Struct ||
+               unqual->getKind() == TypeKind::Union)) {
+            sameType =
+                static_cast<const RecordType *>(argUnqual)->getName() ==
+                static_cast<const RecordType *>(unqual)->getName();
+          }
+          if (sameType) {
+            const_cast<NewExprNode *>(node)->implicitCopyInit = true;
+          }
+        }
+      }
+
+      if (!bestMatch && !node->implicitCopyInit) {
         std::string finalErr = "No matching constructor found for '" +
                                std::string(recTy->getName()) + "'.";
         if (!overloadErrors.empty()) {
@@ -6251,6 +6630,65 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
   return node->exprType;
 }
 
+SemaResult TypeCheckPass::visit(const DestructorCallNode *node) {
+  auto objType = dispatch(node->object);
+  if (!objType) {
+    return std::unexpected(ErrorInfo{node->line, node->column, node->length,
+                                     "Cascading error in destructor call"});
+  }
+
+  const Type *objUnqual = (*objType)->getUnqualifiedType();
+  if (objUnqual->isPointerType()) {
+    objUnqual = static_cast<const PointerType *>(objUnqual)
+                    ->getPointeeType()
+                    ->getUnqualifiedType();
+  } else if (objUnqual->isReferenceType()) {
+    objUnqual = static_cast<const ReferenceType *>(objUnqual)
+                    ->getPointeeType()
+                    ->getUnqualifiedType();
+  }
+
+  if (objUnqual->getKind() != TypeKind::Class &&
+      objUnqual->getKind() != TypeKind::Struct &&
+      objUnqual->getKind() != TypeKind::Union) {
+    return ctx->reportError(node->line, node->column, node->length,
+                            "Cannot call a destructor on a non-record type.");
+  }
+
+  const Type *targetUnqual = node->targetType->getUnqualifiedType();
+  if (targetUnqual != objUnqual) {
+    return ctx->reportError(
+        node->line, node->column, node->length,
+        "Destructor type mismatch: expected '" + objUnqual->toString() +
+            "'.");
+  }
+
+  auto *recTy = static_cast<const RecordType *>(objUnqual);
+  const DeclNode *decl = recTy->getDeclaration();
+  if (!decl) {
+    return ctx->reportError(node->line, node->column, node->length,
+                            "Incomplete type in destructor call.");
+  }
+
+  const FunctionDeclNode *dtor = nullptr;
+  if (decl->kind == NodeKind::ClassDecl)
+    dtor = static_cast<const ClassDeclNode *>(decl)->destructor;
+  else if (decl->kind == NodeKind::StructDecl)
+    dtor = static_cast<const StructDeclNode *>(decl)->destructor;
+  else if (decl->kind == NodeKind::UnionDecl)
+    dtor = static_cast<const UnionDeclNode *>(decl)->destructor;
+
+  if (!dtor || dtor->isImplicit) {
+    return ctx->reportError(node->line, node->column, node->length,
+                            "Type '" + objUnqual->toString() +
+                                "' has no user-defined destructor.");
+  }
+
+  const_cast<DestructorCallNode *>(node)->destructor = dtor;
+  node->exprType = ctx->astCtx.VoidTy;
+  return node->exprType;
+}
+
 SemaResult TypeCheckPass::visit(const DeleteExprNode *node) {
   auto ptrTy = dispatch(node->ptr);
   if (!ptrTy) {
@@ -6281,6 +6719,38 @@ SemaResult TypeCheckPass::visit(const DeleteExprNode *node) {
         dtor = static_cast<const UnionDeclNode *>(decl)->destructor;
       }
     }
+  }
+
+  /* Resolve the custom deallocator ('operator delete'). */
+  const FunctionDeclNode *deallocOp = nullptr;
+  if (unqual->getKind() == TypeKind::Class ||
+      unqual->getKind() == TypeKind::Struct ||
+      unqual->getKind() == TypeKind::Union) {
+    deallocOp = findRecordAllocationOperator(
+        static_cast<const RecordType *>(unqual), "operator delete");
+  }
+  if (!deallocOp) {
+    for (const auto *d : ctx->lookup("operator delete")) {
+      if (d->kind == NodeKind::FunctionDecl &&
+          static_cast<const FunctionDeclNode *>(d)->name ==
+              "operator delete") {
+        deallocOp = static_cast<const FunctionDeclNode *>(d);
+        break;
+      }
+    }
+  }
+  if (deallocOp) {
+    bool okFmt = deallocOp->params.size() == 1 &&
+                 deallocOp->params[0]->type->getUnqualifiedType()
+                     ->isPointerType() &&
+                 deallocOp->returnType->getUnqualifiedType()->isVoid();
+    if (!okFmt) {
+      return ctx->reportError(
+          node->line, node->column, node->length,
+          "'operator delete' must be declared as "
+          "'void operator delete(void* ptr)'.");
+    }
+    const_cast<DeleteExprNode *>(node)->deallocator = deallocOp;
   }
 
   node->exprType = ctx->astCtx.VoidTy;
@@ -6503,6 +6973,9 @@ struct LambdaCaptureChecker {
     }
     case NodeKind::Delete:
       walk(static_cast<const DeleteExprNode *>(node)->ptr);
+      break;
+    case NodeKind::DestructorCall:
+      walk(static_cast<const DestructorCallNode *>(node)->object);
       break;
     case NodeKind::VarDecl: {
       auto *v = static_cast<const VarDeclNode *>(node);

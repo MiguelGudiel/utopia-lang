@@ -672,6 +672,24 @@ void CodeGen::emitConstructorCall(const FunctionCallNode *node,
   builder.CreateCall(func, argsArgs);
 }
 
+llvm::Value *CodeGen::dispatchValueOf(const ExprNode *arg) {
+  const Type *argTy = arg->exprType;
+  if (argTy && (argTy->isReferenceType() ||
+                argTy->getKind() == TypeKind::RValueReference)) {
+    llvm::Value *addr = getLValue(arg);
+    if (!addr)
+      return nullptr;
+    const Type *pointee = nullptr;
+    if (argTy->isReferenceType())
+      pointee = static_cast<const ReferenceType *>(argTy)->getPointeeType();
+    else
+      pointee =
+          static_cast<const RValueReferenceType *>(argTy)->getPointeeType();
+    return createTBAALoad(getLLVMType(pointee), addr, pointee);
+  }
+  return dispatch(arg);
+}
+
 llvm::Value *CodeGen::materializeByValueArg(const ExprNode *arg,
                                             const Type *paramDeclTy) {
   if (!arg || !paramDeclTy)
@@ -1336,17 +1354,23 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
     return nullptr;
 
   if (node->kind == NodeKind::FunctionCall) {
-    /* A reference-typed call yields the address of the referenced object:
-     * dispatch() normally loads it, so suppress the load here. */
     auto *callNode = static_cast<const FunctionCallNode *>(node);
     if (callNode->exprType &&
         (callNode->exprType->isReferenceType() ||
          callNode->exprType->getKind() == TypeKind::RValueReference)) {
+      /* A reference-typed call yields the address of the referenced object:
+       * dispatch() normally loads it, so suppress the load here. */
       bool prev = suppressRefResultLoad;
       suppressRefResultLoad = true;
       llvm::Value *addr = dispatch(callNode);
       suppressRefResultLoad = prev;
       return addr;
+    }
+    if (callNode->exprType &&
+        callNode->exprType->getUnqualifiedType()->isPointerType()) {
+      /* A pointer-returning call (e.g. a 'T* _elem(i)' accessor) yields the
+       * address directly. */
+      return dispatch(callNode);
     }
   }
 
@@ -1646,6 +1670,15 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
   }
 
   if (llvm::isa<ImplicitCastNode>(node) || llvm::isa<CastNode>(node)) {
+    /* A cast to a reference or rvalue-reference type yields the referenced
+     * object's address directly; materializing it into a temporary would
+     * introduce an extra indirection. */
+    if (node->exprType &&
+        (node->exprType->isReferenceType() ||
+         node->exprType->getKind() == TypeKind::RValueReference)) {
+      return dispatch(node);
+    }
+
     /* Cast results are not naturally addressable: the cast visit builds
      * an owned temporary (tracked via lastTemporaryAlloca) — return its
      * address (e.g. for ternary lvalues or reference arguments). */
@@ -2479,6 +2512,35 @@ llvm::Value *CodeGen::visit(const BinaryOpNode *node) {
     return nullptr;
   }
 
+  /* Pointer arithmetic: 'p + n', 'n + p', 'p - n' — the GEP element type is
+   * the pointee type, so typed pointers scale by element size while byte
+   * pointers (RawMemory.ptr) step by byte. */
+  if (node->exprType && node->exprType->isPointerType() &&
+      (node->op == "+" || node->op == "-")) {
+    llvm::Value *ptrV = nullptr;
+    llvm::Value *idxV = nullptr;
+    if (L->getType()->isPointerTy() && R->getType()->isIntegerTy()) {
+      ptrV = L;
+      idxV = R;
+    } else if (R->getType()->isPointerTy() && L->getType()->isIntegerTy()) {
+      ptrV = R;
+      idxV = L;
+    }
+    if (ptrV && idxV) {
+      llvm::Value *idx64 =
+          builder.CreateIntCast(idxV, builder.getInt64Ty(), false);
+      if (node->op == "-")
+        idx64 = builder.CreateNeg(idx64, "ptr.offset.neg");
+      const Type *pointee =
+          static_cast<const PointerType *>(
+              node->exprType->getUnqualifiedType())
+              ->getPointeeType()
+              ->getUnqualifiedType();
+      return builder.CreateInBoundsGEP(getLLVMType(pointee), ptrV, idx64,
+                                       "ptr.offset");
+    }
+  }
+
   if (node->op == "&&") {
     L = createImplicitCast(L, builder.getInt1Ty());
     R = createImplicitCast(R, builder.getInt1Ty());
@@ -3012,7 +3074,7 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
               }
             } else {
               lastTemporaryAlloca = nullptr;
-              llvm::Value *initVal = dispatch(node->initializer);
+              llvm::Value *initVal = dispatchValueOf(node->initializer);
               lastTemporaryAlloca = nullptr;
               if (initVal) {
                 initVal = createImplicitCast(initVal, ty);
@@ -3183,7 +3245,7 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
           }
         } else {
           lastTemporaryAlloca = nullptr;
-          llvm::Value *initVal = dispatch(node->initializer);
+          llvm::Value *initVal = dispatchValueOf(node->initializer);
           lastTemporaryAlloca = nullptr;
           if (initVal) {
             initVal = createImplicitCast(initVal, ty);
@@ -3706,6 +3768,12 @@ llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
 }
 
 llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
+
+  /* Memory.construct<T>(ptr, args...) is lowered by the type checker into a
+   * placement NewExprNode; codegen visits that instead of the call. */
+  if (node->loweredNew) {
+    return visit(node->loweredNew);
+  }
 
   /* Top-level (module-scope) calls have no IR builder insert point;
    * previously they crashed inside CreateGlobalString while lowering
@@ -4756,27 +4824,72 @@ llvm::Value *CodeGen::visit(const NewExprNode *node) {
     sizeVal = builder.getInt64(mod.getDataLayout().getTypeAllocSize(allocTy));
   }
 
-  llvm::Function *mallocFunc = mod.getFunction("malloc");
-  if (!mallocFunc) {
-    llvm::FunctionType *mallocTy = llvm::FunctionType::get(
-        builder.getPtrTy(), {builder.getInt64Ty()}, false);
-    mallocFunc = llvm::Function::Create(
-        mallocTy, llvm::Function::ExternalLinkage, "malloc", mod);
+  llvm::Value *allocatedMem = nullptr;
+  llvm::Value *userMem = nullptr;
+  llvm::Value *typedMem = nullptr;
+
+  if (node->placementExpr) {
+    /* Placement new: construct in existing memory; no allocation, no
+     * ownership. */
+    llvm::Value *placePtr = dispatch(node->placementExpr);
+    if (!placePtr)
+      return nullptr;
+    typedMem = builder.CreateBitCast(placePtr, getLLVMType(node->exprType),
+                                     "placement.ptr");
+  } else {
+    /* Custom allocator ('operator new') or the default malloc. */
+    llvm::Function *allocFunc = nullptr;
+    if (node->allocator) {
+      allocFunc = getOrCreateFunction(node->allocator);
+    } else {
+      allocFunc = mod.getFunction("malloc");
+      if (!allocFunc) {
+        llvm::FunctionType *mallocTy = llvm::FunctionType::get(
+            builder.getPtrTy(), {builder.getInt64Ty()}, false);
+        allocFunc = llvm::Function::Create(
+            mallocTy, llvm::Function::ExternalLinkage, "malloc", mod);
+      }
+    }
+
+    allocatedMem = builder.CreateCall(allocFunc, {sizeVal});
+
+    /* Out of memory: no exceptions in Utopia, so terminate (the C++
+     * analogue of an allocation failure is std::bad_alloc). */
+    {
+      llvm::Function *theFunction = builder.GetInsertBlock()->getParent();
+      llvm::BasicBlock *oomBB =
+          llvm::BasicBlock::Create(ctx, "new.oom", theFunction);
+      llvm::BasicBlock *contBB =
+          llvm::BasicBlock::Create(ctx, "new.oom.cont");
+      llvm::Value *isNull = builder.CreateIsNull(allocatedMem, "alloc.null");
+      builder.CreateCondBr(isNull, oomBB, contBB);
+
+      builder.SetInsertPoint(oomBB);
+      llvm::Function *abortFunc = mod.getFunction("abort");
+      if (!abortFunc) {
+        abortFunc = llvm::Function::Create(
+            llvm::FunctionType::get(builder.getVoidTy(), false),
+            llvm::Function::ExternalLinkage, "abort", mod);
+        abortFunc->setDoesNotReturn();
+      }
+      builder.CreateCall(abortFunc, {});
+      builder.CreateUnreachable();
+
+      theFunction->insert(theFunction->end(), contBB);
+      builder.SetInsertPoint(contBB);
+    }
+
+    userMem = allocatedMem;
+    if (node->arraySize) {
+      /* Store the element count at the base of the allocated block */
+      builder.CreateStore(arrSize64, allocatedMem);
+      /* Offset the pointer by 8 bytes to return to the user context */
+      userMem = builder.CreateInBoundsGEP(builder.getInt8Ty(), allocatedMem,
+                                          builder.getInt64(8));
+    }
+
+    typedMem = builder.CreateBitCast(userMem, getLLVMType(node->exprType));
   }
-
-  llvm::Value *allocatedMem = builder.CreateCall(mallocFunc, {sizeVal});
-  llvm::Value *userMem = allocatedMem;
-
-  if (node->arraySize) {
-    // Store the element count at the base of the allocated block
-    builder.CreateStore(arrSize64, allocatedMem);
-    // Offset the pointer by 8 bytes to return to the user context
-    userMem = builder.CreateInBoundsGEP(builder.getInt8Ty(), allocatedMem,
-                                        builder.getInt64(8));
-  }
-
-  llvm::Value *typedMem =
-      builder.CreateBitCast(userMem, getLLVMType(node->exprType));
 
   const Type *elemUnqual = node->allocatedType->getUnqualifiedType();
   bool elemIsRecord = elemUnqual->getKind() == TypeKind::Class ||
@@ -4866,8 +4979,37 @@ llvm::Value *CodeGen::visit(const NewExprNode *node) {
 
       builder.SetInsertPoint(endBB);
     }
+  } else if (!node->args.empty() &&
+             (elemUnqual->getKind() != TypeKind::Class &&
+              elemUnqual->getKind() != TypeKind::Struct &&
+              elemUnqual->getKind() != TypeKind::Union)) {
+    /* Scalar initialization: 'new T(value)' writes the argument into the
+     * allocated object (e.g. 'new int(42)'). */
+    llvm::Value *initVal = dispatchValueOf(node->args[0]);
+    if (initVal) {
+      initVal =
+          createImplicitCast(initVal, getLLVMType(node->allocatedType));
+      createTBAAStore(initVal, typedMem, node->allocatedType);
+    }
   } else if (node->hasParens || node->resolvedConstructor) {
-    emitDefaultInitialization(typedMem, node->allocatedType);
+    /* Memory.construct zeroes the destination first so constructor
+     * assignments ('this.field = value') and destructor-bearing members
+     * always see a valid object state; without a constructor,
+     * value-initialize (zero) as well. */
+    if (node->placementExpr || !node->resolvedConstructor) {
+      emitDefaultInitialization(typedMem, node->allocatedType);
+    }
+
+    if (node->implicitCopyInit) {
+      /* Trivially copyable record with a single value argument: bitwise
+       * copy instead of a constructor call. */
+      llvm::Value *initVal = dispatchValueOf(node->args[0]);
+      if (initVal) {
+        initVal =
+            createImplicitCast(initVal, getLLVMType(node->allocatedType));
+        createTBAAStore(initVal, typedMem, node->allocatedType);
+      }
+    }
 
     if (node->resolvedConstructor) {
       llvm::Function *ctorFunc =
@@ -4939,17 +5081,8 @@ llvm::Value *CodeGen::visit(const NewExprNode *node) {
       }
 
       builder.CreateCall(ctorFunc, argsArgs);
-    } else if (!node->args.empty()) {
-      /* Scalar initialization: 'new T(value)' writes the argument into the
-       * allocated object (e.g. 'new int(42)'). */
-      llvm::Value *initVal = dispatch(node->args[0]);
-      if (initVal) {
-        initVal =
-            createImplicitCast(initVal, getLLVMType(node->allocatedType));
-        createTBAAStore(initVal, typedMem, node->allocatedType);
-      }
     }
-}
+  }
 
   return typedMem;
 }
@@ -5041,7 +5174,12 @@ llvm::Value *CodeGen::visit(const DeleteExprNode *node) {
       builder.SetInsertPoint(endBB);
     }
 
-    builder.CreateCall(freeFunc, {rawPtr});
+    if (node->deallocator) {
+      llvm::Function *deallocFunc = getOrCreateFunction(node->deallocator);
+      builder.CreateCall(deallocFunc, {rawPtr});
+    } else {
+      builder.CreateCall(freeFunc, {rawPtr});
+    }
   } else {
     if (node->ptr->exprType && node->ptr->exprType->isPointerType()) {
       const Type *pointeeTy =
@@ -5070,7 +5208,12 @@ llvm::Value *CodeGen::visit(const DeleteExprNode *node) {
         }
       }
     }
-    builder.CreateCall(freeFunc, {ptr});
+    if (node->deallocator) {
+      llvm::Function *deallocFunc = getOrCreateFunction(node->deallocator);
+      builder.CreateCall(deallocFunc, {ptr});
+    } else {
+      builder.CreateCall(freeFunc, {ptr});
+    }
   }
 
   builder.CreateBr(mergeBB);
@@ -5078,6 +5221,20 @@ llvm::Value *CodeGen::visit(const DeleteExprNode *node) {
   theFunction->insert(theFunction->end(), mergeBB);
   builder.SetInsertPoint(mergeBB);
 
+  return nullptr;
+}
+
+llvm::Value *CodeGen::visit(const DestructorCallNode *node) {
+  llvm::Value *obj = nullptr;
+  if (node->object->exprType &&
+      node->object->exprType->getUnqualifiedType()->isPointerType()) {
+    obj = dispatch(node->object);
+  } else {
+    obj = getLValue(node->object);
+  }
+  if (!obj || !node->destructor)
+    return nullptr;
+  emitCleanupCall(obj, node->destructor);
   return nullptr;
 }
 

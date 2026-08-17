@@ -187,6 +187,10 @@ ASTNode *ASTCloner::visit(const FunctionCallNode *n) {
   node->hasRawArgs = n->hasRawArgs;
   node->hasTrailingComma = n->hasTrailingComma;
   node->isSuperCall = n->isSuperCall;
+  if (n->loweredNew) {
+    node->loweredNew =
+        llvm::dyn_cast_or_null<NewExprNode>(dispatch(n->loweredNew));
+  }
   return node;
 }
 
@@ -210,12 +214,29 @@ ASTNode *ASTCloner::visit(const NewExprNode *n) {
   node->rawArgNames = ctx.copyArray<std::string_view>(n->rawArgNames);
   node->hasRawArgs = n->hasRawArgs;
   node->hasTrailingComma = n->hasTrailingComma;
+  node->placementExpr =
+      n->placementExpr ? static_cast<ExprNode *>(dispatch(n->placementExpr))
+                       : nullptr;
+  node->implicitCopyInit = n->implicitCopyInit;
+  node->allocator = n->allocator;
+  node->deallocator = n->deallocator;
   return node;
 }
 
 ASTNode *ASTCloner::visit(const DeleteExprNode *n) {
-  return ctx.create<DeleteExprNode>(static_cast<ExprNode *>(dispatch(n->ptr)),
-                                    n->isArray, n->line, n->column, n->length);
+  auto *node = ctx.create<DeleteExprNode>(
+      static_cast<ExprNode *>(dispatch(n->ptr)), n->isArray, n->line,
+      n->column, n->length);
+  node->deallocator = n->deallocator;
+  return node;
+}
+
+ASTNode *ASTCloner::visit(const DestructorCallNode *n) {
+  auto *node = ctx.create<DestructorCallNode>(
+      static_cast<ExprNode *>(dispatch(n->object)), cloneType(n->targetType),
+      n->line, n->column, n->length);
+  node->destructor = n->destructor;
+  return node;
 }
 
 ASTNode *ASTCloner::visit(const BlockNode *n) {

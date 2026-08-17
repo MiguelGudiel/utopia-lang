@@ -4,6 +4,46 @@ void* malloc(usize size);
 @extern
 void free(void* ptr);
 
+/*
+ * RawMemory is an untyped heap allocation returned by alloc().
+ * It owns the block; release it exactly once with free().
+ */
+struct RawMemory {
+  uint8* ptr;
+}
+
+/*
+ * Allocates 'size' bytes aligned to 'align' (a power of two) without
+ * constructing anything. Out-of-memory terminates the program (the same
+ * policy as 'new'). The returned block is released with free().
+ */
+@intrinsic("memory_alloc")
+RawMemory alloc(usize size, usize align);
+
+/*
+ * Releases a block previously returned by alloc().
+ */
+@intrinsic("memory_free")
+void free(RawMemory mem);
+
+/*
+ * Constructs an object of type T in existing memory ('ptr' may be a typed
+ * pointer, void*, or byte pointer such as RawMemory.ptr). Constructor
+ * arguments are forwarded; the returned pointer aliases 'ptr'.
+ * NOTE: the declared signature is a placeholder; the compiler intercepts
+ * the call and resolves T from the explicit type argument.
+ * Internal prelude name: the public API is Memory.construct (stdlib).
+ */
+@intrinsic("memory_construct")
+public void* _construct<T>(void* ptr);
+
+/*
+ * Runs the destructor of the pointee type, if it has one. Does not free
+ * the memory: pair with free() on the owning RawMemory.
+ */
+@intrinsic("memory_destruct")
+void destruct(void* ptr);
+
 class Type {
   uint8* name;
   bool isClass;
@@ -26,6 +66,12 @@ usize sizeof(Type t);
 
 @intrinsic("sizeof_expr")
 usize sizeof<T>(T val);
+
+@intrinsic("alignof_type")
+usize alignof(Type t);
+
+@intrinsic("alignof_expr")
+usize alignof<T>(T val);
 
 @intrinsic("typeof_type")
 Type typeof(Type t);

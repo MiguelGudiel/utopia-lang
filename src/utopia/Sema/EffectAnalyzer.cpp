@@ -47,6 +47,8 @@ void EffectAnalyzer::visit(const FunctionCallNode *n) {
     dispatch(a);
 }
 
+void EffectAnalyzer::visit(const DestructorCallNode *n) {}
+
 void EffectAnalyzer::visit(const DeleteExprNode *n) {
   freesMem = true;
   writesMem = true;

@@ -221,6 +221,10 @@ public:
     return isHit(n) ? n : nullptr;
   }
 
+  const ASTNode *visit(const DestructorCallNode *n) {
+    return n->object;
+  }
+
   const ASTNode *visit(const DeleteExprNode *n) {
     if (auto found = find(n->ptr))
       return found;

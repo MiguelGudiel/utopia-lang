@@ -79,6 +79,7 @@ public:
   llvm::Value *visit(const ArraySubscriptNode *node);
   llvm::Value *visit(const NewExprNode *node);
   llvm::Value *visit(const DeleteExprNode *node);
+  llvm::Value *visit(const DestructorCallNode *node);
   llvm::Value *visit(const TypeLiteralNode *node);
   llvm::Value *visit(const ArrayLiteralNode *node);
   llvm::Value *visit(const NullNode *node);
@@ -220,6 +221,11 @@ private:
                            llvm::Value *targetAddr);
   llvm::Value *materializeByValueArg(const ExprNode *arg,
                                      const Type *paramDeclTy);
+
+  /* Evaluates an expression to its value: reference/rvalue-reference typed
+   * expressions ('x as T&&') yield the referenced object's address, so the
+   * value is loaded through it. */
+  llvm::Value *dispatchValueOf(const ExprNode *arg);
   void emitArrayLiteralInit(llvm::Value *targetAddr, const Type *targetType,
                             const ExprNode *initExpr);
   llvm::AllocaInst *createEntryBlockAlloca(llvm::Type *type,

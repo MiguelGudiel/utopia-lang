@@ -90,6 +90,15 @@ std::string_view Parser::parseOperatorName() {
       {TokenType::BANG, "!"},
       {TokenType::TILDE, "~"}};
 
+  if (currentToken().type == TokenType::NEW_KW ||
+      currentToken().type == TokenType::DELETE_KW) {
+    std::string_view allocName = (currentToken().type == TokenType::NEW_KW)
+                                     ? "operator new"
+                                     : "operator delete";
+    advance();
+    return astCtx.copyString(allocName);
+  }
+
   auto it = opMap.find(currentToken().type);
   if (it == opMap.end()) {
     reportError(currentToken().line, currentToken().column,
@@ -1779,6 +1788,20 @@ ExprNode *Parser::parseUnary() {
     int line = currentToken().line;
     int col = currentToken().column;
 
+    if (currentToken().type == TokenType::IDENTIFIER &&
+        currentToken().value == "uninitialized") {
+      reportError(line, col, 12,
+                  "'new uninitialized' has been removed; use "
+                  "Memory.alloc(size, align) instead.");
+      throw ParseException();
+    }
+    if (currentToken().type == TokenType::LPAREN) {
+      reportError(line, col, 1,
+                  "Placement new has been removed; use "
+                  "Memory.construct<T>(ptr, args...) instead.");
+      throw ParseException();
+    }
+
     const char *typeStart = currentToken().value.data();
     const Type *allocTy = parseType(true);
     const char *typeEnd =
@@ -1858,14 +1881,23 @@ ExprNode *Parser::parseUnary() {
     int col = currentToken().column;
     bool isArray = false;
 
+    if (currentToken().type == TokenType::IDENTIFIER &&
+        currentToken().value == "uninitialized") {
+      reportError(line, col, 12,
+                  "'delete uninitialized' has been removed; use "
+                  "Memory.destruct(ptr) and Memory.free(raw) instead.");
+      throw ParseException();
+    }
+
     if (match(TokenType::LBRACKET)) {
       expect(TokenType::RBRACKET, "Expected ']' after '[' in delete");
       isArray = true;
     }
 
     auto ptr = parseUnary();
-    return astCtx.create<DeleteExprNode>(ptr, isArray, line, col,
-                                         currentToken().column - col);
+    auto delNode = astCtx.create<DeleteExprNode>(ptr, isArray, line, col,
+                                                 currentToken().column - col);
+    return delNode;
   }
 
   if (currentToken().type == TokenType::STAR ||
@@ -3064,6 +3096,20 @@ ExprNode *Parser::parsePostfix() {
     if (match(TokenType::DOT)) {
       int line = expr->line;
       int col = expr->column;
+
+      if (match(TokenType::TILDE)) {
+        /* Manual destructor call: 'obj.~TypeName()' (C++ placement-new
+         * companion: destroy before freeing the raw memory). */
+        int dtorLine = expr->line;
+        const Type *dtorTy = parseType();
+        int endCol = currentToken().column + currentToken().value.length();
+        expect(TokenType::LPAREN, "Expected '(' after destructor type");
+        expect(TokenType::RPAREN, "Expected ')' in destructor call");
+        expr = astCtx.create<DestructorCallNode>(expr, dtorTy, dtorLine, col,
+                                                 endCol - col);
+        continue;
+      }
+
       std::string_view memberName = currentToken().value;
       int memLen = memberName.length();
 
@@ -3612,6 +3658,15 @@ ExprNode *Parser::parsePrimary() {
   if (currentToken().type == TokenType::IDENTIFIER) {
     std::string_view name = currentToken().value;
     int len = (int)name.length();
+
+    /* A bare template parameter used in a value position is a type
+     * reference: 'sizeof(T)', 'alignof(T)', 'typeof(T)'. */
+    if (isTemplateParam(name)) {
+      const Type *t = astCtx.getTemplateParamType(name);
+      advance();
+      return astCtx.create<TypeLiteralNode>(t, line, col, len);
+    }
+
     advance();
 
     bool isTemplateCall = false;

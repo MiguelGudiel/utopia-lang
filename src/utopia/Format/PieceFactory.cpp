@@ -10,7 +10,8 @@ static bool isExpressionStatement(NodeKind kind) {
          kind == NodeKind::UnaryOp || kind == NodeKind::BinaryOp ||
          kind == NodeKind::TernaryOp || kind == NodeKind::Variable ||
          kind == NodeKind::Number || kind == NodeKind::String ||
-         kind == NodeKind::Delete || kind == NodeKind::New;
+         kind == NodeKind::Delete || kind == NodeKind::New ||
+         kind == NodeKind::DestructorCall;
 }
 
 void IndependentPiece::format(
@@ -870,7 +871,8 @@ Piece *PieceFactory::visit(const NewExprNode *node) {
   std::string typeStr = node->rawAllocatedTypeStr.empty()
                             ? node->allocatedType->toString()
                             : std::string(node->rawAllocatedTypeStr);
-  parts.push_back(create<TextPiece>("new " + typeStr));
+  parts.push_back(create<TextPiece>("new"));
+  parts.push_back(create<TextPiece>(" " + typeStr));
   if (node->arraySize) {
     parts.push_back(create<TextPiece>("["));
     parts.push_back(dispatchExpr(node->arraySize));
@@ -902,6 +904,14 @@ Piece *PieceFactory::visit(const DeleteExprNode *node) {
     parts.push_back(create<TextPiece>("[]"));
   parts.push_back(create<TextPiece>(" "));
   parts.push_back(dispatchExpr(node->ptr));
+  return create<ConcatPiece>(std::move(parts));
+}
+
+Piece *PieceFactory::visit(const DestructorCallNode *node) {
+  std::vector<Piece *> parts;
+  parts.push_back(dispatchExpr(node->object));
+  parts.push_back(create<TextPiece>(".~" + node->targetType->toString() +
+                                    "()"));
   return create<ConcatPiece>(std::move(parts));
 }
 

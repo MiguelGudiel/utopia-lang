@@ -1,6 +1,43 @@
 namespace Memory {
 
 /*
+ * The memory intrinsics are declared in the prelude (Memory/Core.utp) so
+ * the standard library itself (e.g. List) can use them; the namespace
+ * re-declares them for the qualified 'Memory.alloc(...)' API.
+ */
+
+/*
+ * Allocates 'size' bytes aligned to 'align' (a power of two) without
+ * constructing anything. Out-of-memory terminates the program (the same
+ * policy as 'new'). The returned block is released with Memory.free().
+ */
+@intrinsic("memory_alloc")
+RawMemory alloc(usize size, usize align);
+
+/*
+ * Releases a block previously returned by Memory.alloc().
+ */
+@intrinsic("memory_free")
+void free(RawMemory mem);
+
+/*
+ * Constructs an object of type T in existing memory ('ptr' may be a typed
+ * pointer, void*, or byte pointer such as RawMemory.ptr). Constructor
+ * arguments are forwarded; the returned pointer aliases 'ptr'.
+ * NOTE: the declared signature is a placeholder; the compiler intercepts
+ * the call and resolves T from the explicit type argument.
+ */
+@intrinsic("memory_construct")
+void* construct<T>(void* ptr);
+
+/*
+ * Runs the destructor of the pointee type, if it has one. Does not free
+ * the memory: pair with Memory.free() on the owning RawMemory.
+ */
+@intrinsic("memory_destruct")
+void destruct(void* ptr);
+
+/*
  * Internal reference-count block shared by shared_ptr and weak_ptr.
  */
 class RefCountBlock {

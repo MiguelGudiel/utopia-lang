@@ -64,6 +64,93 @@ class unique_ptr<T> {
 - Return value optimization (RVO) transfers ownership when returning locals or constructor temporaries by value.
 - `operator=` must be provided explicitly for records with custom destructors.
 
+## Raw memory: `Memory.alloc` / `Memory.free`
+
+For untyped, aligned storage the standard library provides a Zig/Odin-style
+memory API (`import "utopia:memory"; using Memory;`):
+
+```utp
+RawMemory raw = Memory.alloc(sizeof(Buffer) * 2, alignof(Buffer));
+
+Buffer* b0 = Memory.construct<Buffer>(raw.ptr, "x", 1);
+Buffer* b1 = Memory.construct<Buffer>(raw.ptr + sizeof(Buffer), "y", 2);
+
+Memory.destruct(b0);        /* runs ~Buffer, does not free */
+Memory.destruct(b1);
+Memory.free(raw);           /* releases the whole block */
+```
+
+- `Memory.alloc(size, align)` returns a `RawMemory { uint8* ptr }` block
+  aligned to `align` (a power of two); no constructor runs.
+  Out-of-memory terminates the program (the same policy as `new`).
+- `Memory.construct<T>(ptr, args...)` constructs an object of type `T` in
+  existing memory (typed pointers, `void*`, or byte pointers such as
+  `RawMemory.ptr` all work) and returns a `T*` aliasing `ptr`. The
+  destination is zeroed first so constructor assignments
+  (`this.field = value`) always see a valid object state. `T` may be
+  deduced from the pointer when it is already typed:
+  `Memory.construct(b0, "x")`.
+- `Memory.destruct(ptr)` runs the destructor of the pointee type (if it has
+  one); it never frees the memory.
+- `Memory.free(raw)` releases the block. `RawMemory` is an owning handle:
+  release each block exactly once.
+- Pointer arithmetic is element-scaled: `raw.ptr + sizeof(Buffer)` steps by
+  bytes because `RawMemory.ptr` is a byte pointer, while `b0 + 1` steps by
+  one `Buffer`.
+
+This replaces the old C++-style `new uninitialized T` / `delete uninitialized`
+and placement-new (`new (ptr) T(...)`) forms, which have been removed.
+
+## Custom allocators: `operator new` / `operator delete`
+
+`new` / `delete` route through user-defined allocators, exactly like C++.
+Declare them as static class methods (they take precedence for that type) or
+as file-scope functions (they apply to every `new` in that module):
+
+```utp
+/* Module-wide custom allocator */
+void* operator new(usize size) {
+  return myPoolAllocate(size);
+}
+void operator delete(void* ptr) {
+  myPoolFree(ptr);
+}
+
+class Tracked {
+  /* Class-level allocator: only for 'new Tracked' */
+  public static void* operator new(usize size) { ... }
+  public static void operator delete(void* ptr) { ... }
+}
+```
+
+The required signatures are `void* operator new(usize size)` and
+`void operator delete(void* ptr)`. Arrays (`new T[n]` / `delete[]`) also
+route through the custom allocators.
+
+## Out-of-memory
+
+Utopia has no exceptions (there is no try/catch), so a failed allocation
+cannot be thrown from. When the allocator returns null, the program
+terminates (the analogue of C++ `std::bad_alloc`). A custom `operator new`
+can return null to trigger this, or handle the failure itself.
+
+## Alignment: `@align`
+
+The `@align(N)` annotation sets the alignment of structs, classes, unions
+and variables; `alignof(T)` reports it at compile time:
+
+```utp
+@align(16)
+class Vec4 {
+  public float32 x;
+  public float32 y;
+  public float32 z;
+  public float32 w;
+}
+
+usize a = alignof(Vec4);   // 16
+```
+
 ## Smart pointers
 
 The standard library provides C++-style smart pointers with Rust-style auto-deref:

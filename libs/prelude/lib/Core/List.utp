@@ -1,62 +1,111 @@
+import "../Memory/Core.utp";
 export "ListLiteralView.utp";
 
+/*
+ * List<T> is a growable array with std::vector-style semantics: raw aligned
+ * storage is allocated with alloc() and elements are constructed lazily,
+ * so no element is ever default-constructed unless it is actually stored.
+ * Reallocation moves elements (Memory.construct on the new block, destruct
+ * on the old), which for types with move constructors (e.g. String) is a
+ * pointer steal with no per-element allocation.
+ */
 class List<T> {
-  T* _data;
+  RawMemory _raw;
   usize _length;
   usize _capacity;
 
   List() {
+    this._raw.ptr = null;
     this._length = 0;
-    this._capacity = 8;
-    this._data = new T[this._capacity];
+    this._capacity = 0;
   }
 
   List(ListLiteralView<T> view) {
-    this._length = view.length;
-    this._capacity = view.length > 8 ? view.length * 2 : 8;
-    this._data = new T[this._capacity];
+    this._raw.ptr = null;
+    this._length = 0;
+    this._capacity = 0;
+    this._reserve(view.length);
     for (usize i = 0; i < view.length; i++) {
-      this._data[i] = view.data[i];
+      _construct<T>(this._raw.ptr + i * sizeof(T), view.data[i]);
     }
+    this._length = view.length;
   }
 
   List(const List<T>& other) {
-    this._length = other._length;
-    this._capacity = other._capacity;
-    this._data = new T[this._capacity];
-    for (usize i = 0; i < this._length; i++) {
-      this._data[i] = other._data[i];
+    this._raw.ptr = null;
+    this._length = 0;
+    this._capacity = 0;
+    this._reserve(other._length);
+    for (usize i = 0; i < other._length; i++) {
+      _construct<T>(this._raw.ptr + i * sizeof(T),
+                   ((other._raw.ptr + i * sizeof(T)) as T*)[0]);
     }
+    this._length = other._length;
   }
 
   ~List() {
-    if (this._data != null) {
-      delete[] this._data;
+    if (this._raw.ptr != null) {
+      for (usize i = 0; i < this._length; i++) {
+        destruct(this._elem(i));
+      }
+      free(this._raw);
     }
   }
 
   void operator=(const List<T>& other) {
-    if (this._data != null) {
-      delete[] this._data;
+    if (this == &other) return;
+    if (this._raw.ptr != null) {
+      for (usize i = 0; i < this._length; i++) {
+        destruct(this._elem(i));
+      }
+    }
+    this._length = 0;
+    this._reserve(other._length);
+    for (usize i = 0; i < other._length; i++) {
+      _construct<T>(this._raw.ptr + i * sizeof(T),
+                   ((other._raw.ptr + i * sizeof(T)) as T*)[0]);
     }
     this._length = other._length;
-    this._capacity = other._capacity;
-    this._data = new T[this._capacity];
-    for (usize i = 0; i < this._length; i++) {
-      this._data[i] = other._data[i];
-    }
   }
 
   void operator=(ListLiteralView<T> view) {
-    if (this._data != null) {
-      delete[] this._data;
+    if (this._raw.ptr != null) {
+      for (usize i = 0; i < this._length; i++) {
+        destruct(this._elem(i));
+      }
+    }
+    this._length = 0;
+    this._reserve(view.length);
+    for (usize i = 0; i < view.length; i++) {
+      _construct<T>(this._raw.ptr + i * sizeof(T), view.data[i]);
     }
     this._length = view.length;
-    this._capacity = view.length > 8 ? view.length * 2 : 8;
-    this._data = new T[this._capacity];
-    for (usize i = 0; i < view.length; i++) {
-      this._data[i] = view.data[i];
+  }
+
+  /* Typed pointer to element 'i'. */
+  @inline
+  T* _elem(usize i) {
+    return (this._raw.ptr + i * sizeof(T)) as T*;
+  }
+
+  /* Grows the storage to hold at least 'minCap' elements, moving the live
+   * elements into the new block. */
+  void _reserve(usize minCap) {
+    if (minCap <= this._capacity) return;
+    usize newCap = this._capacity == 0 ? 8 as usize : this._capacity;
+    while (newCap < minCap) {
+      newCap = newCap * 2;
     }
+    RawMemory newRaw = alloc(newCap * sizeof(T), alignof(T));
+    for (usize i = 0; i < this._length; i++) {
+      _construct<T>(newRaw.ptr + i * sizeof(T), this._elem(i)[0] as T&&);
+    }
+    for (usize i = 0; i < this._length; i++) {
+      destruct(this._elem(i));
+    }
+    free(this._raw);
+    this._raw = newRaw;
+    this._capacity = newCap;
   }
 
   usize length() {
@@ -67,23 +116,19 @@ class List<T> {
     return this._capacity;
   }
 
+  /* Appends 'value'. The element is move-constructed from the parameter
+   * when T has a move constructor, otherwise copy-constructed. */
   void push(T value) {
     if (this._length >= this._capacity) {
-      this._capacity = this._capacity * 2;
-      T* newData = new T[this._capacity];
-      for (usize i = 0; i < this._length; i++) {
-        newData[i] = this._data[i];
-      }
-      delete[] this._data;
-      this._data = newData;
+      this._reserve(this._length + 1);
     }
-    this._data[this._length] = value;
+    _construct<T>(this._raw.ptr + this._length * sizeof(T), value as T&&);
     this._length++;
   }
 
   @inline
   T& operator[](usize index) {
-    return this._data[index];
+    return this._elem(index)[0];
   }
 
   /* Dart-style aliases and collection helpers.
@@ -101,7 +146,7 @@ class List<T> {
 
   void addAll<T2>(const List<T>& other) {
     for (usize i = 0; i < other._length; i++) {
-      this.push(other._data[i]);
+      this.push(((other._raw.ptr + i * sizeof(T)) as T*)[0]);
     }
   }
 
@@ -122,7 +167,12 @@ class List<T> {
     return this._length != 0;
   }
 
+  /* Destructs the live elements and resets the length; the capacity is
+   * kept for reuse. */
   void clear() {
+    for (usize i = 0; i < this._length; i++) {
+      destruct(this._elem(i));
+    }
     this._length = 0;
   }
 
@@ -131,7 +181,7 @@ class List<T> {
    * List<T> stays instantiable for types without operator==. */
   bool contains<T2>(T value) {
     for (usize i = 0; i < this._length; i++) {
-      if (this._data[i] == value) return true;
+      if (this._elem(i)[0] == value) return true;
     }
     return false;
   }
@@ -139,7 +189,7 @@ class List<T> {
   /* Index of the first occurrence of 'value', or -1 when absent. */
   int64 indexOf<T2>(T value) {
     for (usize i = 0; i < this._length; i++) {
-      if (this._data[i] == value) return i as int64;
+      if (this._elem(i)[0] == value) return i as int64;
     }
     return -1;
   }
@@ -147,50 +197,42 @@ class List<T> {
   /* Index of the last occurrence of 'value', or -1 when absent. */
   int64 lastIndexOf<T2>(T value) {
     for (int64 i = (this._length - 1) as int64; i >= 0; i--) {
-      if (this._data[i as usize] == value) return i;
+      if (this._elem(i as usize)[0] == value) return i;
     }
     return -1;
   }
 
   @inline
   T& first() {
-    return this._data[0];
+    return this._elem(0)[0];
   }
 
   @inline
   T& last() {
-    return this._data[this._length - 1];
+    return this._elem(this._length - 1)[0];
   }
 
   /* Inserts 'value' at 'index', shifting the following elements right. */
   void insert(usize index, T value) {
     if (index > this._length) index = this._length;
     if (this._length >= this._capacity) {
-      this._capacity = this._capacity * 2;
-      T* newData = new T[this._capacity];
-      for (usize i = 0; i < index; i++) {
-        newData[i] = this._data[i];
-      }
-      newData[index] = value;
-      for (usize i = index; i < this._length; i++) {
-        newData[i + 1] = this._data[i];
-      }
-      delete[] this._data;
-      this._data = newData;
-    } else {
-      for (usize i = this._length; i > index; i--) {
-        this._data[i] = this._data[i - 1];
-      }
-      this._data[index] = value;
+      this._reserve(this._length + 1);
     }
+    for (usize i = this._length; i > index; i--) {
+      _construct<T>(this._elem(i), this._elem(i - 1)[0] as T&&);
+      destruct(this._elem(i - 1));
+    }
+    _construct<T>(this._elem(index), value as T&&);
     this._length++;
   }
 
-  /* Removes and returns the element at 'index'. */
+  /* Removes and returns the element at 'index'. The element is moved out,
+   * so the return is a move for move-constructible T. */
   T removeAt<T2>(usize index) {
-    T removed = this._data[index];
+    T removed = this._elem(index)[0] as T&&;
     for (usize i = index; i + 1 < this._length; i++) {
-      this._data[i] = this._data[i + 1];
+      _construct<T>(this._elem(i), this._elem(i + 1)[0] as T&&);
+      destruct(this._elem(i + 1));
     }
     this._length--;
     return removed;
@@ -200,7 +242,7 @@ class List<T> {
    * removed. */
   bool remove<T2>(T value) {
     for (usize i = 0; i < this._length; i++) {
-      if (this._data[i] == value) {
+      if (this._elem(i)[0] == value) {
         this.removeAt(i);
         return true;
       }
@@ -214,7 +256,7 @@ class List<T> {
     if (start >= end || start >= this._length) return result;
     if (end > this._length) end = this._length;
     for (usize i = start; i < end; i++) {
-      result.push(this._data[i]);
+      result.push(this._elem(i)[0]);
     }
     return result;
   }
@@ -227,7 +269,7 @@ class List<T> {
       if (i > 0) {
         result = result + separator;
       }
-      result = result + String(this._data[i]);
+      result = result + String(this._elem(i)[0]);
     }
     return result;
   }
@@ -235,7 +277,7 @@ class List<T> {
   /* Runs 'fn' for every element, in order. */
   void forEach<T2>(void Function(T) fn) {
     for (usize i = 0; i < this._length; i++) {
-      fn(this._data[i]);
+      fn(this._elem(i)[0]);
     }
   }
 
@@ -243,7 +285,7 @@ class List<T> {
   List<T2> map<T2>(T2 Function(T) fn) {
     List<T2> result;
     for (usize i = 0; i < this._length; i++) {
-      result.push(fn(this._data[i]));
+      result.push(fn(this._elem(i)[0]));
     }
     return result;
   }
@@ -252,8 +294,8 @@ class List<T> {
   List<T> where<T2>(bool Function(T) fn) {
     List<T> result;
     for (usize i = 0; i < this._length; i++) {
-      if (fn(this._data[i])) {
-        result.push(this._data[i]);
+      if (fn(this._elem(i)[0])) {
+        result.push(this._elem(i)[0]);
       }
     }
     return result;
@@ -262,23 +304,28 @@ class List<T> {
   /* Combines the elements with 'fn', from first to last. The first element
    * is returned as-is (Dart reduce semantics). */
   T reduce<T2>(T Function(T, T) fn) {
-    T acc = this._data[0];
+    T acc = this._elem(0)[0] as T&&;
     for (usize i = 1; i < this._length; i++) {
-      acc = fn(acc, this._data[i]);
+      acc = fn(acc, this._elem(i)[0]);
     }
     return acc;
   }
 
-  /* Sorts in place using operator< on T (stable insertion sort). */
+  /* Sorts in place using operator< on T (stable insertion sort). Shifts
+   * are moves: the element is move-constructed into its new slot and the
+   * old slot is destructed, so types with move constructors avoid
+   * reallocation entirely. */
   void sort<T2>() {
     for (usize i = 1; i < this._length; i++) {
-      T key = this._data[i];
+      T key = this._elem(i)[0] as T&&;
       int64 j = (i - 1) as int64;
-      while (j >= 0 && key < this._data[j as usize]) {
-        this._data[(j + 1) as usize] = this._data[j as usize];
+      while (j >= 0 && key < this._elem(j as usize)[0]) {
+        _construct<T>(this._elem((j + 1) as usize),
+                     this._elem(j as usize)[0] as T&&);
+        destruct(this._elem(j as usize));
         j--;
       }
-      this._data[(j + 1) as usize] = key;
+      _construct<T>(this._elem((j + 1) as usize), key as T&&);
     }
   }
 
@@ -286,14 +333,15 @@ class List<T> {
    * its first argument should come before the second). */
   void sort<T2>(bool Function(T, T) less) {
     for (usize i = 1; i < this._length; i++) {
-      T key = this._data[i];
+      T key = this._elem(i)[0] as T&&;
       int64 j = (i - 1) as int64;
-      while (j >= 0 && less(key, this._data[j as usize])) {
-        this._data[(j + 1) as usize] = this._data[j as usize];
+      while (j >= 0 && less(key, this._elem(j as usize)[0])) {
+        _construct<T>(this._elem((j + 1) as usize),
+                     this._elem(j as usize)[0] as T&&);
+        destruct(this._elem(j as usize));
         j--;
       }
-      this._data[(j + 1) as usize] = key;
+      _construct<T>(this._elem((j + 1) as usize), key as T&&);
     }
   }
 }
-

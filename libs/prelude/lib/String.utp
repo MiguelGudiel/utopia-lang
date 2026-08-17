@@ -144,6 +144,17 @@ class String {
     String.c_strcpy(this.data, other.data, this.len);
   }
 
+  /* Move constructor: steals the source's buffer, leaving it empty.
+   * Enables zero-allocation moves (e.g. List reallocation). */
+  String(String&& other) {
+    this.data = other.data;
+    this.len = other.len;
+    this.cap = other.cap;
+    other.data = null;
+    other.len = 0;
+    other.cap = 0;
+  }
+
   ~String() {
     if (this.data != null)
       delete[] this.data;
@@ -156,6 +167,19 @@ class String {
     this.cap = other.cap;
     this.data = new uint8[this.cap + 1];
     String.c_strcpy(this.data, other.data, this.len);
+  }
+
+  /* Move assignment: releases this string's buffer and steals the source's,
+   * leaving it empty. */
+  void operator=(String&& other) {
+    if (this.data != null)
+      delete[] this.data;
+    this.data = other.data;
+    this.len = other.len;
+    this.cap = other.cap;
+    other.data = null;
+    other.len = 0;
+    other.cap = 0;
   }
 
   void operator=(const uint8* str) {
