@@ -20,6 +20,8 @@ struct ModuleLoaderConfig {
   std::unordered_map<std::string, std::string> packages;
   std::unordered_set<std::string> definedMacros;
   bool isBuildScript = false;
+  bool isFormatting = false;
+  bool asyncEnabled = true;
 };
 
 class ModuleLoader {

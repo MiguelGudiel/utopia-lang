@@ -11,14 +11,21 @@ namespace utopia {
 
 struct CompileOptions {
   std::string projectName;
+  std::string outputName;
   std::string target;
   std::string sourcePath;
+  std::vector<std::string> resolvedSources;
   std::string outputPath;
   std::string projectRoot;
+  std::string mainProjectRoot;
+  std::string currentProjectRoot;
   std::string outputDir;
+  std::string mainOutputDir;
   std::string stdlibRoot;
   std::string preludeRoot;
   std::string buildLibRoot;
+  std::string targetTriple;
+  std::string sysroot;
   std::vector<std::string> includeDirs;
   std::vector<std::string> linkerFlags;
 
@@ -31,6 +38,7 @@ struct CompileOptions {
   bool emitAsm = false;
   bool isJIT = false;
   bool doFormat = false;
+  bool asyncEnabled = true;
 
   int optLevel = 0;
   bool isDebug = false;

@@ -1,8 +1,125 @@
 #include "utopia/CodeGen/Mangler.hpp"
-#include "utopia/Common/Logger.hpp"
 #include "utopia/Sema/Sema.hpp"
 
 namespace utopia {
+
+/* Processes a method's annotations for the pieces the template early-return
+ * paths skip: 'intrinsic', 'extern', 'weak' and 'export' influence how the
+ * method is compiled, so they must be recorded even while the method's body
+ * is not type-checked eagerly. */
+static void collectMethodAnnotations(FunctionDeclNode *method,
+                                     SemaContext *ctx) {
+  bool isExport = false;
+
+  for (const auto *ann : method->annotations) {
+    if (ann->name == "export") {
+      isExport = true;
+    }
+
+    if (ann->name == "intrinsic") {
+      method->isIntrinsic = true;
+      if (!ann->args.empty() && ann->args[0]->kind == NodeKind::String) {
+        method->intrinsicName =
+            static_cast<const StringNode *>(ann->args[0])->value;
+      } else {
+        method->intrinsicName = method->name;
+      }
+    }
+
+    if (ann->name == "weak") {
+      method->isWeak = true;
+    }
+
+    if (ann->name == "extern") {
+      if (ann->args.empty()) {
+        method->externAlias = method->name;
+        method->callingConv = "cdecl";
+      } else if (ann->args.size() <= 2) {
+        if (ann->args[0]->kind == NodeKind::String) {
+          method->externAlias =
+              static_cast<const StringNode *>(ann->args[0])->value;
+        } else {
+          ctx->reportError(ann->args[0]->line, ann->args[0]->column,
+                           ann->args[0]->length,
+                           "First argument of @extern must be a string "
+                           "literal.");
+        }
+
+        if (ann->args.size() == 2) {
+          if (ann->args[1]->kind == NodeKind::String) {
+            std::string_view cc =
+                static_cast<const StringNode *>(ann->args[1])->value;
+            if (cc == "cdecl" || cc == "stdcall" || cc == "fastcall") {
+              method->callingConv = cc;
+            } else {
+              ctx->reportError(ann->args[1]->line, ann->args[1]->column,
+                               ann->args[1]->length,
+                               "Calling convention must be 'cdecl', "
+                               "'stdcall', or 'fastcall'.");
+            }
+          } else {
+            ctx->reportError(ann->args[1]->line, ann->args[1]->column,
+                             ann->args[1]->length,
+                             "Second argument of @extern must be a string "
+                             "literal.");
+          }
+        } else {
+          method->callingConv = "cdecl";
+        }
+      } else {
+        ctx->reportError(ann->line, ann->column, ann->length,
+                         "The @extern annotation accepts at most two string "
+                         "literal arguments.");
+      }
+    }
+  }
+
+  if (method->isExtern) {
+    if (method->externAlias.empty())
+      method->externAlias = method->name;
+    method->mangledName = std::string(method->externAlias);
+  } else if (isExport) {
+    method->mangledName = std::string(method->name);
+  }
+}
+
+void DeclCollectorPass::visit(const NamespaceDeclNode *node) {
+  std::string currentNs = ctx->getCurrentNamespace();
+  std::string fullNs = currentNs.empty()
+                           ? std::string(node->name)
+                           : currentNs + "." + std::string(node->name);
+
+  size_t start = 0;
+  while (true) {
+    size_t dot = fullNs.find('.', start);
+    std::string part =
+        (dot == std::string::npos) ? fullNs : fullNs.substr(0, dot);
+
+    auto *nsNode =
+        ctx->astCtx.getOrCreateNamespace(ctx->astCtx.copyString(part));
+    ctx->addDecl(part, nsNode);
+
+    if (dot == std::string::npos)
+      break;
+    start = dot + 1;
+  }
+
+  ctx->pushNamespace(node->name);
+
+  /* Usings declared inside the namespace must not leak into outer scopes. */
+  size_t prevUsings = ctx->getUsingsCount();
+
+  for (auto *stmt : node->statements) {
+    dispatch(stmt);
+  }
+
+  ctx->resizeUsings(prevUsings);
+  ctx->popNamespace();
+}
+
+void DeclCollectorPass::visit(const UsingNode *node) {
+  ctx->addUsing(node->name);
+}
 
 bool DeclCollectorPass::run(const ModuleNode *module, SemaContext &context) {
   ctx = &context;
@@ -14,6 +131,9 @@ void DeclCollectorPass::visit(const ModuleNode *node) {
   if (visitedModules.contains(node))
     return;
   visitedModules.insert(node);
+
+  /* Usings declared inside the module must not leak into outer scopes. */
+  size_t prevUsings = ctx->getUsingsCount();
 
   for (const auto *imp : node->importedModules) {
     dispatch(imp);
@@ -34,17 +154,21 @@ void DeclCollectorPass::visit(const ModuleNode *node) {
         stmt->kind == NodeKind::ClassDecl ||
         stmt->kind == NodeKind::AnnotationDecl ||
         stmt->kind == NodeKind::TypedefDecl ||
-        stmt->kind == NodeKind::EnumDecl) {
+        stmt->kind == NodeKind::EnumDecl ||
+        stmt->kind == NodeKind::NamespaceDecl ||
+        stmt->kind == NodeKind::Using) {
       dispatch(stmt);
     }
   }
 
   ctx->setCurrentFile(prevFile);
   ctx->currentModule = prevMod;
+
+  ctx->resizeUsings(prevUsings);
 }
 
 void DeclCollectorPass::visit(const TypedefDeclNode *node) {
-  ctx->addDecl(node->aliasName, node);
+  ctx->addDecl(node->fqName, node);
   if (node->aliasType) {
     node->aliasType->setDeclaration(node);
   }
@@ -54,8 +178,9 @@ void DeclCollectorPass::visit(const AnnotationDeclNode *node) {
   if (node->declFilePath.empty()) {
     const_cast<AnnotationDeclNode *>(node)->declFilePath = ctx->currentFile;
   }
-  ctx->addDecl(node->name, node);
-  auto *recTy = ctx->astCtx.getRecordType(node->name);
+  ctx->addDecl(node->fqName, node);
+
+  auto *recTy = ctx->astCtx.getRecordType(node->fqName);
   const_cast<AnnotationDeclNode *>(node)->recordType = recTy;
   recTy->setDeclaration(node);
 
@@ -71,8 +196,8 @@ void DeclCollectorPass::visit(const AnnotationDeclNode *node) {
           ctx->currentFile;
     }
     const_cast<FunctionDeclNode *>(node->constructor)->mangledName =
-        Mangler::mangle(node->constructor, std::string(node->name));
-    ctx->addDecl(node->name, node->constructor);
+        Mangler::mangle(node->constructor, std::string(node->fqName));
+    ctx->addDecl(node->fqName, node->constructor);
   }
 }
 
@@ -81,7 +206,22 @@ void DeclCollectorPass::visit(const FunctionDeclNode *node) {
     if (node->declFilePath.empty()) {
       const_cast<FunctionDeclNode *>(node)->declFilePath = ctx->currentFile;
     }
+    collectMethodAnnotations(const_cast<FunctionDeclNode *>(node), ctx);
+    /* Templates with '@intrinsic' (e.g. 'hash<T>') keep their intrinsic
+     * name so instantiations lower to the compiler builtin. */
+    for (const auto *ann : node->annotations) {
+      if (ann->name == "intrinsic") {
+        const_cast<FunctionDeclNode *>(node)->isIntrinsic = true;
+        if (!ann->args.empty() && ann->args[0]->kind == NodeKind::String) {
+          const_cast<FunctionDeclNode *>(node)->intrinsicName =
+              static_cast<const StringNode *>(ann->args[0])->value;
+        } else {
+          const_cast<FunctionDeclNode *>(node)->intrinsicName = node->name;
+        }
+      }
+    }
     ctx->templateRegistry[node->name] = node;
+    ctx->templateRegistry[node->fqName] = node;
     return;
   }
 
@@ -160,7 +300,7 @@ void DeclCollectorPass::visit(const FunctionDeclNode *node) {
     const_cast<FunctionDeclNode *>(node)->mangledName = Mangler::mangle(node);
   }
 
-  ctx->addDecl(node->name, node);
+  ctx->addDecl(node->fqName, node);
 }
 
 void DeclCollectorPass::visit(const IfNode *node) {
@@ -198,7 +338,40 @@ void DeclCollectorPass::visit(const SwitchNode *node) {
 }
 
 void DeclCollectorPass::visit(const VarDeclNode *node) {
-  ctx->addDecl(node->varName, node);
+  bool isExtern = false;
+  for (const auto *ann : node->annotations) {
+    if (ann->name == "extern") {
+      isExtern = true;
+      if (ann->args.empty()) {
+        const_cast<VarDeclNode *>(node)->externAlias = node->varName;
+      } else if (ann->args.size() == 1 &&
+                 ann->args[0]->kind == NodeKind::String) {
+        const_cast<VarDeclNode *>(node)->externAlias =
+            static_cast<const StringNode *>(ann->args[0])->value;
+      } else {
+        ctx->reportError(ann->line, ann->column, ann->length,
+                         "The @extern annotation for variables accepts at most "
+                         "one string literal argument.");
+      }
+    }
+  }
+
+  if (isExtern) {
+    const_cast<VarDeclNode *>(node)->isExtern = true;
+    const_cast<VarDeclNode *>(node)->mangledName =
+        std::string(node->externAlias);
+  } else if (!ctx->getCurrentNamespace().empty()) {
+    /* Namespace-scoped variables must not use their plain name as the
+     * symbol: 'namespace GL { PFN... glCreateShader; }' collides with a
+     * statically linked extern of the same name from another module (e.g.
+     * GLES's @extern("glCreateShader")), and the linker then resolves the
+     * function call to the data object. Mangle with the namespace, like
+     * C++ does. */
+    const_cast<VarDeclNode *>(node)->mangledName =
+        Mangler::mangle(node, std::string(""));
+  }
+
+  ctx->addDecl(node->fqName, node);
 }
 
 void DeclCollectorPass::visit(const UnionDeclNode *node) {
@@ -206,7 +379,20 @@ void DeclCollectorPass::visit(const UnionDeclNode *node) {
     if (node->declFilePath.empty()) {
       const_cast<UnionDeclNode *>(node)->declFilePath = ctx->currentFile;
     }
+    for (auto *method : node->methods) {
+      if (method->declFilePath.empty()) {
+        const_cast<FunctionDeclNode *>(method)->declFilePath =
+            ctx->currentFile;
+      }
+      collectMethodAnnotations(const_cast<FunctionDeclNode *>(method), ctx);
+    }
     ctx->templateRegistry[node->name] = node;
+    ctx->templateRegistry[node->fqName] = node;
+    /* Template records are also visible as identifiers so that static
+     * member access on the type ('Future<int>.value(...)') resolves. */
+    ctx->addDecl(node->name, node);
+    if (node->fqName != node->name)
+      ctx->addDecl(node->fqName, node);
     return;
   }
 
@@ -214,9 +400,9 @@ void DeclCollectorPass::visit(const UnionDeclNode *node) {
     const_cast<UnionDeclNode *>(node)->declFilePath = ctx->currentFile;
   }
 
-  ctx->addDecl(node->name, node);
+  ctx->addDecl(node->fqName, node);
 
-  auto *recTy = ctx->astCtx.getRecordType(node->name);
+  auto *recTy = ctx->astCtx.getRecordType(node->fqName);
   const_cast<UnionDeclNode *>(node)->recordType = recTy;
   recTy->setDeclaration(node);
 
@@ -229,7 +415,7 @@ void DeclCollectorPass::visit(const UnionDeclNode *node) {
     }
     if (field->isStatic) {
       const_cast<VarDeclNode *>(field)->mangledName =
-          Mangler::mangle(field, std::string(node->name));
+          Mangler::mangle(field, std::string(node->fqName));
     }
   }
 
@@ -249,8 +435,8 @@ void DeclCollectorPass::visit(const UnionDeclNode *node) {
       const_cast<FunctionDeclNode *>(ctor)->hasPrivateMod = node->hasPrivateMod;
     }
     const_cast<FunctionDeclNode *>(ctor)->mangledName =
-        Mangler::mangle(ctor, std::string(node->name));
-    ctx->addDecl(node->name, ctor);
+        Mangler::mangle(ctor, std::string(node->fqName));
+    ctx->addDecl(node->fqName, ctor);
   }
 
   if (node->destructor) {
@@ -259,7 +445,7 @@ void DeclCollectorPass::visit(const UnionDeclNode *node) {
           ctx->currentFile;
     }
     const_cast<FunctionDeclNode *>(node->destructor)->mangledName =
-        Mangler::mangle(node->destructor, std::string(node->name));
+        Mangler::mangle(node->destructor, std::string(node->fqName));
   }
 
   for (auto *method : node->methods) {
@@ -271,6 +457,17 @@ void DeclCollectorPass::visit(const UnionDeclNode *node) {
     for (const auto *ann : method->annotations) {
       if (ann->name == "export") {
         isExport = true;
+      }
+
+      if (ann->name == "intrinsic") {
+        const_cast<FunctionDeclNode *>(method)->isIntrinsic = true;
+        if (!ann->args.empty() && ann->args[0]->kind == NodeKind::String) {
+          const_cast<FunctionDeclNode *>(method)->intrinsicName =
+              static_cast<const StringNode *>(ann->args[0])->value;
+        } else {
+          const_cast<FunctionDeclNode *>(method)->intrinsicName =
+              method->name;
+        }
       }
 
       if (ann->name == "extern") {
@@ -327,7 +524,7 @@ void DeclCollectorPass::visit(const UnionDeclNode *node) {
           std::string(method->name);
     } else {
       const_cast<FunctionDeclNode *>(method)->mangledName =
-          Mangler::mangle(method, std::string(node->name));
+          Mangler::mangle(method, std::string(node->fqName));
     }
   }
 }
@@ -337,7 +534,20 @@ void DeclCollectorPass::visit(const StructDeclNode *node) {
     if (node->declFilePath.empty()) {
       const_cast<StructDeclNode *>(node)->declFilePath = ctx->currentFile;
     }
+    for (auto *method : node->methods) {
+      if (method->declFilePath.empty()) {
+        const_cast<FunctionDeclNode *>(method)->declFilePath =
+            ctx->currentFile;
+      }
+      collectMethodAnnotations(const_cast<FunctionDeclNode *>(method), ctx);
+    }
     ctx->templateRegistry[node->name] = node;
+    ctx->templateRegistry[node->fqName] = node;
+    /* Template records are also visible as identifiers so that static
+     * member access on the type ('Future<int>.value(...)') resolves. */
+    ctx->addDecl(node->name, node);
+    if (node->fqName != node->name)
+      ctx->addDecl(node->fqName, node);
     return;
   }
 
@@ -345,9 +555,9 @@ void DeclCollectorPass::visit(const StructDeclNode *node) {
     const_cast<StructDeclNode *>(node)->declFilePath = ctx->currentFile;
   }
 
-  ctx->addDecl(node->name, node);
+  ctx->addDecl(node->fqName, node);
 
-  auto *recTy = ctx->astCtx.getRecordType(node->name);
+  auto *recTy = ctx->astCtx.getRecordType(node->fqName);
   const_cast<StructDeclNode *>(node)->recordType = recTy;
   recTy->setDeclaration(node);
 
@@ -360,7 +570,7 @@ void DeclCollectorPass::visit(const StructDeclNode *node) {
     }
     if (field->isStatic) {
       const_cast<VarDeclNode *>(field)->mangledName =
-          Mangler::mangle(field, std::string(node->name));
+          Mangler::mangle(field, std::string(node->fqName));
     }
   }
 
@@ -380,8 +590,8 @@ void DeclCollectorPass::visit(const StructDeclNode *node) {
       const_cast<FunctionDeclNode *>(ctor)->hasPrivateMod = node->hasPrivateMod;
     }
     const_cast<FunctionDeclNode *>(ctor)->mangledName =
-        Mangler::mangle(ctor, std::string(node->name));
-    ctx->addDecl(node->name, ctor);
+        Mangler::mangle(ctor, std::string(node->fqName));
+    ctx->addDecl(node->fqName, ctor);
   }
 
   if (node->destructor) {
@@ -390,7 +600,7 @@ void DeclCollectorPass::visit(const StructDeclNode *node) {
           ctx->currentFile;
     }
     const_cast<FunctionDeclNode *>(node->destructor)->mangledName =
-        Mangler::mangle(node->destructor, std::string(node->name));
+        Mangler::mangle(node->destructor, std::string(node->fqName));
   }
 
   for (auto *method : node->methods) {
@@ -402,6 +612,17 @@ void DeclCollectorPass::visit(const StructDeclNode *node) {
     for (const auto *ann : method->annotations) {
       if (ann->name == "export") {
         isExport = true;
+      }
+
+      if (ann->name == "intrinsic") {
+        const_cast<FunctionDeclNode *>(method)->isIntrinsic = true;
+        if (!ann->args.empty() && ann->args[0]->kind == NodeKind::String) {
+          const_cast<FunctionDeclNode *>(method)->intrinsicName =
+              static_cast<const StringNode *>(ann->args[0])->value;
+        } else {
+          const_cast<FunctionDeclNode *>(method)->intrinsicName =
+              method->name;
+        }
       }
 
       if (ann->name == "extern") {
@@ -458,7 +679,7 @@ void DeclCollectorPass::visit(const StructDeclNode *node) {
           std::string(method->name);
     } else {
       const_cast<FunctionDeclNode *>(method)->mangledName =
-          Mangler::mangle(method, std::string(node->name));
+          Mangler::mangle(method, std::string(node->fqName));
     }
   }
 }
@@ -468,7 +689,20 @@ void DeclCollectorPass::visit(const ClassDeclNode *node) {
     if (node->declFilePath.empty()) {
       const_cast<ClassDeclNode *>(node)->declFilePath = ctx->currentFile;
     }
+    for (auto *method : node->methods) {
+      if (method->declFilePath.empty()) {
+        const_cast<FunctionDeclNode *>(method)->declFilePath =
+            ctx->currentFile;
+      }
+      collectMethodAnnotations(const_cast<FunctionDeclNode *>(method), ctx);
+    }
     ctx->templateRegistry[node->name] = node;
+    ctx->templateRegistry[node->fqName] = node;
+    /* Template records are also visible as identifiers so that static
+     * member access on the type ('Future<int>.value(...)') resolves. */
+    ctx->addDecl(node->name, node);
+    if (node->fqName != node->name)
+      ctx->addDecl(node->fqName, node);
     return;
   }
 
@@ -476,9 +710,9 @@ void DeclCollectorPass::visit(const ClassDeclNode *node) {
     const_cast<ClassDeclNode *>(node)->declFilePath = ctx->currentFile;
   }
 
-  ctx->addDecl(node->name, node);
+  ctx->addDecl(node->fqName, node);
 
-  auto *recTy = ctx->astCtx.getRecordType(node->name);
+  auto *recTy = ctx->astCtx.getRecordType(node->fqName);
   const_cast<ClassDeclNode *>(node)->recordType = recTy;
   recTy->setDeclaration(node);
 
@@ -491,7 +725,7 @@ void DeclCollectorPass::visit(const ClassDeclNode *node) {
     }
     if (field->isStatic) {
       const_cast<VarDeclNode *>(field)->mangledName =
-          Mangler::mangle(field, std::string(node->name));
+          Mangler::mangle(field, std::string(node->fqName));
     }
   }
 
@@ -511,8 +745,8 @@ void DeclCollectorPass::visit(const ClassDeclNode *node) {
       const_cast<FunctionDeclNode *>(ctor)->hasPrivateMod = node->hasPrivateMod;
     }
     const_cast<FunctionDeclNode *>(ctor)->mangledName =
-        Mangler::mangle(ctor, std::string(node->name));
-    ctx->addDecl(node->name, ctor);
+        Mangler::mangle(ctor, std::string(node->fqName));
+    ctx->addDecl(node->fqName, ctor);
   }
   if (node->destructor) {
     if (node->destructor->declFilePath.empty()) {
@@ -520,7 +754,7 @@ void DeclCollectorPass::visit(const ClassDeclNode *node) {
           ctx->currentFile;
     }
     const_cast<FunctionDeclNode *>(node->destructor)->mangledName =
-        Mangler::mangle(node->destructor, std::string(node->name));
+        Mangler::mangle(node->destructor, std::string(node->fqName));
   }
   for (auto *method : node->methods) {
     if (method->declFilePath.empty()) {
@@ -531,6 +765,17 @@ void DeclCollectorPass::visit(const ClassDeclNode *node) {
     for (const auto *ann : method->annotations) {
       if (ann->name == "export") {
         isExport = true;
+      }
+
+      if (ann->name == "intrinsic") {
+        const_cast<FunctionDeclNode *>(method)->isIntrinsic = true;
+        if (!ann->args.empty() && ann->args[0]->kind == NodeKind::String) {
+          const_cast<FunctionDeclNode *>(method)->intrinsicName =
+              static_cast<const StringNode *>(ann->args[0])->value;
+        } else {
+          const_cast<FunctionDeclNode *>(method)->intrinsicName =
+              method->name;
+        }
       }
 
       if (ann->name == "extern") {
@@ -587,7 +832,7 @@ void DeclCollectorPass::visit(const ClassDeclNode *node) {
           std::string(method->name);
     } else {
       const_cast<FunctionDeclNode *>(method)->mangledName =
-          Mangler::mangle(method, std::string(node->name));
+          Mangler::mangle(method, std::string(node->fqName));
     }
   }
 }
@@ -596,9 +841,10 @@ void DeclCollectorPass::visit(const EnumDeclNode *node) {
   if (node->declFilePath.empty()) {
     const_cast<EnumDeclNode *>(node)->declFilePath = ctx->currentFile;
   }
-  ctx->addDecl(node->name, node);
+  ctx->addDecl(node->fqName, node);
+
   const_cast<EnumDeclNode *>(node)->enumType =
-      ctx->astCtx.getEnumType(node->name, node->underlyingType);
+      ctx->astCtx.getEnumType(node->fqName, node->underlyingType);
   const_cast<EnumType *>(node->enumType)->setDeclaration(node);
 
   for (auto *mem : node->members) {

@@ -10,7 +10,9 @@ public:
   static bool link(const std::vector<std::string> &objPaths,
                    const std::string &outPath, bool debug,
                    const std::vector<std::string> &linkerFlags,
-                   const std::string &targetType = "executable");
+                   const std::string &targetType = "executable",
+                   const std::string &compilerPath = "clang",
+                   const std::string &arPath = "ar");
 
 private:
   static std::string executeAndCapture(const std::string &cmd);

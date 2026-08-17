@@ -1,8 +1,8 @@
 #pragma once
 #include "utopia/Common/Types.hpp"
-#include "utopia/Lexer/Token.hpp"
 #include <cstdint>
 #include <llvm/ADT/ArrayRef.h>
+#include <llvm/Support/Casting.h>
 #include <string_view>
 #include <unordered_set>
 
@@ -42,13 +42,21 @@ enum class NodeKind : uint8_t {
   MemberAccess,
   ArraySubscript,
   ArrayLiteral,
+  MapLiteral,
   New,
   Delete,
+  DestructorCall,
   Null,
   EnumDecl,
   EnumMember,
   ImplicitCast,
-  TypeLiteral
+  TypeLiteral,
+  TernaryOp,
+  Lambda,
+  Await,
+  NamespaceDecl,
+  Using,
+  Is
 };
 
 struct ASTNode {
@@ -59,6 +67,7 @@ struct ASTNode {
   int endLine;
   std::string_view docString;
   std::string_view trailingComment;
+  std::string_view endComment;
 
   explicit ASTNode(NodeKind k, int l = 0, int c = 0, int len = 0)
       : kind(k), line(l), column(c), length(len), endLine(l) {}
@@ -67,6 +76,23 @@ struct ASTNode {
 struct StmtNode : public ASTNode {
   explicit StmtNode(NodeKind k, int l = 0, int c = 0, int len = 0)
       : ASTNode(k, l, c, len) {}
+
+  static bool classof(const ASTNode *node) {
+    switch (node->kind) {
+    case NodeKind::Block:
+    case NodeKind::If:
+    case NodeKind::For:
+    case NodeKind::While:
+    case NodeKind::Switch:
+    case NodeKind::Break:
+    case NodeKind::Continue:
+    case NodeKind::Return:
+    case NodeKind::Using:
+      return true;
+    default:
+      return false;
+    }
+  }
 };
 
 struct ExprNode : public ASTNode {
@@ -77,6 +103,88 @@ struct ExprNode : public ASTNode {
 
   explicit ExprNode(NodeKind k, int l = 0, int c = 0, int len = 0)
       : ASTNode(k, l, c, len) {}
+
+  static bool classof(const ASTNode *node) {
+    switch (node->kind) {
+    case NodeKind::Number:
+    case NodeKind::Boolean:
+    case NodeKind::Char:
+    case NodeKind::Rune:
+    case NodeKind::String:
+    case NodeKind::Variable:
+    case NodeKind::BinaryOp:
+    case NodeKind::UnaryOp:
+    case NodeKind::TernaryOp:
+    case NodeKind::Assign:
+    case NodeKind::FunctionCall:
+    case NodeKind::Cast:
+    case NodeKind::MemberAccess:
+    case NodeKind::ArraySubscript:
+    case NodeKind::ArrayLiteral:
+    case NodeKind::New:
+    case NodeKind::Delete:
+    case NodeKind::Null:
+    case NodeKind::ImplicitCast:
+    case NodeKind::TypeLiteral:
+    case NodeKind::Lambda:
+    case NodeKind::Await:
+    case NodeKind::Is:
+      return true;
+    default:
+      return false;
+    }
+  }
+};
+
+struct ParamDeclNode;
+struct BlockNode;
+struct FunctionDeclNode;
+struct FunctionCallNode;
+struct NewExprNode;
+
+struct LambdaNode : public ExprNode {
+  /* Parameter list. Parameters may carry a null 'type' when the type is
+   * inferred from the expected function signature (Dart-style lambdas). */
+  llvm::ArrayRef<ParamDeclNode *> params;
+
+  /* Body: either an expression (Dart '=> expr') or a statement block. */
+  ExprNode *exprBody = nullptr;
+  BlockNode *body = nullptr;
+  bool isExpressionBody = false;
+
+  /* Optional explicit return type: 'int (int a) => a + 1'. */
+  const Type *explicitReturnType = nullptr;
+
+  /* Resolved during semantic analysis. */
+  const FunctionDeclNode *synthesizedFunc = nullptr;
+  std::string_view mangledName;
+  bool unresolved = false;
+
+  LambdaNode(int l, int c, int len)
+      : ExprNode(NodeKind::Lambda, l, c, len) {}
+
+  /* 'async' lambdas compile to a coroutine returning a Future. */
+  bool isAsync = false;
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Lambda;
+  }
+};
+
+struct AwaitExprNode : public ExprNode {
+  ExprNode *expr;
+
+  /* Set by Sema when the await's result is consumed as the Future itself
+   * (e.g. 'Future<int> a = await getA();'): the operand is passed through
+   * without unwrapping its value. */
+  mutable bool keepFuture = false;
+
+  AwaitExprNode(ExprNode *e, int l, int c, int len)
+      : ExprNode(NodeKind::Await, l, c, len), expr(e) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Await;
+  }
 };
 
 struct TypeLiteralNode : public ExprNode {
@@ -84,14 +192,27 @@ struct TypeLiteralNode : public ExprNode {
       : ExprNode(NodeKind::TypeLiteral, l, c, len) {
     representedType = t;
   }
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::TypeLiteral;
+  }
 };
 
 struct AnnotationNode : public ASTNode {
   std::string_view name;
   llvm::ArrayRef<ExprNode *> args;
+
+  /* Indicates whether the node was parsed with a trailing comma to force
+   * formatting splits. */
+  bool hasTrailingComma = false;
+
   AnnotationNode(std::string_view n, llvm::ArrayRef<ExprNode *> a, int l, int c,
                  int len)
       : ASTNode(NodeKind::Annotation, l, c, len), name(n), args(a) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Annotation;
+  }
 };
 
 struct FunctionDeclNode;
@@ -100,10 +221,19 @@ struct DeclNode : public ASTNode {
   llvm::ArrayRef<AnnotationNode *> annotations;
   bool hasPublicMod = false;
   bool hasPrivateMod = false;
+  bool hasProtectedMod = false;
   std::string_view declFilePath;
+  std::string_view fqName; // Fully qualified name (e.g. 'NS.Class')
+
+  /* Exact token location for LSP tooling */
+  int identifierColumn = 0;
+  int identifierLength = 0;
 
   bool isTemplate = false;
   llvm::ArrayRef<std::string_view> templateParams;
+
+  uint64_t alignment = 0;
+  bool isPacked = false;
 
   explicit DeclNode(NodeKind k, int l = 0, int c = 0, int len = 0)
       : ASTNode(k, l, c, len) {}
@@ -117,17 +247,66 @@ struct DeclNode : public ASTNode {
       return false;
     if (hasPublicMod)
       return true;
+
+    size_t pos = declName.find_last_of('.');
+    if (pos != std::string_view::npos) {
+      declName = declName.substr(pos + 1);
+    }
     return !declName.starts_with("_");
+  }
+
+  bool isProtected(std::string_view declName) const {
+    if (hasPrivateMod || hasPublicMod)
+      return false;
+    if (hasProtectedMod)
+      return true;
+    return false;
+  }
+
+  bool isPrivate(std::string_view declName) const {
+    if (hasPublicMod || hasProtectedMod)
+      return false;
+    if (hasPrivateMod)
+      return true;
+
+    size_t pos = declName.find_last_of('.');
+    if (pos != std::string_view::npos) {
+      declName = declName.substr(pos + 1);
+    }
+    return declName.starts_with("_");
+  }
+
+  static bool classof(const ASTNode *node) {
+    switch (node->kind) {
+    case NodeKind::AnnotationDecl:
+    case NodeKind::TypedefDecl:
+    case NodeKind::VarDecl:
+    case NodeKind::FunctionDecl:
+    case NodeKind::ParamDecl:
+    case NodeKind::StructDecl:
+    case NodeKind::UnionDecl:
+    case NodeKind::ClassDecl:
+    case NodeKind::EnumDecl:
+    case NodeKind::EnumMember:
+    case NodeKind::NamespaceDecl:
+      return true;
+    default:
+      return false;
+    }
   }
 };
 
 struct EnumMemberNode : public DeclNode {
   std::string_view name;
   ExprNode *initializer;
-  mutable int64_t evaluatedValue = 0; // Evaluated statically during Sema
+  mutable int64_t evaluatedValue = 0;
 
   EnumMemberNode(std::string_view n, ExprNode *init, int l, int c, int len)
       : DeclNode(NodeKind::EnumMember, l, c, len), name(n), initializer(init) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::EnumMember;
+  }
 };
 
 struct EnumDeclNode : public DeclNode {
@@ -136,8 +315,16 @@ struct EnumDeclNode : public DeclNode {
   llvm::ArrayRef<EnumMemberNode *> members;
   mutable const EnumType *enumType = nullptr;
 
+  /* Indicates whether the node was parsed with a trailing comma to force
+   * formatting splits. */
+  bool hasTrailingComma = false;
+
   EnumDeclNode(std::string_view n, const Type *u, int l, int c, int len)
       : DeclNode(NodeKind::EnumDecl, l, c, len), name(n), underlyingType(u) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::EnumDecl;
+  }
 };
 
 struct NumberNode : public ExprNode {
@@ -145,34 +332,58 @@ struct NumberNode : public ExprNode {
   bool isFloat;
   NumberNode(std::string_view r, bool f, int l, int c, int len)
       : ExprNode(NodeKind::Number, l, c, len), raw(r), isFloat(f) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Number;
+  }
 };
 
 struct BoolNode : public ExprNode {
   bool value;
   BoolNode(bool v, int l, int c, int len)
       : ExprNode(NodeKind::Boolean, l, c, len), value(v) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Boolean;
+  }
 };
 
 struct CharNode : public ExprNode {
   uint8_t value;
   CharNode(uint8_t v, int l, int c, int len)
       : ExprNode(NodeKind::Char, l, c, len), value(v) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Char;
+  }
 };
 
 struct RuneNode : public ExprNode {
   uint32_t value;
   RuneNode(uint32_t v, int l, int c, int len)
       : ExprNode(NodeKind::Rune, l, c, len), value(v) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Rune;
+  }
 };
 
 struct StringNode : public ExprNode {
   std::string_view value;
   StringNode(std::string_view v, int l, int c, int len)
       : ExprNode(NodeKind::String, l, c, len), value(v) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::String;
+  }
 };
 
 struct NullNode : public ExprNode {
   NullNode(int l, int c, int len) : ExprNode(NodeKind::Null, l, c, len) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Null;
+  }
 };
 
 struct VariableNode : public ExprNode {
@@ -186,6 +397,10 @@ struct VariableNode : public ExprNode {
 
   VariableNode(std::string_view n, int l, int c, int len)
       : ExprNode(NodeKind::Variable, l, c, len), name(n) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Variable;
+  }
 };
 
 struct TypedefDeclNode : public DeclNode {
@@ -199,6 +414,10 @@ struct TypedefDeclNode : public DeclNode {
                   int len)
       : DeclNode(NodeKind::TypedefDecl, l, c, len), aliasName(name),
         targetType(target), aliasType(nullptr) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::TypedefDecl;
+  }
 };
 
 struct UnaryOpNode : public ExprNode {
@@ -216,6 +435,10 @@ struct UnaryOpNode : public ExprNode {
       this->length = (e->column + e->length) - c;
     }
   }
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::UnaryOp;
+  }
 };
 
 struct BinaryOpNode : public ExprNode {
@@ -229,6 +452,26 @@ struct BinaryOpNode : public ExprNode {
       : ExprNode(NodeKind::BinaryOp, ln, c), op(o), left(l), right(r) {
     this->length = (right->column + right->length) - this->column;
   }
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::BinaryOp;
+  }
+};
+
+struct TernaryOpNode : public ExprNode {
+  ExprNode *condition;
+  ExprNode *trueExpr;
+  ExprNode *falseExpr;
+  mutable const Type *promotedType = nullptr;
+
+  TernaryOpNode(ExprNode *cond, ExprNode *tExpr, ExprNode *fExpr, int l, int c,
+                int len)
+      : ExprNode(NodeKind::TernaryOp, l, c, len), condition(cond),
+        trueExpr(tExpr), falseExpr(fExpr) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::TernaryOp;
+  }
 };
 
 struct VarDeclNode : public DeclNode {
@@ -239,15 +482,22 @@ struct VarDeclNode : public DeclNode {
   bool isGlobal = false;
   bool isStatic = false;
   bool isWeak = false;
+  bool isExtern = false;
+  std::string_view externAlias;
   std::string_view rawTypeStr;
 
   /* Reference to the resolved copy constructor for aggregate initialization */
   mutable const FunctionDeclNode *copyCtor = nullptr;
+  mutable bool isInitialized = false;
 
   VarDeclNode(const Type *t, std::string_view n, ExprNode *init, int l, int c,
               int len)
       : DeclNode(NodeKind::VarDecl, l, c, len), type(t), varName(n),
-        initializer(init) {}
+        initializer(init), isInitialized(init != nullptr) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::VarDecl;
+  }
 };
 
 struct AssignNode : public ExprNode {
@@ -259,20 +509,39 @@ struct AssignNode : public ExprNode {
   AssignNode(std::string_view o, ExprNode *t, ExprNode *v, int l, int c,
              int len)
       : ExprNode(NodeKind::Assign, l, c, len), op(o), target(t), value(v) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Assign;
+  }
 };
 
 struct BlockNode : public StmtNode {
   llvm::ArrayRef<ASTNode *> statements;
   bool isExpressionBody = false;
+  bool hasBraces = true;
 
   BlockNode(int l, int c) : StmtNode(NodeKind::Block, l, c, 1) {}
   void finalize(int endCol) { this->length = endCol - this->column; }
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Block;
+  }
 };
 
 struct ReturnNode : public StmtNode {
   ExprNode *value;
+
+  /* Set by Sema when an async function returns a Future<T> of its value
+   * type ('return fut;'): the codegen awaits the future before completing
+   * the enclosing coroutine. */
+  mutable bool implicitAwait = false;
+
   ReturnNode(ExprNode *v, int l, int c, int len)
       : StmtNode(NodeKind::Return, l, c, len), value(v) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Return;
+  }
 };
 
 struct ParamDeclNode : public DeclNode {
@@ -287,7 +556,13 @@ struct ParamDeclNode : public DeclNode {
                 bool isReq, int l, int c, int len)
       : DeclNode(NodeKind::ParamDecl, l, c, len), type(t), name(n),
         defaultValue(defVal), isNamed(isN), isRequired(isReq) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::ParamDecl;
+  }
 };
+
+struct FunctionCallNode;
 
 struct FunctionDeclNode : public DeclNode {
   const Type *returnType;
@@ -303,13 +578,24 @@ struct FunctionDeclNode : public DeclNode {
   bool isStatic = false;
   bool isWeak = false;
   bool isIntrinsic = false;
+  bool isVirtual = false;
+  bool isOverride = false;
+  bool isAbstract = false;
+  /* 'async' functions compile to coroutines that return a Future<T> of
+   * their declared return type. */
+  bool isAsync = false;
+  /* Set by Sema when the body (not nested lambdas) contains an await. */
+  mutable bool hasAwait = false;
+  /* For async functions: Future<returnType>, resolved during Sema. */
+  mutable const Type *effectiveReturnType = nullptr;
   std::string_view intrinsicName;
   mutable std::string_view externAlias;
   std::string_view callingConv = "cdecl";
   const RecordType *parentRecord = nullptr;
   std::string_view rawReturnTypeStr;
 
-  /* Intrinsic function attributes inferred during semantic analysis */
+  FunctionCallNode *superCall = nullptr;
+
   mutable bool isReadNone = false;
   mutable bool isReadOnly = false;
   mutable bool isNoFree = false;
@@ -317,12 +603,23 @@ struct FunctionDeclNode : public DeclNode {
   mutable bool isWillReturn = false;
   mutable bool isMustProgress = false;
 
+  /* Virtual method resolution offset */
+  uint32_t vtableIndex = 0;
+
+  /* Indicates whether the node was parsed with a trailing comma to force
+   * formatting splits. */
+  bool hasTrailingComma = false;
+
   FunctionDeclNode(const Type *ret, std::string_view n, int l, int c,
                    bool isC = false, bool isMeth = false, bool isExt = false,
                    bool isVar = false, bool isImpl = false)
       : DeclNode(NodeKind::FunctionDecl, l, c), returnType(ret), name(n),
         body(nullptr), isConst(isC), isMethod(isMeth), isExtern(isExt),
         isVariadic(isVar), isImplicit(isImpl) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::FunctionDecl;
+  }
 };
 
 struct FunctionCallNode : public ExprNode {
@@ -333,11 +630,24 @@ struct FunctionCallNode : public ExprNode {
   llvm::ArrayRef<ExprNode *> rawArgs;
   llvm::ArrayRef<std::string_view> rawArgNames;
   bool hasRawArgs = false;
+  bool isSuperCall = false;
+
+  /* Memory.construct<T>(ptr, args...): the type checker lowers the call
+   * into a placement NewExprNode that the codegen visits instead. */
+  NewExprNode *loweredNew = nullptr;
+
+  /* Indicates whether the node was parsed with a trailing comma to force
+   * formatting splits. */
+  bool hasTrailingComma = false;
 
   FunctionCallNode(ExprNode *t, llvm::ArrayRef<ExprNode *> a,
                    llvm::ArrayRef<std::string_view> n, int l, int c, int len)
       : ExprNode(NodeKind::FunctionCall, l, c, len), target(t), args(a),
         argNames(n) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::FunctionCall;
+  }
 };
 
 struct CastNode : public ExprNode {
@@ -345,24 +655,64 @@ struct CastNode : public ExprNode {
   const Type *targetType;
   std::string_view rawTargetTypeStr;
 
-  /* Resolves to a valid single-argument constructor if the cast
-   * requires a user-defined conversion. */
   const FunctionDeclNode *conversionConstructor = nullptr;
 
   CastNode(ExprNode *e, const Type *target, int l, int c, int len)
       : ExprNode(NodeKind::Cast, l, c, len), expr(e), targetType(target) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Cast;
+  }
+};
+
+/* Dart/C#-style type test: 'expr is Type' and 'expr is! Type'. Returns
+ * whether the dynamic type of the expression is 'targetType' or a subtype
+ * of it. When the static type cannot decide the answer, Sema marks the node
+ * for a runtime vtable-based check ('needsRuntimeCheck') and resolves the
+ * promoted target type for 'if (x is T)' type promotion. */
+struct IsExprNode : public ExprNode {
+  ExprNode *expr;
+  const Type *targetType;
+  bool isNegated = false;
+  std::string_view rawTargetTypeStr;
+
+  /* Set by Sema when the result is known at compile time (0 = false,
+   * 1 = true, -1 = runtime check required). Already accounts for
+   * 'isNegated'. */
+  mutable int staticResult = -1;
+
+  /* The operand's resolved class type (behind pointer/reference), used by
+   * codegen to reach the object's vtable. */
+  const ClassType *operandClassType = nullptr;
+
+  /* The type a variable referenced by this test is promoted to inside an
+   * 'if' block, preserving the operand's pointer/reference indirection
+   * ('x is T' with 'x: Base*' promotes x to 'T*'). Null when the operand is
+   * not a simple variable. */
+  mutable const Type *promotionType = nullptr;
+
+  IsExprNode(ExprNode *e, const Type *target, int l, int c, int len)
+      : ExprNode(NodeKind::Is, l, c, len), expr(e), targetType(target) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Is;
+  }
 };
 
 struct ForNode : public StmtNode {
-  ASTNode *initStatement; // It can be a VarDeclNode or an ExprNode (or null).
-  ExprNode *condition;    // Optional
-  ExprNode *increment;    // Optional
+  ASTNode *initStatement;
+  ExprNode *condition;
+  ExprNode *increment;
   BlockNode *body;
 
   ForNode(ASTNode *init, ExprNode *cond, ExprNode *inc, BlockNode *b, int l,
           int c, int len)
       : StmtNode(NodeKind::For, l, c, len), initStatement(init),
         condition(cond), increment(inc), body(b) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::For;
+  }
 };
 
 struct WhileNode : public StmtNode {
@@ -371,14 +721,22 @@ struct WhileNode : public StmtNode {
 
   WhileNode(ExprNode *cond, BlockNode *b, int l, int c, int len)
       : StmtNode(NodeKind::While, l, c, len), condition(cond), body(b) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::While;
+  }
 };
 
 struct CaseNode : public ASTNode {
-  ExprNode *value; /* nullptr represents 'default' */
+  ExprNode *value;
   llvm::ArrayRef<ASTNode *> statements;
 
   CaseNode(ExprNode *v, llvm::ArrayRef<ASTNode *> stmts, int l, int c, int len)
       : ASTNode(NodeKind::Case, l, c, len), value(v), statements(stmts) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Case;
+  }
 };
 
 struct SwitchNode : public StmtNode {
@@ -390,15 +748,27 @@ struct SwitchNode : public StmtNode {
              int col, int len)
       : StmtNode(NodeKind::Switch, l, col, len), condition(cond), cases(c),
         hasDefault(hd) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Switch;
+  }
 };
 
 struct BreakNode : public StmtNode {
   BreakNode(int l, int c, int len) : StmtNode(NodeKind::Break, l, c, len) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Break;
+  }
 };
 
 struct ContinueNode : public StmtNode {
   ContinueNode(int l, int c, int len)
       : StmtNode(NodeKind::Continue, l, c, len) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Continue;
+  }
 };
 
 struct IfNode : public StmtNode {
@@ -409,6 +779,10 @@ struct IfNode : public StmtNode {
   IfNode(ExprNode *cond, BlockNode *tb, ASTNode *eb, int l, int c, int len)
       : StmtNode(NodeKind::If, l, c, len), condition(cond), thenBlock(tb),
         elseBlock(eb) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::If;
+  }
 };
 
 struct ModuleNode : public ASTNode {
@@ -426,8 +800,15 @@ struct ModuleNode : public ASTNode {
       : ASTNode(NodeKind::Module), filePath(path) {}
 
   bool canSee(std::string_view targetFilePath) const;
+  bool canSeeHelper(
+      std::string_view targetFilePath,
+      std::unordered_set<const ModuleNode *> &visited) const;
   bool exports(std::string_view targetFilePath,
                std::unordered_set<const ModuleNode *> &visited) const;
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Module;
+  }
 };
 
 struct AnnotationDeclNode : public DeclNode {
@@ -440,6 +821,10 @@ struct AnnotationDeclNode : public DeclNode {
   AnnotationDeclNode(std::string_view n, int l, int c, int len)
       : DeclNode(NodeKind::AnnotationDecl, l, c, len), name(n),
         constructor(nullptr) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::AnnotationDecl;
+  }
 };
 
 struct UnionDeclNode : public DeclNode {
@@ -454,6 +839,10 @@ struct UnionDeclNode : public DeclNode {
 
   UnionDeclNode(std::string_view n, int l, int c, int len)
       : DeclNode(NodeKind::UnionDecl, l, c, len), name(n), destructor(nullptr) {
+  }
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::UnionDecl;
   }
 };
 
@@ -470,6 +859,10 @@ struct StructDeclNode : public DeclNode {
   StructDeclNode(std::string_view n, int l, int c, int len)
       : DeclNode(NodeKind::StructDecl, l, c, len), name(n),
         destructor(nullptr) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::StructDecl;
+  }
 };
 
 struct ClassDeclNode : public DeclNode {
@@ -479,11 +872,19 @@ struct ClassDeclNode : public DeclNode {
   llvm::ArrayRef<FunctionDeclNode *> constructors;
   FunctionDeclNode *destructor;
 
+  const Type *baseClass = nullptr;
+  llvm::ArrayRef<const Type *> interfaces;
+
   mutable const RecordType *recordType = nullptr;
   bool isOpaque = false;
+  bool isAbstract = false;
 
   ClassDeclNode(std::string_view n, int l, int c, int len)
       : DeclNode(NodeKind::ClassDecl, l, c, len), name(n), destructor(nullptr) {
+  }
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::ClassDecl;
   }
 };
 
@@ -498,7 +899,9 @@ struct MemberAccessNode : public ExprNode {
   const EnumMemberNode *enumMember = nullptr;
 
   bool isStaticFieldRef = false;
-  const VarDeclNode *resolvedVar = nullptr;
+  const DeclNode *resolvedDecl = nullptr;
+
+  bool isSuperAccess = false;
 
   /* Storage for explicit template arguments applied to method access */
   llvm::ArrayRef<const Type *> templateArgs;
@@ -506,6 +909,10 @@ struct MemberAccessNode : public ExprNode {
   MemberAccessNode(ExprNode *obj, std::string_view mem, int l, int c, int len)
       : ExprNode(NodeKind::MemberAccess, l, c, len), object(obj),
         memberName(mem) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::MemberAccess;
+  }
 };
 
 struct ArraySubscriptNode : public ExprNode {
@@ -515,12 +922,42 @@ struct ArraySubscriptNode : public ExprNode {
 
   ArraySubscriptNode(ExprNode *b, ExprNode *i, int l, int c, int len)
       : ExprNode(NodeKind::ArraySubscript, l, c, len), base(b), index(i) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::ArraySubscript;
+  }
 };
 
 struct ArrayLiteralNode : public ExprNode {
   llvm::ArrayRef<ExprNode *> elements;
+
+  /* Indicates whether the node was parsed with a trailing comma to force
+   * formatting splits. */
+  bool hasTrailingComma = false;
+
   ArrayLiteralNode(llvm::ArrayRef<ExprNode *> elems, int l, int c, int len)
       : ExprNode(NodeKind::ArrayLiteral, l, c, len), elements(elems) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::ArrayLiteral;
+  }
+};
+
+struct MapLiteralNode : public ExprNode {
+  llvm::ArrayRef<ExprNode *> keys;
+  llvm::ArrayRef<ExprNode *> values;
+
+  /* Indicates whether the node was parsed with a trailing comma to force
+   * formatting splits. */
+  bool hasTrailingComma = false;
+
+  MapLiteralNode(llvm::ArrayRef<ExprNode *> ks, llvm::ArrayRef<ExprNode *> vs,
+                 int l, int c, int len)
+      : ExprNode(NodeKind::MapLiteral, l, c, len), keys(ks), values(vs) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::MapLiteral;
+  }
 };
 
 struct NewExprNode : public ExprNode {
@@ -535,19 +972,63 @@ struct NewExprNode : public ExprNode {
   llvm::ArrayRef<std::string_view> rawArgNames;
   bool hasRawArgs = false;
 
+  /* Indicates whether the node was parsed with a trailing comma to force
+   * formatting splits. */
+  bool hasTrailingComma = false;
+
+  /* C++-style placement new: 'new (ptr) T(...)' constructs in existing
+   * memory instead of allocating. Only produced internally as the lowering
+   * target of Memory.construct<T>(ptr, args...). */
+  ExprNode *placementExpr = nullptr;
+
+  /* Set when constructing a record that has no user-defined constructors
+   * (trivially copyable) with a single value argument: the destination is
+   * bitwise-copied from the argument instead of going through a ctor. */
+  bool implicitCopyInit = false;
+
+  /* Resolved custom allocator / deallocator ('operator new' /
+   * 'operator delete' on the class or at file scope); null means the
+   * default malloc/free. */
+  const FunctionDeclNode *allocator = nullptr;
+  const FunctionDeclNode *deallocator = nullptr;
+
   NewExprNode(const Type *allocTy, ExprNode *arrSize,
               llvm::ArrayRef<ExprNode *> a, llvm::ArrayRef<std::string_view> n,
               bool hasParens, int l, int c, int len)
       : ExprNode(NodeKind::New, l, c, len), allocatedType(allocTy),
         arraySize(arrSize), args(a), argNames(n), hasParens(hasParens) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::New;
+  }
 };
 
 struct DeleteExprNode : public ExprNode {
   ExprNode *ptr;
   bool isArray;
+  const FunctionDeclNode *deallocator = nullptr;
 
   DeleteExprNode(ExprNode *p, bool isArr, int l, int c, int len)
       : ExprNode(NodeKind::Delete, l, c, len), ptr(p), isArray(isArr) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Delete;
+  }
+};
+
+/* Manual destructor call: 'obj.~TypeName()'. */
+struct DestructorCallNode : public ExprNode {
+  ExprNode *object;
+  const Type *targetType;
+  const FunctionDeclNode *destructor = nullptr;
+
+  DestructorCallNode(ExprNode *obj, const Type *t, int l, int c, int len)
+      : ExprNode(NodeKind::DestructorCall, l, c, len), object(obj),
+        targetType(t) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::DestructorCall;
+  }
 };
 
 struct ImplicitCastNode : public ExprNode {
@@ -559,6 +1040,33 @@ struct ImplicitCastNode : public ExprNode {
                    const FunctionDeclNode *ctor, int l, int c, int len)
       : ExprNode(NodeKind::ImplicitCast, l, c, len), expr(e),
         targetType(target), conversionConstructor(ctor) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::ImplicitCast;
+  }
 };
 
+struct NamespaceDeclNode : public DeclNode {
+  std::string_view name;
+  llvm::ArrayRef<ASTNode *> statements;
+  bool isFileScoped = false;
+
+  NamespaceDeclNode(std::string_view n, int l, int c, int len)
+      : DeclNode(NodeKind::NamespaceDecl, l, c, len), name(n) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::NamespaceDecl;
+  }
+};
+
+struct UsingNode : public StmtNode {
+  std::string_view name;
+
+  UsingNode(std::string_view n, int l, int c, int len)
+      : StmtNode(NodeKind::Using, l, c, len), name(n) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Using;
+  }
+};
 } // namespace utopia

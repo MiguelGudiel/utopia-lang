@@ -1,6 +1,7 @@
 #pragma once
 #include "utopia/AST/AST.hpp"
 #include <iostream>
+#include <type_traits>
 
 namespace utopia {
 
@@ -10,9 +11,11 @@ public:
     /* Trap null pointers at the traversal boundary to prevent silent
      * propagation of unhandled expected types across the pipeline */
     if (!node) [[unlikely]] {
-      std::cerr << "[Fatal] ASTVisitor dispatch encountered a null AST node.\n";
-      throw std::runtime_error(
-          "ASTVisitor: ASTVisitor dispatch encountered a null AST node.");
+      if constexpr (std::is_void_v<R>) {
+        return;
+      } else {
+        return R{};
+      }
     }
 
     switch (node->kind) {
@@ -40,6 +43,12 @@ public:
     case NodeKind::BinaryOp:
       return static_cast<Derived *>(this)->visit(
           static_cast<const BinaryOpNode *>(node));
+    case NodeKind::TernaryOp:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const TernaryOpNode *>(node));
+    case NodeKind::Lambda:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const LambdaNode *>(node));
     case NodeKind::Module:
       return static_cast<Derived *>(this)->visit(
           static_cast<const ModuleNode *>(node));
@@ -61,6 +70,12 @@ public:
     case NodeKind::EnumMember:
       return static_cast<Derived *>(this)->visit(
           static_cast<const EnumMemberNode *>(node));
+    case NodeKind::NamespaceDecl:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const NamespaceDeclNode *>(node));
+    case NodeKind::Using:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const UsingNode *>(node));
     case NodeKind::Assign:
       return static_cast<Derived *>(this)->visit(
           static_cast<const AssignNode *>(node));
@@ -100,6 +115,9 @@ public:
     case NodeKind::Cast:
       return static_cast<Derived *>(this)->visit(
           static_cast<const CastNode *>(node));
+    case NodeKind::Is:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const IsExprNode *>(node));
     case NodeKind::ParamDecl:
       return static_cast<Derived *>(this)->visit(
           static_cast<const ParamDeclNode *>(node));
@@ -121,12 +139,18 @@ public:
     case NodeKind::ArrayLiteral:
       return static_cast<Derived *>(this)->visit(
           static_cast<const ArrayLiteralNode *>(node));
+    case NodeKind::MapLiteral:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const MapLiteralNode *>(node));
     case NodeKind::New:
       return static_cast<Derived *>(this)->visit(
           static_cast<const NewExprNode *>(node));
     case NodeKind::Delete:
       return static_cast<Derived *>(this)->visit(
           static_cast<const DeleteExprNode *>(node));
+    case NodeKind::DestructorCall:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const DestructorCallNode *>(node));
     case NodeKind::TypeLiteral:
       return static_cast<Derived *>(this)->visit(
           static_cast<const TypeLiteralNode *>(node));
@@ -136,6 +160,9 @@ public:
     case NodeKind::ImplicitCast:
       return static_cast<Derived *>(this)->visit(
           static_cast<const ImplicitCastNode *>(node));
+    case NodeKind::Await:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const AwaitExprNode *>(node));
     default:
       /* Dispatch failure routing to prevent silent segfaults on unmapped nodes
        */
@@ -143,6 +170,16 @@ public:
                 << static_cast<int>(node->kind) << '\n';
       throw std::runtime_error("ASTVisitor: Unhandled NodeKind: " +
                                std::to_string(static_cast<int>(node->kind)));
+    }
+  }
+
+  /* Default lambda handler: passes that do not need lambda internals treat
+   * them as opaque expressions. Specialized passes override this. */
+  R visit(const LambdaNode *) {
+    if constexpr (std::is_void_v<R>) {
+      return;
+    } else {
+      return R{};
     }
   }
 };

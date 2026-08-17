@@ -1,22 +1,24 @@
+import "Core/List.utp";
+
 class String {
   private uint8* data;
-  private uint64 len;
-  private uint64 cap;
+  private usize len;
+  private usize cap;
 
   /* Internal utilities for memory and string length evaluation to avoid 
      heavy external dependencies inside the prelude. */
-  private static uint64 c_strlen(const uint8* str) {
+  private static usize c_strlen(const uint8* str) {
     if (str == null)
       return 0;
-    uint64 i = 0;
+    usize i = 0;
     while (str[i] != 0) {
       i++;
     }
     return i;
   }
 
-  private static void c_strcpy(uint8* dest, const uint8* src, uint64 length) {
-    for (uint64 i = 0; i < length; i++) {
+  private static void c_strcpy(uint8* dest, const uint8* src, usize length) {
+    for (usize i = 0; i < length; i++) {
       dest[i] = src[i];
     }
     dest[length] = 0;
@@ -27,18 +29,26 @@ class String {
 
   @extern("atof")
   private static float64 c_atof(const uint8* str);
-  
-  @extern("snprintf")
-  private static int32 c_snprintf(uint8* str, uint64 size, const uint8* format, ...);
 
-  public String() {
+  @extern("atoll")
+  private static int64 c_atoll(const uint8* str);
+
+  @extern("snprintf")
+  private static int32 c_snprintf(
+    uint8* str,
+    usize size,
+    const uint8* format,
+    ...,
+  );
+
+  String() {
     this.len = 0;
     this.cap = 15;
     this.data = new uint8[16];
     this.data[0] = 0;
   }
 
-  public String(const uint8* str) {
+  String(const uint8* str) {
     if (str == null) {
       this.len = 0;
       this.cap = 15;
@@ -52,70 +62,70 @@ class String {
     String.c_strcpy(this.data, str, this.len);
   }
 
-  public String(int8 v) {
+  String(int8 v) {
     this.cap = 15;
     this.data = new uint8[16];
-    this.len = String.c_snprintf(this.data, 16, "%d", v) as uint64;
+    this.len = String.c_snprintf(this.data, 16, "%d", v) as usize;
   }
 
-  public String(uint8 v) {
+  String(uint8 v) {
     this.cap = 15;
     this.data = new uint8[16];
-    this.len = String.c_snprintf(this.data, 16, "%u", v) as uint64;
+    this.len = String.c_snprintf(this.data, 16, "%u", v) as usize;
   }
 
-  public String(int16 v) {
+  String(int16 v) {
     this.cap = 15;
     this.data = new uint8[16];
-    this.len = String.c_snprintf(this.data, 16, "%d", v) as uint64;
+    this.len = String.c_snprintf(this.data, 16, "%d", v) as usize;
   }
 
-  public String(uint16 v) {
+  String(uint16 v) {
     this.cap = 15;
     this.data = new uint8[16];
-    this.len = String.c_snprintf(this.data, 16, "%u", v) as uint64;
+    this.len = String.c_snprintf(this.data, 16, "%u", v) as usize;
   }
 
-  public String(int32 v) {
+  String(int32 v) {
     this.cap = 15;
     this.data = new uint8[16];
-    this.len = String.c_snprintf(this.data, 16, "%d", v) as uint64;
+    this.len = String.c_snprintf(this.data, 16, "%d", v) as usize;
   }
 
-  public String(uint32 v) {
+  String(uint32 v) {
     this.cap = 15;
     this.data = new uint8[16];
-    this.len = String.c_snprintf(this.data, 16, "%u", v) as uint64;
+    this.len = String.c_snprintf(this.data, 16, "%u", v) as usize;
   }
 
-  public String(int64 v) {
+  String(int64 v) {
     this.cap = 31;
     this.data = new uint8[32];
     /* Standard format specifier for 64-bit integer */
-    this.len = String.c_snprintf(this.data, 32, "%lld", v) as uint64;
+    this.len = String.c_snprintf(this.data, 32, "%lld", v) as usize;
   }
 
-  public String(uint64 v) {
+  String(usize v) {
     this.cap = 31;
     this.data = new uint8[32];
-    this.len = String.c_snprintf(this.data, 32, "%llu", v) as uint64;
+    this.len = String.c_snprintf(this.data, 32, "%llu", v) as usize;
   }
 
-  public String(float32 v) {
+  String(float32 v) {
     this.cap = 31;
     this.data = new uint8[32];
     /* CodeGen automatically promotes variadic float32 to float64, 
      * making "%g" completely safe. */
-    this.len = String.c_snprintf(this.data, 32, "%g", v) as uint64;
+    this.len = String.c_snprintf(this.data, 32, "%g", v) as usize;
   }
 
-  public String(float64 v) {
+  String(float64 v) {
     this.cap = 31;
     this.data = new uint8[32];
-    this.len = String.c_snprintf(this.data, 32, "%g", v) as uint64;
+    this.len = String.c_snprintf(this.data, 32, "%g", v) as usize;
   }
 
-  public String(bool v) {
+  String(bool v) {
     this.cap = 15;
     this.data = new uint8[16];
     if (v) {
@@ -127,19 +137,30 @@ class String {
     }
   }
 
-  public String(const String& other) {
+  String(const String& other) {
     this.len = other.len;
     this.cap = other.cap;
     this.data = new uint8[this.cap + 1];
     String.c_strcpy(this.data, other.data, this.len);
   }
 
-  public ~String() {
+  /* Move constructor: steals the source's buffer, leaving it empty.
+   * Enables zero-allocation moves (e.g. List reallocation). */
+  String(String&& other) {
+    this.data = other.data;
+    this.len = other.len;
+    this.cap = other.cap;
+    other.data = null;
+    other.len = 0;
+    other.cap = 0;
+  }
+
+  ~String() {
     if (this.data != null)
       delete[] this.data;
   }
 
-  public void operator=(const String& other) {
+  void operator=(const String& other) {
     if (this.data != null)
       delete[] this.data;
     this.len = other.len;
@@ -148,7 +169,20 @@ class String {
     String.c_strcpy(this.data, other.data, this.len);
   }
 
-  public void operator=(const uint8* str) {
+  /* Move assignment: releases this string's buffer and steals the source's,
+   * leaving it empty. */
+  void operator=(String&& other) {
+    if (this.data != null)
+      delete[] this.data;
+    this.data = other.data;
+    this.len = other.len;
+    this.cap = other.cap;
+    other.data = null;
+    other.len = 0;
+    other.cap = 0;
+  }
+
+  void operator=(const uint8* str) {
     if (this.data != null)
       delete[] this.data;
     if (str == null) {
@@ -164,43 +198,65 @@ class String {
     String.c_strcpy(this.data, str, this.len);
   }
 
-  public bool operator==(const String& other) {
+  bool operator==(const String& other) {
     if (this.len != other.len) return false;
-    for (uint64 i = 0; i < this.len; i++) {
+    for (usize i = 0; i < this.len; i++) {
       if (this.data[i] != other.data[i]) return false;
     }
     return true;
   }
 
-  public bool operator==(const uint8* str) {
+  bool operator==(const uint8* str) {
     if (str == null) return this.len == 0;
-    uint64 str_len = String.c_strlen(str);
+    usize str_len = String.c_strlen(str);
     if (this.len != str_len) return false;
-    for (uint64 i = 0; i < this.len; i++) {
+    for (usize i = 0; i < this.len; i++) {
       if (this.data[i] != str[i]) return false;
     }
     return true;
   }
 
-  public bool operator!=(const String& other) {
+  bool operator!=(const String& other) {
     /* Dereference this pointer to invoke the overloaded operator== */
     return !(*this == other);
   }
 
-  public bool operator!=(const uint8* str) {
+  bool operator!=(const uint8* str) {
     return !(*this == str);
   }
 
-  public String operator+(const String& other) {
+  /* Lexicographic ordering (used by SplayTreeMap and sorting). */
+  bool operator<(const String& other) {
+    usize n = this.len < other.len ? this.len : other.len;
+    for (usize i = 0; i < n; i++) {
+      if (this.data[i] < other.data[i]) return true;
+      if (this.data[i] > other.data[i]) return false;
+    }
+    return this.len < other.len;
+  }
+
+  bool operator>(const String& other) {
+    return other < *this;
+  }
+
+  bool operator<=(const String& other) {
+    return !(other < *this);
+  }
+
+  bool operator>=(const String& other) {
+    return !(*this < other);
+  }
+
+  String operator+(const String& other) {
     String result;
     result.len = this.len + other.len;
     result.cap = result.len + 15;
-      
-    delete[] result.data; 
+
+    delete[] result.data;
     result.data = new uint8[result.cap + 1];
 
     String.c_strcpy(result.data, this.data, this.len);
-    for (uint64 i = 0; i < other.len; i++) {
+    for (usize i = 0; i < other.len; i++) {
       result.data[this.len + i] = other.data[i];
     }
     result.data[result.len] = 0;
@@ -208,22 +264,22 @@ class String {
     return result;
   }
 
-  public String operator+(const uint8* str) {
+  String operator+(const uint8* str) {
     String result;
     if (str == null) {
-      result = *this; 
+      result = *this;
       return result;
     }
 
-    uint64 str_len = String.c_strlen(str);
+    usize str_len = String.c_strlen(str);
     result.len = this.len + str_len;
     result.cap = result.len + 15;
-        
+
     delete[] result.data;
     result.data = new uint8[result.cap + 1];
 
     String.c_strcpy(result.data, this.data, this.len);
-    for (uint64 i = 0; i < str_len; i++) {
+    for (usize i = 0; i < str_len; i++) {
       result.data[this.len + i] = str[i];
     }
     result.data[result.len] = 0;
@@ -231,48 +287,48 @@ class String {
     return result;
   }
 
-  public String operator+(uint8 c) {
+  String operator+(uint8 c) {
     String result = *this;
     result.push_back(c);
     return result;
   }
 
   @inline
-  public uint8& operator[](uint64 index) {
+  uint8& operator[](usize index) {
     return this.data[index];
   }
 
   @inline
-  public uint64 length() {
+  usize length() {
     return this.len;
   }
 
   @inline
-  public uint64 capacity() {
+  usize capacity() {
     return this.cap;
   }
 
   @inline
-  public const uint8* c_str() {
+  const uint8* c_str() {
     return this.data;
   }
 
-  public int32 toInt() {
+  int32 toInt() {
     if (this.data == null) return 0;
     return String.c_atoi(this.data);
   }
 
-  public float64 toFloat() {
+  float64 toFloat() {
     if (this.data == null) return 0.0;
     return String.c_atof(this.data);
   }
 
-  public void clear() {
+  void clear() {
     this.len = 0;
     this.data[0] = 0;
   }
 
-  public void push_back(uint8 c) {
+  void push_back(uint8 c) {
     if (this.len >= this.cap) {
       this.cap = this.cap * 2 + 15;
       uint8* new_data = new uint8[this.cap + 1];
@@ -283,6 +339,251 @@ class String {
     this.data[this.len] = c;
     this.len++;
     this.data[this.len] = 0;
+  }
+
+  @inline
+  bool isEmpty() {
+    return this.len == 0;
+  }
+
+  @inline
+  bool isNotEmpty() {
+    return this.len != 0;
+  }
+
+  int64 toInt64() {
+    if (this.data == null) return 0;
+    return String.c_atoll(this.data);
+  }
+
+  /* Returns the substring in [start, end). 'end' is exclusive, like Dart. */
+  String substring(usize start, usize end) {
+    String result;
+    if (start >= end || start >= this.len) return result;
+    if (end > this.len) end = this.len;
+    for (usize i = start; i < end; i++) {
+      result.push_back(this.data[i]);
+    }
+    return result;
+  }
+
+  bool startsWith(const String& prefix) {
+    if (prefix.len > this.len) return false;
+    for (usize i = 0; i < prefix.len; i++) {
+      if (this.data[i] != prefix.data[i]) return false;
+    }
+    return true;
+  }
+
+  bool startsWith(const uint8* prefix) {
+    if (prefix == null) return this.len == 0;
+    usize plen = String.c_strlen(prefix);
+    if (plen > this.len) return false;
+    for (usize i = 0; i < plen; i++) {
+      if (this.data[i] != prefix[i]) return false;
+    }
+    return true;
+  }
+
+  bool endsWith(const String& suffix) {
+    if (suffix.len > this.len) return false;
+    usize start = this.len - suffix.len;
+    for (usize i = 0; i < suffix.len; i++) {
+      if (this.data[start + i] != suffix.data[i]) return false;
+    }
+    return true;
+  }
+
+  bool contains(const String& needle) {
+    return this.indexOf(needle) >= 0;
+  }
+
+  bool contains(uint8 c) {
+    return this.indexOf(c) >= 0;
+  }
+
+  /* Index of the first occurrence, or -1 when absent (like Dart). */
+  int64 indexOf(const String& needle) {
+    if (needle.len == 0) return 0;
+    if (needle.len > this.len) return -1;
+    for (usize i = 0; i + needle.len <= this.len; i++) {
+      usize j = 0;
+      while (j < needle.len && this.data[i + j] == needle.data[j]) {
+        j++;
+      }
+      if (j == needle.len) return i as int64;
+    }
+    return -1;
+  }
+
+  int64 indexOf(uint8 c) {
+    for (usize i = 0; i < this.len; i++) {
+      if (this.data[i] == c) return i as int64;
+    }
+    return -1;
+  }
+
+  /* Index of the last occurrence, or -1 when absent. */
+  int64 lastIndexOf(const String& needle) {
+    if (needle.len == 0) return this.len as int64;
+    if (needle.len > this.len) return -1;
+    for (int64 i = (this.len - needle.len) as int64; i >= 0; i--) {
+      usize j = 0;
+      while (j < needle.len && this.data[i as usize + j] == needle.data[j]) {
+        j++;
+      }
+      if (j == needle.len) return i;
+    }
+    return -1;
+  }
+
+  int64 lastIndexOf(uint8 c) {
+    for (int64 i = (this.len - 1) as int64; i >= 0; i--) {
+      if (this.data[i as usize] == c) return i;
+    }
+    return -1;
+  }
+
+  /* Replaces every occurrence of 'from' with 'to'. */
+  String replace(const String& from, const String& to) {
+    String result;
+    if (from.len == 0) {
+      return *this;
+    }
+    usize i = 0;
+    while (i < this.len) {
+      bool matched = true;
+      if (i + from.len > this.len) {
+        matched = false;
+      } else {
+        for (usize j = 0; j < from.len; j++) {
+          if (this.data[i + j] != from.data[j]) {
+            matched = false;
+            break;
+          }
+        }
+      }
+      if (matched) {
+        for (usize j = 0; j < to.len; j++) {
+          result.push_back(to.data[j]);
+        }
+        i += from.len;
+      } else {
+        result.push_back(this.data[i]);
+        i++;
+      }
+    }
+    return result;
+  }
+
+  /* ASCII-only case conversion, like the C tolower/toupper helpers. */
+  String toUpperCase() {
+    String result;
+    for (usize i = 0; i < this.len; i++) {
+      uint8 c = this.data[i];
+      if (c >= 97 && c <= 122) {
+        c = (c - 32) as uint8;
+      }
+      result.push_back(c);
+    }
+    return result;
+  }
+
+  String toLowerCase() {
+    String result;
+    for (usize i = 0; i < this.len; i++) {
+      uint8 c = this.data[i];
+      if (c >= 65 && c <= 90) {
+        c = (c + 32) as uint8;
+      }
+      result.push_back(c);
+    }
+    return result;
+  }
+
+  private static bool isWhitespace(uint8 c) {
+    return c == 32 || c == 9 || c == 10 || c == 13 || c == 11 || c == 12;
+  }
+
+  String trim() {
+    usize start = 0;
+    while (start < this.len && String.isWhitespace(this.data[start])) {
+      start++;
+    }
+    usize end = this.len;
+    while (end > start && String.isWhitespace(this.data[end - 1])) {
+      end--;
+    }
+    return this.substring(start, end);
+  }
+
+  String trimStart() {
+    usize start = 0;
+    while (start < this.len && String.isWhitespace(this.data[start])) {
+      start++;
+    }
+    return this.substring(start, this.len);
+  }
+
+  String trimEnd() {
+    usize end = this.len;
+    while (end > 0 && String.isWhitespace(this.data[end - 1])) {
+      end--;
+    }
+    return this.substring(0, end);
+  }
+
+  /* Splits this string on every occurrence of the delimiter. */
+  List<String> split(uint8 delimiter) {
+    List<String> result;
+    String current;
+    for (usize i = 0; i < this.len; i++) {
+      if (this.data[i] == delimiter) {
+        result.push(current);
+        current.clear();
+      } else {
+        current.push_back(this.data[i]);
+      }
+    }
+    result.push(current);
+    return result;
+  }
+
+  List<String> split(const String& delimiter) {
+    List<String> result;
+    if (delimiter.len == 0) {
+      for (usize i = 0; i < this.len; i++) {
+        String piece;
+        piece.push_back(this.data[i]);
+        result.push(piece);
+      }
+      return result;
+    }
+    usize i = 0;
+    String current;
+    while (i < this.len) {
+      bool matched = true;
+      if (i + delimiter.len > this.len) {
+        matched = false;
+      } else {
+        for (usize j = 0; j < delimiter.len; j++) {
+          if (this.data[i + j] != delimiter.data[j]) {
+            matched = false;
+            break;
+          }
+        }
+      }
+      if (matched) {
+        result.push(current);
+        current.clear();
+        i += delimiter.len;
+      } else {
+        current.push_back(this.data[i]);
+        i++;
+      }
+    }
+    result.push(current);
+    return result;
   }
 }
 
@@ -295,7 +596,7 @@ String operator+(const uint8* lhs, const String& rhs) {
 }
 
 String operator+(uint8 lhs, const String& rhs) {
-  String res;
+  String res = "";
   res.push_back(lhs);
   return res + rhs;
 }

@@ -1,0 +1,95 @@
+/*
+ * Utopia async/await.
+ *
+ * - 'async' functions compile to coroutines that return a Future<T> of
+ *   their declared return type; 'await' suspends the coroutine until the
+ *   awaited future completes and yields its value.
+ * - Calling an async function without await runs it in the background, like
+ *   Dart: the program's event loop keeps it alive until it settles.
+ * - Lambdas can be 'async' too, and the main function can be 'async'.
+ * - Future.runOnThread runs work on a real worker thread; async lambdas
+ *   passed to it run on the worker with their own event loop copy.
+ */
+
+/* An async function: 'Future.delayed' schedules a timer and the await
+ * suspends until it fires. */
+Future<int> fetchData() async {
+  await Future.delayed<void>(100, () {});
+  return 42;
+}
+
+/* The Duration overload: Duration.zero still runs asynchronously, exactly
+ * like Dart's Future.delayed(Duration.zero, ...). */
+Future<String> fetchLater() async {
+  await Future.delayed<void>(Duration(milliseconds: 50), () {});
+  return "later";
+}
+
+/* Fire-and-forget: this runs in the background while main continues. */
+int backgroundWork = 0;
+
+void backgroundUpdate() async {
+  await Future.delayed<void>(300, () {});
+  backgroundWork = 7;
+}
+
+/* An async function can await a Future<T> into an explicitly-typed
+ * Future<T> variable; the await passes the future through. */
+Future<int> fetchTwice() async {
+  Future<int> first = await fetchData();
+  return first;
+}
+
+int main() async {
+  /* Future.delayed with a Duration (Dart API). */
+  String later = await fetchLater();
+  print("delayed(Duration): %s\n", later.c_str());
+
+  /* Future.microtask defers to the event loop: 'now' is printed before
+   * the microtask runs. */
+  Future.microtask<void>(() { print("microtask ran\n"); });
+  print("after microtask launch\n");
+
+  /* Fire-and-forget async call: continues immediately. */
+  backgroundUpdate();
+  print("background right after launch: %d\n", backgroundWork);
+
+  /* Await a future: the coroutine suspends until it completes. */
+  int value = await fetchData();
+  print("fetchData: %d\n", value);
+
+  /* Explicitly-typed await target. */
+  Future<int> twice = await fetchTwice();
+  print("fetchTwice: %d\n", await twice);
+
+  /* runOnThread: sync work on a real worker thread. */
+  int t = await Future.runOnThread<int>(() => 100 + 50);
+  print("thread: %d\n", t);
+
+  /* runOnThread with an async lambda: the worker runs its own event loop. */
+  int u = await Future.runOnThread<int>(() async {
+    int inner = await fetchData();
+    return inner * 2;
+  });
+  print("async thread: %d\n", u);
+
+  /* Async lambdas return a Future; await them like any other. */
+  Future<int> Function() lazy = () async {
+    await Future.delayed<void>(20, () {});
+    return 99;
+  };
+  print("async lambda: %d\n", await lazy());
+
+  /* then() chains: the callback runs when the future completes. */
+  await Future.value<int>(5).then((v) => print("then: %d\n", v * 3));
+
+  /* Future.wait completes with the values of every future, in order. */
+  List<Future<int>> futures = [fetchData(), fetchData(), fetchData()];
+  List<int> values = await Future.wait<int>(futures);
+  print("wait: %d %d %d\n", values[0], values[1], values[2]);
+
+  /* The fire-and-forget future settled while the awaits above ran. */
+  print("background after work: %d\n", backgroundWork);
+
+  return 0;
+}

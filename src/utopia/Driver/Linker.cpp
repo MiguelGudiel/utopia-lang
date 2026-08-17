@@ -11,16 +11,23 @@ namespace utopia {
 bool Linker::link(const std::vector<std::string> &objPaths,
                   const std::string &outPath, bool debug,
                   const std::vector<std::string> &linkerFlags,
-                  const std::string &targetType) {
+                  const std::string &targetType,
+                  const std::string &compilerPath, const std::string &arPath) {
   std::string cmd;
 
   if (targetType == "static_library") {
-    cmd = "ar rcs " + outPath + " ";
+    /* 'llvm-ar rcs' replaces members but never removes members that are not
+     * part of the update list: archives rebuilt for a different target (e.g.
+     * Android after a host build) kept stale objects of the previous
+     * architecture. Remove the archive first so it only contains the current
+     * compilation results. */
+    std::remove(outPath.c_str());
+    cmd = "\"" + arPath + "\" rcs \"" + outPath + "\" ";
     for (const auto &obj : objPaths) {
-      cmd += obj + " ";
+      cmd += "\"" + obj + "\" ";
     }
   } else {
-    cmd = "clang ";
+    cmd = "\"" + compilerPath + "\" ";
     if (debug)
       cmd += "-g ";
 
@@ -31,13 +38,13 @@ bool Linker::link(const std::vector<std::string> &objPaths,
     /* Object files must precede linker flags and static libraries
      * to guarantee proper symbol resolution in single-pass linkers. */
     for (const auto &obj : objPaths) {
-      cmd += obj + " ";
+      cmd += "\"" + obj + "\" ";
     }
 
     for (const auto &flag : linkerFlags) {
       cmd += flag + " ";
     }
-    cmd += "-o " + outPath;
+    cmd += "-o \"" + outPath + "\"";
   }
 
   std::array<char, 128> buffer;

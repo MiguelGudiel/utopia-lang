@@ -39,14 +39,20 @@ public:
   ASTNode *visit(const VariableNode *n);
   ASTNode *visit(const UnaryOpNode *n);
   ASTNode *visit(const BinaryOpNode *n);
+  ASTNode *visit(const TernaryOpNode *n);
+  ASTNode *visit(const LambdaNode *n);
+  ASTNode *visit(const AwaitExprNode *n);
   ASTNode *visit(const AssignNode *n);
   ASTNode *visit(const ArrayLiteralNode *n);
+  ASTNode *visit(const MapLiteralNode *n);
   ASTNode *visit(const ArraySubscriptNode *n);
   ASTNode *visit(const MemberAccessNode *n);
   ASTNode *visit(const FunctionCallNode *n);
   ASTNode *visit(const CastNode *n);
+  ASTNode *visit(const IsExprNode *n);
   ASTNode *visit(const NewExprNode *n);
   ASTNode *visit(const DeleteExprNode *n);
+  ASTNode *visit(const DestructorCallNode *n);
   ASTNode *visit(const TypeLiteralNode *n);
   ASTNode *visit(const BlockNode *n);
   ASTNode *visit(const IfNode *n);
@@ -70,6 +76,8 @@ public:
   ASTNode *visit(const AnnotationDeclNode *n);
   ASTNode *visit(const AnnotationNode *n);
   ASTNode *visit(const ImplicitCastNode *n);
+  ASTNode *visit(const NamespaceDeclNode *n);
+  ASTNode *visit(const UsingNode *n);
 };
 
 } // namespace utopia

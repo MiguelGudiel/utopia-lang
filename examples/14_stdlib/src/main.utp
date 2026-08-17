@@ -1,0 +1,210 @@
+/*
+ * The extended standard library: Duration, Stopwatch, DateTime, Random,
+ * Math, optional/pair, algorithms, and the Dart-style String/List methods.
+ *
+ * Everything lives in the prelude without a namespace, so it is available
+ * globally (except Console and C externals).
+ */
+
+void durationDemo() {
+  /* Constructor parts default to zero, exactly like Dart. */
+  Duration d = Duration(days: 1, hours: 2, minutes: 3, seconds: 4,
+                        milliseconds: 5, microseconds: 6);
+  print("Duration(days:1,h:2,m:3,s:4,ms:5,us:6) = %s\n", d.toString().c_str());
+
+  /* Factory-style constructors. */
+  print("seconds(90):    %s\n", Duration.seconds(90).toString().c_str());
+  print("microseconds:   %s\n",
+        Duration.microseconds(1500000).toString().c_str());
+
+  /* in* accessors truncate toward zero. */
+  Duration e = Duration(hours: 26, minutes: 90);
+  print("26h90m -> inHours=%lld inMinutes=%lld inSeconds=%lld\n",
+        e.inHours(), e.inMinutes(), e.inSeconds());
+
+  /* Arithmetic and comparison operators. */
+  print("90s - 1min:     %s\n",
+        (Duration.seconds(90) - Duration.minutes(1)).toString().c_str());
+  print("zero is zero:   %d\n",
+        Duration.zero() == Duration(days: 0));
+  print("-5s:            %s\n", Duration.seconds(-5).toString().c_str());
+  print("2.5 * 2:        %s\n", (Duration.seconds(2) * 2).toString().c_str());
+  print("10s / 3:        %s\n", (Duration.seconds(10) / 3).toString().c_str());
+  print("is 10s > 5s:    %d\n", Duration.seconds(10) > Duration.seconds(5));
+  print("compareTo:      %d\n", Duration.minutes(1).compareTo(Duration.seconds(30)));
+  print("isNegative:     %d %d\n", Duration.seconds(-1).isNegative(),
+        Duration.zero().isNegative());
+}
+
+void stopwatchDemo() {
+  Stopwatch sw;
+  print("stopwatch started: %d\n", sw.isRunning());
+  sw.start();
+  sw.stop();
+  print("elapsed after stop: %s\n", sw.elapsed().toString().c_str());
+  sw.start();
+  Duration busy = Duration.zero();
+  for (int64 i = 0; i < 2000000; i++) {
+    busy = busy + Duration.microseconds(1);
+  }
+  sw.stop();
+  print("busy loop counted: %lldus, stopwatch: %lldus\n",
+        busy.inMicroseconds(), sw.elapsedMicroseconds());
+  print("frequency: %lld ticks/sec\n", sw.frequency());
+}
+
+void dateTimeDemo() {
+  DateTime now = DateTime.now();
+  print("now: %s\n", now.toString().c_str());
+  print("now iso: %s\n", now.toIso8601String().c_str());
+
+  DateTime utc = DateTime.utc(2024, 1, 15, 10, 30, 0);
+  print("utc: %s\n", utc.toString().c_str());
+  print("year=%d month=%d day=%d weekday=%d dayOfYear=%d\n", utc.year(),
+        utc.month(), utc.day(), utc.weekday(), utc.dayOfYear());
+
+  DateTime local = DateTime(2024, 12, 25);
+  print("christmas diff: %s\n",
+        local.difference(DateTime(2024, 1, 1)).toString().c_str());
+  print("+1 day: %s\n", local.add(Duration(days: 1)).toIso8601String().c_str());
+  print("isBefore: %d\n", local.isBefore(DateTime(2025)));
+  print("millis since epoch: %lld\n", local.millisecondsSinceEpoch());
+}
+
+void randomDemo() {
+  Random r = Random(42); /* fixed seed: reproducible */
+  print("seeded randoms: %d %d %d\n", r.nextInt(100), r.nextInt(100),
+        r.nextInt(100));
+  print("nextDouble: %f\n", r.nextDouble());
+  print("nextBool: %d %d\n", r.nextBool(), r.nextBool());
+
+  Random unseeded = Random();
+  print("unseeded nextInt(10): %d\n", unseeded.nextInt(10));
+}
+
+void mathDemo() {
+  print("pi: %f\n", Math.PI);
+  print("sqrt(2): %f\n", Math.sqrt(2.0));
+  print("pow(2, 10): %f\n", Math.pow(2.0, 10.0));
+  print("log(e): %f\n", Math.log(Math.E));
+  print("sin(pi/2): %f\n", Math.sin(Math.PI / 2.0));
+  print("floor/ceil/round: %f %f %f\n", Math.floor(2.7), Math.ceil(2.2),
+        Math.round(2.5));
+  print("fmod(7.5, 2): %f\n", Math.fmod(7.5, 2.0));
+  print("hypot(3,4): %f\n", Math.hypot(3.0, 4.0));
+  print("min/max: %f %f\n", Math.min(1.5, 2.5), Math.max(1.5, 2.5));
+  print("abs: %lld %f\n", Math.abs(-42 as int64), Math.abs(-3.25));
+}
+
+void utilityDemo() {
+  optional<int64> maybe;
+  print("optional empty: %d\n", maybe.has_value());
+  maybe.emplace(99);
+  print("optional set: %d value=%lld\n", maybe.has_value(), maybe.value());
+  maybe.reset();
+  print("value_or: %lld\n", maybe.value_or(-1));
+
+  pair<int64, String> p = make_pair<int64, String>(7, "seven");
+  print("pair: %lld %s\n", p.first, p.second.c_str());
+
+  print("min/max/clamp: %lld %lld %lld\n", min(3, 7), max(3, 7),
+        clamp(15 as int64, 0 as int64, 10 as int64));
+  print("abs: %lld %f\n", abs(-7), abs(-2.5));
+
+  int64 a = 1;
+  int64 b = 2;
+  swap<int64>(a, b);
+  print("swap: %lld %lld\n", a, b);
+
+  optional<String> name = optional<String>(String("Utopia"));
+  print("optional<String>: %s\n", name.value().c_str());
+}
+
+void stringDemo() {
+  String s = "  Hello, Utopia World!  ";
+  print("trim: '%s'\n", s.trim().c_str());
+  print("trimStart: '%s'\n", s.trimStart().c_str());
+  print("trimEnd: '%s'\n", s.trimEnd().c_str());
+
+  String text = "the quick brown fox";
+  print("startsWith 'the': %d\n", text.startsWith("the"));
+  print("endsWith 'fox': %d\n", text.endsWith("fox"));
+  print("contains 'quick': %d\n", text.contains("quick"));
+  print("indexOf 'o': %lld\n", text.indexOf('o'));
+  print("lastIndexOf 'o': %lld\n", text.lastIndexOf('o'));
+  print("substring(4, 9): '%s'\n", text.substring(4, 9).c_str());
+  print("toUpperCase: %s\n", text.toUpperCase().c_str());
+  print("replace 'o' with '0': %s\n",
+        text.replace("o", "0").c_str());
+  print("isEmpty: %d %d\n", String().isEmpty(), text.isNotEmpty());
+  print("toInt64: %lld\n", String("123456").toInt64());
+
+  String csv = "alpha,beta,gamma";
+  List<String> parts = csv.split(",");
+  print("split count: %d\n", parts.length());
+  for (usize i = 0; i < parts.length(); i++) {
+    print("  part[%d]: %s\n", i, parts[i].c_str());
+  }
+
+  String words = "one two three";
+  List<String> w = words.split(" ");
+  print("split str count: %d first=%s\n", w.length(), w.first().c_str());
+}
+
+void listDemo() {
+  List<int32> numbers;
+  numbers.add(5);
+  numbers.addAll([1, 3, 2, 4]);
+  print("length: %d\n", numbers.length());
+  print("contains 3: %d\n", numbers.contains(3));
+  print("indexOf 2: %lld\n", numbers.indexOf(2));
+  numbers.insert(0, 100);
+  print("after insert, first: %lld\n", numbers.first());
+  int32 removed = numbers.removeAt(1);
+  print("removeAt(1): %lld\n", removed);
+  numbers.remove(5);
+  print("after remove 5, last: %lld\n", numbers.last());
+
+  numbers.sort();
+  print("sorted: ");
+  numbers.forEach((v) => print("%lld ", v));
+  print("\n");
+
+  print("join: %s\n", numbers.join(", ").c_str());
+
+  List<int64> squares = numbers.map<int64>((x) => x * 2 as int64);
+  print("squares: %s\n", squares.join(", ").c_str());
+
+  List<int32> evens = numbers.where((x) => x % 2 == 0);
+  print("evens: %s\n", evens.join(", ").c_str());
+
+  int32 total = numbers.reduce((acc, x) => acc + x);
+  print("sum: %lld\n", total);
+
+  List<int32> desc = [3, 1, 2];
+  desc.sort((a, b) => a > b);
+  print("desc sorted: %s\n", desc.join(", ").c_str());
+
+  List<int32> slice = numbers.sublist(1, 3);
+  print("sublist(1,3): %s\n", slice.join(", ").c_str());
+}
+
+void envDemo() {
+  Env.set("UTOPIA_DEMO", "hello");
+  print("env get: %s\n", Env.get("UTOPIA_DEMO").c_str());
+  Env.unset("UTOPIA_DEMO");
+  print("env after unset: '%s'\n", Env.get("UTOPIA_DEMO").c_str());
+}
+
+int main() {
+  durationDemo();
+  stopwatchDemo();
+  dateTimeDemo();
+  randomDemo();
+  mathDemo();
+  utilityDemo();
+  stringDemo();
+  listDemo();
+  envDemo();
+  return 0;
+}

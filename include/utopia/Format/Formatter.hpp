@@ -8,30 +8,25 @@ namespace utopia {
 class Formatter {
 public:
   static std::string format(const ASTNode *astRoot, int pageWidth = 80) {
-    PieceFactory factory;
-    Piece *rootPiece = factory.dispatch(astRoot);
+    PieceFactory factory(pageWidth);
+    const Piece *rootPiece = factory.dispatch(astRoot);
 
     if (!rootPiece) {
       return "";
     }
 
-    Solver solver;
-    Solution optimal = solver.solve(rootPiece, pageWidth);
+    SolutionCache cache;
+    Solver solver(cache, pageWidth, 0, 0);
+    Solution optimal = solver.format(rootPiece);
 
-    /* Perform the actual string generation once the optimal bound states are
-     * found */
-    CodeWriter writer(pageWidth, 0, false);
-    std::function<void(const Piece *, State)> formatTree =
-        [&](const Piece *p, State inheritedState) {
-          State s = inheritedState;
-          if (optimal.boundStates.find(p) != optimal.boundStates.end()) {
-            s = optimal.boundStates[p];
-          }
-          p->format(writer, s, formatTree);
-        };
+    std::string output = optimal.code;
 
-    formatTree(rootPiece, State::Unsplit);
-    return writer.getOutput();
+    /* Be a good citizen, end with a newline. */
+    if (!output.empty() && output.back() != '\n') {
+      output += '\n';
+    }
+
+    return output;
   }
 };
 

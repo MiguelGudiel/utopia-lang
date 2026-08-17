@@ -50,11 +50,27 @@ public:
     return isHit(n) ? n : nullptr;
   }
 
+  const ASTNode *visit(const AwaitExprNode *n) {
+    if (auto found = find(n->expr))
+      return found;
+    return isHit(n) ? n : nullptr;
+  }
+
   const ASTNode *visit(const BinaryOpNode *n) {
     if (auto L = find(n->left))
       return L;
     if (auto R = find(n->right))
       return R;
+    return isHit(n) ? n : nullptr;
+  }
+
+  const ASTNode *visit(const TernaryOpNode *n) {
+    if (auto found = find(n->condition))
+      return found;
+    if (auto found = find(n->trueExpr))
+      return found;
+    if (auto found = find(n->falseExpr))
+      return found;
     return isHit(n) ? n : nullptr;
   }
 
@@ -142,6 +158,12 @@ public:
     return isHit(n) ? n : nullptr;
   }
 
+  const ASTNode *visit(const IsExprNode *n) {
+    if (auto found = find(n->expr))
+      return found;
+    return isHit(n) ? n : nullptr;
+  }
+
   const ASTNode *visit(const ImplicitCastNode *n) {
     if (auto found = find(n->expr))
       return found;
@@ -157,6 +179,20 @@ public:
     for (auto *a : n->args)
       if (auto found = find(a))
         return found;
+    return isHit(n) ? n : nullptr;
+  }
+
+  const ASTNode *visit(const LambdaNode *n) {
+    for (auto *p : n->params)
+      if (auto found = find(p))
+        return found;
+    if (n->isExpressionBody && n->exprBody) {
+      if (auto found = find(n->exprBody))
+        return found;
+    } else if (n->body) {
+      if (auto found = find(n->body))
+        return found;
+    }
     return isHit(n) ? n : nullptr;
   }
 
@@ -181,6 +217,16 @@ public:
     return isHit(n) ? n : nullptr;
   }
 
+  const ASTNode *visit(const MapLiteralNode *n) {
+    for (auto *k : n->keys)
+      if (auto found = find(k))
+        return found;
+    for (auto *v : n->values)
+      if (auto found = find(v))
+        return found;
+    return isHit(n) ? n : nullptr;
+  }
+
   const ASTNode *visit(const NewExprNode *n) {
     if (n->arraySize)
       if (auto found = find(n->arraySize))
@@ -189,6 +235,10 @@ public:
       if (auto found = find(a))
         return found;
     return isHit(n) ? n : nullptr;
+  }
+
+  const ASTNode *visit(const DestructorCallNode *n) {
+    return n->object;
   }
 
   const ASTNode *visit(const DeleteExprNode *n) {
@@ -294,6 +344,15 @@ public:
         return found;
     return isHit(n) ? n : nullptr;
   }
+
+  const ASTNode *visit(const NamespaceDeclNode *n) {
+    for (auto *s : n->statements)
+      if (auto found = find(s))
+        return found;
+    return isHit(n) ? n : nullptr;
+  }
+
+  const ASTNode *visit(const UsingNode *n) { return isHit(n) ? n : nullptr; }
 
   const ASTNode *visit(const AnnotationDeclNode *n) {
     for (auto *f : n->fields)

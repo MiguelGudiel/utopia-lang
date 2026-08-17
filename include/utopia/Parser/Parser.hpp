@@ -5,7 +5,6 @@
 #include "utopia/Common/Types.hpp"
 #include "utopia/Lexer/Token.hpp"
 #include <exception>
-#include <span>
 
 namespace utopia {
 
@@ -22,15 +21,17 @@ class Parser {
 public:
   Parser(ASTContext &context, llvm::ArrayRef<Token> tokenStream,
          DiagnosticsEngine &de, std::string_view path,
-         ModuleLoader *loader = nullptr)
+         ModuleLoader *loader = nullptr, bool asyncEnabled = true)
       : astCtx(context), tokens(tokenStream), diags(de), filePath(path),
-        moduleLoader(loader) {}
+        moduleLoader(loader), asyncEnabled(asyncEnabled) {}
 
   ModuleNode *parseModule(std::string_view filePath);
 
   DeclNode *
   parseDeclarationOrFunction(llvm::ArrayRef<AnnotationNode *> annotations = {});
-  std::vector<ParamDeclNode *> parseParameterList(bool &isVariadic);
+  std::vector<ParamDeclNode *> parseParameterList(bool &isVariadic,
+                                                  bool &hasTrailingComma,
+                                                  bool allowUntypedParams = false);
 
 private:
   ASTContext &astCtx;
@@ -40,8 +41,14 @@ private:
   DiagnosticsEngine &diags;
   std::string_view filePath;
   ModuleLoader *moduleLoader;
+  bool asyncEnabled;
 
   std::vector<std::string_view> currentTemplateParams;
+  std::vector<std::string> namespaceStack;
+  std::vector<std::string> activeUsings;
+
+  std::string getCurrentNamespace() const;
+  std::string getFQName(std::string_view name) const;
 
   const Token &currentToken() const;
   const Token &peekToken(size_t offset = 1) const;
@@ -81,10 +88,18 @@ private:
 
   std::string_view parseOperatorName();
 
-  const Type *parseType(bool inNewExpr = false);
+  const Type *parseType(bool inNewExpr = false,
+                        bool allowRValueRef = true);
   const Type *applyArrayDeclarator(const Type *baseType);
+  const Type *parseTypeModifiers(const Type *baseType, bool inNewExpr,
+                                 bool allowRValueRef = true);
+
   std::string consumeComments();
   ExprNode *parseArrayLiteral();
+  ExprNode *parseMapLiteral();
+  NamespaceDeclNode *parseNamespaceDecl(bool &isFileScoped);
+  UsingNode *parseUsing();
+  bool isDeclaration();
   ASTNode *parseStatement();
   IfNode *parseIfStatement();
   llvm::ArrayRef<AnnotationNode *> parseAnnotations();
@@ -92,7 +107,7 @@ private:
   DeclNode *parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations);
   DeclNode *parseTypedefDecl();
 
-  DeclNode *parseRecordDecl(TypeKind kind);
+  DeclNode *parseRecordDecl(TypeKind kind, bool isAbstract = false);
   DeclNode *parseEnumDecl();
   BlockNode *parseBlock();
   BlockNode *parseStatementAsBlock();
@@ -107,6 +122,7 @@ private:
 
   ExprNode *parseExpression();
   ExprNode *parseAssignment();
+  ExprNode *parseTernary();
   ExprNode *parseLogicalOr();
   ExprNode *parseLogicalAnd();
   ExprNode *parseBitwiseOr();
@@ -121,6 +137,10 @@ private:
   ExprNode *parseUnary();
   ExprNode *parsePostfix();
   ExprNode *parsePrimary();
+  ExprNode *parseLambda(const Type *explicitReturnType);
+  std::vector<ParamDeclNode *> parseLambdaParams();
+  bool looksLikeLambdaParams(size_t openOffset) const;
+  bool lambdaFollowedByBody(size_t openOffset) const;
 };
 
 } // namespace utopia

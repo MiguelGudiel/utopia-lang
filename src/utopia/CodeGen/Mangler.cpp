@@ -14,20 +14,30 @@ std::string Mangler::mangle(const FunctionDeclNode *node,
 
   std::string res = "_Z";
 
-  if (!parentRecord.empty()) {
-    res += "N";
-    res += std::to_string(parentRecord.length()) + parentRecord;
+  std::string nameStr =
+      std::string(node->fqName.empty() ? node->name : node->fqName);
+  std::replace(nameStr.begin(), nameStr.end(), '.', '_');
 
-    if (node->name == parentRecord) {
+  std::string parentStr = parentRecord;
+  std::replace(parentStr.begin(), parentStr.end(), '.', '_');
+
+  if (!parentStr.empty()) {
+    res += "N";
+    res += std::to_string(parentStr.length()) + parentStr;
+
+    if (node->name == parentRecord ||
+        node->name == parentRecord.substr(parentRecord.find_last_of('.') + 1)) {
       res += "C1";
     } else if (node->name == "~") {
       res += "D1";
     } else {
-      res += std::to_string(node->name.length()) + std::string(node->name);
+      std::string simpleName = std::string(node->name);
+      std::replace(simpleName.begin(), simpleName.end(), '.', '_');
+      res += std::to_string(simpleName.length()) + simpleName;
     }
     res += "E";
   } else {
-    res += std::to_string(node->name.length()) + std::string(node->name);
+    res += std::to_string(nameStr.length()) + nameStr;
   }
 
   if (node->params.empty()) {
@@ -45,13 +55,22 @@ std::string Mangler::mangle(const VarDeclNode *node,
                             const std::string &parentRecord) {
   std::string res = "_Z";
 
-  if (!parentRecord.empty()) {
+  std::string nameStr =
+      std::string(node->fqName.empty() ? node->varName : node->fqName);
+  std::replace(nameStr.begin(), nameStr.end(), '.', '_');
+
+  std::string parentStr = parentRecord;
+  std::replace(parentStr.begin(), parentStr.end(), '.', '_');
+
+  if (!parentStr.empty()) {
     res += "N";
-    res += std::to_string(parentRecord.length()) + parentRecord;
-    res += std::to_string(node->varName.length()) + std::string(node->varName);
+    res += std::to_string(parentStr.length()) + parentStr;
+    std::string simpleName = std::string(node->varName);
+    std::replace(simpleName.begin(), simpleName.end(), '.', '_');
+    res += std::to_string(simpleName.length()) + simpleName;
     res += "E";
   } else {
-    res += std::to_string(node->varName.length()) + std::string(node->varName);
+    res += std::to_string(nameStr.length()) + nameStr;
   }
 
   return res;
@@ -107,6 +126,8 @@ std::string Mangler::mangleType(const Type *t) {
       return "j";
     case BuiltinKind::UInt64:
       return "y";
+    case BuiltinKind::USize:
+      return "z";
     case BuiltinKind::Float32:
       return "f";
     case BuiltinKind::Float64:
@@ -115,16 +136,23 @@ std::string Mangler::mangleType(const Type *t) {
       return "b";
     case BuiltinKind::Void:
       return "v";
+    case BuiltinKind::TypeVal:
+      return "T";
+    case BuiltinKind::Namespace:
+      return "N";
     }
   }
   if (t->getKind() == TypeKind::Struct || t->getKind() == TypeKind::Class ||
       t->getKind() == TypeKind::Union) {
-    auto name = static_cast<const RecordType *>(t)->getName();
-    return std::to_string(name.length()) + std::string(name);
+    std::string name =
+        std::string(static_cast<const RecordType *>(t)->getName());
+    std::replace(name.begin(), name.end(), '.', '_');
+    return std::to_string(name.length()) + name;
   }
   if (t->getKind() == TypeKind::Enum) {
-    auto name = static_cast<const EnumType *>(t)->getName();
-    return std::to_string(name.length()) + std::string(name);
+    std::string name = std::string(static_cast<const EnumType *>(t)->getName());
+    std::replace(name.begin(), name.end(), '.', '_');
+    return std::to_string(name.length()) + name;
   }
   return "u";
 }

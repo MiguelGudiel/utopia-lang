@@ -68,15 +68,8 @@ ModuleLoader::resolveImportURI(std::string_view uri,
       }
     }
 
-    std::filesystem::path target =
-        config.projectRoot / "utopia_modules" / pkgPath;
-    if (target.extension() != ".utp")
-      target += ".utp";
-
-    if (std::filesystem::exists(target)) {
-      return std::filesystem::weakly_canonical(target);
-    }
-    return std::unexpected("Package module not found: " + pkgPath);
+    return std::unexpected("Package module not found: " + pkgPath +
+                           " (Did you forget to run 'utopia yip get'?)");
   }
 
   std::filesystem::path target(uriStr);
@@ -145,7 +138,8 @@ ModuleNode *ModuleLoader::loadModule(const std::string &importURI,
     fileContent = buffer.str();
   }
 
-  Preprocessor pp(fileContent, config.definedMacros);
+  Preprocessor pp(fileContent, config.definedMacros, &diags, key,
+                  config.isFormatting);
   std::string processedContent = pp.process();
 
   std::string_view persistentSource = astCtx.copyString(processedContent);
@@ -180,14 +174,15 @@ ModuleNode *ModuleLoader::loadModule(const std::string &importURI,
 
   auto tokens = astCtx.copyArray<Token>(tokensVec);
 
-  Parser parser(astCtx, tokens, diags, persistentFilePath, this);
+  bool parserAsync = config.asyncEnabled;
+  Parser parser(astCtx, tokens, diags, persistentFilePath, this,
+                parserAsync);
   ModuleNode *module = parser.parseModule(persistentFilePath);
 
   moduleCache[key] = module;
 
   for (std::string_view imp : module->rawImports) {
-    /* Cache hits are guaranteed here, fulfilling local module linkages. */
-    ModuleNode *loaded = loadModule(std::string(imp), absPath.parent_path());
+      ModuleNode *loaded = loadModule(std::string(imp), absPath.parent_path());
     if (loaded) {
       if (std::find(resolvedImports.begin(), resolvedImports.end(), loaded) ==
           resolvedImports.end()) {

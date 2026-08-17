@@ -11,7 +11,8 @@ class PPExprParser {
   const std::unordered_set<std::string> &macros;
 
   void skipWhitespace() {
-    while (pos < str.length() && std::isspace(str[pos])) {
+    while (pos < str.length() &&
+             std::isspace(static_cast<unsigned char>(str[pos]))) {
       pos++;
     }
   }
@@ -29,7 +30,9 @@ class PPExprParser {
   std::string_view matchId() {
     skipWhitespace();
     size_t start = pos;
-    while (pos < str.length() && (std::isalnum(str[pos]) || str[pos] == '_')) {
+    while (pos < str.length() &&
+           (std::isalnum(static_cast<unsigned char>(str[pos])) ||
+            str[pos] == '_')) {
       pos++;
     }
     return str.substr(start, pos - start);
@@ -96,39 +99,35 @@ public:
 };
 
 Preprocessor::Preprocessor(std::string_view sourceCode,
-                           const std::unordered_set<std::string> &macros)
-    : source(sourceCode), cursor(0), definedMacros(macros) {
+                           const std::unordered_set<std::string> &macros,
+                           DiagnosticsEngine *diags, std::string_view filePath,
+                           bool isFormatting)
+    : source(sourceCode), cursor(0), definedMacros(macros), diags(diags),
+      filePath(std::string(filePath)), isFormatting(isFormatting), line(1),
+      col(1), inactiveStartLine(-1) {}
 
-#if defined(_WIN32)
-  definedMacros.insert("_WIN32");
-#elif defined(__APPLE__)
-  definedMacros.insert("__APPLE__");
-#elif defined(__ANDROID__)
-  definedMacros.insert("__ANDROID__");
-#elif defined(__linux__) || defined(__gnu_linux__)
-  definedMacros.insert("__gnu_linux__");
-#elif defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
-  definedMacros.insert("__BSD__");
-  definedMacros.insert("__FreeBSD__");
-  definedMacros.insert("__NetBSD__");
-  definedMacros.insert("__OpenBSD__");
-#endif
-
-#if defined(__x86_64__) || defined(_M_X64)
-  definedMacros.insert("x64");
-  definedMacros.insert("x86_64");
-#elif defined(__i386) || defined(_M_IX86)
-  definedMacros.insert("x86");
-#elif defined(__aarch64__) || defined(_M_ARM64)
-  definedMacros.insert("arm64");
-#elif defined(__arm__) || defined(_M_ARM)
-  definedMacros.insert("arm");
-#endif
+int Preprocessor::getUTF8CharLength(unsigned char c) {
+  if ((c & 0x80) == 0)
+    return 1;
+  if ((c & 0xE0) == 0xC0)
+    return 2;
+  if ((c & 0xF0) == 0xE0)
+    return 3;
+  if ((c & 0xF8) == 0xF0)
+    return 4;
+  return 1;
 }
 
 void Preprocessor::advance() {
   if (cursor < source.length()) {
-    cursor++;
+    int charLen = getUTF8CharLength(source[cursor]);
+    if (source[cursor] == '\n') {
+      line++;
+      col = 1;
+    } else {
+      col += charLen;
+    }
+    cursor += charLen;
   }
 }
 
@@ -138,6 +137,9 @@ bool Preprocessor::evaluateCondition(std::string_view expr) {
 }
 
 void Preprocessor::processDirective() {
+  int directiveLine = this->line;
+  bool wasSkipping = skipMode();
+
   advance();
 
   auto skipSpaces = [&]() {
@@ -150,7 +152,8 @@ void Preprocessor::processDirective() {
   skipSpaces();
 
   size_t kwStart = cursor;
-  while (cursor < source.length() && std::isalpha(source[cursor])) {
+  while (cursor < source.length() &&
+           std::isalpha(static_cast<unsigned char>(source[cursor]))) {
     advance();
   }
   std::string_view kw(source.data() + kwStart, cursor - kwStart);
@@ -233,6 +236,21 @@ void Preprocessor::processDirective() {
       Logger::warning("Unknown preprocessor directive: " + std::string(kw));
     }
   }
+
+  bool isSkipping = skipMode();
+
+  /* Report the inactive block range strictly excluding the directive lines */
+  if (wasSkipping && diags && !isFormatting && inactiveStartLine != -1 &&
+      directiveLine > inactiveStartLine) {
+    // diags->report({DiagLevel::Inactive, inactiveStartLine, 1, 0,
+    //                "Inactive preprocessor block", filePath, directiveLine});
+  }
+
+  if (isSkipping) {
+    inactiveStartLine = directiveLine + 1;
+  } else {
+    inactiveStartLine = -1;
+  }
 }
 
 std::string Preprocessor::process() {
@@ -243,6 +261,7 @@ std::string Preprocessor::process() {
 
   while (cursor < source.length()) {
     char c = source[cursor];
+    unsigned char uc = static_cast<unsigned char>(c);
 
     if (c == '\n') {
       output += '\n';
@@ -251,8 +270,8 @@ std::string Preprocessor::process() {
       continue;
     }
 
-    if (std::isspace(c)) {
-      output += skipMode() ? ' ' : c;
+    if (std::isspace(uc)) {
+      output += (skipMode() && !isFormatting) ? ' ' : c;
       advance();
       continue;
     }
@@ -266,7 +285,7 @@ std::string Preprocessor::process() {
         if (source[i] == '\n') {
           output += '\n';
         } else {
-          output += ' ';
+          output += isFormatting ? source[i] : ' ';
         }
       }
       continue;
@@ -274,12 +293,24 @@ std::string Preprocessor::process() {
 
     isStartOfLine = false;
 
-    if (skipMode()) {
-      output += ' ';
+    /* Copy the whole UTF-8 character: advance() skips the full sequence, so
+     * copying a single byte would drop the continuation bytes of every
+     * multi-byte character and corrupt the output. */
+    int charLen = getUTF8CharLength(uc);
+    if (skipMode() && !isFormatting) {
+      for (int i = 0; i < charLen; ++i)
+        output += ' ';
     } else {
-      output += c;
+      for (int i = 0; i < charLen && cursor + i < source.length(); ++i)
+        output += source[cursor + i];
     }
     advance();
+  }
+
+  if (skipMode() && diags && !isFormatting && inactiveStartLine != -1 &&
+      line >= inactiveStartLine) {
+    // diags->report({DiagLevel::Inactive, inactiveStartLine, 1, 0,
+    //                "Inactive preprocessor block", filePath, line + 1});
   }
 
   if (!condStack.empty()) {

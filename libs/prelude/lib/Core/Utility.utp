@@ -1,0 +1,206 @@
+/*
+ * Utility template types and algorithms, mirroring C++'s <optional>,
+ * <utility> and <algorithm> for the parts that make sense without maps:
+ * optional<T>, pair<T, U>, min/max/clamp/abs/swap.
+ */
+
+/*
+ * optional<T> — a value of type T that may be absent, mirroring
+ * std::optional. The engaged state is tracked explicitly, so T only needs
+ * to be default-constructible.
+ */
+class optional<T> {
+  bool _hasValue;
+  T _value;
+
+  optional() {
+    this._hasValue = false;
+  }
+
+  optional(T value) {
+    this._value = value;
+    this._hasValue = true;
+  }
+
+  optional(const optional<T>& other) {
+    this._hasValue = other._hasValue;
+    if (this._hasValue) {
+      this._value = other._value;
+    }
+  }
+
+  void operator=(const optional<T>& other) {
+    this._hasValue = other._hasValue;
+    if (this._hasValue) {
+      this._value = other._value;
+    }
+  }
+
+  @inline
+  bool has_value() {
+    return this._hasValue;
+  }
+
+  @inline
+  bool isSet() {
+    return this._hasValue;
+  }
+
+  /* The contained value. Only valid when has_value() is true. */
+  @inline
+  T& value() {
+    return this._value;
+  }
+
+  /* The contained value, or 'fallback' when empty. */
+  @inline
+  T value_or(T fallback) {
+    if (this._hasValue) return this._value;
+    return fallback;
+  }
+
+  /* Discards any contained value. */
+  void reset() {
+    this._hasValue = false;
+  }
+
+  /* Replaces the contained value (C++ emplace semantics). */
+  void emplace(T value) {
+    this._value = value;
+    this._hasValue = true;
+  }
+
+  bool operator==(const optional<T>& other) {
+    if (this._hasValue != other._hasValue) return false;
+    if (!this._hasValue) return true;
+    return this._value == other._value;
+  }
+
+  bool operator!=(const optional<T>& other) {
+    return !(*this == other);
+  }
+}
+
+/*
+ * pair<T, U> — a heterogeneous pair of values, mirroring std::pair.
+ */
+class pair<T, U> {
+  T first;
+  U second;
+
+  pair() {}
+
+  pair(T first, U second) {
+    this.first = first;
+    this.second = second;
+  }
+
+  pair(const pair<T, U>& other) {
+    this.first = other.first;
+    this.second = other.second;
+  }
+
+  void operator=(const pair<T, U>& other) {
+    this.first = other.first;
+    this.second = other.second;
+  }
+
+  bool operator==(const pair<T, U>& other) {
+    return this.first == other.first && this.second == other.second;
+  }
+
+  bool operator!=(const pair<T, U>& other) {
+    return !(*this == other);
+  }
+}
+
+/* Constructs a pair with deduced element types (std::make_pair). */
+pair<T, U> make_pair<T, U>(T first, U second) {
+  return pair<T, U>(first, second);
+}
+
+@inline
+int32 min(int32 a, int32 b) {
+  return a < b ? a : b;
+}
+
+@inline
+int64 min(int64 a, int64 b) {
+  return a < b ? a : b;
+}
+
+@inline
+float32 min(float32 a, float32 b) {
+  return a < b ? a : b;
+}
+
+@inline
+float64 min(float64 a, float64 b) {
+  return a < b ? a : b;
+}
+
+@inline
+int32 max(int32 a, int32 b) {
+  return a > b ? a : b;
+}
+
+@inline
+int64 max(int64 a, int64 b) {
+  return a > b ? a : b;
+}
+
+@inline
+float32 max(float32 a, float32 b) {
+  return a > b ? a : b;
+}
+
+@inline
+float64 max(float64 a, float64 b) {
+  return a > b ? a : b;
+}
+
+@inline
+int32 clamp(int32 value, int32 lo, int32 hi) {
+  if (value < lo) return lo;
+  if (value > hi) return hi;
+  return value;
+}
+
+@inline
+int64 clamp(int64 value, int64 lo, int64 hi) {
+  if (value < lo) return lo;
+  if (value > hi) return hi;
+  return value;
+}
+
+@inline
+float32 clamp(float32 value, float32 lo, float32 hi) {
+  if (value < lo) return lo;
+  if (value > hi) return hi;
+  return value;
+}
+
+@inline
+float64 clamp(float64 value, float64 lo, float64 hi) {
+  if (value < lo) return lo;
+  if (value > hi) return hi;
+  return value;
+}
+
+@inline
+int64 abs(int64 x) {
+  return x < 0 ? -x : x;
+}
+
+@inline
+float64 abs(float64 x) {
+  return x < 0 ? -x : x;
+}
+
+/* Swaps the values of 'a' and 'b' (std::swap). */
+void swap<T>(T& a, T& b) {
+  T tmp = a;
+  a = b;
+  b = tmp;
+}
+

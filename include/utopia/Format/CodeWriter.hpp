@@ -1,232 +1,200 @@
 #pragma once
 #include "utopia/Format/FormatCore.hpp"
-#include <algorithm>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 namespace utopia {
 
 class Piece;
+class Solution;
+class SolutionCache;
 
+/* Persistent immutable linked list node representing a formatting state bound
+ * to a specific Piece. Nodes live in an arena owned by the SolutionCache so
+ * that all Solutions (and Solvers) for a format operation can share them. */
+struct BoundStateNode {
+  const Piece *piece;
+  State state;
+  const BoundStateNode *parent;
+};
+
+/* A level of indentation in the indentation stack. */
+struct IndentLevel {
+  /* The reason this indentation was added. */
+  Indent type;
+
+  /* The total number of spaces of indentation. */
+  int spaces;
+
+  IndentLevel(Indent type, int spaces) : type(type), spaces(spaces) {}
+};
+
+/* Information for each piece currently being formatted while CodeWriter
+ * traverses the piece tree. */
+struct FormatState {
+  /* The piece being formatted. */
+  const Piece *piece;
+
+  /* The piece's shape. This changes based on the newlines the piece writes. */
+  Shape shape = Shape::Inline;
+
+  /* How a newline affects the shape of this piece. */
+  ShapeMode mode = ShapeMode::Merge;
+
+  FormatState(const Piece *piece) : piece(piece) {}
+};
+
+/* The interface used by Pieces to output formatted code.
+ *
+ * The back-end lowers the tree of pieces to the final formatted code by
+ * allowing each piece to produce the output for the code it represents. */
 class CodeWriter {
 public:
-  explicit CodeWriter(
-      int pageWidth = 80, int baseIndent = 0, bool measureOnly = false,
-      const std::unordered_map<const Piece *, State> *boundStates = nullptr)
-      : pageWidth(pageWidth), currentIndent(baseIndent),
-        measureOnly(measureOnly), boundStates(boundStates) {}
+  /* [leadingIndent] is the number of spaces of leading indentation at the
+   * beginning of the first line and [subsequentIndent] is the indentation of
+   * each line after that, independent of indentation created by pieces being
+   * written. */
+  CodeWriter(int pageWidth, int leadingIndent, int subsequentIndent,
+             SolutionCache &cache, Solution &solution);
 
-  void pushPiece(const Piece *p) { activePieces.push_back(p); }
-  void popPiece() { activePieces.pop_back(); }
+  /* Returns the final formatted code and the next pieces that can be expanded
+   * from the solution this CodeWriter is writing, if any. */
+  std::pair<std::string, std::vector<const Piece *>> finish();
 
-  void space() {
-    pendingWhitespace = std::max(pendingWhitespace, Whitespace::Space);
+  /* Appends [text] to the output.
+   *
+   * If [soft] is `true`, then [text] is considered to be "soft" code: string
+   * literals, comments, etc. When an overflowing line of code ends in soft
+   * characters, the overflow cost of all of those characters is collapsed to a
+   * single point of penalty. */
+  void write(const std::string &text, bool soft = false);
+
+  /* Writes a comment. Internal newlines re-indent joined comment lines (`//`,
+   * `/*` at the start of the line) but leave block comment internals flush
+   * left. */
+  void writeComment(const std::string &text);
+
+  /* Directly injects pre-solved formatting text from a separately formatted
+   * subtree. */
+  void writePreformatted(const std::string &text);
+
+  /* Increases the indentation by [indent] relative to the current amount of
+   * indentation. */
+  void pushIndent(Indent indent);
+
+  /* Discards the indentation change from the last call to [pushIndent]. */
+  void popIndent();
+
+  /* Inserts a newline if [condition] is true.
+   *
+   * If [space] is `true` and [condition] is `false`, writes a space. If [blank]
+   * is `true`, writes an extra newline to produce a blank line. */
+  void splitIf(bool condition, bool space = true, bool blank = false);
+
+  /* Writes a single space to the output. */
+  void space() { whitespace(Whitespace::Space); }
+
+  /* Inserts a line split in the output.
+   *
+   * If [blank] is `true`, writes an extra newline to produce a blank line. If
+   * [flushLeft] is `true`, then the new line begins at column 1 and ignores any
+   * surrounding indentation. Used for multi-line block comments and multi-line
+   * strings. */
+  void newline(bool blank = false, bool flushLeft = false) {
+    whitespace(blank ? Whitespace::BlankLine : Whitespace::Newline,
+               flushLeft);
   }
 
-  void newline() {
-    pendingWhitespace = std::max(pendingWhitespace, Whitespace::Newline);
-  }
+  /* Queues [whitespace] to be written to the output.
+   *
+   * If [flushLeft] is `true`, then the new line begins at column 1 and ignores
+   * any surrounding indentation. */
+  void whitespace(Whitespace whitespace, bool flushLeft = false);
 
-  void blankLine() {
-    pendingWhitespace = std::max(pendingWhitespace, Whitespace::BlankLine);
-  }
+  /* When a newline is written by the current piece or one of its children,
+   * determines how that affects the current piece's shape. */
+  void setShapeMode(ShapeMode mode);
 
-  void splitIf(bool condition) {
-    if (condition)
-      newline();
-    else
-      space();
-  }
+  /* Format [piece] and insert the result into the code being written.
+   *
+   * If [separate] is `true`, then [piece] is formatted and solved using a
+   * separate Solver and the result inserted into this CodeWriter's Solution.
+   * It's only safe to pass [separate] when the piece's formatting depends only
+   * on its starting indentation and state. */
+  void format(const Piece *piece, bool separate = false);
 
-  int getCurrentLine() const { return currentLine; }
-  void markInvalid() { isValid = false; }
-
-  void writeString(const std::string &text) { _writeInternal(text, true); }
-
-  void write(const std::string &text) { _writeInternal(text, false); }
-
-  void _writeInternal(const std::string &text, bool isStringLiteral) {
-    if (text.empty())
-      return;
-
-    size_t start = 0;
-    while (start < text.length()) {
-      size_t nextNewline = text.find('\n', start);
-      size_t len = (nextNewline != std::string::npos) ? (nextNewline - start)
-                                                      : std::string::npos;
-      std::string chunk = text.substr(start, len);
-
-      if (!chunk.empty() || nextNewline == std::string::npos) {
-        flushWhitespace();
-
-        if (!measureOnly) {
-          buffer += chunk;
-        }
-
-        for (const Piece *p : activePieces) {
-          if (std::find(currentLinePieces.begin(), currentLinePieces.end(),
-                        p) == currentLinePieces.end()) {
-            currentLinePieces.push_back(p);
-          }
-        }
-        currentColumn += chunk.length();
-        if (isStringLiteral) {
-          forgiveOverflow = true;
-        }
-
-        if (currentColumn > pageWidth && !forgiveOverflow && !hasOverflowed) {
-          recordPotentialOverflow();
-        }
-      }
-
-      if (nextNewline != std::string::npos) {
-        if (currentColumn > pageWidth && !forgiveOverflow) {
-          totalOverflow += (currentColumn - pageWidth);
-          if (!hasOverflowed) {
-            recordPotentialOverflow();
-          }
-        }
-        currentLinePieces.clear();
-        currentColumn = 0;
-        if (!measureOnly) {
-          buffer += "\n";
-          buffer.append(currentIndent, ' ');
-        }
-        currentColumn += currentIndent;
-        pendingWhitespace = Whitespace::None;
-        forgiveOverflow = false;
-        currentLine++;
-        start = nextNewline + 1;
-      } else {
-        break;
-      }
-    }
-  }
-
-  void finish() {
-    flushWhitespace();
-    if (currentColumn > pageWidth && !forgiveOverflow) {
-      totalOverflow += (currentColumn - pageWidth);
-      if (!hasOverflowed) {
-        recordPotentialOverflow();
-      }
-    }
-  }
-
-  void pushIndent(Indent indent) {
-    indentStack.push_back(indent);
-    recalculateIndent();
-  }
-
-  void popIndent() {
-    if (!indentStack.empty()) {
-      indentStack.pop_back();
-      recalculateIndent();
-    }
-  }
-
-  void exactNewlines(int count) {
-    if (count > pendingNewlines) {
-      pendingNewlines = count;
-    }
-  }
-
-  int getOverflow() const {
-    int overflow = totalOverflow;
-    if (currentColumn > pageWidth && !forgiveOverflow) {
-      overflow += (currentColumn - pageWidth);
-    }
-    return overflow;
-  }
-
-  std::vector<const Piece *> getFirstOverflowPieces() const {
-    return firstOverflowPieces;
-  }
-
-  std::string getOutput() const { return buffer; }
-
-  bool isValid = true;
+  /* The number of spaces of leading indentation of the line currently being
+   * written. */
+  int getCurrentIndent() const { return indentStack.empty() ? 0 : indentStack.back().spaces; }
 
 private:
   int pageWidth;
-  int currentIndent;
-  int currentColumn = 0;
-  int totalOverflow = 0;
-  int currentLine = 0;
-  int pendingNewlines = 0;
-  bool measureOnly;
-  bool forgiveOverflow = false;
 
+  /* Previously cached formatted subtrees. */
+  SolutionCache &cache;
+
+  /* The solution this CodeWriter is generating code for. */
+  Solution &solution;
+
+  /* The code being written. */
+  std::string code;
+
+  /* What whitespace should be written before the next non-whitespace text. */
   Whitespace pendingWhitespace = Whitespace::None;
-  std::string buffer;
-  std::vector<Indent> indentStack;
 
-  std::vector<const Piece *> activePieces;
+  /* The number of spaces of indentation that should begin the next line when
+   * [pendingWhitespace] is a newline or blank line. */
+  int pendingIndent = 0;
+
+  /* The indentation to write before the next text, if a newline was just
+   * flushed. -1 means none is pending. */
+  int pendingIndentToWrite = -1;
+
+  /* The number of characters in the line currently being written. */
+  int column = 0;
+
+  /* The number of characters at the end of the current line that are "soft". */
+  int softCharacters = 0;
+
+  /* The stack of indentation levels. */
+  std::vector<IndentLevel> indentStack;
+
+  /* The stack of information for each piece currently being formatted. */
+  std::vector<FormatState> pieceFormats;
+
+  /* Whether we have already found the first line whose pieces should be used
+   * to expand further solutions. */
+  bool foundExpandLine = false;
+
+  /* The solvable pieces on the first overflowing or invalid line, if we've
+   * found any. */
+  std::vector<const Piece *> expandPieces;
+
+  /* The stack of solvable pieces currently being formatted. */
+  std::vector<const Piece *> currentUnsolvedPieces;
+
+  /* The set of unsolved pieces that were being formatted when text was written
+   * to the current line. */
   std::vector<const Piece *> currentLinePieces;
-  std::vector<const Piece *> firstOverflowPieces;
-  bool hasOverflowed = false;
 
-  const std::unordered_map<const Piece *, State> *boundStates;
+  /* Whether any text has been written yet (for the leading indent). */
+  bool started = false;
 
-  void recordPotentialOverflow();
+  /* The number of spaces of leading indentation of the first line. */
+  int leadingIndent;
 
-  void flushWhitespace() {
-    if (pendingWhitespace == Whitespace::None && pendingNewlines == 0)
-      return;
+  void flushWhitespace();
+  void finishLine();
 
-    if (pendingWhitespace == Whitespace::Space && pendingNewlines == 0) {
-      currentColumn += 1;
-      if (!measureOnly)
-        buffer += " ";
-    } else {
-      if (currentColumn > pageWidth && !forgiveOverflow) {
-        totalOverflow += (currentColumn - pageWidth);
-        if (!hasOverflowed) {
-          recordPotentialOverflow();
-        }
-      }
+  /* Format [piece] using a separate Solver and merge the result into this
+   * writer's solution. */
+  void formatSeparate(const Piece *piece);
 
-      currentLinePieces.clear();
-      currentColumn = 0;
+  /* Format [piece] writing directly into this CodeWriter. */
+  void formatInline(const Piece *piece);
 
-      int defaultLines = (pendingWhitespace == Whitespace::BlankLine) ? 2 : 1;
-      int lines = std::max(pendingNewlines, defaultLines);
-
-      if (!measureOnly) {
-        buffer += std::string(lines, '\n');
-        currentLine += lines;
-        buffer.append(currentIndent, ' ');
-      } else {
-        currentLine += lines;
-      }
-      currentColumn += currentIndent;
-    }
-    pendingWhitespace = Whitespace::None;
-    pendingNewlines = 0;
-    forgiveOverflow = false;
-  }
-
-  void recalculateIndent() {
-    currentIndent = 0;
-    Indent lastSignificant = Indent::None;
-
-    for (Indent ind : indentStack) {
-      if (ind == Indent::Infix && lastSignificant == Indent::Assignment) {
-        continue;
-      }
-      if (ind == Indent::ControlFlowClause &&
-          (lastSignificant == Indent::Expression ||
-           lastSignificant == Indent::Infix)) {
-        continue;
-      }
-
-      currentIndent += static_cast<int>(ind);
-      if (ind != Indent::None && ind != Indent::Grouping) {
-        lastSignificant = ind;
-      }
-    }
-  }
+  /* Determine how a newline affects the current piece's shape. */
+  void applyNewlineToShape(FormatState &state, Shape shape = Shape::Other);
 };
 
 } // namespace utopia

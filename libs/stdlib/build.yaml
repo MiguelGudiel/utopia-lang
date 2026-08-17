@@ -8,7 +8,7 @@ build:
   include_dirs:
     - "."
   sources:
-    - "lib/test.utp"
+    - "lib/memory.utp"
     - "lib/ffi.utp"
     - "lib/io.utp"
   linker_flags:

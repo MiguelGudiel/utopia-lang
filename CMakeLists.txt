@@ -13,11 +13,16 @@ option(ENABLE_SANITIZERS "Enable Address and Undefined Behavior Sanitizers" ON)
 if(ENABLE_SANITIZERS)
     add_compile_options(-fsanitize=undefined -fno-omit-frame-pointer -g)
     add_link_options(-fsanitize=undefined)
+    #add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -g)
+    #add_link_options(-fsanitize=address,undefined)
 endif()
 
 find_package(LLVM REQUIRED CONFIG)
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
 message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
+
+find_package(CURL REQUIRED)
+message(STATUS "Found CURL ${CURL_VERSION_STRING}")
 
 llvm_map_components_to_libnames(llvm_libs 
     core 
@@ -40,6 +45,7 @@ include_directories(include)
 set(YAML_CPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(YAML_CPP_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
 add_subdirectory(thirdparty/yaml-cpp)
+add_subdirectory(runtime/utopia_async)
 add_subdirectory(src)
 add_subdirectory(tools/utopia)
 add_subdirectory(tools/lsp)

@@ -1,5 +1,6 @@
 #pragma once
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -13,19 +14,24 @@ struct SourceInfo {
 };
 
 struct SubprojectConfig {
+  std::string name;
+  std::string version;
   std::string path;
-  std::string linkType; // "static" or "shared"
+  std::string linkType;
 };
 
 struct ProjectConfig {
   std::string name;
+  std::string outputName;
+  std::string version;
   std::string target;
   fs::path projectRoot;
-  std::string outputDir;
+  std::optional<std::string> outputDir;
   std::vector<SourceInfo> resolvedSources;
   std::vector<std::string> includeDirs;
   std::vector<std::string> linkerFlags;
   std::optional<int> optLevel;
+  std::optional<bool> asyncEnabled;
   std::vector<SubprojectConfig> dependencies;
 };
 

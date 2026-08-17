@@ -81,7 +81,7 @@ static bool isTypeKeyword(std::string_view id) {
          id == "int8" || id == "uint" || id == "uint32" || id == "uint64" ||
          id == "uint16" || id == "uint8" || id == "float" || id == "float32" ||
          id == "float64" || id == "double" || id == "char" || id == "rune" ||
-         id == "usize_t" || id == "bool" || id == "void";
+         id == "usize" || id == "bool" || id == "void";
 }
 
 Token Lexer::nextToken() {
@@ -105,7 +105,7 @@ Token Lexer::parseToken() {
 
   if (c == '/') {
     if (cursor + 1 < source.length() && source[cursor + 1] == '/') {
-      size_t startStr = cursor; // Comenzar a capturar incluyendo el '//'
+      size_t startStr = cursor;
       advance();
       advance();
       while (cursor < source.length() && source[cursor] != '\n')
@@ -115,7 +115,7 @@ Token Lexer::parseToken() {
               startLine, startCol};
     }
     if (cursor + 1 < source.length() && source[cursor + 1] == '*') {
-      size_t startStr = cursor; // Comenzar a capturar incluyendo el '/*'
+      size_t startStr = cursor;
       advance();
       advance();
       while (cursor + 1 < source.length() &&
@@ -130,6 +130,16 @@ Token Lexer::parseToken() {
       std::string_view val(source.data() + startStr, endStr - startStr);
       return {TokenType::COMMENT, val, startLine, startCol};
     }
+  }
+
+  if (c == '#') {
+    size_t startStr = cursor;
+    while (cursor < source.length() && source[cursor] != '\n') {
+      advance();
+    }
+    return {TokenType::COMMENT,
+            std::string_view(source.data() + startStr, cursor - startStr),
+            startLine, startCol};
   }
 
   if (c == 'U' && cursor + 1 < source.length() && source[cursor + 1] == '\'') {
@@ -196,6 +206,8 @@ Token Lexer::parseToken() {
       return {TokenType::RETURN, id, startLine, startCol};
     if (id == "typedef")
       return {TokenType::TYPEDEF_KW, id, startLine, startCol};
+    if (id == "abstract")
+      return {TokenType::ABSTRACT_KW, id, startLine, startCol};
     if (id == "enum")
       return {TokenType::ENUM_KW, id, startLine, startCol};
     if (id == "for")
@@ -218,8 +230,12 @@ Token Lexer::parseToken() {
       return {TokenType::ELSE_KW, id, startLine, startCol};
     if (id == "as")
       return {TokenType::AS, id, startLine, startCol};
+    if (id == "is")
+      return {TokenType::IS_KW, id, startLine, startCol};
     if (id == "const")
       return {TokenType::CONST_KW, id, startLine, startCol};
+    if (id == "var")
+      return {TokenType::VAR_KW, id, startLine, startCol};
     if (id == "annotation")
       return {TokenType::ANNOTATION_KW, id, startLine, startCol};
     if (id == "static")
@@ -230,6 +246,8 @@ Token Lexer::parseToken() {
       return {TokenType::PUBLIC_KW, id, startLine, startCol};
     if (id == "private")
       return {TokenType::PRIVATE_KW, id, startLine, startCol};
+    if (id == "protected")
+      return {TokenType::PROTECTED_KW, id, startLine, startCol};
     if (id == "true")
       return {TokenType::TRUE_KW, id, startLine, startCol};
     if (id == "false")
@@ -240,6 +258,16 @@ Token Lexer::parseToken() {
       return {TokenType::UNION_KW, id, startLine, startCol};
     if (id == "class")
       return {TokenType::CLASS_KW, id, startLine, startCol};
+    if (id == "extends")
+      return {TokenType::EXTENDS_KW, id, startLine, startCol};
+    if (id == "implements")
+      return {TokenType::IMPLEMENTS_KW, id, startLine, startCol};
+    if (id == "namespace")
+      return {TokenType::NAMESPACE_KW, id, startLine, startCol};
+    if (id == "using")
+      return {TokenType::USING_KW, id, startLine, startCol};
+    if (id == "super")
+      return {TokenType::SUPER_KW, id, startLine, startCol};
     if (id == "this")
       return {TokenType::THIS_KW, id, startLine, startCol};
     if (id == "new")
@@ -252,6 +280,10 @@ Token Lexer::parseToken() {
       return {TokenType::FUNCTION_KW, id, startLine, startCol};
     if (id == "operator")
       return {TokenType::OPERATOR_KW, id, startLine, startCol};
+    if (id == "async")
+      return {TokenType::ASYNC_KW, id, startLine, startCol};
+    if (id == "await")
+      return {TokenType::AWAIT_KW, id, startLine, startCol};
     if (isTypeKeyword(id))
       return {TokenType::TYPE_KW, id, startLine, startCol};
     return {TokenType::IDENTIFIER, id, startLine, startCol};
@@ -298,7 +330,7 @@ Token Lexer::parseToken() {
     while (cursor < source.length()) {
       unsigned char nextC = source[cursor];
       if (nextC == 'f' || nextC == 'F' || nextC == 'u' || nextC == 'U' ||
-          nextC == 'l' || nextC == 'L') {
+          nextC == 'l' || nextC == 'L' || nextC == 'z' || nextC == 'Z') {
         advance();
       } else {
         break;
@@ -441,6 +473,9 @@ Token Lexer::parseToken() {
     return {TokenType::BANG, std::string_view(start, 1), startLine, startCol};
   case '@':
     return {TokenType::AT, std::string_view(start, 1), startLine, startCol};
+  case '?':
+    return {TokenType::QUESTION, std::string_view(start, 1), startLine,
+            startCol};
   case '(':
     return {TokenType::LPAREN, std::string_view(start, 1), startLine, startCol};
   case ')':

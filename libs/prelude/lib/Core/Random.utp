@@ -1,0 +1,62 @@
+/*
+ * Random — a deterministic pseudo-random number generator, mirroring Dart's
+ * dart:math Random API. It uses xorshift64* with a time-derived seed by
+ * default; the seed can be supplied explicitly for reproducible sequences.
+ */
+
+@extern("time")
+int64 _rand_time(int64* t);
+
+
+class Random {
+  uint64 _state;
+
+  /* Seeded from the wall clock (Dart's default constructor). */
+  Random() {
+    this._state = Random._seedFromTime();
+  }
+
+  /* Seeded explicitly for reproducible sequences (Dart's
+   * Random(seed)). */
+  Random(uint64 seed) {
+    this._state = seed != 0 ? seed : 0x9E3779B97F4A7C15;
+  }
+
+  /* Mixes the clock with a per-instance counter so two Random() instances
+   * created in the same second still differ. */
+  static uint64 _counter = 0;
+
+  static uint64 _seedFromTime() {
+    int64 t = _rand_time(null);
+    Random._counter = Random._counter + 1;
+    uint64 s = (t as uint64) * 0x9E3779B97F4A7C15 + Random._counter;
+    if (s == 0) s = 0x853C49E6748FEA9B;
+    return s;
+  }
+
+  uint64 _next() {
+    uint64 x = this._state;
+    x = x ^ (x << 13);
+    x = x ^ (x >> 7);
+    x = x ^ (x << 17);
+    this._state = x;
+    return x * 0x2545F4914F6CDD1D;
+  }
+
+  /* A random integer in [0, max). 'max' must be positive; values are
+   * uniform over the upper bits of the generator. */
+  int32 nextInt(int32 max) {
+    if (max <= 0) return 0;
+    return ((this._next() >> 32) % (max as uint64)) as int32;
+  }
+
+  /* A random float64 in [0, 1) with 53 bits of precision. */
+  float64 nextDouble() {
+    return (this._next() >> 11) * 1.0 / 9007199254740992.0;
+  }
+
+  /* A random boolean. */
+  bool nextBool() {
+    return (this._next() & 1) != 0;
+  }
+}

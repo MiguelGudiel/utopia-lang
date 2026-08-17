@@ -1,0 +1,22 @@
+/*
+ * Demonstrates dynamic memory allocation for arrays.
+ * Shows how to allocate, initialize, read, and safely free memory.
+ */
+int main() {
+  int size = 5;
+
+  int* arr = new int[size];
+
+  for (int i = 0; i < size; i++) {
+    arr[i] = (i + 1) * 10;
+  }
+
+  for (int i = 0; i < size; i++) {
+    print("Element at index %d is: %d\n", i, arr[i]);
+  }
+
+  /* Heap arrays must be released with `delete[]` to match the allocation. */
+  delete[] arr;
+
+  return 0;
+}

@@ -6,27 +6,24 @@ class Point {
   public int x;
   public int y;
 
-  /* Initializes a new Point instance */
   public Point(int x, int y) {
     this.x = x;
     this.y = y;
   }
 
-  /* Prints the formatted coordinates of the point */
   public void printPoint() {
     print("Point(%d, %d)\n", this.x, this.y);
   }
 }
 
 int main() {
-  /* Instantiate a new object on the heap */
+  /* Heap allocation is explicit: `new` returns a pointer the caller owns. */
   Point* p1 = new Point(10, 20);
-    
-  /* Call a class method using dot notation directly on the pointer */
+
+  /* Member access through '.' on a pointer auto-dereferences the target. */
   p1.printPoint();
-    
-  /* Clean up the instance */
+
   delete p1;
-    
+
   return 0;
 }

@@ -30,9 +30,12 @@ public:
   const BuiltinType *UInt16Ty;
   const BuiltinType *UInt32Ty;
   const BuiltinType *UInt64Ty;
+  const BuiltinType *USizeTy;
   const BuiltinType *Float32Ty;
   const BuiltinType *Float64Ty;
   const BuiltinType *TypeValTy;
+  const BuiltinType *NamespaceTy;
+  const AutoType *AutoTy;
 
   ASTContext() {
     VoidTy = create<BuiltinType>(BuiltinKind::Void);
@@ -45,9 +48,12 @@ public:
     UInt16Ty = create<BuiltinType>(BuiltinKind::UInt16);
     UInt32Ty = create<BuiltinType>(BuiltinKind::UInt32);
     UInt64Ty = create<BuiltinType>(BuiltinKind::UInt64);
+    USizeTy = create<BuiltinType>(BuiltinKind::USize);
     Float32Ty = create<BuiltinType>(BuiltinKind::Float32);
     Float64Ty = create<BuiltinType>(BuiltinKind::Float64);
     TypeValTy = create<BuiltinType>(BuiltinKind::TypeVal);
+    NamespaceTy = create<BuiltinType>(BuiltinKind::Namespace);
+    AutoTy = create<AutoType>();
   }
   ~ASTContext() = default;
 
@@ -126,6 +132,11 @@ public:
     return constTy;
   }
 
+  NamespaceDeclNode *getNamespace(std::string_view fqName) const {
+    auto it = namespaces.find(fqName);
+    return it != namespaces.end() ? it->second : nullptr;
+  }
+
   RecordType *createRecordType(TypeKind kind, std::string_view name) {
     auto it = recordTypes.find(name);
     if (it != recordTypes.end()) {
@@ -169,8 +180,10 @@ public:
       return Int8Ty;
     if (name == "uint" || name == "uint32")
       return UInt32Ty;
-    if (name == "uint64" || name == "usize_t")
+    if (name == "uint64")
       return UInt64Ty;
+    if (name == "usize")
+      return USizeTy;
     if (name == "uint16")
       return UInt16Ty;
     if (name == "uint8" || name == "char")
@@ -210,6 +223,22 @@ public:
       return Float32Ty;
     }
 
+    /* USize keeps its width unless combined with a 64-bit type, which
+     * promotes it to UInt64. */
+    if (k1 == BuiltinKind::USize && k2 == BuiltinKind::USize) {
+      return USizeTy;
+    }
+    if (k1 == BuiltinKind::USize) {
+      if (k2 == BuiltinKind::Int64 || k2 == BuiltinKind::UInt64)
+        return UInt64Ty;
+      return USizeTy;
+    }
+    if (k2 == BuiltinKind::USize) {
+      if (k1 == BuiltinKind::Int64 || k1 == BuiltinKind::UInt64)
+        return UInt64Ty;
+      return USizeTy;
+    }
+
     /*
      * 2D Type Promotion Matrix for Integer Arithmetic.
      * Prevents lossy conversions by safely expanding to the next compatible
@@ -220,12 +249,12 @@ public:
      * 4: UInt8, 5: UInt16, 6: UInt32, 7: UInt64
      */
     static constexpr BuiltinKind promotionMatrix[8][8] = {
-        /*             Int8                 Int16                Int32 Int64
-               UInt8                UInt16               UInt32 UInt64 */
-        /* Int8   */ {BuiltinKind::Int8, BuiltinKind::Int16, BuiltinKind::Int32,
-                      BuiltinKind::Int64, BuiltinKind::Int16,
-                      BuiltinKind::Int32, BuiltinKind::Int64,
-                      BuiltinKind::UInt64},
+        /*            Int8               Int16                Int32 Int64
+                      UInt8              UInt16               UInt32 UInt64 */
+        /* Int8   */
+        {BuiltinKind::Int8, BuiltinKind::Int16, BuiltinKind::Int32,
+         BuiltinKind::Int64, BuiltinKind::Int16, BuiltinKind::Int32,
+         BuiltinKind::Int64, BuiltinKind::UInt64},
         /* Int16  */
         {BuiltinKind::Int16, BuiltinKind::Int16, BuiltinKind::Int32,
          BuiltinKind::Int64, BuiltinKind::Int16, BuiltinKind::Int32,
@@ -295,6 +324,21 @@ public:
     return arrTy;
   }
 
+  /* Returns the canonical map-literal type for the given key/value types
+   * and entry count. */
+  const MapLiteralType *getMapLiteralType(const Type *keyType,
+                                          const Type *valueType,
+                                          uint64_t size) {
+    for (const auto *mapTy : mapLiteralTypes) {
+      if (mapTy->getKeyType() == keyType && mapTy->getValueType() == valueType &&
+          mapTy->getSize() == size)
+        return mapTy;
+    }
+    auto *mapTy = create<MapLiteralType>(keyType, valueType, size);
+    mapLiteralTypes.push_back(mapTy);
+    return mapTy;
+  }
+
   const FunctionType *getFunctionType(const Type *ret,
                                       llvm::ArrayRef<const Type *> params) {
     auto *mem = allocator.Allocate<FunctionType>();
@@ -325,9 +369,28 @@ public:
     return it != typeAliases.end() ? it->second : nullptr;
   }
 
+  NamespaceDeclNode *getOrCreateNamespace(std::string_view fqName) {
+    auto it = namespaces.find(fqName);
+    if (it != namespaces.end())
+      return it->second;
+
+    /* Extract the simple name from the fully qualified name to ensure
+     * IDE completions and hover tooltips only display the relevant component.
+     */
+    size_t dot = fqName.find_last_of('.');
+    std::string_view simpleName =
+        (dot == std::string_view::npos) ? fqName : fqName.substr(dot + 1);
+
+    auto *ns = create<NamespaceDeclNode>(simpleName, 0, 0, 0);
+    ns->fqName = fqName;
+    namespaces[fqName] = ns;
+    return ns;
+  }
+
 private:
   llvm::BumpPtrAllocator allocator;
   std::vector<const ArrayType *> arrayTypes;
+  std::vector<const MapLiteralType *> mapLiteralTypes;
   std::unordered_map<const Type *, const PointerType *> pointerTypes;
   std::unordered_map<const Type *, const ReferenceType *> referenceTypes;
   std::unordered_map<const Type *, const RValueReferenceType *>
@@ -338,6 +401,8 @@ private:
   std::unordered_map<std::string_view, const EnumType *> enumTypes;
 
   std::unordered_set<std::string_view> registeredTemplates;
+
+  std::unordered_map<std::string_view, NamespaceDeclNode *> namespaces;
 };
 
 } // namespace utopia

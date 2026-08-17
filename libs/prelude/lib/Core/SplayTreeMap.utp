@@ -1,0 +1,440 @@
+import "../Memory/Core.utp";
+import "List.utp";
+export "MapLiteralView.utp";
+
+/* Internal: BST node with parent pointers for bottom-up splaying. */
+struct _SplayNode<K, V> {
+  K key;
+  V value;
+  _SplayNode<K, V>* left;
+  _SplayNode<K, V>* right;
+  _SplayNode<K, V>* parent;
+}
+
+
+/*
+ * SplayTreeMap<K, V>: a self-adjusting binary search tree (splay tree) that
+ * keeps entries sorted by key, like Dart's SplayTreeMap. Iteration runs in
+ * sorted key order; each operation splays the accessed node to the root, so
+ * recently accessed keys are fastest afterwards.
+ *
+ * Complexity (n = entries):
+ *   - get/set/put/containsKey/remove: O(log n) amortized (splay)
+ *   - iteration (forEach/keys/values): O(n), sorted by key
+ *   - copy/assignment: O(n) deep copy (n amortized O(log n) inserts)
+ *
+ * Keys are ordered with 'operator<', so a key type must provide one
+ * (String, numbers, enums and user types with an overloaded operator<).
+ * Unlike the hash maps, no operator== is required: equality is derived from
+ * the ordering.
+ */
+class SplayTreeMap<K, V> {
+  _SplayNode<K, V>* _root;
+  int64 _count;
+
+  SplayTreeMap() {
+    this._root = null;
+    this._count = 0;
+  }
+
+  SplayTreeMap(MapLiteralView<K, V> view) {
+    this._root = null;
+    this._count = 0;
+    for (usize i = 0; i < view.length; i++) {
+      this.put(view.keys[i], view.values[i]);
+    }
+  }
+
+  SplayTreeMap(const SplayTreeMap<K, V>& other) {
+    this._root = null;
+    this._count = 0;
+    this._copyFrom(other);
+  }
+
+  ~SplayTreeMap() {
+    this._destroyTree(this._root);
+    this._root = null;
+    this._count = 0;
+  }
+
+  void operator=(const SplayTreeMap<K, V>& other) {
+    if (this == &other) return;
+    this._destroyTree(this._root);
+    this._root = null;
+    this._count = 0;
+    this._copyFrom(other);
+  }
+
+  /* ---- internal helpers ------------------------------------------------ */
+
+  /* Allocates a node with the key constructed in place (the value is left
+   * for the caller to construct, so operator[] can default-construct it). */
+  _SplayNode<K, V>* _newNode(K key) {
+    _SplayNode<K, V>* n =
+        (alloc(sizeof(_SplayNode<K, V>), alignof(_SplayNode<K, V>)).ptr)
+            as _SplayNode<K, V>*;
+    _construct<K>(&(n[0].key), key);
+    n[0].left = null;
+    n[0].right = null;
+    n[0].parent = null;
+    return n;
+  }
+
+  @inline
+  bool _eqKeys(K a, K b) {
+    return !(a < b) && !(b < a);
+  }
+
+  void _rotateLeft(_SplayNode<K, V>* x) {
+    _SplayNode<K, V>* y = x[0].right;
+    x[0].right = y[0].left;
+    if (y[0].left != null) {
+      y[0].left[0].parent = x;
+    }
+    y[0].parent = x[0].parent;
+    if (x[0].parent == null) {
+      this._root = y;
+    } else if (x == x[0].parent[0].left) {
+      x[0].parent[0].left = y;
+    } else {
+      x[0].parent[0].right = y;
+    }
+    y[0].left = x;
+    x[0].parent = y;
+  }
+
+  void _rotateRight(_SplayNode<K, V>* x) {
+    _SplayNode<K, V>* y = x[0].left;
+    x[0].left = y[0].right;
+    if (y[0].right != null) {
+      y[0].right[0].parent = x;
+    }
+    y[0].parent = x[0].parent;
+    if (x[0].parent == null) {
+      this._root = y;
+    } else if (x == x[0].parent[0].right) {
+      x[0].parent[0].right = y;
+    } else {
+      x[0].parent[0].left = y;
+    }
+    y[0].right = x;
+    x[0].parent = y;
+  }
+
+  /* Splays 'x' to the root with bottom-up zig/zig-zig/zig-zag rotations. */
+  void _splay(_SplayNode<K, V>* x) {
+    while (x[0].parent != null) {
+      _SplayNode<K, V>* p = x[0].parent;
+      _SplayNode<K, V>* g = p[0].parent;
+      if (g == null) {
+        if (x == p[0].left) {
+          this._rotateRight(p);
+        } else {
+          this._rotateLeft(p);
+        }
+      } else if (x == p[0].left && p == g[0].left) {
+        this._rotateRight(g);
+        this._rotateRight(p);
+      } else if (x == p[0].right && p == g[0].right) {
+        this._rotateLeft(g);
+        this._rotateLeft(p);
+      } else if (x == p[0].right && p == g[0].left) {
+        this._rotateLeft(p);
+        this._rotateRight(g);
+      } else {
+        this._rotateRight(p);
+        this._rotateLeft(g);
+      }
+    }
+    /* 'x' may already be the subtree root without any rotation having run
+     * (e.g. after a removal); make it the tree root explicitly. */
+    this._root = x;
+  }
+
+  /* Searches for 'key' and splays the deepest visited node to the root. */
+  void _splaySearch(K key) {
+    _SplayNode<K, V>* x = this._root;
+    while (x != null) {
+      if (key < x[0].key) {
+        if (x[0].left == null) {
+          break;
+        }
+        x = x[0].left;
+      } else if (x[0].key < key) {
+        if (x[0].right == null) {
+          break;
+        }
+        x = x[0].right;
+      } else {
+        break;
+      }
+    }
+    if (x != null) {
+      this._splay(x);
+    }
+  }
+
+  /* Splits the tree at the root: inserts a new node holding 'key' as the
+   * new root and returns it. The tree must be non-empty and the key
+   * distinct from the root's; the value is left unconstructed. */
+  _SplayNode<K, V>* _insertSplit(K key) {
+    _SplayNode<K, V>* n = this._newNode(key);
+    if (key < this._root[0].key) {
+      n[0].left = this._root[0].left;
+      if (n[0].left != null) {
+        n[0].left[0].parent = n;
+      }
+      n[0].right = this._root;
+      this._root[0].parent = n;
+      this._root[0].left = null;
+    } else {
+      n[0].right = this._root[0].right;
+      if (n[0].right != null) {
+        n[0].right[0].parent = n;
+      }
+      n[0].left = this._root;
+      this._root[0].parent = n;
+      this._root[0].right = null;
+    }
+    n[0].parent = null;
+    this._root = n;
+    return n;
+  }
+
+  /* Inserts (key, value) or replaces the existing value. */
+  void _insertOrReplace(K key, V value) {
+    if (this._root == null) {
+      this._root = this._newNode(key);
+      _construct<V>(&(this._root[0].value), value);
+      this._count++;
+      return;
+    }
+    this._splaySearch(key);
+    if (this._eqKeys(this._root[0].key, key)) {
+      destruct(&(this._root[0].value));
+      _construct<V>(&(this._root[0].value), value);
+      return;
+    }
+    this._count++;
+    _SplayNode<K, V>* n = this._insertSplit(key);
+    _construct<V>(&(n[0].value), value);
+  }
+
+  /* Iterative destruction: left subtrees are rotated into the right spine,
+   * so each node is freed exactly once without recursion. */
+  void _destroyTree(_SplayNode<K, V>* root) {
+    while (root != null) {
+      if (root[0].left != null) {
+        _SplayNode<K, V>* l = root[0].left;
+        root[0].left = l[0].right;
+        if (l[0].right != null) {
+          l[0].right[0].parent = root;
+        }
+        l[0].parent = root[0].parent;
+        l[0].right = root;
+        root[0].parent = l;
+        root = l;
+      } else {
+        _SplayNode<K, V>* r = root[0].right;
+        destruct(&(root[0].key));
+        destruct(&(root[0].value));
+        free(root);
+        root = r;
+        if (root != null) {
+          root[0].parent = null;
+        }
+      }
+    }
+  }
+
+  /* Deep copy: walks 'other' in sorted order and inserts copies. */
+  void _copyFrom(const SplayTreeMap<K, V>& other) {
+    if (other._root == null) {
+      return;
+    }
+    List<_SplayNode<K, V>*> stack;
+    _SplayNode<K, V>* x = other._root;
+    while (x != null || stack.isNotEmpty()) {
+      while (x != null) {
+        stack.push(x);
+        x = x[0].left;
+      }
+      x = stack.removeAt(stack.length() - 1);
+      this.put(x[0].key, x[0].value);
+      x = x[0].right;
+    }
+  }
+
+  /* ---- public API ------------------------------------------------------ */
+
+  @inline
+  usize length() {
+    return this._count as usize;
+  }
+
+  @inline
+  bool isEmpty() {
+    return this._count == 0;
+  }
+
+  @inline
+  bool isNotEmpty() {
+    return this._count != 0;
+  }
+
+  /* Indexes 'key', inserting a default-constructed entry when absent. */
+  V& operator[](K key) {
+    if (this._root == null) {
+      this._root = this._newNode(key);
+      _construct<V>(&(this._root[0].value));
+      this._count++;
+      return this._root[0].value;
+    }
+    this._splaySearch(key);
+    if (this._eqKeys(this._root[0].key, key)) {
+      return this._root[0].value;
+    }
+    this._count++;
+    _SplayNode<K, V>* n = this._insertSplit(key);
+    _construct<V>(&(n[0].value));
+    return n[0].value;
+  }
+
+  /* Inserts 'value' for 'key', replacing any existing value. */
+  void put(K key, V value) {
+    this._insertOrReplace(key, value);
+  }
+
+  /* True when 'key' is present. */
+  bool containsKey(K key) {
+    if (this._root == null) {
+      return false;
+    }
+    this._splaySearch(key);
+    return this._eqKeys(this._root[0].key, key);
+  }
+
+  /* True when at least one entry holds a value equal to 'value'. */
+  bool containsValue<T2, T3>(V value) {
+    if (this._root == null) {
+      return false;
+    }
+    List<_SplayNode<K, V>*> stack;
+    _SplayNode<K, V>* x = this._root;
+    while (x != null || stack.isNotEmpty()) {
+      while (x != null) {
+        stack.push(x);
+        x = x[0].left;
+      }
+      x = stack.removeAt(stack.length() - 1);
+      if (x[0].value == value) {
+        return true;
+      }
+      x = x[0].right;
+    }
+    return false;
+  }
+
+  /* Removes 'key'; returns whether an entry was removed. */
+  bool remove(K key) {
+    if (this._root == null) {
+      return false;
+    }
+    this._splaySearch(key);
+    if (!this._eqKeys(this._root[0].key, key)) {
+      return false;
+    }
+    _SplayNode<K, V>* root = this._root;
+    _SplayNode<K, V>* left = root[0].left;
+    _SplayNode<K, V>* right = root[0].right;
+    destruct(&(root[0].key));
+    destruct(&(root[0].value));
+    free(root);
+    this._count--;
+    if (left == null) {
+      this._root = right;
+      if (right != null) {
+        right[0].parent = null;
+      }
+      return true;
+    }
+    /* Detach the left subtree (its parent used to be the freed node). */
+    left[0].parent = null;
+    _SplayNode<K, V>* m = left;
+    while (m[0].right != null) {
+      m = m[0].right;
+    }
+    this._splay(m);
+    this._root[0].right = right;
+    if (right != null) {
+      right[0].parent = this._root;
+    }
+    return true;
+  }
+
+  /* Removes every entry, keeping the storage of the tree reusable. */
+  void clear() {
+    this._destroyTree(this._root);
+    this._root = null;
+    this._count = 0;
+  }
+
+  /* Runs 'fn' for every entry, in ascending key order. */
+  void forEach(void Function(K, V) fn) {
+    if (this._root == null) {
+      return;
+    }
+    List<_SplayNode<K, V>*> stack;
+    _SplayNode<K, V>* x = this._root;
+    while (x != null || stack.isNotEmpty()) {
+      while (x != null) {
+        stack.push(x);
+        x = x[0].left;
+      }
+      x = stack.removeAt(stack.length() - 1);
+      fn(x[0].key, x[0].value);
+      x = x[0].right;
+    }
+  }
+
+  /* All keys, in ascending order. */
+  List<K> keys() {
+    List<K> result;
+    if (this._root == null) {
+      return result;
+    }
+    List<_SplayNode<K, V>*> stack;
+    _SplayNode<K, V>* x = this._root;
+    while (x != null || stack.isNotEmpty()) {
+      while (x != null) {
+        stack.push(x);
+        x = x[0].left;
+      }
+      x = stack.removeAt(stack.length() - 1);
+      result.push(x[0].key);
+      x = x[0].right;
+    }
+    return result;
+  }
+
+  /* All values, in ascending key order. */
+  List<V> values() {
+    List<V> result;
+    if (this._root == null) {
+      return result;
+    }
+    List<_SplayNode<K, V>*> stack;
+    _SplayNode<K, V>* x = this._root;
+    while (x != null || stack.isNotEmpty()) {
+      while (x != null) {
+        stack.push(x);
+        x = x[0].left;
+      }
+      x = stack.removeAt(stack.length() - 1);
+      result.push(x[0].value);
+      x = x[0].right;
+    }
+    return result;
+  }
+}
+

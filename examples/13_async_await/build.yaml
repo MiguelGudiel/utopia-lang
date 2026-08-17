@@ -1,0 +1,12 @@
+project:
+  name: "async_await"
+
+build:
+  target: executable
+  source_dirs:
+    - src/
+  sources:
+    - "main.utp"
+  linker_flags:
+    - "-lm"
+

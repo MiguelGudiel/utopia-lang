@@ -23,6 +23,10 @@ protected:
                                llvm::StructType *structTy) const;
   llvm::IRBuilder<> &getBuilder(CodeGen &cg) const;
   llvm::Module &getModule(CodeGen &cg) const;
+  void emitCleanupCall(CodeGen &cg, llvm::Value *ptr,
+                       const FunctionDeclNode *dtor) const;
+  llvm::AllocaInst *createEntryBlockAlloca(CodeGen &cg, llvm::Type *type,
+                                           const std::string &varName) const;
 
 public:
   virtual ~Intrinsic() = default;

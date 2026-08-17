@@ -90,6 +90,15 @@ std::string_view Parser::parseOperatorName() {
       {TokenType::BANG, "!"},
       {TokenType::TILDE, "~"}};
 
+  if (currentToken().type == TokenType::NEW_KW ||
+      currentToken().type == TokenType::DELETE_KW) {
+    std::string_view allocName = (currentToken().type == TokenType::NEW_KW)
+                                     ? "operator new"
+                                     : "operator delete";
+    advance();
+    return astCtx.copyString(allocName);
+  }
+
   auto it = opMap.find(currentToken().type);
   if (it == opMap.end()) {
     reportError(currentToken().line, currentToken().column,
@@ -115,63 +124,95 @@ std::string_view Parser::parseOperatorName() {
   return astCtx.copyString(name);
 }
 
-const Type *Parser::parseType(bool inNewExpr) {
-  bool isConst = match(TokenType::CONST_KW);
-
-  if (currentToken().type != TokenType::TYPE_KW &&
-      currentToken().type != TokenType::IDENTIFIER) {
-    reportError(currentToken().line, currentToken().column,
-                (int)currentToken().value.length(), "Expected type name");
-    throw ParseException();
+bool Parser::isDeclaration() {
+  if (currentToken().type == TokenType::CONST_KW ||
+      currentToken().type == TokenType::VAR_KW ||
+      currentToken().type == TokenType::STATIC_KW ||
+      currentToken().type == TokenType::TYPE_KW) {
+    return true;
   }
 
-  std::string_view base = currentToken().value;
-  const Type *ty = nullptr;
+  if (currentToken().type == TokenType::IDENTIFIER) {
+    size_t offset = 0;
+    std::string typeNameStr = std::string(peekToken(offset).value);
 
-  if (isTemplateParam(base)) {
-    ty = astCtx.getTemplateParamType(base);
-  } else {
-    ty = astCtx.getBuiltinTypeByName(base);
-    if (!ty)
-      ty = astCtx.getRecordType(base);
-    if (!ty)
-      ty = astCtx.getTypeAlias(base);
-    if (!ty)
-      ty = astCtx.getEnumTypeByName(base);
-  }
-
-  if (!ty) {
-    ty = astCtx.getTemplateParamType(base);
-  }
-
-  advance();
-
-  if (currentToken().type == TokenType::LT) {
-    advance();
-    std::vector<const Type *> tArgs;
-    if (currentToken().type != TokenType::GT) {
-      do {
-        tArgs.push_back(parseType());
-      } while (match(TokenType::COMMA));
+    while (peekToken(offset + 1).type == TokenType::DOT &&
+           peekToken(offset + 2).type == TokenType::IDENTIFIER) {
+      typeNameStr += ".";
+      typeNameStr += peekToken(offset + 2).value;
+      offset += 2;
     }
 
-    if (currentToken().type == TokenType::RSHIFT) {
-      const_cast<Token &>(currentToken()).type = TokenType::GT;
-      const_cast<Token &>(currentToken()).value = ">";
-    } else {
-      expect(TokenType::GT, "Expected '>'");
+    if (peekToken(offset + 1).type == TokenType::LT) {
+      int bracketDepth = 0;
+      size_t tempOffset = offset + 1;
+      while (peekToken(tempOffset).type != TokenType::EOF_TOK) {
+        if (peekToken(tempOffset).type == TokenType::LT)
+          bracketDepth++;
+        else if (peekToken(tempOffset).type == TokenType::GT)
+          bracketDepth--;
+        else if (peekToken(tempOffset).type == TokenType::RSHIFT)
+          bracketDepth -= 2;
+
+        tempOffset++;
+        if (bracketDepth <= 0)
+          break;
+      }
+      offset = tempOffset - 1;
     }
-    ty =
-        astCtx.getTemplateInstType(base, astCtx.copyArray<const Type *>(tArgs));
-  }
 
-  if (isConst) {
-    ty = astCtx.getConstType(ty);
-  }
+    TokenType nextTok = peekToken(offset + 1).type;
 
+    if (nextTok == TokenType::IDENTIFIER || nextTok == TokenType::OPERATOR_KW) {
+      return true;
+    }
+
+    /* 'Name Function(...)' is a function pointer type declaration (e.g.
+     * 'String Function() f = ...'); 'Function' is a keyword so this cannot
+     * be an expression. */
+    if (nextTok == TokenType::FUNCTION_KW) {
+      return true;
+    }
+
+    if (nextTok == TokenType::AMPERSAND || nextTok == TokenType::STAR ||
+        nextTok == TokenType::LBRACKET || nextTok == TokenType::LOGICAL_AND) {
+
+      auto resolveType = [&](std::string_view name) -> bool {
+        return astCtx.getRecordType(name) || astCtx.getTypeAlias(name) ||
+               astCtx.getEnumTypeByName(name) || isTemplateParam(name) ||
+               astCtx.getBuiltinTypeByName(name);
+      };
+
+      if (resolveType(typeNameStr))
+        return true;
+
+      std::string ns = getCurrentNamespace();
+      while (!ns.empty()) {
+        if (resolveType(ns + "." + typeNameStr))
+          return true;
+        size_t pos = ns.find_last_of('.');
+        if (pos != std::string::npos)
+          ns = ns.substr(0, pos);
+        else
+          break;
+      }
+
+      /* Usings may qualify types declared in imported modules. */
+      for (const auto &u : activeUsings) {
+        if (resolveType(u + "." + typeNameStr))
+          return true;
+      }
+    }
+  }
+  return false;
+}
+
+const Type *Parser::parseTypeModifiers(const Type *baseType, bool inNewExpr,
+                                       bool allowRValueRef) {
+  const Type *ty = baseType;
   while (currentToken().type == TokenType::STAR ||
          currentToken().type == TokenType::AMPERSAND ||
-         currentToken().type == TokenType::LOGICAL_AND ||
+         (allowRValueRef && currentToken().type == TokenType::LOGICAL_AND) ||
          currentToken().type == TokenType::CONST_KW ||
          (!inNewExpr && currentToken().type == TokenType::LBRACKET)) {
     if (currentToken().type == TokenType::CONST_KW) {
@@ -183,13 +224,113 @@ const Type *Parser::parseType(bool inNewExpr) {
     } else if (currentToken().type == TokenType::AMPERSAND) {
       ty = astCtx.getReferenceType(ty);
       advance();
-    } else if (currentToken().type == TokenType::LOGICAL_AND) {
+    } else if (allowRValueRef && currentToken().type == TokenType::LOGICAL_AND) {
       ty = astCtx.getRValueReferenceType(ty);
       advance();
     } else if (!inNewExpr && currentToken().type == TokenType::LBRACKET) {
       ty = applyArrayDeclarator(ty);
     }
   }
+  return ty;
+}
+
+const Type *Parser::parseType(bool inNewExpr, bool allowRValueRef) {
+  bool isConst = match(TokenType::CONST_KW);
+
+  if (currentToken().type != TokenType::TYPE_KW &&
+      currentToken().type != TokenType::IDENTIFIER) {
+    reportError(currentToken().line, currentToken().column,
+                (int)currentToken().value.length(), "Expected type name");
+    throw ParseException();
+  }
+
+  std::string typeNameStr = std::string(currentToken().value);
+  advance();
+
+  while (currentToken().type == TokenType::DOT &&
+         peekToken().type == TokenType::IDENTIFIER) {
+    advance();
+    typeNameStr += ".";
+    typeNameStr += currentToken().value;
+    advance();
+  }
+
+  std::string_view base = astCtx.copyString(typeNameStr);
+  const Type *ty = nullptr;
+
+  if (isTemplateParam(base)) {
+    ty = astCtx.getTemplateParamType(base);
+  } else {
+    auto resolveType = [&](std::string_view name) -> const Type * {
+      const Type *t = astCtx.getBuiltinTypeByName(name);
+      if (!t)
+        t = astCtx.getRecordType(name);
+      if (!t)
+        t = astCtx.getTypeAlias(name);
+      if (!t)
+        t = astCtx.getEnumTypeByName(name);
+      return t;
+    };
+
+    ty = resolveType(base);
+
+    if (!ty) {
+      std::string ns = getCurrentNamespace();
+      while (!ns.empty()) {
+        ty = resolveType(ns + "." + std::string(base));
+        if (ty)
+          break;
+        size_t pos = ns.find_last_of('.');
+        if (pos != std::string::npos) {
+          ns = ns.substr(0, pos);
+        } else {
+          break;
+        }
+      }
+    }
+
+    /* Usings may qualify types declared in imported modules. */
+    if (!ty) {
+      for (const auto &u : activeUsings) {
+        ty = resolveType(u + "." + std::string(base));
+        if (ty)
+          break;
+      }
+    }
+  }
+
+  if (!ty) {
+    ty = astCtx.getTemplateParamType(base);
+  }
+
+  if (currentToken().type == TokenType::LT) {
+    advance();
+    std::vector<const Type *> tArgs;
+    if (currentToken().type != TokenType::GT) {
+      do {
+        if (currentToken().type == TokenType::GT ||
+            currentToken().type == TokenType::RSHIFT)
+          break;
+        tArgs.push_back(parseType());
+      } while (match(TokenType::COMMA));
+    }
+
+    if (currentToken().type == TokenType::RSHIFT) {
+      const_cast<Token &>(currentToken()).type = TokenType::GT;
+      /* Keep the original view: it spans both '>' characters, so raw type
+       * strings computed from this token still cover the full '>>'. */
+    } else {
+      expect(TokenType::GT, "Expected '>'");
+    }
+    ty =
+        astCtx.getTemplateInstType(base, astCtx.copyArray<const Type *>(tArgs));
+  }
+
+  if (isConst) {
+    ty = astCtx.getConstType(ty);
+  }
+
+  ty = parseTypeModifiers(ty, inNewExpr, allowRValueRef);
 
   if (match(TokenType::FUNCTION_KW)) {
     expect(TokenType::LPAREN, "Expected '(' after 'Function'");
@@ -197,36 +338,17 @@ const Type *Parser::parseType(bool inNewExpr) {
     if (currentToken().type != TokenType::RPAREN &&
         currentToken().type != TokenType::EOF_TOK) {
       do {
+        if (currentToken().type == TokenType::RPAREN)
+          break;
         paramTypes.push_back(parseType());
       } while (match(TokenType::COMMA));
     }
     expect(TokenType::RPAREN, "Expected ')' after function parameters");
 
     ty = astCtx.getFunctionType(ty, astCtx.copyArray<const Type *>(paramTypes));
-
     ty = astCtx.getPointerType(ty);
 
-    while (currentToken().type == TokenType::STAR ||
-           currentToken().type == TokenType::AMPERSAND ||
-           currentToken().type == TokenType::LOGICAL_AND ||
-           currentToken().type == TokenType::CONST_KW ||
-           (!inNewExpr && currentToken().type == TokenType::LBRACKET)) {
-      if (currentToken().type == TokenType::CONST_KW) {
-        ty = astCtx.getConstType(ty);
-        advance();
-      } else if (currentToken().type == TokenType::STAR) {
-        ty = astCtx.getPointerType(ty);
-        advance();
-      } else if (currentToken().type == TokenType::AMPERSAND) {
-        ty = astCtx.getReferenceType(ty);
-        advance();
-      } else if (currentToken().type == TokenType::LOGICAL_AND) {
-        ty = astCtx.getRValueReferenceType(ty);
-        advance();
-      } else if (!inNewExpr && currentToken().type == TokenType::LBRACKET) {
-        ty = applyArrayDeclarator(ty);
-      }
-    }
+    ty = parseTypeModifiers(ty, inNewExpr, allowRValueRef);
   }
 
   return ty;
@@ -266,9 +388,7 @@ std::string Parser::consumeComments() {
         if (*p == '\n')
           newlines++;
       }
-      if (newlines > 1) {
-        doc += std::string(newlines - 1, '\n');
-      }
+      doc += std::string(newlines, '\n');
     }
   }
 
@@ -281,12 +401,24 @@ ModuleNode *Parser::parseModule(std::string_view filePath) {
   std::vector<std::string_view> imports;
   std::vector<std::string_view> exports;
   std::vector<ASTNode *> statements;
+  std::string moduleDoc;
+
+  NamespaceDeclNode *fileScopedNs = nullptr;
 
   while (currentToken().type != TokenType::EOF_TOK) {
     try {
       if (currentToken().type == TokenType::IDENTIFIER &&
           (currentToken().value == "import" ||
            currentToken().value == "export")) {
+
+        std::string importDoc = consumeComments();
+        if (!importDoc.empty()) {
+          if (moduleDoc.empty()) {
+            moduleDoc = importDoc;
+          } else {
+            moduleDoc += importDoc;
+          }
+        }
 
         bool isExport = (currentToken().value == "export");
         advance();
@@ -327,6 +459,32 @@ ModuleNode *Parser::parseModule(std::string_view filePath) {
                                    pathCol, pathLen, filePath);
         }
 
+      } else if (currentToken().type == TokenType::NAMESPACE_KW) {
+        std::string doc = consumeComments();
+        bool isFileScoped = false;
+        auto ns = parseNamespaceDecl(isFileScoped);
+        if (!doc.empty()) {
+          ns->docString = astCtx.copyString(doc);
+        }
+        if (isFileScoped) {
+          if (fileScopedNs) {
+            reportError(ns->line, ns->column, ns->length,
+                        "Only one file-scoped namespace is allowed.");
+          } else {
+            fileScopedNs = ns;
+            statements.push_back(ns);
+            namespaceStack.push_back(std::string(ns->name));
+          }
+        } else {
+          statements.push_back(ns);
+        }
+      } else if (currentToken().type == TokenType::USING_KW) {
+        std::string doc = consumeComments();
+        auto u = parseUsing();
+        if (!doc.empty()) {
+          u->docString = astCtx.copyString(doc);
+        }
+        statements.push_back(u);
       } else if (currentToken().type != TokenType::EOF_TOK) {
         if (currentToken().type == TokenType::RBRACE) {
           reportError(currentToken().line, currentToken().column, 1,
@@ -341,6 +499,40 @@ ModuleNode *Parser::parseModule(std::string_view filePath) {
     } catch (const ParseException &) {
       synchronize();
     }
+  }
+
+  std::string eofDoc = consumeComments();
+  if (!eofDoc.empty()) {
+    if (!statements.empty()) {
+      ASTNode *lastStmt = statements.back();
+      std::string combined;
+      if (!lastStmt->trailingComment.empty()) {
+        combined = std::string(lastStmt->trailingComment) + "\n" + eofDoc;
+      } else {
+        combined = "\n" + eofDoc;
+      }
+      lastStmt->trailingComment = astCtx.copyString(combined);
+    } else {
+      if (moduleDoc.empty()) {
+        moduleDoc = eofDoc;
+      } else {
+        moduleDoc += eofDoc;
+      }
+    }
+  }
+
+  if (fileScopedNs) {
+    namespaceStack.pop_back();
+    auto it = std::find(statements.begin(), statements.end(), fileScopedNs);
+    if (it != statements.end()) {
+      std::vector<ASTNode *> inner(it + 1, statements.end());
+      fileScopedNs->statements = astCtx.copyArray<ASTNode *>(inner);
+      statements.erase(it + 1, statements.end());
+    }
+  }
+
+  if (!moduleDoc.empty()) {
+    module->docString = astCtx.copyString(moduleDoc);
   }
 
   module->rawImports = astCtx.copyArray<std::string_view>(imports);
@@ -360,7 +552,7 @@ llvm::ArrayRef<AnnotationNode *> Parser::parseAnnotations() {
 AnnotationNode *Parser::parseAnnotation() {
   int line = currentToken().line;
   int col = currentToken().column;
-  advance(); /* consume '@' */
+  advance();
 
   std::string_view name = currentToken().value;
   if (currentToken().type == TokenType::IDENTIFIER ||
@@ -373,10 +565,16 @@ AnnotationNode *Parser::parseAnnotation() {
   }
 
   std::vector<ExprNode *> args;
+  bool hasTrailingComma = false;
+
   if (match(TokenType::LPAREN)) {
     if (currentToken().type != TokenType::RPAREN &&
         currentToken().type != TokenType::EOF_TOK) {
       do {
+        if (currentToken().type == TokenType::RPAREN) {
+          hasTrailingComma = true;
+          break;
+        }
         args.push_back(parseExpression());
       } while (match(TokenType::COMMA));
     }
@@ -384,8 +582,10 @@ AnnotationNode *Parser::parseAnnotation() {
   }
 
   int len = (currentToken().column - col);
-  return astCtx.create<AnnotationNode>(name, astCtx.copyArray<ExprNode *>(args),
-                                       line, col, len);
+  auto node = astCtx.create<AnnotationNode>(
+      name, astCtx.copyArray<ExprNode *>(args), line, col, len);
+  node->hasTrailingComma = hasTrailingComma;
+  return node;
 }
 
 const Type *Parser::applyArrayDeclarator(const Type *baseType) {
@@ -415,9 +615,12 @@ const Type *Parser::applyArrayDeclarator(const Type *baseType) {
   return result;
 }
 
-std::vector<ParamDeclNode *> Parser::parseParameterList(bool &isVariadic) {
+std::vector<ParamDeclNode *>
+Parser::parseParameterList(bool &isVariadic, bool &hasTrailingComma,
+                           bool allowUntypedParams) {
   std::vector<ParamDeclNode *> params;
   isVariadic = false;
+  hasTrailingComma = false;
   bool inNamedBlock = false;
   bool optionalPositionalStarted = false;
 
@@ -426,18 +629,25 @@ std::vector<ParamDeclNode *> Parser::parseParameterList(bool &isVariadic) {
 
     if (match(TokenType::ELLIPSIS)) {
       isVariadic = true;
+      if (match(TokenType::COMMA)) {
+        hasTrailingComma = true;
+      }
       break;
     }
 
     if (!inNamedBlock && match(TokenType::LBRACE)) {
       inNamedBlock = true;
-      if (currentToken().type == TokenType::RBRACE) {
-        // Empty named block permitted
-      }
     }
 
     if (inNamedBlock && currentToken().type == TokenType::RBRACE) {
       advance();
+      if (match(TokenType::COMMA)) {
+        hasTrailingComma = true;
+      }
+      break;
+    }
+
+    if (currentToken().type == TokenType::RPAREN) {
       break;
     }
 
@@ -454,13 +664,29 @@ std::vector<ParamDeclNode *> Parser::parseParameterList(bool &isVariadic) {
       throw ParseException();
     }
 
-    const char *typeStart = currentToken().value.data();
-    const Type *pType = parseType();
-    const char *typeEnd =
-        tokens[cursor - 1].value.data() + tokens[cursor - 1].value.length();
-    std::string_view rawTypeStr(typeStart, typeEnd - typeStart);
+    const Type *pType = nullptr;
+    std::string_view rawTypeStr;
+
+    /* Untyped parameters (Dart-style lambdas): an identifier not followed by
+     * another identifier or type modifier is the parameter name itself. */
+    bool isUntyped =
+        allowUntypedParams && currentToken().type == TokenType::IDENTIFIER;
+    if (isUntyped) {
+      TokenType nxt = peekToken().type;
+      isUntyped = (nxt == TokenType::COMMA || nxt == TokenType::RPAREN ||
+                   nxt == TokenType::ASSIGN || nxt == TokenType::LBRACE);
+    }
+
+    if (!isUntyped) {
+      const char *typeStart = currentToken().value.data();
+      pType = parseType();
+      const char *typeEnd =
+          tokens[cursor - 1].value.data() + tokens[cursor - 1].value.length();
+      rawTypeStr = std::string_view(typeStart, typeEnd - typeStart);
+    }
 
     std::string_view pName = currentToken().value;
+    int idCol = currentToken().column;
     int pLen = (int)pName.length();
     expect(TokenType::IDENTIFIER, "Expected parameter name.");
 
@@ -498,6 +724,9 @@ std::vector<ParamDeclNode *> Parser::parseParameterList(bool &isVariadic) {
     auto paramNode = astCtx.create<ParamDeclNode>(
         pType, pName, defVal, inNamedBlock, isRequired, pLine, pCol, pLen);
     paramNode->rawTypeStr = rawTypeStr;
+    paramNode->identifierColumn = idCol;
+    paramNode->identifierLength = pLen;
+
     if (!doc.empty())
       paramNode->docString = astCtx.copyString(doc);
     if (cursor > 0 && !tokens[cursor - 1].trailingComment.empty()) {
@@ -509,11 +738,22 @@ std::vector<ParamDeclNode *> Parser::parseParameterList(bool &isVariadic) {
       if (inNamedBlock) {
         expect(TokenType::RBRACE,
                "Expected '}' to close named parameter list.");
+        if (match(TokenType::COMMA)) {
+          hasTrailingComma = true;
+        }
       }
       break;
     } else {
       if (inNamedBlock && currentToken().type == TokenType::RBRACE) {
+        hasTrailingComma = true;
         advance();
+        if (match(TokenType::COMMA)) {
+          hasTrailingComma = true;
+        }
+        break;
+      }
+      if (currentToken().type == TokenType::RPAREN) {
+        hasTrailingComma = true;
         break;
       }
     }
@@ -521,10 +761,6 @@ std::vector<ParamDeclNode *> Parser::parseParameterList(bool &isVariadic) {
   return params;
 }
 
-/*
- * Abstracted body parsing mechanism to handle both traditional blocks
- * and expression-bodied functions transparently.
- */
 BlockNode *Parser::parseFunctionBody(const Type *returnType) {
   if (match(TokenType::ARROW)) {
     int line = currentToken().line;
@@ -540,8 +776,6 @@ BlockNode *Parser::parseFunctionBody(const Type *returnType) {
     block->isExpressionBody = true;
     ASTNode *stmt = expr;
 
-    /* Transparently inject a ReturnNode if the function intrinsically expects a
-     * value */
     if (returnType && !returnType->isVoid()) {
       stmt = astCtx.create<ReturnNode>(expr, line, col, endCol - col);
     }
@@ -583,8 +817,7 @@ void Parser::checkRecordMemberRedefinition(
           }
         }
 
-        /* Method const qualifier evaluates into the overload resolution
-         * signature */
+        /* The const qualifier is part of the overload-resolution signature. */
         if (sameSignature && m->isConst != newMethod->isConst) {
           sameSignature = false;
         }
@@ -637,14 +870,18 @@ DeclNode *
 Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
   int line = currentToken().line;
   int col = currentToken().column;
-  advance(); /* consume 'annotation' */
+  advance();
 
   expect(TokenType::CLASS_KW, "Expected 'class' after 'annotation'");
 
   std::string_view name = currentToken().value;
+  int idCol = currentToken().column;
+  int idLen = name.length();
   expect(TokenType::IDENTIFIER, "Expected annotation class name");
 
-  RecordType *classTy = astCtx.createRecordType(TypeKind::Class, name);
+  std::string fqNameStr = getFQName(name);
+  std::string_view fqName = astCtx.copyString(fqNameStr);
+  RecordType *classTy = astCtx.createRecordType(TypeKind::Class, fqName);
   classTy->setOpaque(false);
 
   expect(TokenType::LBRACE, "Expected '{'");
@@ -655,22 +892,22 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
   while (currentToken().type != TokenType::RBRACE &&
          currentToken().type != TokenType::EOF_TOK) {
 
-    /* Metadata applies strictly recursively to annotation definitions as well
-     */
     std::string doc = consumeComments();
     auto memberAnnotations = parseAnnotations();
 
-    bool isPub = false, isPriv = false;
+    bool isPub = false, isPriv = false, isProt = false;
     while (currentToken().type == TokenType::PUBLIC_KW ||
-           currentToken().type == TokenType::PRIVATE_KW) {
+           currentToken().type == TokenType::PRIVATE_KW ||
+           currentToken().type == TokenType::PROTECTED_KW) {
       if (currentToken().type == TokenType::PUBLIC_KW)
         isPub = true;
       if (currentToken().type == TokenType::PRIVATE_KW)
         isPriv = true;
+      if (currentToken().type == TokenType::PROTECTED_KW)
+        isProt = true;
       advance();
     }
 
-    /* Intercept floating metadata and comments guarding the scope closure */
     if (currentToken().type == TokenType::RBRACE ||
         currentToken().type == TokenType::EOF_TOK) {
       if (!memberAnnotations.empty()) {
@@ -681,19 +918,20 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
       break;
     }
 
-    /* Enforce compile-time invariant: const constructor requirement */
     if (currentToken().type == TokenType::CONST_KW &&
         peekToken().type == TokenType::IDENTIFIER &&
         peekToken().value == name) {
       int cLine = currentToken().line;
       int cCol = currentToken().column;
+      int ctorIdCol = peekToken().column;
 
-      advance(); /* const */
-      advance(); /* name */
+      advance();
+      advance();
       expect(TokenType::LPAREN, "Expected '('");
 
       bool isVariadic = false;
-      auto params = parseParameterList(isVariadic);
+      bool hasTrailingComma = false;
+      auto params = parseParameterList(isVariadic, hasTrailingComma);
       if (isVariadic) {
         reportError(cLine, cCol, name.length(),
                     "Annotation constructors cannot be variadic.");
@@ -714,6 +952,10 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
       constructor->annotations = memberAnnotations;
       constructor->hasPublicMod = isPub;
       constructor->hasPrivateMod = isPriv;
+      constructor->hasProtectedMod = isProt;
+      constructor->identifierColumn = ctorIdCol;
+      constructor->identifierLength = name.length();
+      constructor->hasTrailingComma = hasTrailingComma;
 
       if (!doc.empty())
         constructor->docString = astCtx.copyString(doc);
@@ -722,6 +964,9 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
       }
 
       constructor->body = parseFunctionBody(astCtx.VoidTy);
+      constructor->length =
+          constructor->body->column + constructor->body->length - cCol;
+      constructor->endLine = constructor->body->endLine;
       continue;
     }
 
@@ -734,20 +979,35 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
         tokens[cursor - 1].value.data() + tokens[cursor - 1].value.length();
     std::string_view rawTypeStr(typeStart, typeEnd - typeStart);
 
+    if (currentToken().type == TokenType::LPAREN) {
+      reportError(currentToken().line, currentToken().column, 1,
+                  "Missing type for member '" + memType->toString() + "'.");
+      throw ParseException();
+    }
+
     std::string_view memName = currentToken().value;
+    int memIdCol = currentToken().column;
+    int memIdLen = memName.length();
 
     expect(TokenType::IDENTIFIER, "Expected member name");
+
+    int endLine = currentToken().line;
+    int endCol = currentToken().column + 1;
     expect(TokenType::SEMICOLON, "Expected ';'");
 
     checkRecordMemberRedefinition(memName, fields, {}, nullptr, mLine, mCol,
                                   memName.length());
 
     auto field = astCtx.create<VarDeclNode>(memType, memName, nullptr, mLine,
-                                            mCol, memName.length());
+                                            mCol, endCol - mCol);
     field->annotations = memberAnnotations;
     field->hasPublicMod = isPub;
     field->hasPrivateMod = isPriv;
+    field->hasProtectedMod = isProt;
     field->rawTypeStr = rawTypeStr;
+    field->endLine = endLine;
+    field->identifierColumn = memIdCol;
+    field->identifierLength = memIdLen;
 
     if (!doc.empty())
       field->docString = astCtx.copyString(doc);
@@ -758,22 +1018,48 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
     fields.push_back(field);
   }
 
+  std::string closingDoc = consumeComments();
+
   int endLine = currentToken().line;
   int endCol = currentToken().column + 1;
   expect(TokenType::RBRACE, "Expected '}'");
 
+  if (!closingDoc.empty()) {
+    ASTNode *lastMember = nullptr;
+    for (auto *f : fields)
+      if (!lastMember || f->endLine > lastMember->endLine)
+        lastMember = f;
+    if (constructor &&
+        (!lastMember || constructor->endLine > lastMember->endLine))
+      lastMember = constructor;
+
+    if (lastMember) {
+      std::string combined;
+      if (!lastMember->trailingComment.empty()) {
+        combined = std::string(lastMember->trailingComment) + "\n" + closingDoc;
+      } else {
+        combined = "\n" + closingDoc;
+      }
+      lastMember->trailingComment = astCtx.copyString(combined);
+    }
+  }
+
   std::vector<FieldInfo> fInfos;
   for (size_t i = 0; i < fields.size(); ++i) {
     fInfos.push_back({fields[i]->varName, fields[i]->type, (uint32_t)i,
-                      fields[i]->isPublic(fields[i]->varName)});
+                      fields[i]->isPublic(fields[i]->varName),
+                      fields[i]->isProtected(fields[i]->varName)});
   }
   classTy->setFields(astCtx.copyArray<FieldInfo>(fInfos));
 
   auto node = astCtx.create<AnnotationDeclNode>(name, line, col, endCol - col);
+  node->fqName = fqName;
   node->fields = astCtx.copyArray<VarDeclNode *>(fields);
   node->constructor = constructor;
   node->annotations = annotations;
   node->endLine = endLine;
+  node->identifierColumn = idCol;
+  node->identifierLength = idLen;
 
   if (!constructor) {
     reportError(line, col, endCol - col,
@@ -784,17 +1070,124 @@ Parser::parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations) {
   return node;
 }
 
+std::string Parser::getCurrentNamespace() const {
+  std::string ns;
+  for (size_t i = 0; i < namespaceStack.size(); ++i) {
+    ns += namespaceStack[i];
+    if (i < namespaceStack.size() - 1)
+      ns += ".";
+  }
+  return ns;
+}
+
+std::string Parser::getFQName(std::string_view name) const {
+  std::string ns = getCurrentNamespace();
+  return ns.empty() ? std::string(name) : ns + "." + std::string(name);
+}
+
+NamespaceDeclNode *Parser::parseNamespaceDecl(bool &isFileScoped) {
+  int line = currentToken().line;
+  int col = currentToken().column;
+  advance();
+
+  std::string nameStr;
+  while (true) {
+    expect(TokenType::IDENTIFIER, "Expected namespace name component");
+    nameStr += tokens[cursor - 1].value;
+    if (match(TokenType::DOT)) {
+      nameStr += ".";
+    } else {
+      break;
+    }
+  }
+  std::string_view name = astCtx.copyString(nameStr);
+  int len = tokens[cursor - 1].column + tokens[cursor - 1].value.length() - col;
+
+  std::string fqNameStr = getFQName(name);
+  std::string_view fqName = astCtx.copyString(fqNameStr);
+
+  auto node = astCtx.create<NamespaceDeclNode>(name, line, col, len);
+  node->fqName = fqName;
+
+  if (match(TokenType::SEMICOLON)) {
+    node->endLine = tokens[cursor - 1].line;
+    isFileScoped = true;
+    node->isFileScoped = true;
+    return node;
+  }
+
+  isFileScoped = false;
+  expect(TokenType::LBRACE, "Expected '{' or ';' after namespace name");
+
+  namespaceStack.push_back(std::string(name));
+
+  /* Usings declared inside the namespace must not leak out of it. */
+  size_t prevUsings = activeUsings.size();
+
+  std::vector<ASTNode *> stmts;
+  while (currentToken().type != TokenType::RBRACE &&
+         currentToken().type != TokenType::EOF_TOK) {
+    try {
+      if (auto stmt = parseStatement()) {
+        stmts.push_back(stmt);
+      }
+    } catch (const ParseException &) {
+      synchronize();
+    }
+  }
+
+  activeUsings.resize(prevUsings);
+  namespaceStack.pop_back();
+
+  node->endLine = currentToken().line;
+  expect(TokenType::RBRACE, "Expected '}'");
+  node->statements = astCtx.copyArray<ASTNode *>(stmts);
+  return node;
+}
+
+UsingNode *Parser::parseUsing() {
+  int line = currentToken().line;
+  int col = currentToken().column;
+  advance();
+
+  std::string nameStr;
+  while (true) {
+    expect(TokenType::IDENTIFIER, "Expected using name component");
+    nameStr += tokens[cursor - 1].value;
+    if (match(TokenType::DOT)) {
+      nameStr += ".";
+    } else {
+      break;
+    }
+  }
+  std::string_view name = astCtx.copyString(nameStr);
+  int endCol = tokens[cursor - 1].column + tokens[cursor - 1].value.length();
+  expect(TokenType::SEMICOLON, "Expected ';'");
+
+  activeUsings.push_back(std::string(name));
+
+  auto node = astCtx.create<UsingNode>(name, line, col, endCol - col);
+  node->endLine = tokens[cursor - 1].line;
+  return node;
+}
+
 ASTNode *Parser::parseStatement() {
   std::string doc = consumeComments();
   auto annotations = parseAnnotations();
 
-  bool isPub = false, isPriv = false;
+  bool isPub = false, isPriv = false, isProt = false, isAbstract = false;
   while (currentToken().type == TokenType::PUBLIC_KW ||
-         currentToken().type == TokenType::PRIVATE_KW) {
+         currentToken().type == TokenType::PRIVATE_KW ||
+         currentToken().type == TokenType::PROTECTED_KW ||
+         currentToken().type == TokenType::ABSTRACT_KW) {
     if (currentToken().type == TokenType::PUBLIC_KW)
       isPub = true;
     if (currentToken().type == TokenType::PRIVATE_KW)
       isPriv = true;
+    if (currentToken().type == TokenType::PROTECTED_KW)
+      isProt = true;
+    if (currentToken().type == TokenType::ABSTRACT_KW)
+      isAbstract = true;
     advance();
   }
 
@@ -805,7 +1198,7 @@ ASTNode *Parser::parseStatement() {
                   (int)currentToken().value.length(),
                   "Annotations are strictly permitted on declarations only.");
     }
-    if (isPub || isPriv) {
+    if (isPub || isPriv || isProt || isAbstract) {
       reportError(
           currentToken().line, currentToken().column,
           (int)currentToken().value.length(),
@@ -816,7 +1209,17 @@ ASTNode *Parser::parseStatement() {
 
   ASTNode *node = nullptr;
 
-  if (currentToken().type == TokenType::TYPEDEF_KW) {
+  if (currentToken().type == TokenType::NAMESPACE_KW) {
+    bool isFileScoped = false;
+    node = parseNamespaceDecl(isFileScoped);
+    if (isFileScoped) {
+      reportError(node->line, node->column, node->length,
+                  "File-scoped namespaces can only be declared at the top of "
+                  "the file.");
+    }
+  } else if (currentToken().type == TokenType::USING_KW) {
+    node = parseUsing();
+  } else if (currentToken().type == TokenType::TYPEDEF_KW) {
     node = parseTypedefDecl();
   } else if (currentToken().type == TokenType::ENUM_KW) {
     node = parseEnumDecl();
@@ -827,7 +1230,7 @@ ASTNode *Parser::parseStatement() {
   } else if (currentToken().type == TokenType::STRUCT_KW) {
     node = parseRecordDecl(TypeKind::Struct);
   } else if (currentToken().type == TokenType::CLASS_KW) {
-    node = parseRecordDecl(TypeKind::Class);
+    node = parseRecordDecl(TypeKind::Class, isAbstract);
   } else if (currentToken().type == TokenType::IF_KW) {
     node = parseIfStatement();
   } else if (currentToken().type == TokenType::FOR_KW) {
@@ -840,17 +1243,7 @@ ASTNode *Parser::parseStatement() {
     node = parseBreakStatement();
   } else if (currentToken().type == TokenType::CONTINUE_KW) {
     node = parseContinueStatement();
-  } else if (currentToken().type == TokenType::CONST_KW ||
-             currentToken().type == TokenType::STATIC_KW ||
-             ((currentToken().type == TokenType::TYPE_KW ||
-               (currentToken().type == TokenType::IDENTIFIER &&
-                (astCtx.getRecordType(currentToken().value) != nullptr ||
-                 astCtx.getTypeAlias(currentToken().value) != nullptr ||
-                 astCtx.getEnumTypeByName(currentToken().value) != nullptr ||
-                 isTemplateParam(currentToken().value)))) &&
-              peekToken().type != TokenType::DOT) ||
-             (currentToken().type == TokenType::IDENTIFIER &&
-              peekToken().type == TokenType::IDENTIFIER)) {
+  } else if (isDeclaration()) {
     node = parseDeclarationOrFunction(annotations);
   } else if (currentToken().type == TokenType::RETURN) {
     node = parseReturn();
@@ -858,6 +1251,14 @@ ASTNode *Parser::parseStatement() {
     node = parseBlock();
   } else {
     node = parseExpressionStatement();
+  }
+
+  if (isAbstract && (!node || node->kind != NodeKind::ClassDecl)) {
+    reportError(node ? node->line : currentToken().line,
+                node ? node->column : currentToken().column,
+                node ? node->length : currentToken().value.length(),
+                "The 'abstract' modifier is strictly permitted on class "
+                "declarations only.");
   }
 
   if (node) {
@@ -882,7 +1283,7 @@ ASTNode *Parser::parseStatement() {
     }
   }
 
-  if (isPub || isPriv) {
+  if (isPub || isPriv || isProt) {
     if (node && (node->kind == NodeKind::VarDecl ||
                  node->kind == NodeKind::FunctionDecl ||
                  node->kind == NodeKind::StructDecl ||
@@ -893,6 +1294,7 @@ ASTNode *Parser::parseStatement() {
       auto decl = static_cast<DeclNode *>(node);
       decl->hasPublicMod = isPub;
       decl->hasPrivateMod = isPriv;
+      decl->hasProtectedMod = isProt;
     } else {
       reportError(
           node ? node->line : currentToken().line,
@@ -908,9 +1310,11 @@ ASTNode *Parser::parseStatement() {
 DeclNode *Parser::parseTypedefDecl() {
   int line = currentToken().line;
   int col = currentToken().column;
-  advance(); /* consume 'typedef' */
+  advance();
 
   std::string_view name = currentToken().value;
+  int idCol = currentToken().column;
+  int idLen = name.length();
   expect(TokenType::IDENTIFIER, "Expected alias name after 'typedef'");
 
   expect(TokenType::ASSIGN, "Expected '=' in typedef declaration");
@@ -922,11 +1326,32 @@ DeclNode *Parser::parseTypedefDecl() {
   /* Fallback peek to distinguish known types from plain function identifiers */
   const Type *knownBase = nullptr;
   if (currentToken().type == TokenType::IDENTIFIER) {
-    knownBase = astCtx.getBuiltinTypeByName(currentToken().value);
-    if (!knownBase)
-      knownBase = astCtx.getRecordType(currentToken().value);
-    if (!knownBase)
-      knownBase = astCtx.getTypeAlias(currentToken().value);
+    auto resolveKnown = [&](std::string_view tn) -> const Type * {
+      const Type *t = astCtx.getBuiltinTypeByName(tn);
+      if (!t)
+        t = astCtx.getRecordType(tn);
+      if (!t)
+        t = astCtx.getTypeAlias(tn);
+      if (!t)
+        t = astCtx.getEnumTypeByName(tn);
+      return t;
+    };
+    knownBase = resolveKnown(currentToken().value);
+    /* Enums, records and aliases from other modules register under their
+     * fully-qualified name (NS.Type); walk the enclosing namespaces. */
+    if (!knownBase) {
+      std::string ns = getCurrentNamespace();
+      while (!ns.empty()) {
+        knownBase = resolveKnown(ns + "." + std::string(currentToken().value));
+        if (knownBase)
+          break;
+        size_t pos = ns.find_last_of('.');
+        if (pos != std::string::npos)
+          ns = ns.substr(0, pos);
+        else
+          break;
+      }
+    }
   }
 
   if (knownBase || currentToken().type == TokenType::CONST_KW ||
@@ -956,14 +1381,21 @@ DeclNode *Parser::parseTypedefDecl() {
 
   astCtx.addTypeAlias(name, aliasTy);
 
+  std::string fqNameStr = getFQName(name);
+  std::string_view fqName = astCtx.copyString(fqNameStr);
+
   auto decl =
       astCtx.create<TypedefDeclNode>(name, targetType, line, col, endCol - col);
+  decl->fqName = fqName;
   decl->targetEntityName = targetEntity;
   decl->aliasType = aliasTy;
   if (targetType) {
     decl->rawTargetTypeStr = rawTypeStr;
   }
   decl->endLine = endLine;
+  decl->identifierColumn = idCol;
+  decl->identifierLength = idLen;
+
   return decl;
 }
 
@@ -975,9 +1407,15 @@ BlockNode *Parser::parseStatementAsBlock() {
   int startLine = currentToken().line;
   int startCol = currentToken().column;
 
+  /* Usings declared inside the single-statement block must not leak out. */
+  size_t prevUsings = activeUsings.size();
+
   auto stmt = parseStatement();
 
+  activeUsings.resize(prevUsings);
+
   auto block = astCtx.create<BlockNode>(startLine, startCol);
+  block->hasBraces = false;
   if (stmt) {
     std::vector<ASTNode *> statements = {stmt};
     block->statements = astCtx.copyArray<ASTNode *>(statements);
@@ -1023,7 +1461,7 @@ IfNode *Parser::parseIfStatement() {
 ForNode *Parser::parseForStatement() {
   int line = currentToken().line;
   int col = currentToken().column;
-  advance(); // consume 'for'
+  advance();
 
   expect(TokenType::LPAREN, "Expected '(' after 'for'");
 
@@ -1031,6 +1469,7 @@ ForNode *Parser::parseForStatement() {
   if (currentToken().type != TokenType::SEMICOLON) {
     if (currentToken().type == TokenType::TYPE_KW ||
         currentToken().type == TokenType::CONST_KW ||
+        currentToken().type == TokenType::VAR_KW ||
         (currentToken().type == TokenType::IDENTIFIER &&
          (peekToken().type == TokenType::IDENTIFIER ||
           astCtx.getRecordType(currentToken().value) != nullptr))) {
@@ -1065,7 +1504,7 @@ ForNode *Parser::parseForStatement() {
 WhileNode *Parser::parseWhileStatement() {
   int line = currentToken().line;
   int col = currentToken().column;
-  advance(); // consume 'while'
+  advance();
 
   expect(TokenType::LPAREN, "Expected '(' after 'while'");
   auto cond = parseExpression();
@@ -1082,7 +1521,7 @@ WhileNode *Parser::parseWhileStatement() {
 SwitchNode *Parser::parseSwitchStatement() {
   int line = currentToken().line;
   int col = currentToken().column;
-  advance(); /* consume 'switch' */
+  advance();
 
   expect(TokenType::LPAREN, "Expected '(' after 'switch'");
   auto cond = parseExpression();
@@ -1092,6 +1531,9 @@ SwitchNode *Parser::parseSwitchStatement() {
 
   std::vector<CaseNode *> cases;
   bool hasDefault = false;
+
+  /* Usings declared inside the switch must not leak out of it. */
+  size_t prevUsings = activeUsings.size();
 
   while (currentToken().type != TokenType::RBRACE &&
          currentToken().type != TokenType::EOF_TOK) {
@@ -1133,8 +1575,12 @@ SwitchNode *Parser::parseSwitchStatement() {
         break;
       }
 
-      if (auto stmt = parseStatement()) {
-        stmts.push_back(stmt);
+      try {
+        if (auto stmt = parseStatement()) {
+          stmts.push_back(stmt);
+        }
+      } catch (const ParseException &) {
+        synchronize();
       }
     }
 
@@ -1155,9 +1601,24 @@ SwitchNode *Parser::parseSwitchStatement() {
     cases.push_back(caseNode);
   }
 
+  std::string closingDoc = consumeComments();
+
   int endLine = currentToken().line;
   int endCol = currentToken().column + 1;
   expect(TokenType::RBRACE, "Expected '}' at end of switch block");
+
+  activeUsings.resize(prevUsings);
+
+  if (!closingDoc.empty() && !cases.empty()) {
+    ASTNode *lastCase = cases.back();
+    std::string combined;
+    if (!lastCase->trailingComment.empty()) {
+      combined = std::string(lastCase->trailingComment) + "\n" + closingDoc;
+    } else {
+      combined = "\n" + closingDoc;
+    }
+    lastCase->trailingComment = astCtx.copyString(combined);
+  }
 
   auto node =
       astCtx.create<SwitchNode>(cond, astCtx.copyArray<CaseNode *>(cases),
@@ -1226,16 +1687,46 @@ ExprNode *Parser::parseEquality() {
 
 ExprNode *Parser::parseRelational() {
   auto left = parseShift();
-  while (currentToken().type == TokenType::LT ||
-         currentToken().type == TokenType::GT ||
-         currentToken().type == TokenType::LE ||
-         currentToken().type == TokenType::GE) {
-    int line = left->line;
-    int col = left->column;
-    std::string_view op = currentToken().value;
-    advance();
-    auto right = parseShift();
-    left = astCtx.create<BinaryOpNode>(op, left, right, line, col);
+  while (true) {
+    if (currentToken().type == TokenType::LT ||
+        currentToken().type == TokenType::GT ||
+        currentToken().type == TokenType::LE ||
+        currentToken().type == TokenType::GE) {
+      int line = left->line;
+      int col = left->column;
+      std::string_view op = currentToken().value;
+      advance();
+      auto right = parseShift();
+      left = astCtx.create<BinaryOpNode>(op, left, right, line, col);
+      continue;
+    }
+
+    if (currentToken().type == TokenType::IS_KW) {
+      int line = left->line;
+      int col = left->column;
+      advance();
+
+      /* 'is!' negates the type test: 'expr is! Type'. */
+      bool negate = match(TokenType::BANG);
+
+      /* '&&' is not treated as the rvalue-reference suffix here: 'x is T &&
+       * y' must parse as '(x is T) && y'. */
+      const char *typeStart = currentToken().value.data();
+      const Type *targetType = parseType(false, /*allowRValueRef=*/false);
+      const char *typeEnd =
+          tokens[cursor - 1].value.data() + tokens[cursor - 1].value.length();
+      std::string_view rawTypeStr(typeStart, typeEnd - typeStart);
+
+      int endCol = tokens[cursor - 1].column + tokens[cursor - 1].value.length();
+      auto isNode =
+          astCtx.create<IsExprNode>(left, targetType, line, col, endCol - col);
+      isNode->isNegated = negate;
+      isNode->rawTargetTypeStr = rawTypeStr;
+      left = isNode;
+      continue;
+    }
+
+    break;
   }
   return left;
 }
@@ -1308,9 +1799,39 @@ ExprNode *Parser::parseAdditive() {
 }
 
 ExprNode *Parser::parseUnary() {
+  if (currentToken().type == TokenType::AWAIT_KW) {
+    int line = currentToken().line;
+    int col = currentToken().column;
+    int len = currentToken().value.length();
+    if (!asyncEnabled) {
+      reportError(line, col, len,
+                  "'await' is disabled for this build (async support is "
+                  "turned off).");
+      throw ParseException();
+    }
+    advance();
+    auto expr = parseUnary();
+    return astCtx.create<AwaitExprNode>(expr, line, col,
+                                        (expr->column + expr->length) - col);
+  }
+
   if (match(TokenType::NEW_KW)) {
     int line = currentToken().line;
     int col = currentToken().column;
+
+    if (currentToken().type == TokenType::IDENTIFIER &&
+        currentToken().value == "uninitialized") {
+      reportError(line, col, 12,
+                  "'new uninitialized' has been removed; use "
+                  "Memory.alloc(size, align) instead.");
+      throw ParseException();
+    }
+    if (currentToken().type == TokenType::LPAREN) {
+      reportError(line, col, 1,
+                  "Placement new has been removed; use "
+                  "Memory.construct<T>(ptr, args...) instead.");
+      throw ParseException();
+    }
 
     const char *typeStart = currentToken().value.data();
     const Type *allocTy = parseType(true);
@@ -1329,14 +1850,17 @@ ExprNode *Parser::parseUnary() {
     std::vector<std::string_view> argNames;
     bool hasParens = false;
     bool namedStarted = false;
+    bool hasTrailingComma = false;
 
     if (match(TokenType::LPAREN)) {
       hasParens = true;
 
       if (currentToken().type != TokenType::RPAREN) {
         do {
-          if (currentToken().type == TokenType::RPAREN)
+          if (currentToken().type == TokenType::RPAREN) {
+            hasTrailingComma = true;
             break;
+          }
 
           if (currentToken().type == TokenType::IDENTIFIER &&
               peekToken().type == TokenType::COLON) {
@@ -1355,6 +1879,14 @@ ExprNode *Parser::parseUnary() {
             }
             argNames.push_back("");
             args.push_back(parseExpression());
+
+            if (currentToken().type == TokenType::IDENTIFIER) {
+              reportError(
+                  currentToken().line, currentToken().column,
+                  currentToken().value.length(),
+                  "Unexpected identifier in argument list. Missing comma?");
+              throw ParseException();
+            }
           }
 
         } while (match(TokenType::COMMA));
@@ -1371,6 +1903,7 @@ ExprNode *Parser::parseUnary() {
     node->rawArgs = argsRef;
     node->rawArgNames = namesRef;
     node->hasRawArgs = true;
+    node->hasTrailingComma = hasTrailingComma;
     return node;
   }
 
@@ -1379,14 +1912,23 @@ ExprNode *Parser::parseUnary() {
     int col = currentToken().column;
     bool isArray = false;
 
+    if (currentToken().type == TokenType::IDENTIFIER &&
+        currentToken().value == "uninitialized") {
+      reportError(line, col, 12,
+                  "'delete uninitialized' has been removed; use "
+                  "Memory.destruct(ptr) and Memory.free(raw) instead.");
+      throw ParseException();
+    }
+
     if (match(TokenType::LBRACKET)) {
       expect(TokenType::RBRACKET, "Expected ']' after '[' in delete");
       isArray = true;
     }
 
     auto ptr = parseUnary();
-    return astCtx.create<DeleteExprNode>(ptr, isArray, line, col,
-                                         currentToken().column - col);
+    auto delNode = astCtx.create<DeleteExprNode>(ptr, isArray, line, col,
+                                                 currentToken().column - col);
+    return delNode;
   }
 
   if (currentToken().type == TokenType::STAR ||
@@ -1408,12 +1950,31 @@ ExprNode *Parser::parseUnary() {
   return parsePostfix();
 }
 
-DeclNode *Parser::parseRecordDecl(TypeKind kind) {
+ExprNode *Parser::parseTernary() {
+  auto expr = parseLogicalOr();
+  if (match(TokenType::QUESTION)) {
+    int line = expr->line;
+    int col = expr->column;
+
+    auto trueExpr = parseExpression();
+    expect(TokenType::COLON, "Expected ':' in ternary operator");
+    auto falseExpr = parseAssignment();
+
+    int endCol = falseExpr->column + falseExpr->length;
+    return astCtx.create<TernaryOpNode>(expr, trueExpr, falseExpr, line, col,
+                                        endCol - col);
+  }
+  return expr;
+}
+
+DeclNode *Parser::parseRecordDecl(TypeKind kind, bool isAbstract) {
   int line = currentToken().line;
   int col = currentToken().column;
   advance();
 
   std::string_view name = currentToken().value;
+  int idCol = currentToken().column;
+  int idLen = name.length();
   expect(TokenType::IDENTIFIER, "Expected record name");
 
   std::vector<std::string_view> tParams;
@@ -1437,13 +1998,30 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
     }
     if (currentToken().type == TokenType::RSHIFT) {
       const_cast<Token &>(currentToken()).type = TokenType::GT;
-      const_cast<Token &>(currentToken()).value = ">";
+      /* Keep the original view: it spans both '>' characters, so raw type
+       * strings computed from this token still cover the full '>>'. */
     } else {
       expect(TokenType::GT, "Expected '>'");
     }
   }
 
-  RecordType *recordTy = astCtx.createRecordType(kind, name);
+  const Type *baseClass = nullptr;
+  std::vector<const Type *> interfaces;
+
+  if (kind == TypeKind::Class) {
+    if (match(TokenType::EXTENDS_KW)) {
+      baseClass = parseType();
+    }
+    if (match(TokenType::IMPLEMENTS_KW)) {
+      do {
+        interfaces.push_back(parseType());
+      } while (match(TokenType::COMMA));
+    }
+  }
+
+  std::string fqNameStr = getFQName(name);
+  std::string_view fqName = astCtx.copyString(fqNameStr);
+  RecordType *recordTy = astCtx.createRecordType(kind, fqName);
 
   if (match(TokenType::SEMICOLON)) {
     DeclNode *node = nullptr;
@@ -1451,20 +2029,29 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
 
     if (kind == TypeKind::Class) {
       auto cNode = astCtx.create<ClassDeclNode>(name, line, col, len);
+      cNode->fqName = fqName;
       cNode->isOpaque = true;
+      cNode->isAbstract = isAbstract;
       cNode->recordType = recordTy;
+      cNode->baseClass = baseClass;
+      cNode->interfaces = astCtx.copyArray<const Type *>(interfaces);
       node = cNode;
     } else if (kind == TypeKind::Struct) {
       auto sNode = astCtx.create<StructDeclNode>(name, line, col, len);
+      sNode->fqName = fqName;
       sNode->isOpaque = true;
       sNode->recordType = recordTy;
       node = sNode;
     } else {
       auto uNode = astCtx.create<UnionDeclNode>(name, line, col, len);
+      uNode->fqName = fqName;
       uNode->isOpaque = true;
       uNode->recordType = recordTy;
       node = uNode;
     }
+
+    node->identifierColumn = idCol;
+    node->identifierLength = idLen;
 
     popTemplateParams(tParams.size());
     return node;
@@ -1484,13 +2071,16 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
     std::string doc = consumeComments();
     auto memberAnnotations = parseAnnotations();
 
-    bool isPub = false, isPriv = false;
+    bool isPub = false, isPriv = false, isProt = false;
     while (currentToken().type == TokenType::PUBLIC_KW ||
-           currentToken().type == TokenType::PRIVATE_KW) {
+           currentToken().type == TokenType::PRIVATE_KW ||
+           currentToken().type == TokenType::PROTECTED_KW) {
       if (currentToken().type == TokenType::PUBLIC_KW)
         isPub = true;
       if (currentToken().type == TokenType::PRIVATE_KW)
         isPriv = true;
+      if (currentToken().type == TokenType::PROTECTED_KW)
+        isProt = true;
       advance();
     }
 
@@ -1511,6 +2101,8 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
       advance();
 
       std::string_view dtorName = currentToken().value;
+      int dtorIdCol = currentToken().column;
+      int dtorIdLen = dtorName.length() + 1;
       expect(TokenType::IDENTIFIER, "Expected record name after '~'");
 
       if (dtorName != name) {
@@ -1534,6 +2126,9 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
       destructor->annotations = memberAnnotations;
       destructor->hasPublicMod = isPub;
       destructor->hasPrivateMod = isPriv;
+      destructor->hasProtectedMod = isProt;
+      destructor->identifierColumn = dCol;
+      destructor->identifierLength = dtorIdLen;
 
       if (!doc.empty())
         destructor->docString = astCtx.copyString(doc);
@@ -1542,14 +2137,19 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
       }
 
       destructor->body = parseFunctionBody(astCtx.VoidTy);
+      destructor->length =
+          destructor->body->column + destructor->body->length - dCol;
+      destructor->endLine = destructor->body->endLine;
       continue;
     }
 
     bool isConstCtor = false;
+    int ctorIdCol = currentToken().column;
     if (currentToken().type == TokenType::CONST_KW &&
         peekToken().type == TokenType::IDENTIFIER &&
         peekToken().value == name && peekToken(2).type == TokenType::LPAREN) {
       isConstCtor = true;
+      ctorIdCol = peekToken().column;
     }
 
     if (isConstCtor || (currentToken().type == TokenType::IDENTIFIER &&
@@ -1564,17 +2164,82 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
       advance();
 
       bool isVariadic = false;
-      auto params = parseParameterList(isVariadic);
+      bool hasTrailingComma = false;
+      auto params = parseParameterList(isVariadic, hasTrailingComma);
       expect(TokenType::RPAREN, "Expected ')'");
+
+      FunctionCallNode *superCall = nullptr;
+      if (match(TokenType::COLON)) {
+        int superLine = currentToken().line;
+        int superCol = currentToken().column;
+        expect(TokenType::SUPER_KW, "Expected 'super' after ':'");
+        auto superVar =
+            astCtx.create<VariableNode>("super", superLine, superCol, 5);
+
+        expect(TokenType::LPAREN, "Expected '(' after 'super'");
+
+        std::vector<ExprNode *> args;
+        std::vector<std::string_view> argNames;
+        bool namedStarted = false;
+        bool superTrailingComma = false;
+
+        if (currentToken().type != TokenType::RPAREN) {
+          do {
+            if (currentToken().type == TokenType::RPAREN) {
+              superTrailingComma = true;
+              break;
+            }
+
+            if (currentToken().type == TokenType::IDENTIFIER &&
+                peekToken().type == TokenType::COLON) {
+              namedStarted = true;
+              argNames.push_back(currentToken().value);
+              advance();
+              advance();
+              args.push_back(parseExpression());
+            } else {
+              if (namedStarted) {
+                reportError(currentToken().line, currentToken().column,
+                            currentToken().value.length(),
+                            "Positional arguments cannot appear after named "
+                            "arguments.");
+                throw ParseException();
+              }
+              argNames.push_back("");
+              args.push_back(parseExpression());
+            }
+
+          } while (match(TokenType::COMMA));
+        }
+
+        int endCol = currentToken().column + (int)currentToken().value.length();
+        expect(TokenType::RPAREN, "Expected ')'");
+
+        auto argsRef = astCtx.copyArray<ExprNode *>(args);
+        auto namesRef = astCtx.copyArray<std::string_view>(argNames);
+        superCall = astCtx.create<FunctionCallNode>(superVar, argsRef, namesRef,
+                                                    superLine, superCol,
+                                                    endCol - superCol);
+        superCall->rawArgs = argsRef;
+        superCall->rawArgNames = namesRef;
+        superCall->hasRawArgs = true;
+        superCall->hasTrailingComma = superTrailingComma;
+        superCall->isSuperCall = true;
+      }
 
       auto constructor =
           astCtx.create<FunctionDeclNode>(astCtx.VoidTy, name, cLine, cCol,
                                           isConstCtor, true, false, isVariadic);
+      constructor->superCall = superCall;
       constructor->parentRecord = recordTy;
       constructor->params = astCtx.copyArray<ParamDeclNode *>(params);
       constructor->annotations = memberAnnotations;
       constructor->hasPublicMod = isPub;
       constructor->hasPrivateMod = isPriv;
+      constructor->hasProtectedMod = isProt;
+      constructor->identifierColumn = ctorIdCol;
+      constructor->identifierLength = name.length();
+      constructor->hasTrailingComma = hasTrailingComma;
 
       if (!doc.empty())
         constructor->docString = astCtx.copyString(doc);
@@ -1583,6 +2248,9 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
       }
 
       constructor->body = parseFunctionBody(astCtx.VoidTy);
+      constructor->length =
+          constructor->body->column + constructor->body->length - cCol;
+      constructor->endLine = constructor->body->endLine;
       checkConstructorRedefinition(constructors, constructor, cLine, cCol,
                                    name.length());
       constructors.push_back(constructor);
@@ -1616,10 +2284,21 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
     std::string_view rawTypeStr(typeStart, typeEnd - typeStart);
 
     std::string_view memName;
+    int memIdCol = currentToken().column;
+    int memIdLen = 0;
+
     if (match(TokenType::OPERATOR_KW)) {
       memName = parseOperatorName();
+      memIdLen = memName.length();
     } else {
+      if (currentToken().type == TokenType::LPAREN) {
+        reportError(currentToken().line, currentToken().column, 1,
+                    "Missing return type for method '" + memType->toString() +
+                        "'.");
+        throw ParseException();
+      }
       memName = currentToken().value;
+      memIdLen = memName.length();
       expect(TokenType::IDENTIFIER, "Expected member name");
     }
 
@@ -1644,7 +2323,7 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
       }
       if (currentToken().type == TokenType::RSHIFT) {
         const_cast<Token &>(currentToken()).type = TokenType::GT;
-        const_cast<Token &>(currentToken()).value = ">";
+        /* Keep the original view so raw strings cover the full '>>'. */
       } else {
         expect(TokenType::GT, "Expected '>'");
       }
@@ -1652,27 +2331,55 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
 
     if (match(TokenType::LPAREN)) {
       bool isVariadic = false;
-      auto params = parseParameterList(isVariadic);
+      bool hasTrailingComma = false;
+      auto params = parseParameterList(isVariadic, hasTrailingComma);
       expect(TokenType::RPAREN, "Expected ')'");
+
+      bool isAsyncMethod = match(TokenType::ASYNC_KW);
+      if (isAsyncMethod && !asyncEnabled) {
+        reportError(currentToken().line, currentToken().column, 5,
+                    "'async' methods are disabled for this build (async "
+                    "support is turned off).");
+        throw ParseException();
+      }
 
       auto method = astCtx.create<FunctionDeclNode>(
           memType, memName, mLine, mCol, false, true, isExtern, isVariadic);
       method->parentRecord = recordTy;
       method->isStatic = isStatic;
+      method->isAsync = isAsyncMethod;
       method->params = astCtx.copyArray<ParamDeclNode *>(params);
       method->annotations = memberAnnotations;
       method->hasPublicMod = isPub;
       method->hasPrivateMod = isPriv;
+      method->hasProtectedMod = isProt;
       method->rawReturnTypeStr = rawTypeStr;
+      method->identifierColumn = memIdCol;
+      method->identifierLength = memIdLen;
+      method->hasTrailingComma = hasTrailingComma;
 
       if (!doc.empty())
         method->docString = astCtx.copyString(doc);
 
       if (isExtern || isIntrinsic) {
+        int endLine = currentToken().line;
+        int endCol = currentToken().column + 1;
         expect(TokenType::SEMICOLON,
                "Expected ';' after extern or intrinsic method declaration");
+        method->length = endCol - mCol;
+        method->endLine = endLine;
+      } else if (isAbstract && currentToken().type == TokenType::SEMICOLON) {
+        int endLine = currentToken().line;
+        int endCol = currentToken().column + 1;
+        advance();
+        method->length = endCol - mCol;
+        method->endLine = endLine;
+        method->isAbstract = true;
+        method->body = nullptr;
       } else {
         method->body = parseFunctionBody(memType);
+        method->length = method->body->column + method->body->length - mCol;
+        method->endLine = method->body->endLine;
       }
 
       if (cursor > 0 && !tokens[cursor - 1].trailingComment.empty()) {
@@ -1710,18 +2417,24 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
       if (match(TokenType::ASSIGN)) {
         init = parseExpression();
       }
+      int endLine = currentToken().line;
+      int endCol = currentToken().column + 1;
       expect(TokenType::SEMICOLON, "Expected ';'");
 
       checkRecordMemberRedefinition(memName, fields, methods, nullptr, mLine,
                                     mCol, memName.length());
 
       auto field = astCtx.create<VarDeclNode>(memType, memName, init, mLine,
-                                              mCol, memName.length());
+                                              mCol, endCol - mCol);
       field->isStatic = isStatic;
       field->annotations = memberAnnotations;
       field->hasPublicMod = isPub;
       field->hasPrivateMod = isPriv;
+      field->hasProtectedMod = isProt;
       field->rawTypeStr = rawTypeStr;
+      field->endLine = endLine;
+      field->identifierColumn = memIdCol;
+      field->identifierLength = memIdLen;
 
       if (!doc.empty())
         field->docString = astCtx.copyString(doc);
@@ -1767,21 +2480,26 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
     if (fields[i]->isStatic)
       continue;
     fInfos.push_back({fields[i]->varName, fields[i]->type, instanceFieldIndex++,
-                      fields[i]->isPublic(fields[i]->varName)});
+                      fields[i]->isPublic(fields[i]->varName),
+                      fields[i]->isProtected(fields[i]->varName)});
   }
   recordTy->setFields(astCtx.copyArray<FieldInfo>(fInfos));
 
   DeclNode *node = nullptr;
-  int len = endCol - col;
+  int len = currentToken().column - col;
 
   if (kind == TypeKind::Class) {
     auto cNode = astCtx.create<ClassDeclNode>(name, line, col, len);
+    cNode->fqName = fqName;
     cNode->fields = astCtx.copyArray<VarDeclNode *>(fields);
     cNode->methods = astCtx.copyArray<FunctionDeclNode *>(methods);
     cNode->constructors = astCtx.copyArray<FunctionDeclNode *>(constructors);
     cNode->destructor = destructor;
+    cNode->baseClass = baseClass;
+    cNode->interfaces = astCtx.copyArray<const Type *>(interfaces);
     cNode->endLine = endLine;
     cNode->recordType = recordTy;
+    cNode->isAbstract = isAbstract;
     if (!tParams.empty()) {
       cNode->isTemplate = true;
       cNode->templateParams = astCtx.copyArray<std::string_view>(tParams);
@@ -1789,6 +2507,7 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
     node = cNode;
   } else if (kind == TypeKind::Struct) {
     auto sNode = astCtx.create<StructDeclNode>(name, line, col, len);
+    sNode->fqName = fqName;
     sNode->fields = astCtx.copyArray<VarDeclNode *>(fields);
     sNode->methods = astCtx.copyArray<FunctionDeclNode *>(methods);
     sNode->constructors = astCtx.copyArray<FunctionDeclNode *>(constructors);
@@ -1802,6 +2521,7 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
     node = sNode;
   } else {
     auto uNode = astCtx.create<UnionDeclNode>(name, line, col, len);
+    uNode->fqName = fqName;
     uNode->fields = astCtx.copyArray<VarDeclNode *>(fields);
     uNode->methods = astCtx.copyArray<FunctionDeclNode *>(methods);
     uNode->constructors = astCtx.copyArray<FunctionDeclNode *>(constructors);
@@ -1815,6 +2535,9 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
     node = uNode;
   }
 
+  node->identifierColumn = idCol;
+  node->identifierLength = idLen;
+
   popTemplateParams(tParams.size());
   return node;
 }
@@ -1822,9 +2545,11 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind) {
 DeclNode *Parser::parseEnumDecl() {
   int line = currentToken().line;
   int col = currentToken().column;
-  advance(); /* consume 'enum' */
+  advance();
 
   std::string_view name = currentToken().value;
+  int idCol = currentToken().column;
+  int idLen = name.length();
   expect(TokenType::IDENTIFIER, "Expected enum name");
 
   const Type *underlyingType = astCtx.Int32Ty;
@@ -1837,26 +2562,34 @@ DeclNode *Parser::parseEnumDecl() {
     }
   }
 
+  std::string fqNameStr = getFQName(name);
+  std::string_view fqName = astCtx.copyString(fqNameStr);
+
   /* Eagerly register the enum type so subsequent parameters/variables can use
    * it as a valid type */
-  astCtx.getEnumType(name, underlyingType);
+  astCtx.getEnumType(fqName, underlyingType);
 
   expect(TokenType::LBRACE, "Expected '{'");
 
   std::vector<EnumMemberNode *> members;
+  bool hasTrailingComma = false;
+
   while (currentToken().type != TokenType::RBRACE &&
          currentToken().type != TokenType::EOF_TOK) {
 
     if (currentToken().type == TokenType::RBRACE)
       break;
 
-    bool isPub = false, isPriv = false;
+    bool isPub = false, isPriv = false, isProt = false;
     while (currentToken().type == TokenType::PUBLIC_KW ||
-           currentToken().type == TokenType::PRIVATE_KW) {
+           currentToken().type == TokenType::PRIVATE_KW ||
+           currentToken().type == TokenType::PROTECTED_KW) {
       if (currentToken().type == TokenType::PUBLIC_KW)
         isPub = true;
       if (currentToken().type == TokenType::PRIVATE_KW)
         isPriv = true;
+      if (currentToken().type == TokenType::PROTECTED_KW)
+        isProt = true;
       advance();
     }
 
@@ -1865,6 +2598,8 @@ DeclNode *Parser::parseEnumDecl() {
     int mLine = currentToken().line;
     int mCol = currentToken().column;
     std::string_view mName = currentToken().value;
+    int midCol = currentToken().column;
+    int midLen = mName.length();
     expect(TokenType::IDENTIFIER, "Expected enum member name");
 
     for (auto *existing : members) {
@@ -1881,10 +2616,17 @@ DeclNode *Parser::parseEnumDecl() {
       init = parseExpression();
     }
 
-    auto memberNode = astCtx.create<EnumMemberNode>(
-        mName, init, mLine, mCol, currentToken().column - mCol);
+    int endLine = init ? init->endLine : mLine;
+    int endCol = init ? (init->column + init->length) : currentToken().column;
+
+    auto memberNode =
+        astCtx.create<EnumMemberNode>(mName, init, mLine, mCol, endCol - mCol);
+    memberNode->endLine = endLine;
     memberNode->hasPublicMod = isPub;
     memberNode->hasPrivateMod = isPriv;
+    memberNode->hasProtectedMod = isProt;
+    memberNode->identifierColumn = midCol;
+    memberNode->identifierLength = midLen;
 
     if (!doc.empty())
       memberNode->docString = astCtx.copyString(doc);
@@ -1896,18 +2638,43 @@ DeclNode *Parser::parseEnumDecl() {
 
     if (!match(TokenType::COMMA)) {
       break;
+    } else if (currentToken().type == TokenType::RBRACE) {
+      hasTrailingComma = true;
+      break;
     }
   }
+
+  std::string closingDoc = consumeComments();
 
   int endLine = currentToken().line;
   int endCol = currentToken().column + 1;
   expect(TokenType::RBRACE, "Expected '}'");
 
+  if (!closingDoc.empty() && !members.empty()) {
+    ASTNode *lastMember = members.back();
+    std::string combined;
+    if (!lastMember->trailingComment.empty()) {
+      combined = std::string(lastMember->trailingComment) + "\n" + closingDoc;
+    } else {
+      combined = "\n" + closingDoc;
+    }
+    lastMember->trailingComment = astCtx.copyString(combined);
+  }
+
   auto node = astCtx.create<EnumDeclNode>(name, underlyingType, line, col,
                                           endCol - col);
+  node->fqName = fqName;
   node->members = astCtx.copyArray<EnumMemberNode *>(members);
-  node->enumType = astCtx.getEnumType(name, underlyingType);
+  /* Register with the fully qualified name: the type system deduplicates
+   * EnumType by name, and keeping a second instance under the simple name
+   * makes the simple-name lookup shadow the namespace-qualified one
+   * (breaking enum assignability inside namespaces). */
+  node->enumType = astCtx.getEnumType(fqName, underlyingType);
   node->endLine = endLine;
+  node->identifierColumn = idCol;
+  node->identifierLength = idLen;
+  node->hasTrailingComma = hasTrailingComma;
+
   return node;
 }
 
@@ -1934,21 +2701,53 @@ DeclNode *Parser::parseDeclarationOrFunction(
     }
   }
 
-  const char *typeStart = currentToken().value.data();
-  const Type *nodeType = parseType();
-  const char *typeEnd =
-      tokens[cursor - 1].value.data() + tokens[cursor - 1].value.length();
-  std::string_view rawTypeStr(typeStart, typeEnd - typeStart);
+  const Type *nodeType = nullptr;
+  std::string_view rawTypeStr;
 
-  std::string_view id;
-  if (match(TokenType::OPERATOR_KW)) {
-    id = parseOperatorName();
-  } else {
-    id = currentToken().value;
-    expect(TokenType::IDENTIFIER, "Expected identifier after type");
+  bool isImplicitlyTyped = false;
+  bool isConstDecl = false;
+
+  if (match(TokenType::VAR_KW)) {
+    isImplicitlyTyped = true;
+    nodeType = astCtx.AutoTy;
+    rawTypeStr = "var";
+  } else if (currentToken().type == TokenType::CONST_KW &&
+             peekToken().type == TokenType::IDENTIFIER &&
+             (peekToken(2).type == TokenType::ASSIGN ||
+              peekToken(2).type == TokenType::SEMICOLON)) {
+    advance();
+    isImplicitlyTyped = true;
+    isConstDecl = true;
+    nodeType = astCtx.getConstType(astCtx.AutoTy);
+    rawTypeStr = "const";
   }
 
-  int idLen = (int)id.length();
+  if (!isImplicitlyTyped) {
+    const char *typeStart = currentToken().value.data();
+    nodeType = parseType();
+    const char *typeEnd =
+        tokens[cursor - 1].value.data() + tokens[cursor - 1].value.length();
+    rawTypeStr = std::string_view(typeStart, typeEnd - typeStart);
+  }
+
+  std::string_view id;
+  int idCol = currentToken().column;
+  int idLen = 0;
+
+  if (match(TokenType::OPERATOR_KW)) {
+    id = parseOperatorName();
+    idLen = id.length();
+  } else {
+    if (currentToken().type == TokenType::LPAREN) {
+      reportError(currentToken().line, currentToken().column, 1,
+                  "Missing return type for function '" + nodeType->toString() +
+                      "'.");
+      throw ParseException();
+    }
+    id = currentToken().value;
+    idLen = id.length();
+    expect(TokenType::IDENTIFIER, "Expected identifier after type");
+  }
 
   std::vector<std::string_view> tParams;
   if (match(TokenType::LT)) {
@@ -1971,24 +2770,145 @@ DeclNode *Parser::parseDeclarationOrFunction(
     }
     if (currentToken().type == TokenType::RSHIFT) {
       const_cast<Token &>(currentToken()).type = TokenType::GT;
-      const_cast<Token &>(currentToken()).value = ">";
+      /* Keep the original view: it spans both '>' characters, so raw type
+       * strings computed from this token still cover the full '>>'. */
     } else {
       expect(TokenType::GT, "Expected '>'");
     }
   }
 
+  std::string fqNameStr = getFQName(id);
+  std::string_view fqName = astCtx.copyString(fqNameStr);
+
+  /*
+   * Disambiguate the C++ "most vexing parse": 'Type name(expr...)' is a
+   * variable declaration with a constructor-call initializer whenever the
+   * tokens inside the parentheses cannot form a parameter list, e.g.
+   * 'unique_ptr<Foo> up(new Foo());'. A leading type (keyword or
+   * 'Type name' pair) keeps the declaration a function declaration.
+   */
+  bool isVarWithCtorCall = false;
+  if (currentToken().type == TokenType::LPAREN && tParams.empty() &&
+      !isImplicitlyTyped) {
+    TokenType firstTok = peekToken(1).type;
+    if (firstTok == TokenType::IDENTIFIER) {
+      TokenType secondTok = peekToken(2).type;
+      if (secondTok == TokenType::IDENTIFIER ||
+          secondTok == TokenType::STAR || secondTok == TokenType::AMPERSAND ||
+          secondTok == TokenType::LOGICAL_AND ||
+          secondTok == TokenType::COMMA || secondTok == TokenType::LT ||
+          secondTok == TokenType::RSHIFT) {
+        isVarWithCtorCall = false;
+      } else {
+        isVarWithCtorCall = true;
+      }
+    } else if (firstTok != TokenType::RPAREN &&
+               firstTok != TokenType::TYPE_KW &&
+               firstTok != TokenType::CONST_KW &&
+               firstTok != TokenType::VAR_KW &&
+               firstTok != TokenType::STATIC_KW &&
+               firstTok != TokenType::LBRACE) {
+      isVarWithCtorCall = true;
+    }
+  }
+
+  if (isVarWithCtorCall) {
+    std::vector<ExprNode *> args;
+    std::vector<std::string_view> argNames;
+    bool hasTrailingComma = false;
+
+    expect(TokenType::LPAREN, "Expected '('");
+    if (currentToken().type != TokenType::RPAREN) {
+      do {
+        if (currentToken().type == TokenType::RPAREN) {
+          hasTrailingComma = true;
+          break;
+        }
+        if (currentToken().type == TokenType::IDENTIFIER &&
+            peekToken().type == TokenType::COLON) {
+          argNames.push_back(currentToken().value);
+          advance();
+          advance();
+          args.push_back(parseExpression());
+        } else {
+          argNames.push_back("");
+          args.push_back(parseExpression());
+        }
+      } while (match(TokenType::COMMA));
+    }
+
+    int callEndLine = currentToken().line;
+    int callEndCol = currentToken().column + (int)currentToken().value.length();
+    expect(TokenType::RPAREN, "Expected ')'");
+
+    auto argsRef = astCtx.copyArray<ExprNode *>(args);
+    auto namesRef = astCtx.copyArray<std::string_view>(argNames);
+
+    /* The constructor-call initializer targets the declared type, e.g.
+     * 'Text t1("hello")' becomes 't1 = Text("hello")'. Template types keep
+     * their base name and template arguments so the Sema phase can resolve
+     * the instantiated constructor. */
+    ExprNode *target = nullptr;
+    const Type *baseType = nodeType->getUnqualifiedType();
+    if (auto *instTy = llvm::dyn_cast<TemplateInstType>(baseType)) {
+      auto *tVar =
+          astCtx.create<VariableNode>(instTy->getBaseName(), line, col, idLen);
+      tVar->templateArgs =
+          astCtx.copyArray<const Type *>(instTy->getTemplateArgs());
+      target = tVar;
+    } else {
+      std::string_view targetName =
+          astCtx.copyString(baseType->toString());
+      target =
+          astCtx.create<VariableNode>(targetName, idCol, col, idLen);
+    }
+
+    auto callNode = astCtx.create<FunctionCallNode>(
+        target, argsRef, namesRef, line, col, callEndCol - col);
+    callNode->endLine = callEndLine;
+
+    ExprNode *init = callNode;
+    int endLine = currentToken().line;
+    int endCol = currentToken().column + (int)currentToken().value.length();
+    expect(TokenType::SEMICOLON, "Expected ';' after variable declaration");
+
+    auto varDecl =
+        astCtx.create<VarDeclNode>(nodeType, id, init, line, col, endCol - col);
+    varDecl->fqName = fqName;
+    varDecl->rawTypeStr = rawTypeStr;
+    varDecl->endLine = endLine;
+    varDecl->identifierColumn = idCol;
+    varDecl->identifierLength = idLen;
+    varDecl->isStatic = isStatic;
+
+    return varDecl;
+  }
+
   if (match(TokenType::LPAREN)) {
     bool isVariadic = false;
-    auto params = parseParameterList(isVariadic);
+    bool hasTrailingComma = false;
+    auto params = parseParameterList(isVariadic, hasTrailingComma);
     expect(TokenType::RPAREN, "Expected ')' after parameters");
 
+    bool isAsync = match(TokenType::ASYNC_KW);
+    if (isAsync && !asyncEnabled) {
+      reportError(currentToken().line, currentToken().column, 5,
+                  "'async' functions are disabled for this build (async "
+                  "support is turned off).");
+      throw ParseException();
+    }
     bool isFuncConst = match(TokenType::CONST_KW);
 
     auto funcDecl = astCtx.create<FunctionDeclNode>(
         nodeType, id, line, col, isFuncConst, false, isExtern, isVariadic);
+    funcDecl->fqName = fqName;
     funcDecl->isStatic = isStatic;
+    funcDecl->isAsync = isAsync;
     funcDecl->params = astCtx.copyArray<ParamDeclNode *>(params);
     funcDecl->rawReturnTypeStr = rawTypeStr;
+    funcDecl->identifierColumn = idCol;
+    funcDecl->identifierLength = idLen;
+    funcDecl->hasTrailingComma = hasTrailingComma;
 
     if (isExtern || isIntrinsic) {
       int endLine = currentToken().line;
@@ -2012,18 +2932,8 @@ DeclNode *Parser::parseDeclarationOrFunction(
     return funcDecl;
   }
 
-  if (isExtern) {
-    reportError(line, col, idLen, "Variables cannot be declared as extern.");
-    throw ParseException();
-  }
-
   if (isIntrinsic) {
     reportError(line, col, idLen, "Variables cannot be declared as intrinsic.");
-    throw ParseException();
-  }
-
-  if (isStatic) {
-    reportError(line, col, idLen, "Variables cannot be declared as static.");
     throw ParseException();
   }
 
@@ -2037,8 +2947,13 @@ DeclNode *Parser::parseDeclarationOrFunction(
 
   auto varDecl =
       astCtx.create<VarDeclNode>(nodeType, id, init, line, col, endCol - col);
+  varDecl->fqName = fqName;
   varDecl->rawTypeStr = rawTypeStr;
   varDecl->endLine = endLine;
+  varDecl->identifierColumn = idCol;
+  varDecl->identifierLength = idLen;
+  varDecl->isStatic = isStatic;
+
   return varDecl;
 }
 
@@ -2050,16 +2965,39 @@ BlockNode *Parser::parseBlock() {
   auto block = astCtx.create<BlockNode>(startLine, startCol);
   std::vector<ASTNode *> statements;
 
+  /* Usings declared inside the block must not leak into enclosing scopes. */
+  size_t prevUsings = activeUsings.size();
+
   while (currentToken().type != TokenType::RBRACE &&
          currentToken().type != TokenType::EOF_TOK) {
-    if (auto stmt = parseStatement()) {
-      statements.push_back(stmt);
+    try {
+      if (auto stmt = parseStatement()) {
+        statements.push_back(stmt);
+      }
+    } catch (const ParseException &) {
+      synchronize();
     }
   }
+
+  std::string closingDoc = consumeComments();
 
   int endLine = currentToken().line;
   int endCol = currentToken().column + 1;
   expect(TokenType::RBRACE, "Expected '}'");
+
+  activeUsings.resize(prevUsings);
+
+  if (!closingDoc.empty() && !statements.empty()) {
+    ASTNode *lastStmt = statements.back();
+    std::string combined;
+    if (!lastStmt->trailingComment.empty()) {
+      combined = std::string(lastStmt->trailingComment) + "\n" + closingDoc;
+    } else {
+      combined = "\n" + closingDoc;
+    }
+    lastStmt->trailingComment = astCtx.copyString(combined);
+  }
+
   block->statements = astCtx.copyArray<ASTNode *>(statements);
   block->finalize(endCol);
   block->endLine = endLine;
@@ -2093,7 +3031,7 @@ ExprNode *Parser::parseExpressionStatement() {
 ExprNode *Parser::parseExpression() { return parseAssignment(); }
 
 ExprNode *Parser::parseAssignment() {
-  auto expr = parseLogicalOr();
+  auto expr = parseTernary();
 
   switch (currentToken().type) {
   case TokenType::ASSIGN:
@@ -2123,13 +3061,15 @@ ExprNode *Parser::parseAssignment() {
 ExprNode *Parser::parseArrayLiteral() {
   int line = currentToken().line;
   int col = currentToken().column;
-  advance(); /* Consume '[' */
+  advance();
 
   std::vector<ExprNode *> elements;
+  bool hasTrailingComma = false;
   if (currentToken().type != TokenType::RBRACKET &&
       currentToken().type != TokenType::EOF_TOK) {
     do {
       if (currentToken().type == TokenType::RBRACKET) {
+        hasTrailingComma = true;
         break;
       }
       elements.push_back(parseExpression());
@@ -2139,8 +3079,45 @@ ExprNode *Parser::parseArrayLiteral() {
   int endCol = currentToken().column + 1;
   expect(TokenType::RBRACKET, "Expected ']' at end of array literal");
 
-  return astCtx.create<ArrayLiteralNode>(astCtx.copyArray<ExprNode *>(elements),
-                                         line, col, endCol - col);
+  auto node = astCtx.create<ArrayLiteralNode>(
+      astCtx.copyArray<ExprNode *>(elements), line, col, endCol - col);
+  node->hasTrailingComma = hasTrailingComma;
+  return node;
+}
+
+ExprNode *Parser::parseMapLiteral() {
+  int line = currentToken().line;
+  int col = currentToken().column;
+  advance();
+
+  std::vector<ExprNode *> keys;
+  std::vector<ExprNode *> values;
+  bool hasTrailingComma = false;
+
+  if (currentToken().type != TokenType::RBRACE &&
+      currentToken().type != TokenType::EOF_TOK) {
+    do {
+      if (currentToken().type == TokenType::RBRACE) {
+        hasTrailingComma = true;
+        break;
+      }
+      auto key = parseExpression();
+      expect(TokenType::COLON,
+             "Expected ':' between key and value in map literal");
+      auto value = parseExpression();
+      keys.push_back(key);
+      values.push_back(value);
+    } while (match(TokenType::COMMA));
+  }
+
+  int endCol = currentToken().column + 1;
+  expect(TokenType::RBRACE, "Expected '}' at end of map literal");
+
+  auto node = astCtx.create<MapLiteralNode>(
+      astCtx.copyArray<ExprNode *>(keys), astCtx.copyArray<ExprNode *>(values),
+      line, col, endCol - col);
+  node->hasTrailingComma = hasTrailingComma;
+  return node;
 }
 
 ExprNode *Parser::parseTerm() {
@@ -2171,7 +3148,6 @@ ExprNode *Parser::parseCast() {
         tokens[cursor - 1].value.data() + tokens[cursor - 1].value.length();
     std::string_view rawTypeStr(typeStart, typeEnd - typeStart);
 
-    /* Securely calculate the end column using the parsed type's last token */
     int endCol = tokens[cursor - 1].column + tokens[cursor - 1].value.length();
 
     left = astCtx.create<CastNode>(left, targetType, line, col, endCol - col);
@@ -2186,16 +3162,26 @@ ExprNode *Parser::parsePostfix() {
     if (match(TokenType::DOT)) {
       int line = expr->line;
       int col = expr->column;
+
+      if (match(TokenType::TILDE)) {
+        /* Manual destructor call: 'obj.~TypeName()' (C++ placement-new
+         * companion: destroy before freeing the raw memory). */
+        int dtorLine = expr->line;
+        const Type *dtorTy = parseType();
+        int endCol = currentToken().column + currentToken().value.length();
+        expect(TokenType::LPAREN, "Expected '(' after destructor type");
+        expect(TokenType::RPAREN, "Expected ')' in destructor call");
+        expr = astCtx.create<DestructorCallNode>(expr, dtorTy, dtorLine, col,
+                                                 endCol - col);
+        continue;
+      }
+
       std::string_view memberName = currentToken().value;
       int memLen = memberName.length();
 
-      /* Capture the exact column of the identifier before advancing the token
-       * stream */
       int memCol = currentToken().column;
       expect(TokenType::IDENTIFIER, "Expected member name after '.'");
 
-      /* Check for template invocation using semantic awareness rather than
-       * lookahead */
       bool isTemplateCall = false;
       if (currentToken().type == TokenType::LT &&
           astCtx.isTemplateName(memberName)) {
@@ -2205,8 +3191,13 @@ ExprNode *Parser::parsePostfix() {
       auto maNode = astCtx.create<MemberAccessNode>(expr, memberName, line, col,
                                                     (memCol + memLen) - col);
 
+      if (expr->kind == NodeKind::Variable &&
+          static_cast<VariableNode *>(expr)->name == "super") {
+        maNode->isSuperAccess = true;
+      }
+
       if (isTemplateCall) {
-        advance(); /* Consume '<' */
+        advance();
         std::vector<const Type *> tArgs;
         if (currentToken().type != TokenType::GT) {
           do {
@@ -2215,7 +3206,7 @@ ExprNode *Parser::parsePostfix() {
         }
         if (currentToken().type == TokenType::RSHIFT) {
           const_cast<Token &>(currentToken()).type = TokenType::GT;
-          const_cast<Token &>(currentToken()).value = ">";
+          /* Keep the original view so raw strings cover the full '>>'. */
         } else {
           expect(TokenType::GT, "Expected '>'");
         }
@@ -2237,11 +3228,14 @@ ExprNode *Parser::parsePostfix() {
       std::vector<ExprNode *> args;
       std::vector<std::string_view> argNames;
       bool namedStarted = false;
+      bool hasTrailingComma = false;
 
       if (currentToken().type != TokenType::RPAREN) {
         do {
-          if (currentToken().type == TokenType::RPAREN)
+          if (currentToken().type == TokenType::RPAREN) {
+            hasTrailingComma = true;
             break;
+          }
 
           if (currentToken().type == TokenType::IDENTIFIER &&
               peekToken().type == TokenType::COLON) {
@@ -2260,6 +3254,15 @@ ExprNode *Parser::parsePostfix() {
             }
             argNames.push_back("");
             args.push_back(parseExpression());
+
+            if (currentToken().type == TokenType::IDENTIFIER) {
+              reportError(
+                  currentToken().line, currentToken().column,
+                  currentToken().value.length(),
+                  "Unexpected identifier in argument list. If this is a "
+                  "function declaration, you are missing the return type.");
+              throw ParseException();
+            }
           }
 
         } while (match(TokenType::COMMA));
@@ -2271,12 +3274,20 @@ ExprNode *Parser::parsePostfix() {
 
       auto argsRef = astCtx.copyArray<ExprNode *>(args);
       auto namesRef = astCtx.copyArray<std::string_view>(argNames);
-      expr = astCtx.create<FunctionCallNode>(expr, argsRef, namesRef, line, col,
-                                             endCol - col);
-      expr->endLine = endLine;
-      static_cast<FunctionCallNode *>(expr)->rawArgs = argsRef;
-      static_cast<FunctionCallNode *>(expr)->rawArgNames = namesRef;
-      static_cast<FunctionCallNode *>(expr)->hasRawArgs = true;
+      auto callNode = astCtx.create<FunctionCallNode>(expr, argsRef, namesRef,
+                                                      line, col, endCol - col);
+      callNode->endLine = endLine;
+      callNode->rawArgs = argsRef;
+      callNode->rawArgNames = namesRef;
+      callNode->hasRawArgs = true;
+      callNode->hasTrailingComma = hasTrailingComma;
+
+      if (expr->kind == NodeKind::Variable &&
+          static_cast<VariableNode *>(expr)->name == "super") {
+        callNode->isSuperCall = true;
+      }
+
+      expr = callNode;
     } else if (currentToken().type == TokenType::PLUS_PLUS ||
                currentToken().type == TokenType::MINUS_MINUS) {
       int line = expr->line;
@@ -2291,9 +3302,134 @@ ExprNode *Parser::parsePostfix() {
   return expr;
 }
 
+bool Parser::looksLikeLambdaParams(size_t openOffset) const {
+  TokenType firstTok = peekToken(openOffset + 1).type;
+  if (firstTok == TokenType::RPAREN)
+    return true; /* () */
+  if (firstTok == TokenType::TYPE_KW || firstTok == TokenType::CONST_KW ||
+      firstTok == TokenType::LBRACE || firstTok == TokenType::REQUIRED_KW)
+    return true; /* (int a) / (const uint8* s) / ({int x}) / ({required bool b}) */
+  if (firstTok == TokenType::IDENTIFIER) {
+    TokenType secondTok = peekToken(openOffset + 2).type;
+    if (secondTok == TokenType::IDENTIFIER || /* (Foo a) */
+        secondTok == TokenType::COMMA ||      /* (a, b) */
+        secondTok == TokenType::RPAREN ||     /* (a) */
+        secondTok == TokenType::STAR ||       /* (Foo* p) */
+        secondTok == TokenType::AMPERSAND ||  /* (Foo& r) */
+        secondTok == TokenType::LOGICAL_AND ||/* (Foo&& r) */
+        secondTok == TokenType::LT ||         /* (Foo<Bar> p) */
+        secondTok == TokenType::RSHIFT) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool Parser::lambdaFollowedByBody(size_t openOffset) const {
+  /* Scan to the balanced ')' and check that it is followed by '=>' or '{'. */
+  int depth = 0;
+  size_t i = openOffset;
+  while (i < tokens.size()) {
+    TokenType t = peekToken(i).type;
+    if (t == TokenType::LPAREN || t == TokenType::LT ||
+        t == TokenType::LBRACKET || t == TokenType::LBRACE) {
+      depth++;
+    } else if (t == TokenType::RPAREN || t == TokenType::GT ||
+               t == TokenType::RBRACKET || t == TokenType::RBRACE) {
+      depth--;
+      if (depth <= 0)
+        break;
+    }
+    i++;
+  }
+  if (i + 1 >= tokens.size())
+    return false;
+  TokenType next = peekToken(i + 1).type;
+  /* 'async' may appear between the parameter list and the body:
+   * '(int v) async { ... }'. */
+  if (next == TokenType::ASYNC_KW) {
+    if (i + 2 >= tokens.size())
+      return false;
+    next = peekToken(i + 2).type;
+  }
+  return next == TokenType::ARROW || next == TokenType::LBRACE;
+}
+
+std::vector<ParamDeclNode *> Parser::parseLambdaParams() {
+  bool isVariadic = false;
+  bool hasTrailingComma = false;
+  int vLine = currentToken().line;
+  int vCol = currentToken().column;
+  auto params =
+      parseParameterList(isVariadic, hasTrailingComma, /*allowUntyped=*/true);
+  if (isVariadic) {
+    reportError(vLine, vCol, 3,
+                "Variadic lambda parameters are not supported.");
+    throw ParseException();
+  }
+  return params;
+}
+
+ExprNode *Parser::parseLambda(const Type *explicitReturnType) {
+  int line = currentToken().line;
+  int col = currentToken().column;
+
+  expect(TokenType::LPAREN, "Expected '(' to start lambda parameters");
+  auto params = parseLambdaParams();
+  expect(TokenType::RPAREN, "Expected ')' after lambda parameters");
+
+  auto lambda = astCtx.create<LambdaNode>(line, col, 1);
+  lambda->explicitReturnType = explicitReturnType;
+  lambda->isAsync = match(TokenType::ASYNC_KW);
+  if (lambda->isAsync && !asyncEnabled) {
+    reportError(currentToken().line, currentToken().column, 5,
+                "'async' lambdas are disabled for this build (async support "
+                "is turned off).");
+    throw ParseException();
+  }
+  lambda->params = astCtx.copyArray<ParamDeclNode *>(params);
+
+  int endLine = currentToken().line;
+  int endCol = currentToken().column + (int)currentToken().value.length();
+
+  if (match(TokenType::ARROW)) {
+    auto expr = parseExpression();
+    endLine = currentToken().line;
+    endCol = currentToken().column + (int)currentToken().value.length();
+
+    /* Unlike function declarations, the trailing ';' belongs to the
+     * enclosing statement, not to the lambda expression itself. */
+    lambda->isExpressionBody = true;
+    lambda->exprBody = expr;
+    lambda->length = endCol - col;
+    lambda->endLine = endLine;
+    return lambda;
+  }
+
+  auto block = parseBlock();
+  lambda->body = block;
+  lambda->length = block->column + block->length - col;
+  lambda->endLine = block->endLine;
+  return lambda;
+}
+
 ExprNode *Parser::parsePrimary() {
   int line = currentToken().line;
   int col = currentToken().column;
+
+  /* Lambdas: '() => e', '(int a, int b) { ... }', '(a, b) => a + b', and
+   * explicit-return variants 'int (int a) => a + 1'. */
+  if (currentToken().type == TokenType::LPAREN &&
+      lambdaFollowedByBody(0) && looksLikeLambdaParams(0)) {
+    return parseLambda(nullptr);
+  }
+  if ((currentToken().type == TokenType::TYPE_KW ||
+       currentToken().type == TokenType::IDENTIFIER) &&
+      peekToken().type == TokenType::LPAREN && lambdaFollowedByBody(1) &&
+      looksLikeLambdaParams(1)) {
+    const Type *retTy = parseType();
+    return parseLambda(retTy);
+  }
 
   if (currentToken().type == TokenType::TYPE_KW) {
     const Type *t = parseType();
@@ -2312,6 +3448,10 @@ ExprNode *Parser::parsePrimary() {
     return parseArrayLiteral();
   }
 
+  if (currentToken().type == TokenType::LBRACE) {
+    return parseMapLiteral();
+  }
+
   if (match(TokenType::LPAREN)) {
     auto expr = parseExpression();
     expect(TokenType::RPAREN, "Expected ')'");
@@ -2319,7 +3459,8 @@ ExprNode *Parser::parsePrimary() {
     return expr;
   }
 
-  if (currentToken().type == TokenType::THIS_KW) {
+  if (currentToken().type == TokenType::THIS_KW ||
+      currentToken().type == TokenType::SUPER_KW) {
     std::string_view name = currentToken().value;
     int len = name.length();
     advance();
@@ -2587,6 +3728,15 @@ ExprNode *Parser::parsePrimary() {
   if (currentToken().type == TokenType::IDENTIFIER) {
     std::string_view name = currentToken().value;
     int len = (int)name.length();
+
+    /* A bare template parameter used in a value position is a type
+     * reference: 'sizeof(T)', 'alignof(T)', 'typeof(T)'. */
+    if (isTemplateParam(name)) {
+      const Type *t = astCtx.getTemplateParamType(name);
+      advance();
+      return astCtx.create<TypeLiteralNode>(t, line, col, len);
+    }
+
     advance();
 
     bool isTemplateCall = false;
@@ -2606,7 +3756,7 @@ ExprNode *Parser::parsePrimary() {
       }
       if (currentToken().type == TokenType::RSHIFT) {
         const_cast<Token &>(currentToken()).type = TokenType::GT;
-        const_cast<Token &>(currentToken()).value = ">";
+        /* Keep the original view so raw strings cover the full '>>'. */
       } else {
         expect(TokenType::GT, "Expected '>'");
       }

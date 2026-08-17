@@ -39,6 +39,14 @@ void DebugInfoEmitter::emitLocation(llvm::IRBuilder<> &builder,
   if (!emitDebugInfo || !node || node->line == 0)
     return;
   llvm::DIScope *scope = lexicalBlocks.empty() ? diCU : lexicalBlocks.back();
+
+  /* DICompileUnit is not a valid scope for DILocation. Prevent LLVM IR
+   * Verification crash when resolving top-level AST nodes out of function
+   * scope. */
+  if (llvm::isa<llvm::DICompileUnit>(scope)) {
+    return;
+  }
+
   builder.SetCurrentDebugLocation(llvm::DILocation::get(
       builder.getContext(), node->line, node->column, scope));
 }
@@ -84,6 +92,11 @@ llvm::DIType *DebugInfoEmitter::getDIType(CodeGen &cg, const Type *type) {
     case BuiltinKind::UInt64:
       diTy =
           dBuilder->createBasicType("uint64", 64, llvm::dwarf::DW_ATE_unsigned);
+      break;
+    case BuiltinKind::USize:
+      diTy = dBuilder->createBasicType(
+          "usize", mod.getDataLayout().getPointerSizeInBits(),
+          llvm::dwarf::DW_ATE_unsigned);
       break;
     case BuiltinKind::Float32:
       diTy =

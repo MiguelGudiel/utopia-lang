@@ -1,0 +1,127 @@
+/*
+ * Smart pointers (unique_ptr, shared_ptr, weak_ptr) with auto-deref: member access uses '.' directly on the smart
+ * pointer, and the compiler resolves through 'operator*' automatically.
+ */
+import "utopia:memory";
+
+using Memory;
+
+class Widget {
+  public int id;
+  public String name;
+
+  public Widget(int id, String name) {
+    this.id = id;
+    this.name = name;
+  }
+
+  public void describe() {
+    print("Widget(id=%d, name='%s')\n", this.id, this.name.c_str());
+  }
+
+  public void rename(String newName) {
+    this.name = newName;
+  }
+}
+
+/* Factory functions returning smart pointers by value (RVO + move). */
+unique_ptr<Widget> makeWidget(int id, String name) {
+  return unique_ptr<Widget>(new Widget(id, name));
+}
+
+shared_ptr<Widget> makeSharedWidget(int id, String name) {
+  shared_ptr<Widget> sp = shared_ptr<Widget>(new Widget(id, name));
+  return sp;
+}
+
+/* A record holding smart pointers as fields. */
+class Registry {
+  public unique_ptr<Widget> primary;
+  public shared_ptr<Widget> cache;
+
+  public Registry(int id, String name) {
+    this.primary = unique_ptr<Widget>(new Widget(id, name));
+    this.cache = make_shared<Widget>(new Widget(id * 10, "cached"));
+  }
+}
+
+int main() {
+  print("== unique_ptr ==\n");
+  unique_ptr<Widget> u = make_unique<Widget>(new Widget(1, "alpha"));
+  u.describe();
+
+  /* Auto-deref field read and write through the smart pointer. */
+  print("id: %d\n", u.id);
+  u.id = 42;
+  u.rename("renamed");
+  u.describe();
+
+  /* Comparison with null and with a raw pointer. */
+  print("u != null: %d\n", u != null);
+  Widget* raw = u.get();
+  print("raw id: %d, u == raw: %d\n", raw.id, u == raw);
+
+  /* release() transfers ownership. */
+  Widget* released = u.release();
+  print("u null after release: %d\n", u == null);
+  delete released;
+
+  /* reset() replaces / clears the owned pointer. */
+  u.reset(new Widget(7, "seven"));
+  u.describe();
+  u.reset();
+  print("u null after reset: %d\n", u == null);
+
+  /* Move assignment transfers ownership. */
+  u = make_unique<Widget>(new Widget(9, "moved"));
+  u.describe();
+
+  print("\n== shared_ptr ==\n");
+  shared_ptr<Widget> s1 = make_shared<Widget>(new Widget(100, "shared"));
+  s1.describe();
+  print("use_count: %d\n", s1.use_count());
+
+  /* Copy semantics bump the reference count. */
+  {
+    shared_ptr<Widget> s2 = s1;
+    print("use_count inside scope: %d\n", s1.use_count());
+    s2.describe();
+  }
+  print("use_count after scope: %d\n", s1.use_count());
+
+  /* Assignment keeps the object alive through the other owner. */
+  shared_ptr<Widget> s3;
+  s3 = s1;
+  s1.reset();
+  print("s3 alive: %d, use_count: %d\n", s3 != null, s3.use_count());
+
+  print("\n== weak_ptr ==\n");
+  weak_ptr<Widget> w = s3;
+  print("expired: %d\n", w.expired());
+  {
+    shared_ptr<Widget> locked = w.lock();
+    print("locked id: %d\n", locked.id);
+  }
+  print("expired while owner alive: %d\n", w.expired());
+
+  s3.reset();
+  print("expired after last owner: %d\n", w.expired());
+  shared_ptr<Widget> dead = w.lock();
+  print("lock of expired: %d\n", dead != null);
+
+  print("\n== fields + factories ==\n");
+  Registry reg = Registry(5, "primary");
+  reg.primary.describe();
+  reg.cache.describe();
+  reg.primary.rename("updated");
+  reg.primary.describe();
+
+  unique_ptr<Widget> fromFn = makeWidget(8, "fromFn");
+  fromFn.describe();
+
+  shared_ptr<Widget> fromShared = makeSharedWidget(9, "fromShared");
+  fromShared.describe();
+
+  print("\nAll smart pointer checks passed!\n");
+  return 0;
+}

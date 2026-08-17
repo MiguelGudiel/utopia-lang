@@ -2,88 +2,19 @@
 #include "utopia/AST/ASTVisitor.hpp"
 #include "utopia/Format/Piece.hpp"
 #include <memory>
-#include <string>
 #include <vector>
 
 namespace utopia {
 
-/* Strips original indentation from multiline block comments to prevent
- the CodeWriter from double-indenting the internal lines. */
-inline std::string formatCommentString(const std::string &raw) {
-  if (raw.length() < 2 || raw.substr(0, 2) != "/*")
-    return raw;
-
-  std::string result;
-  size_t start = 0;
-  bool firstLine = true;
-  size_t commonIndent = std::string::npos;
-  bool allLinesStartWithStar = true;
-
-  /* First pass: Calculate the common indentation of all internal lines */
-  start = 0;
-  while (start < raw.length()) {
-    size_t end = raw.find('\n', start);
-    if (end == std::string::npos)
-      end = raw.length();
-
-    if (!firstLine) {
-      size_t indent = 0;
-      while (start + indent < end &&
-             (raw[start + indent] == ' ' || raw[start + indent] == '\t')) {
-        indent++;
-      }
-      if (start + indent < end) {
-        if (commonIndent == std::string::npos || indent < commonIndent) {
-          commonIndent = indent;
-        }
-        if (raw[start + indent] != '*') {
-          allLinesStartWithStar = false;
-        }
-      }
-    }
-    firstLine = false;
-    start = end + 1;
-  }
-
-  if (commonIndent == std::string::npos)
-    commonIndent = 0;
-
-  /* Preserve the 1-space offset for standard Javadoc-style block comments */
-  size_t stripCount = (allLinesStartWithStar && commonIndent > 0)
-                          ? commonIndent - 1
-                          : commonIndent;
-
-  /* Second pass: Strip the calculated indentation */
-  start = 0;
-  firstLine = true;
-  while (start < raw.length()) {
-    size_t end = raw.find('\n', start);
-    if (end == std::string::npos)
-      end = raw.length();
-
-    if (firstLine) {
-      result += raw.substr(start, end - start);
-    } else {
-      result += "\n";
-      size_t spacesToSkip = 0;
-      while (spacesToSkip < stripCount && start + spacesToSkip < end &&
-             (raw[start + spacesToSkip] == ' ' ||
-              raw[start + spacesToSkip] == '\t')) {
-        spacesToSkip++;
-      }
-      result += raw.substr(start + spacesToSkip, end - (start + spacesToSkip));
-    }
-
-    firstLine = false;
-    start = end + 1;
-  }
-
-  return result;
-}
+/* Tracks the contents of a nested tree of argument lists and collection
+ * literals to determine which should be eagerly split. Defined in
+ * PieceFactory.cpp. */
+struct ExpressionContents;
 
 class PieceFactory : public ASTVisitor<PieceFactory, Piece *> {
 public:
   std::vector<std::unique_ptr<Piece>> arena;
+  int pageWidth;
 
   template <typename T, typename... Args> T *create(Args &&...args) {
     auto ptr = std::make_unique<T>(std::forward<Args>(args)...);
@@ -92,11 +23,50 @@ public:
     return raw;
   }
 
-  Piece* extractChain(const ExprNode* node);
+  explicit PieceFactory(int pageWidth = 80);
+
+  ~PieceFactory();
+
   Piece *dispatchExpr(const ExprNode *node);
 
   Piece *dispatchStmt(const ASTNode *node);
 
+  /* Builds a statement piece, appending `;` to expression statements. */
+  Piece *statementPiece(const ASTNode *node);
+
+  /* Whether [node] is an expression that may be block formatted when it
+   * appears as a list element. */
+  bool canBlockFormat(const ExprNode *node) const;
+
+  /* Given a list of arguments, determines which (if any) should be given block
+   * formatting. Returns its index or -1. */
+  int candidateBlockArgument(const llvm::ArrayRef<ExprNode *> &args,
+                             const llvm::ArrayRef<std::string_view> &names);
+
+  /* Builds a ListPiece for a bracket-delimited set of arguments or elements.
+   * If [allowBlockArgument] is true, one element may receive block formatting.
+   */
+  Piece *buildList(const llvm::ArrayRef<ExprNode *> &args,
+                   const llvm::ArrayRef<std::string_view> &names,
+                   const char *leftBracket, const char *rightBracket,
+                   ListStyle style = ListStyle{}, bool allowBlockArgument = false,
+                   bool blockShaped = true);
+
+  /* Builds a ChainPiece for a series of method calls and property accesses, or
+   * nullptr if there is no chain. */
+  Piece *buildChain(const ExprNode *node);
+
+  /* The number of spaces of leading indentation on the first line. */
+  int getPageWidth() const { return pageWidth; }
+
+  /* Depth of named-argument expression contexts. Set when visiting the value
+   * expression of a named argument. */
+  int namedArgDepth = 0;
+
+  std::unique_ptr<ExpressionContents> contents;
+
+  Piece *visit(const NamespaceDeclNode *node);
+  Piece *visit(const UsingNode *node);
   Piece *visit(const NumberNode *node);
   Piece *visit(const BoolNode *node);
   Piece *visit(const CharNode *node);
@@ -104,7 +74,10 @@ public:
   Piece *visit(const StringNode *node);
   Piece *visit(const VariableNode *node);
   Piece *visit(const UnaryOpNode *node);
+  Piece *visit(const AwaitExprNode *node);
   Piece *visit(const BinaryOpNode *node);
+  Piece *visit(const TernaryOpNode *node);
+  Piece *visit(const LambdaNode *node);
   Piece *visit(const ModuleNode *node);
   Piece *visit(const AnnotationNode *node);
   Piece *visit(const AnnotationDeclNode *node);
@@ -125,6 +98,7 @@ public:
   Piece *visit(const FunctionCallNode *node);
   Piece *visit(const ReturnNode *node);
   Piece *visit(const CastNode *node);
+  Piece *visit(const IsExprNode *node);
   Piece *visit(const ParamDeclNode *node);
   Piece *visit(const UnionDeclNode *node);
   Piece *visit(const StructDeclNode *node);
@@ -132,8 +106,10 @@ public:
   Piece *visit(const MemberAccessNode *node);
   Piece *visit(const ArraySubscriptNode *node);
   Piece *visit(const ArrayLiteralNode *node);
+  Piece *visit(const MapLiteralNode *node);
   Piece *visit(const NewExprNode *node);
   Piece *visit(const DeleteExprNode *node);
+  Piece *visit(const DestructorCallNode *node);
   Piece *visit(const TypeLiteralNode *node);
   Piece *visit(const NullNode *node);
   Piece *visit(const ImplicitCastNode *node);

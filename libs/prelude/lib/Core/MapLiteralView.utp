@@ -1,0 +1,25 @@
+/*
+ * MapLiteralView<K, V> is a lightweight view over a map literal's storage:
+ * two parallel arrays (one for the keys, one for the values) plus the entry
+ * count. It enables '{k1: v1, ...}' initialization without copying the
+ * literal twice, mirroring ListLiteralView for lists.
+ *
+ * The compiler recognizes instantiations of this name ('MapLiteralView_...')
+ * and lowers map literals directly into the view, so every map type that
+ * declares a constructor taking MapLiteralView<K, V> accepts the same
+ * literal syntax — including user-defined map-like types.
+ */
+struct MapLiteralView<K, V> {
+  const K* keys;
+  const V* values;
+  usize length;
+}
+
+/*
+ * hash<T>(value): deterministic content hash used by HashMap and Map, like
+ * Dart's Object.hashCode. String hashes its content; string literals
+ * ('const uint8*') hash the null-terminated content; every other type
+ * hashes its raw in-memory bytes, so equal values always hash equally.
+ */
+@intrinsic("hash_expr")
+usize hash<T>(T value);

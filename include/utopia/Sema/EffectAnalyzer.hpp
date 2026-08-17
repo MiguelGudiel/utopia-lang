@@ -15,8 +15,10 @@ public:
   void visit(const AssignNode *n);
   void visit(const FunctionCallNode *n);
   void visit(const DeleteExprNode *n);
+  void visit(const DestructorCallNode *n);
   void visit(const NewExprNode *n);
   void visit(const ImplicitCastNode *n);
+  void visit(const LambdaNode *n);
   void visit(const ForNode *n);
   void visit(const WhileNode *n);
   void visit(const SwitchNode *n);
@@ -24,6 +26,9 @@ public:
   void visit(const BreakNode *n) {}
   void visit(const ContinueNode *n) {}
   void visit(const UnaryOpNode *n);
+  void visit(const AwaitExprNode *n);
+  void visit(const BinaryOpNode *n);
+  void visit(const TernaryOpNode *n);
   void visit(const ArraySubscriptNode *n);
   void visit(const MemberAccessNode *n);
   void visit(const VariableNode *n);
@@ -31,11 +36,12 @@ public:
   void visit(const ReturnNode *n);
   void visit(const IfNode *n);
   void visit(const CastNode *n);
-  void visit(const BinaryOpNode *n);
+  void visit(const IsExprNode *n);
   void visit(const VarDeclNode *n);
   void visit(const ArrayLiteralNode *n);
+  void visit(const MapLiteralNode *n);
   void visit(const TypeLiteralNode *n);
-  
+
   void visit(const NumberNode *) {}
   void visit(const BoolNode *) {}
   void visit(const CharNode *) {}
@@ -53,6 +59,9 @@ public:
   void visit(const FunctionDeclNode *) {}
   void visit(const EnumDeclNode *) {}
   void visit(const EnumMemberNode *) {}
+
+  void visit(const NamespaceDeclNode *n);
+  void visit(const UsingNode *n);
 };
 
 } // namespace utopia

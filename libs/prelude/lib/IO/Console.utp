@@ -7,24 +7,24 @@ class Console {
   @extern("getchar")
   private static int32 c_getchar();
 
-  public static void print(const String& text) {
+  static void print(const String& text) {
     Console.c_printf("%s", text.c_str());
   }
 
-  public static void printLine(const String& text) {
+  static void printLine(const String& text) {
     Console.c_printf("%s\n", text.c_str());
   }
 
-  public static String readLine() {
+  static String readLine() {
     String result;
     while (true) {
       int32 c = Console.c_getchar();
-      
+
       /* Break on EOF (-1) or newline */
       if (c == -1 || c == 10) {
         break;
       }
-      
+
       /* Ignore carriage return */
       if (c != 13) {
         result.push_back(c as uint8);
@@ -33,7 +33,7 @@ class Console {
     return result;
   }
 
-  public static void clear() {
+  static void clear() {
     Console.print("\x1B[H\x1B[2J\x1B[3J");
   }
 }

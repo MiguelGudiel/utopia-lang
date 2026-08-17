@@ -1,5 +1,8 @@
 import "io.utp";
 
+/* Path lives in the IO namespace. */
+using IO;
+
 #if _WIN32
 
 @extern("LoadLibraryA")
@@ -23,6 +26,8 @@ void* os_dlsym(void* handle, const uint8* symbol);
 int32 os_dlclose(void* handle);
 
 #endif
+
+namespace FFI {
 
 class DynamicLibrary {
   void* handle;
@@ -89,3 +94,5 @@ class DynamicLibrary {
     }
   }
 }
+
+} /* namespace FFI */

@@ -1,0 +1,69 @@
+/*
+ * Demonstrates Dart-style lambdas: they infer their parameter and return
+ * types from the expected function pointer signature, and their parameters
+ * support everything a function parameter supports.
+ */
+
+/* A function that accepts a function pointer. */
+int apply(int Function(int) fn, int value) {
+  return fn(value);
+}
+
+/* Globals are safe to reference from a lambda: they are not stack captures. */
+int globalFactor = 3;
+
+/* A higher-order function returning a lambda through a function pointer. */
+int Function(int) makeTripler() {
+  return (x) => x * globalFactor;
+}
+
+int main() {
+  /* IIFE: an immediately-invoked lambda; the return type is inferred from
+   * the expression body. */
+  int myNumber = (() => 5)();
+  print("myNumber: %d\n", myNumber);
+
+  /* The parentheses hold the lambda's parameters, exactly like a function
+   * call: positional, typed or inferred. */
+  int sum = ((int a, int b) => a + b)(1, 2);
+  print("sum: %d\n", sum);
+
+  /* The signature comes from the target function pointer; untyped parameters
+   * are inferred from it. */
+  int Function(int) twice = (x) => x * 2;
+  int Function(int) square = (int x) {
+    return x * x;
+  };
+  print("twice: %d\n", twice(21));
+  print("square: %d\n", square(7));
+
+  /* The return type may be written explicitly (optional). */
+  int Function(int) addHundred = int32 (x) => x + 100;
+  print("addHundred: %d\n", addHundred(5));
+
+  /* A void lambda with an expression body. */
+  void Function() greet = () => print("Hello from a lambda!\n");
+  greet();
+
+  /* Block bodies support local variables and statements. */
+  int Function(int) stateful = (x) {
+    int r = x + 1;
+    return r * 2;
+  };
+  print("stateful: %d\n", stateful(5));
+
+  /* Lambdas can be passed directly as arguments. */
+  print("apply: %d\n", apply((y) => y * 10, 4));
+
+  /* Nested lambdas and arrays of function pointers. */
+  int Function(int)[2] operators = [(x) => x * 2, (x) => x + 100];
+  print("operators[0](5): %d\n", operators[0](5));
+  print("operators[1](5): %d\n", operators[1](5));
+
+  /* Lambdas as return values (only globals and their own parameters can be
+   * referenced: lambdas are function pointers, not closures). */
+  int Function(int) triple = makeTripler();
+  print("triple(6): %d\n", triple(6));
+
+  return 0;
+}

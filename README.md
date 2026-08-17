@@ -22,25 +22,73 @@ This is not a production-ready language or toolchain. There is no stability guar
 
 ## Features
 
-Based on the current compiler and standard library implementation:
+Utopia combines a C/C++-style memory and execution model with a modern, Dart-inspired surface syntax. The following features are currently implemented, with no exceptions:
 
-- Static typing with explicit-width integers (`int8`–`int64`, `uint8`–`uint64`), `float32`/`float64`, `bool`, `char`, `rune`, and `void`
-- Structs and classes with constructors, destructors, methods, and static members
-- Access control via `public`/`private` modifiers
-- Operator overloading (`operator+`, `operator==`, `operator[]`, etc.)
-- Basic generics for functions, classes, and methods (e.g. `class Box<T>`)
-- Enums with an explicit underlying integer type
-- Pointers, references, and r-value references
-- Manual memory management via `new`/`delete`, including array allocation
-- Fixed-size arrays and array literals
-- Named and optional parameters, including a `required` modifier for named parameters
-- Expression-bodied functions (`=>`)
-- An annotation system (`@extern`, `@export`, `@align`, `@packed`, and user-defined annotation classes)
-- A module system based on `import` statements, with a small prelude (`String`, `Console`, memory and OS bindings)
-- A C-style preprocessor (`#if`/`#elif`/`#else`/`#endif`, `#define`, `#undef`) with built-in platform/architecture macros
-- LLVM-based code generation with TBAA metadata and optional DWARF debug info
-- Ahead-of-time compilation to executables, shared libraries, or LLVM IR/assembly, as well as an in-process JIT execution mode
-- Project builds driven by a `build.yaml` manifest, with optional `build.utp` build scripts executed via JIT
+### Language core
+
+- **Static typing** with explicit-width integers (`int8`–`int64`, `uint8`–`uint64`), floating point (`float32`/`float64`, aliased as `float`/`double`), `bool`, `char` (byte), `rune` (Unicode code point), `usize`, `int`/`uint` aliases, and `void`
+- **`var`/`const` type inference**, `const`-qualified types, and canonical, deduplicated type system (pointers, references, r-value references, fixed-size arrays, function types, aliases, templates)
+- **Records**: `struct`, `class`, and `union` with fields, multiple overloaded constructors, destructors, methods, and `static` members
+- **Enums** with an explicit underlying integer type and constant initializers (`enum Color : int8 { Red, Green = 5 }`)
+- **`typedef` aliases** and multi-part `namespace` declarations (including file-scoped namespaces) with `using` directives
+- **Access control**: `public`, `private`, `protected`, plus an underscore (`_`) convention for implicit privacy
+- **Inheritance** (`extends`), **interfaces** (`implements`), **abstract classes/methods**, `super` delegation and access, and polymorphic dispatch via an LLVM vtable
+- **Virtual dispatch** through `@virtual`/`@override` annotations and `const` methods
+- **Generics/templates** for classes, structs, unions, functions, and methods (e.g. `class Box<T>`, `T findMax<T>(T, T)`) with on-demand instantiation
+- **Operator overloading** (`operator+`, `operator==`, `operator[]`, `operator=`, unary and compound-assignment operators, etc.) including free-function operators
+- **Expression-bodied functions** (`=>`) and classic `if`/`else`, `while`, `for`, `switch`/`case`/`default`, `break`, `continue`, `return`, and ternary `?:`
+
+### Memory model
+
+- **Manual memory management** via `new`/`delete` and `new[]`/`delete[]` (with array length prefix)
+- **RAII**: destructors run deterministically on scope exit, early returns, and loop exits; copy/move constructors and `operator=` enforce correct ownership semantics for records with custom destructors
+- **Smart pointers** in the standard library: `unique_ptr<T>`, `shared_ptr<T>`, `weak_ptr<T>` with reference counting, plus `make_unique<T>`/`make_shared<T>` factories — mirroring the C++ API
+- **Rust-style auto-deref**: member access with `.` resolves through overloaded `operator*` automatically, so `ptr.field` and `ptr.method()` work directly on smart pointers (no `->` syntax needed)
+- **Pointers, references, and r-value references** with automatic dereference on member access, plus `null`
+
+### Functions & parameters
+
+- **Named parameters** (`{int port = 8080}`), **optional/default parameters**, and a **`required`** modifier for named parameters
+- **Variadic functions** (`...`) with automatic float-to-double promotion
+- **Function overloading** by signature, including `const` qualifiers
+- **Function-pointer types** via the `Function` type
+- **Type casting** with the `as` operator and user-defined conversion constructors
+- **Dart-style `async`/`await`**: `async` functions, methods, lambdas and `main` compile to coroutines returning `Future<T>`; `await` suspends until the future completes
+  - Fire-and-forget calls run in the background on the program's event loop
+  - `Future.runOnThread` runs work on real worker threads; async lambdas run there with their own event-loop copy
+  - `Future.value`, `Future.sync`, `Future.delayed`, `Future.wait`, and `then()` chaining (sync and async callbacks)
+  - `Future<T> a = await getA();` keeps the future (no unwrap) and `return fut;` awaits implicitly
+  - The runtime (`libutopia_async`) is injected automatically; disable it with `--no-async` or `async: false` in `build.yaml`
+
+### Annotations
+
+- **Built-in annotations**: `@extern` (with calling-convention control), `@export`, `@align`, `@packed`, `@nodiscard`, `@deprecated`, `@inline`, `@forceInline`, `@readnone`, `@readonly`, `@nosync`, `@nofree`, `@willreturn`, `@mustprogress`, `@nocapture`, `@nonnull`, `@dereferenceable`, `@weak`, `@intrinsic`, `@virtual`, `@override`
+- **User-defined annotation classes** (`annotation class Route { ... }`)
+- **Compile-time intrinsics**: `sizeof`/`typeof` with type reflection
+
+### Modules & tooling
+
+- **Module system** with `import`/`export`, an automatically loaded prelude, a standard library (`utopia:memory`, `utopia:ffi`, `utopia:io`, `utopia:test`), and the `utopia:builder` API for build scripts
+- **Package manager (`yip`)**: `get`, `add`, `publish`, and `login` against a remote registry
+- **C-style preprocessor**: `#if`/`#elif`/`#else`/`#endif`, `#define`, `#undef`, `#error`, `#warning`, with automatic platform/architecture macros
+- **LLVM-based code generation** with TBAA metadata, LLVM attribute inference, and optional DWARF debug info
+- **Ahead-of-time compilation** to executables, static/shared libraries, LLVM IR, or assembly, plus an in-process **JIT** mode (`utopia run`)
+- **Project builds** driven by a `build.yaml` manifest (targets: executable, library, shared library) with optional `build.utp` scripts executed via JIT, and a transitive build cache
+- **Cross-compilation** support (`--target`, `--sysroot`, including Android via the NDK)
+- **Language Server Protocol** implementation (hover, go-to-definition, completion, signature help, diagnostics, semantic tokens, formatting) and a built-in **code formatter**
+
+### Standard library
+
+- **`String`**: construction from any primitive, `+`/`==`/`!=` operators, indexing, `length()`, `c_str()`, `toInt()`/`toFloat()`, `clear()`, `push_back()`
+- **`List<T>`**: dynamic generic list with `push()`, indexing, copy semantics, and array-literal initialization
+- **`Map<K, V>` / `HashMap<K, V>` / `SplayTreeMap<K, V>`**: Dart-style maps with map-literal initialization (`{"key": value}`) — `Map` preserves insertion order (LinkedHashMap, O(1) average lookups), `HashMap` is an unordered open-addressing table, and `SplayTreeMap` keeps keys sorted (O(log n) amortized); all deep-copy on assignment and accept the same literal
+- **`Console`**: `print`, `printLine`, `readLine`, `clear`; global `print(format, ...)` with `printf`-style formatting
+- **`Math`**: numeric limits constants (`INT32_MAX`, `FLOAT64_MIN`, ...)
+- **`Memory`**: `malloc`/`free` bindings and type reflection (`Type`, `MethodInfo`)
+- **`System`**: `sleep`, `system` bindings
+- **`Path`/`File`/`Directory`/`FileHandle`**: filesystem and file I/O utilities (in the `IO` namespace)
+- **`DynamicLibrary`**: runtime `dlopen`/`dlsym`-style FFI (in the `FFI` namespace)
+- **Smart pointers** (`Memory.unique_ptr`, `Memory.shared_ptr`, `Memory.weak_ptr`, `Memory.make_unique`, `Memory.make_shared`) in the `Memory` namespace
 
 ## Installation
 
@@ -81,16 +129,34 @@ The `examples/` directory contains small, self-contained programs demonstrating 
 - Enums and `switch` statements
 - Recursion
 - Classes and object lifetime
+- Inheritance, `super` delegation, and virtual/override methods
 - Dynamic memory allocation
 - Functions, named parameters, and default arguments
 - Generics/templates
 - Custom annotations
+- Smart pointers with Rust-style auto-deref (`unique_ptr`, `shared_ptr`, `weak_ptr`)
+- Dart-style lambdas with inferred signatures (`() => 5`, `(x) => x * 2`)
+- Dart-style async/await (`Future<T>`, `await`, fire-and-forget, `runOnThread`, `then`, `wait`)
+- The extended standard library (`Duration`, `Stopwatch`, `DateTime`, `Random`, `Math`)
+- `List<T>` operations, copies, and the functional methods (`map`, `where`, `reduce`)
+- `Map<K, V>`, `HashMap`, and `SplayTreeMap` with `{key: value}` literals
+- Abstract classes and abstract methods
+- Multiple interfaces via `implements`
+- Polymorphism and virtual dispatch through base and interface pointers
 
 Each example is a standalone project with its own `build.yaml` manifest.
 
 ## Documentation
 
-A `docs/` directory exists in this repository for language documentation. It is still under development; the primary way to learn the language today is through the `examples/` directory and the standard library sources under `libs/`.
+The `docs/` directory contains the full language documentation, organized like the books of other systems languages:
+
+- **Getting Started** — installation, your first program, and project layout
+- **Language Guide** — types, variables, functions, control flow, records, OOP, generics, operators, memory management and smart pointers, modules, preprocessor, and annotations
+- **Standard Library** — `String`, `List`, `Console`, `Math`, `Memory`, `System`, I/O, FFI, and smart pointers
+- **Tooling** — compiler CLI, build system, JIT, LSP, formatter, and cross-compilation targets
+- **Advanced Topics** — LLVM code generation, TBAA, DWARF debug info, and intrinsics
+
+Start at [docs/README.md](docs/README.md). The `examples/` directory also provides runnable, self-contained sample programs.
 
 ## Building from Source
 
@@ -118,9 +184,9 @@ Repository layout:
 - `src/`, `include/` — compiler library (lexer, parser, semantic analysis, LLVM codegen)
 - `tools/utopia/` — command-line driver
 - `libs/` — prelude, standard library, and build-script library shipped with the toolchain
-- `examples/` — sample programs
+- `examples/` — sample programs (including `11_smart_pointers`)
 - `tests/` — test suite
-- `docs/` — documentation (in progress)
+- `docs/` — full language documentation
 
 ## Project Status
 

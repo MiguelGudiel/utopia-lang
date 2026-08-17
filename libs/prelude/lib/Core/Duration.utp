@@ -1,0 +1,229 @@
+import "../String.utp";
+
+/*
+ * Duration — a span of time with microsecond precision, mirroring Dart's
+ * dart:core Duration API.
+ *
+ * A Duration is stored as a signed 64-bit count of microseconds; the same
+ * arithmetic (including wraparound) applies as in Dart.
+ */
+
+class Duration {
+  int64 _us;
+
+  /* Dart's const Duration({days, hours, minutes, seconds, milliseconds,
+   * microseconds}) — all parts are optional and default to zero. */
+  Duration(
+    {int64 days = 0,
+    int64 hours = 0,
+    int64 minutes = 0,
+    int64 seconds = 0,
+    int64 milliseconds = 0,
+    int64 microseconds = 0},
+  ) {
+    this._us =
+        days * 86400000000L + hours * 3600000000L + minutes * 60000000L +
+        seconds * 1000000L +
+        milliseconds * 1000L +
+        microseconds;
+  }
+
+  static const int64 microsecondsPerMillisecond = 1000;
+  static const int64 microsecondsPerSecond = 1000000;
+  static const int64 microsecondsPerMinute = 60000000;
+  static const int64 microsecondsPerHour = 3600000000L;
+  static const int64 microsecondsPerDay = 86400000000L;
+
+  static const int64 millisecondsPerSecond = 1000;
+  static const int64 millisecondsPerMinute = 60000;
+  static const int64 millisecondsPerHour = 3600000;
+  static const int64 millisecondsPerDay = 86400000;
+
+  static const int64 secondsPerMinute = 60;
+  static const int64 secondsPerHour = 3600;
+  static const int64 secondsPerDay = 86400;
+
+  static const int64 minutesPerHour = 60;
+  static const int64 minutesPerDay = 1440;
+
+  static const int64 hoursPerDay = 24;
+
+  /* A zero-length duration. */
+  @inline
+  static Duration zero() {
+    return Duration();
+  }
+
+  @inline
+  static Duration microseconds(int64 microseconds) {
+    return Duration(microseconds: microseconds);
+  }
+
+  @inline
+  static Duration milliseconds(int64 milliseconds) {
+    return Duration(milliseconds: milliseconds);
+  }
+
+  @inline
+  static Duration seconds(int64 seconds) {
+    return Duration(seconds: seconds);
+  }
+
+  @inline
+  static Duration minutes(int64 minutes) {
+    return Duration(minutes: minutes);
+  }
+
+  @inline
+  static Duration hours(int64 hours) {
+    return Duration(hours: hours);
+  }
+
+  @inline
+  static Duration days(int64 days) {
+    return Duration(days: days);
+  }
+
+  /* The total count of the unit, truncated toward zero (Dart's inDays and
+   * friends use truncating division). */
+  @inline
+  int64 inMicroseconds() {
+    return this._us;
+  }
+
+  @inline
+  int64 inMilliseconds() {
+    return this._us / Duration.microsecondsPerMillisecond;
+  }
+
+  @inline
+  int64 inSeconds() {
+    return this._us / Duration.microsecondsPerSecond;
+  }
+
+  @inline
+  int64 inMinutes() {
+    return this._us / Duration.microsecondsPerMinute;
+  }
+
+  @inline
+  int64 inHours() {
+    return this._us / Duration.microsecondsPerHour;
+  }
+
+  @inline
+  int64 inDays() {
+    return this._us / Duration.microsecondsPerDay;
+  }
+
+  @inline
+  bool isNegative() {
+    return this._us < 0;
+  }
+
+  Duration operator+(const Duration& other) {
+    return Duration.microseconds(this._us + other._us);
+  }
+
+  Duration operator-(const Duration& other) {
+    return Duration.microseconds(this._us - other._us);
+  }
+
+  /* Unary negation. */
+  Duration operator-() {
+    return Duration.microseconds(-this._us);
+  }
+
+  /* Scales by an integer factor, truncating the result to microseconds
+   * (Dart's operator*). */
+  Duration operator*(int64 factor) {
+    return Duration.microseconds(this._us * factor);
+  }
+
+  Duration operator*(float64 factor) {
+    return Duration.microseconds(((this._us as float64) * factor) as int64);
+  }
+
+  /* Truncating division by an integer quotient (Dart's operator~/). */
+  Duration operator/(int64 quotient) {
+    return Duration.microseconds(this._us / quotient);
+  }
+
+  /* Remainder of the microsecond count divided by 'quotient' (Dart's
+   * operator%). */
+  Duration operator%(int64 quotient) {
+    return Duration.microseconds(this._us % quotient);
+  }
+
+  bool operator==(const Duration& other) {
+    return this._us == other._us;
+  }
+
+  bool operator!=(const Duration& other) {
+    return this._us != other._us;
+  }
+
+  bool operator<(const Duration& other) {
+    return this._us < other._us;
+  }
+
+  bool operator>(const Duration& other) {
+    return this._us > other._us;
+  }
+
+  bool operator<=(const Duration& other) {
+    return this._us <= other._us;
+  }
+
+  bool operator>=(const Duration& other) {
+    return this._us >= other._us;
+  }
+
+  /* Negative when this < other, zero when equal, positive otherwise. */
+  int32 compareTo(const Duration& other) {
+    if (this._us < other._us) return -1;
+    if (this._us > other._us) return 1;
+    return 0;
+  }
+
+  @extern("snprintf")
+  static int32 c_snprintf(uint8* str, usize size, const uint8* format, ...);
+
+  /* Formats as H:MM:SS.mmmuuu (hours unpadded, like Dart); negative
+   * durations are rendered with a leading '-'. Zero renders as
+   * "0:00:00.000000". */
+  String toString() {
+    if (this._us == 0) return "0:00:00.000000";
+    int64 abs = this._us < 0 ? -this._us : this._us;
+    int64 h = abs / Duration.microsecondsPerHour;
+    int64 m = (abs / Duration.microsecondsPerMinute) % 60;
+    int64 s = (abs / Duration.microsecondsPerSecond) % 60;
+    int64 ms = (abs / Duration.microsecondsPerMillisecond) % 1000;
+    int64 us = abs % 1000;
+    uint8[64] buf;
+    if (this._us < 0) {
+      Duration.c_snprintf(
+        &buf[0],
+        64,
+        "-%lld:%02lld:%02lld.%03lld%03lld",
+        h,
+        m,
+        s,
+        ms,
+        us,
+      );
+    } else {
+      Duration.c_snprintf(
+        &buf[0],
+        64,
+        "%lld:%02lld:%02lld.%03lld%03lld",
+        h,
+        m,
+        s,
+        ms,
+        us,
+      );
+    }
+    return &buf[0];
+  }
+}

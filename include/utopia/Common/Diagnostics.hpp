@@ -7,7 +7,7 @@
 
 namespace utopia {
 
-enum class DiagLevel { Error, Warning, Note };
+enum class DiagLevel { Error, Warning, Note, Inactive };
 
 struct Diagnostic {
   DiagLevel level;
@@ -36,17 +36,24 @@ public:
   bool hasErrors() const { return errorCount > 0; }
   const std::vector<Diagnostic> &getDiagnostics() const { return diagnostics; }
 
-  // Generates a JSON array compatible with LSP publishDiagnostics
-  nlohmann::json toJSON() const {
+  // Generates a JSON array compatible with LSP publishDiagnostics. When
+  // 'fileFilter' is non-empty, only diagnostics reported for that file (or
+  // without a file) are kept: tree-wide analyses produce diagnostics for
+  // imported modules, which must be attributed to those documents instead
+  // of the document that triggered the analysis.
+  nlohmann::json toJSON(const std::string &fileFilter = "") const {
     auto j = nlohmann::json::array();
     for (const auto &d : diagnostics) {
+      if (!fileFilter.empty() && !d.filePath.empty() &&
+          d.filePath != fileFilter)
+        continue;
       int lspLine = d.line > 0 ? d.line - 1 : 0;
       int lspCol = d.column > 0 ? d.column - 1 : 0;
       int lspEndLine = (d.endLine > 0) ? d.endLine - 1 : lspLine;
 
       int lspEndCol;
       if (lspEndLine > lspLine) {
-        lspEndCol = std::max(0, lspCol + d.length);
+        lspEndCol = 9999;
       } else {
         // Prevent negative lengths from multi-line spanning nodes to avoid VS
         // Code rejecting the payload
@@ -54,13 +61,27 @@ public:
         lspEndCol = lspCol + safeLen;
       }
 
-      j.push_back(
-          {{"range",
-            {{"start", {{"line", lspLine}, {"character", lspCol}}},
-             {"end", {{"line", lspEndLine}, {"character", lspEndCol}}}}},
-           {"severity", d.level == DiagLevel::Error ? 1 : 2},
-           {"message", d.message},
-           {"source", "utopia"}});
+      auto diagObj = nlohmann::json{
+          {"range",
+           {{"start", {{"line", lspLine}, {"character", lspCol}}},
+            {"end", {{"line", lspEndLine}, {"character", lspEndCol}}}}},
+          {"message", d.message},
+          {"source", "utopia"},
+          {"file", d.filePath}};
+
+      if (d.level == DiagLevel::Error) {
+        diagObj["severity"] = 1;
+      } else if (d.level == DiagLevel::Warning) {
+        diagObj["severity"] = 2;
+      } else if (d.level == DiagLevel::Note) {
+        diagObj["severity"] = 3;
+      } else if (d.level == DiagLevel::Inactive) {
+        diagObj["severity"] = 4; // Hint level in LSP
+        diagObj["tags"] = {
+            1}; // 1 = DiagnosticTag::Unnecessary (Greys out code in IDE)
+      }
+
+      j.push_back(diagObj);
     }
     return j;
   }
@@ -90,6 +111,10 @@ private:
     case DiagLevel::Note:
       color = "\033[1;36m";
       label = "note";
+      break;
+    case DiagLevel::Inactive:
+      color = "\033[1;30m"; // Dark grey
+      label = "inactive";
       break;
     }
 

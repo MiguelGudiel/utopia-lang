@@ -1,0 +1,92 @@
+/*
+ * Interfaces: modeled as abstract classes with 'implements'. A class may
+ * implement several interfaces (and extend one base class); each interface
+ * method must be implemented with @override. Calls through an interface
+ * pointer resolve through the vtable like base-class calls.
+ */
+
+abstract class Drawable {
+  public void draw();
+}
+
+abstract class Resizable {
+  public void resize(int32 w, int32 h);
+}
+
+abstract class Serializable {
+  public String serialize();
+}
+
+class Window implements Drawable, Resizable, Serializable {
+  private int32 _w;
+  private int32 _h;
+
+  Window(int32 w, int32 h) {
+    this._w = w;
+    this._h = h;
+  }
+
+  @override
+  public void draw() {
+    print("window %dx%d\n", this._w, this._h);
+  }
+
+  @override
+  public void resize(int32 w, int32 h) {
+    this._w = w;
+    this._h = h;
+  }
+
+  @override
+  public String serialize() {
+    return String(this._w) + "x" + String(this._h);
+  }
+}
+
+class Button implements Drawable, Serializable {
+  private String _label;
+
+  Button(String label) {
+    this._label = label;
+  }
+
+  @override
+  public void draw() {
+    print("button '%s'\n", this._label.c_str());
+  }
+
+  @override
+  public String serialize() {
+    return this._label;
+  }
+}
+
+void render(Drawable* d) {
+  d.draw();
+}
+
+void rescale(Resizable* r, int32 w, int32 h) {
+  r.resize(w, h);
+}
+
+void dump(Serializable* s) {
+  print("serialized: %s\n", s.serialize().c_str());
+}
+
+int32 main() {
+  Window* window = new Window(800, 600);
+  Button* button = new Button("OK");
+
+  /* The same object is passed through each of its interfaces. */
+  render(window);
+  render(button);
+  dump(window);
+  dump(button);
+
+  rescale(window, 1920, 1080);
+  render(window);
+
+  delete window;
+  delete button;
+  return 0;
+}

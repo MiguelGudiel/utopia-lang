@@ -3,9 +3,7 @@
  * Execution begins here and must return an integer status code.
  */
 int main() {
-  /* Output the standard greeting to the console. */
   print("Hello, World!\n");
 
-  /* Return a zero status code to indicate successful execution. */
   return 0;
 }

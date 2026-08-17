@@ -10,6 +10,9 @@ void addIncludeDir(const uint8* dir);
 @extern("UtopiaBuild_setOptLevel")
 void setOptLevel(int32 level);
 
+@extern("UtopiaBuild_setAsyncEnabled")
+void setAsyncEnabled(bool enabled);
+
 @extern("UtopiaBuild_addDefine")
 void addDefine({const uint8* name, bool isPublic = true});
 
@@ -21,3 +24,36 @@ bool isDefined(const uint8* name);
 
 @extern("UtopiaBuild_addCacheDefine")
 void addCacheDefine({const uint8* name, bool defaultValue = false, bool isPublic = true});
+
+@extern("UtopiaBuild_getMainProjectRoot")
+const uint8* _getMainProjectRoot();
+
+@extern("UtopiaBuild_getCurrentProjectRoot")
+const uint8* _getCurrentProjectRoot();
+
+@extern("UtopiaBuild_getOutputDir")
+const uint8* _getOutputDir();
+
+@extern("UtopiaBuild_getMainOutputDir")
+const uint8* _getMainOutputDir();
+
+@extern("UtopiaBuild_getTargetTriple")
+const uint8* _getTargetTriple();
+
+@extern("UtopiaBuild_getBuildType")
+const uint8* _getBuildType();
+
+@extern("UtopiaBuild_getTargetOS")
+const uint8* _getTargetOS();
+
+@extern("UtopiaBuild_getTargetArch")
+const uint8* _getTargetArch();
+
+const String MAIN_PROJECT_ROOT = _getMainProjectRoot();
+const String CURRENT_PROJECT_ROOT = _getCurrentProjectRoot();
+const String OUTPUT_DIR = _getOutputDir();
+const String MAIN_OUTPUT_DIR = _getMainOutputDir();
+const String TARGET_TRIPLE = _getTargetTriple();
+const String BUILD_TYPE = _getBuildType();
+const String TARGET_OS = _getTargetOS();
+const String TARGET_ARCH = _getTargetArch();

@@ -2,6 +2,14 @@
 
 namespace utopia {
 
+void EffectAnalyzer::visit(const NamespaceDeclNode *n) {
+  for (const auto *stmt : n->statements) {
+    dispatch(stmt);
+  }
+}
+
+void EffectAnalyzer::visit(const UsingNode *n) {}
+
 void EffectAnalyzer::visit(const AssignNode *n) {
   writesMem = true;
   dispatch(n->target);
@@ -39,6 +47,8 @@ void EffectAnalyzer::visit(const FunctionCallNode *n) {
     dispatch(a);
 }
 
+void EffectAnalyzer::visit(const DestructorCallNode *n) {}
+
 void EffectAnalyzer::visit(const DeleteExprNode *n) {
   freesMem = true;
   writesMem = true;
@@ -58,6 +68,11 @@ void EffectAnalyzer::visit(const ImplicitCastNode *n) {
   readsMem = true;
   potentiallyInfinite = true;
   dispatch(n->expr);
+}
+
+void EffectAnalyzer::visit(const LambdaNode *n) {
+  /* A lambda defers its effects until called; the body's effects are tracked
+   * by the synthesized function's own analysis. */
 }
 
 void EffectAnalyzer::visit(const ForNode *n) {
@@ -99,6 +114,27 @@ void EffectAnalyzer::visit(const UnaryOpNode *n) {
   dispatch(n->expr);
 }
 
+void EffectAnalyzer::visit(const AwaitExprNode *n) {
+  /* Await suspends on the event loop: it may not return and it touches the
+   * scheduler state. */
+  readsMem = true;
+  writesMem = true;
+  hasSync = true;
+  potentiallyInfinite = true;
+  dispatch(n->expr);
+}
+
+void EffectAnalyzer::visit(const BinaryOpNode *n) {
+  dispatch(n->left);
+  dispatch(n->right);
+}
+
+void EffectAnalyzer::visit(const TernaryOpNode *n) {
+  dispatch(n->condition);
+  dispatch(n->trueExpr);
+  dispatch(n->falseExpr);
+}
+
 void EffectAnalyzer::visit(const UnionDeclNode *n) {}
 
 void EffectAnalyzer::visit(const ArraySubscriptNode *n) {
@@ -137,8 +173,12 @@ void EffectAnalyzer::visit(const MemberAccessNode *n) {
 void EffectAnalyzer::visit(const TypeLiteralNode *n) {}
 
 void EffectAnalyzer::visit(const VariableNode *n) {
+  if (n->isField) {
+    readsMem = true;
+  }
   if (n->resolvedDecl && n->resolvedDecl->kind == NodeKind::VarDecl) {
-    if (static_cast<const VarDeclNode *>(n->resolvedDecl)->isGlobal)
+    auto *varDecl = static_cast<const VarDeclNode *>(n->resolvedDecl);
+    if (varDecl->isGlobal || varDecl->isStatic)
       readsMem = true;
   }
 }
@@ -169,9 +209,10 @@ void EffectAnalyzer::visit(const CastNode *n) {
   dispatch(n->expr);
 }
 
-void EffectAnalyzer::visit(const BinaryOpNode *n) {
-  dispatch(n->left);
-  dispatch(n->right);
+void EffectAnalyzer::visit(const IsExprNode *n) {
+  /* A type test only reads the vtable pointer of the object. */
+  readsMem = true;
+  dispatch(n->expr);
 }
 
 void EffectAnalyzer::visit(const VarDeclNode *n) {
@@ -182,6 +223,13 @@ void EffectAnalyzer::visit(const VarDeclNode *n) {
 void EffectAnalyzer::visit(const ArrayLiteralNode *n) {
   for (auto *e : n->elements)
     dispatch(e);
+}
+
+void EffectAnalyzer::visit(const MapLiteralNode *n) {
+  for (auto *k : n->keys)
+    dispatch(k);
+  for (auto *v : n->values)
+    dispatch(v);
 }
 
 } // namespace utopia

@@ -5,14 +5,22 @@
       "id": "winArch",
       "type": "pickString",
       "description": "Arquitectura objetivo para Windows",
-      "options": ["x64", "ARM64", "Win32"],
+      "options": [
+        "x64",
+        "ARM64",
+        "Win32"
+      ],
       "default": "x64"
     },
     {
       "id": "macArch",
       "type": "pickString",
       "description": "Arquitectura objetivo para macOS (arm64 = M1/M2/M3, x86_64 = Intel)",
-      "options": ["arm64", "x86_64", "x86_64;arm64"],
+      "options": [
+        "arm64",
+        "x86_64",
+        "x86_64;arm64"
+      ],
       "default": "arm64"
     }
   ],
@@ -50,16 +58,14 @@
     },
     {
       "label": "Package Installer: Windows (NSIS)",
-      "type": "shell",
-      "windows": {
-        "command": "cmake -S . -B build_release -A ${input:winArch} -DCMAKE_BUILD_TYPE=Release && cmake --build build_release --config Release && cpack --config build_release/CPackConfig.cmake -C Release -G NSIS",
-        "options": {
-          "shell": {
-            "executable": "cmd.exe",
-            "args": ["/d", "/c"]
-          }
-        }
-      },
+      "type": "process",
+      "command": "python",
+      "args": [
+        "${workspaceFolder}/scripts/build_installer.py",
+        "--arch",
+        "${input:winArch}"
+      ],
+      "windows": {},
       "problemMatcher": [],
       "group": "build",
       "presentation": {
@@ -69,10 +75,14 @@
     },
     {
       "label": "Package Installer: macOS (DMG)",
-      "type": "shell",
-      "osx": {
-        "command": "cmake -S . -B build_release -DCMAKE_OSX_ARCHITECTURES=\"${input:macArch}\" -DCMAKE_BUILD_TYPE=Release && cmake --build build_release && cpack --config build_release/CPackConfig.cmake -G DragNDrop"
-      },
+      "type": "process",
+      "command": "python3",
+      "args": [
+        "${workspaceFolder}/scripts/build_installer.py",
+        "--arch",
+        "${input:macArch}"
+      ],
+      "osx": {},
       "problemMatcher": [],
       "group": "build",
       "presentation": {
@@ -82,10 +92,12 @@
     },
     {
       "label": "Package Installer: Fedora/Linux (RPM)",
-      "type": "shell",
-      "linux": {
-        "command": "cmake -S . -B build_release -DCMAKE_BUILD_TYPE=Release && cmake --build build_release && cpack --config build_release/CPackConfig.cmake -G RPM"
-      },
+      "type": "process",
+      "command": "python3",
+      "args": [
+        "${workspaceFolder}/scripts/build_installer.py"
+      ],
+      "linux": {},
       "problemMatcher": [],
       "group": "build",
       "presentation": {
