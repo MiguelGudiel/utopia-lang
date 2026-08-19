@@ -1,0 +1,307 @@
+/*
+ * SIMD smoke test: portable layer + x86 (SSE/AVX/AVX-512) + NEON layers.
+ */
+int failed = 0;
+
+void check(bool ok, String what) {
+  if (!ok) {
+    print("FAIL: %s\n", what.c_str());
+    failed = 1;
+  }
+}
+
+void checkF(float got, float want, String what) {
+  float diff = got - want;
+  if (diff < 0) diff = -diff;
+  if (diff > 0.0001) {
+    print("FAIL: %s got=%f want=%f\n", what.c_str(), got, want);
+    failed = 1;
+  }
+}
+
+void checkI(int64 got, int64 want, String what) {
+  if (got != want) {
+    print("FAIL: %s got=%lld want=%lld\n", what.c_str(), got, want);
+    failed = 1;
+  }
+}
+
+void main() {
+  /* ---- splat / add / mul / sub / div / neg / abs ---- */
+  float32x4 a = simd_splat_f32x4(3.0);
+  float32x4 b = simd_splat_f32x4(2.0);
+  checkF(simd_extract(simd_add(a, b), 0), 5.0, "add");
+  checkF(simd_extract(simd_sub(a, b), 3), 1.0, "sub");
+  checkF(simd_extract(simd_mul(a, b), 2), 6.0, "mul");
+  checkF(simd_extract(simd_div(a, b), 1), 1.5, "div");
+  checkF(simd_extract(simd_neg(a), 0), -3.0, "neg");
+  checkF(simd_extract(simd_sqrt(simd_splat_f32x4(16.0)), 0), 4.0, "sqrt");
+  checkF(simd_extract(simd_min(a, b), 0), 2.0, "min");
+  checkF(simd_extract(simd_max(a, b), 0), 3.0, "max");
+  checkF(simd_extract(simd_fma(a, b, simd_splat_f32x4(1.0)), 0), 7.0, "fma");
+
+  /* ---- make / zero / extract / insert ---- */
+  float32x4 m = simd_make_f32x4(1.0, 2.0, 3.0, 4.0);
+  checkF(simd_extract(m, 2), 3.0, "make/extract");
+  float32x4 ins = simd_insert(m, 1, 9.0);
+  checkF(simd_extract(ins, 1), 9.0, "insert");
+  float32x4 z = simd_zero_f32x4();
+  checkF(simd_extract(z, 0), 0.0, "zero");
+
+  /* ---- comparisons / select / blendv ---- */
+  float32x4 cmpA = simd_make_f32x4(1.0, 5.0, 2.0, 6.0);
+  float32x4 cmpB = simd_make_f32x4(3.0, 3.0, 3.0, 3.0);
+  boolx4 mask = simd_cmp_lt(cmpA, cmpB);
+  check(simd_any(mask), "any");
+  check(!simd_all(mask), "all");
+  check(simd_extract(mask, 0), "mask0");
+  check(!simd_extract(mask, 1), "mask1");
+  float32x4 sel = simd_select(mask, cmpA, cmpB);
+  checkF(simd_extract(sel, 0), 1.0, "select");
+  checkF(simd_extract(sel, 1), 3.0, "select2");
+  float32x4 bl = simd_blendv(simd_cmp_lt_ones(cmpA, cmpB), cmpA, cmpB);
+  checkF(simd_extract(bl, 0), 1.0, "blendv");
+  checkF(simd_extract(bl, 3), 3.0, "blendv2");
+  checkF(simd_extract(simd_cmp_eq_ones(a, a), 1), -1.0, "cmp_ones");
+  checkF(simd_extract(simd_cmp_ge_ones(b, a), 0), 0.0, "cmp_ones2");
+
+  /* ---- bitwise ---- */
+  int32x4 x = simd_splat_i32x4(0x0F0F0F0F);
+  int32x4 y = simd_splat_i32x4(0x00FF00FF);
+  checkI(simd_extract(simd_and(x, y), 0), 0x000F000F, "and");
+  checkI(simd_extract(simd_or(x, y), 0), 0x0FFF0FFF, "or");
+  checkI(simd_extract(simd_xor(x, y), 0), 0x0FF00FF0, "xor");
+  checkI(simd_extract(simd_not(x), 0), 0xF0F0F0F0 as int32, "not");
+  checkI(simd_extract(simd_shl(x, simd_splat_i32x4(4)), 0), -252645136, "shl");
+  int32x4 negv = simd_splat_i32x4(-8);
+  checkI(simd_extract(simd_shr(negv, simd_splat_i32x4(1)), 0), -4, "shr");
+  uint32x4 posv = simd_splat_u32x4(0x80000000);
+  checkI(simd_extract(simd_ushr(posv, simd_splat_u32x4(1)), 0), 0x40000000,
+         "ushr");
+
+  /* ---- integer arithmetic ---- */
+  int32x4 ia = simd_splat_i32x4(17);
+  int32x4 ib = simd_splat_i32x4(5);
+  checkI(simd_extract(simd_sdiv(ia, ib), 0), 3, "sdiv");
+  checkI(simd_extract(simd_srem(ia, ib), 0), 2, "srem");
+  uint32x4 ua = simd_splat_u32x4(17);
+  uint32x4 ub = simd_splat_u32x4(5);
+  checkI(simd_extract(simd_udiv(ua, ub), 0), 3, "udiv");
+  checkI(simd_extract(simd_urem(ua, ub), 0), 2, "urem");
+  checkI(simd_extract(simd_min(ia, ib), 0), 5, "imin");
+  checkI(simd_extract(simd_max(ia, ib), 0), 17, "imax");
+  checkI(simd_extract(simd_umin(ua, ub), 0), 5, "umin");
+  checkI(simd_extract(simd_umax(ua, ub), 0), 17, "umax");
+
+  /* ---- shuffle / splat_lane / hadd / unpack ---- */
+  float32x4 p = simd_make_f32x4(1.0, 2.0, 3.0, 4.0);
+  float32x4 q = simd_make_f32x4(5.0, 6.0, 7.0, 8.0);
+  float32x4 sh = simd_shuffle(p, q, 3, 2, 5, 4);
+  checkF(simd_extract(sh, 0), 4.0, "shuffle0");
+  checkF(simd_extract(sh, 1), 3.0, "shuffle1");
+  checkF(simd_extract(sh, 2), 6.0, "shuffle2");
+  checkF(simd_extract(sh, 3), 5.0, "shuffle3");
+  float32x4 spl = simd_splat_lane(p, 2);
+  checkF(simd_extract(spl, 3), 3.0, "splat_lane");
+  float32x4 hadd = simd_hadd(p, q);
+  checkF(simd_extract(hadd, 0), 3.0, "hadd0");
+  checkF(simd_extract(hadd, 1), 7.0, "hadd1");
+  checkF(simd_extract(hadd, 2), 11.0, "hadd2");
+  checkF(simd_extract(hadd, 3), 15.0, "hadd3");
+  float32x4 un = simd_unpacklo(p, q);
+  checkF(simd_extract(un, 0), 1.0, "unpacklo0");
+  checkF(simd_extract(un, 1), 5.0, "unpacklo1");
+  checkF(simd_extract(un, 2), 2.0, "unpacklo2");
+  checkF(simd_extract(un, 3), 6.0, "unpacklo3");
+
+  /* ---- memory: load/store (aligned and unaligned) ---- */
+  /* Aligned loads/stores require the address to be aligned to the vector
+   * size (as in C, misaligned use is UB). 'alloc' provides aligned memory;
+   * 'new' arrays are 8-byte aligned (length prefix), enough for the
+   * unaligned variants. */
+  RawMemory raw = alloc(128, 64);
+  float32* abuf = raw.ptr as float32*;
+  for (int i = 0; i < 32; i++) {
+    abuf[i] = i as float32;
+  }
+  float32* buf = new float32[16];
+  for (int i = 0; i < 16; i++) {
+    buf[i] = i as float32;
+  }
+  float32x4 l0 = simd_load_f32x4(&abuf[0]);
+  checkF(simd_extract(l0, 0), 0.0, "load0");
+  checkF(simd_extract(l0, 3), 3.0, "load3");
+  float32x4 l1 = simd_loadu_f32x4(&buf[1]);
+  checkF(simd_extract(l1, 0), 1.0, "loadu0");
+  float32x4 sum = simd_add(l0, l1);
+  simd_store_f32x4(sum, &abuf[8]);
+  checkF(abuf[8], 1.0, "store0");
+  checkF(abuf[9], 3.0, "store1");
+  simd_storeu_f32x4(sum, &buf[12]);
+  checkF(buf[13], 3.0, "storeu1");
+
+  /* ---- reductions ---- */
+  checkF(simd_reduce_add(p), 10.0, "reduce_add");
+  checkF(simd_reduce_min(p), 1.0, "reduce_min");
+  checkF(simd_reduce_max(p), 4.0, "reduce_max");
+  int32x4 ri = simd_make_i32x4(1, 2, 3, 4);
+  checkI(simd_reduce_add(ri), 10, "reduce_add_i");
+  checkI(simd_reduce_max(ri), 4, "reduce_max_i");
+  int8x16 r8 = simd_splat_i8x16(3);
+  checkI(simd_reduce_and(r8), 3, "reduce_and");
+  checkI(simd_reduce_xor(r8), 0, "reduce_xor");
+
+  /* ---- conversions ---- */
+  int32x4 ci = simd_make_i32x4(1, 2, 3, 4);
+  float32x4 cf = simd_convert_f32x4(ci);
+  checkF(simd_extract(cf, 3), 4.0, "itof");
+  int32x4 back = simd_convert_i32x4(cf);
+  checkI(simd_extract(back, 2), 3, "ftoi");
+  float64x2 cd = simd_convert_f64x2(simd_make_i64x2(5, 6));
+  checkF(simd_extract(cd, 1) as float32, 6.0, "itof64");
+  float64x4 cw = simd_convert_f64x4(simd_make_f32x4(1.5, 2.5, 3.5, 4.5));
+  checkF(simd_extract(cw, 0) as float32, 1.5, "f32tof64");
+  float32x4 cn = simd_convert_f32x4(cw);
+  checkF(simd_extract(cn, 3), 4.5, "f64tof32");
+  /* ---- bitcasts ---- */
+  float32x4 bf = simd_make_f32x4(1.0, 2.0, 3.0, 4.0);
+  int32x4 bi = simd_bitcast_i32x4(bf);
+  checkF(simd_extract(simd_bitcast_f32x4(bi), 2), 3.0, "bitcast_roundtrip");
+  int64x2 b64 = simd_bitcast_i64x2(bf);
+  checkF(simd_extract(simd_bitcast_f32x4(b64), 1), 2.0, "bitcast_64");
+
+  /* ---- masks: bitmask ---- */
+  boolx4 bm = simd_cmp_lt(p, simd_splat_f32x4(2.5));
+  checkI(simd_bitmask(bm) as int64, 0x3, "bitmask");
+  checkI(simd_signmask(simd_cmp_lt_ones(p, simd_splat_f32x4(2.5))), 0x3,
+         "signmask");
+
+  /* ---- 256-bit and 512-bit vectors ---- */
+  float32x8 a8 = simd_splat_f32x8(1.0);
+  float32x8 b8 = simd_splat_f32x8(2.0);
+  checkF(simd_extract(simd_add(a8, b8), 7), 3.0, "add8");
+  checkF(simd_reduce_add(a8), 8.0, "reduce8");
+  float32x16 a16 = simd_splat_f32x16(1.0);
+  checkF(simd_extract(simd_mul(a16, a16), 15), 1.0, "mul16");
+  int8x64 i64v = simd_splat_i8x64(1);
+  checkI(simd_reduce_add(i64v), 64, "i8x64_reduce");
+  uint64x2 u64v = simd_splat_u64x2(0x100000000);
+  checkI(simd_extract(simd_shl(u64v, simd_splat_u64x2(2)), 1) as int64, 0x400000000,
+         "u64_shl");
+
+  /* ---- x86 layer (SSE/AVX) ---- */
+  float32x4 xa = _mm_set_ps(4.0, 3.0, 2.0, 1.0);
+  float32x4 xb = _mm_set_ps(8.0, 7.0, 6.0, 5.0);
+  checkF(simd_extract(_mm_add_ps(xa, xb), 0), 6.0, "mm_add_ps");
+  checkF(simd_extract(_mm_mul_ps(xa, xb), 3), 32.0, "mm_mul_ps");
+  checkF(simd_extract(_mm_sub_ps(xb, xa), 2), 4.0, "mm_sub_ps");
+  checkF(simd_extract(_mm_div_ps(xb, xa), 1), 3.0, "mm_div_ps");
+  checkF(simd_extract(_mm_min_ps(xa, xb), 0), 1.0, "mm_min_ps");
+  checkF(simd_extract(_mm_max_ps(xa, xb), 0), 5.0, "mm_max_ps");
+  checkF(simd_extract(_mm_sqrt_ps(simd_splat_f32x4(9.0)), 0), 3.0, "mm_sqrt");
+  checkF(simd_extract(_mm_hadd_ps(xa, xb), 0), 3.0, "mm_hadd");
+  checkF(simd_extract(_mm_movelh_ps(xa, xb), 0), 3.0, "mm_movelh");
+  checkF(simd_extract(_mm_movehl_ps(xa, xb), 0), 7.0, "mm_movehl");
+  checkF(simd_extract(_mm_unpacklo_ps(xa, xb), 0), 1.0, "mm_unpacklo");
+  checkF(simd_extract(_mm_set1_ps(2.5), 3), 2.5, "mm_set1");
+  checkF(simd_extract(_mm_setzero_ps(), 0), 0.0, "mm_setzero");
+  float32x4 xm = _mm_cmplt_ps(xa, xb);
+  checkF(simd_extract(xm, 2), -1.0, "mm_cmplt");
+  checkI(simd_signmask(xm), 0xF, "mm_cmplt_mask");
+  checkI(_mm_movemask_ps(xm), 0xF, "mm_movemask");
+  float32x4 xbl = _mm_blendv_ps(xm, xa, xb);
+  checkF(simd_extract(xbl, 0), 1.0, "mm_blendv");
+  checkI(simd_extract(_mm_cvtps_epi32(xa), 1), 2, "mm_cvtps");
+  int32x4 xc = _mm_castps_si128(xa);
+  checkF(simd_extract(_mm_castsi128_ps(xc), 3), 4.0, "mm_cast");
+  float32x4 xmadd = _mm_fmadd_ps(xa, xb, xa);
+  checkF(simd_extract(xmadd, 0), 6.0, "mm_fmadd");
+  checkI(_mm_extract_epi32(xc, 2), 1077936128, "mm_extract_epi32");
+  float32x4 xld = _mm_loadu_ps(&buf[4]);
+  checkF(simd_extract(xld, 0), 4.0, "mm_loadu");
+  float32x4 xld2 = _mm_load_ps(&abuf[0]);
+  checkF(simd_extract(xld2, 3), 3.0, "mm_load");
+  _mm_storeu_ps(&buf[0], simd_splat_f32x4(42.0));
+  checkF(buf[0], 42.0, "mm_storeu");
+  _mm_store_ps(&abuf[4], simd_splat_f32x4(43.0));
+  checkF(abuf[7], 43.0, "mm_store");
+
+  /* 256-bit x86 */
+  float32x8 y8 = _mm256_set1_ps(3.0);
+  float32x8 z8 = _mm256_set1_ps(4.0);
+  checkF(simd_extract(_mm256_add_ps(y8, z8), 7), 7.0, "mm256_add");
+  checkF(simd_extract(_mm256_fmadd_ps(y8, z8, y8), 0), 15.0, "mm256_fmadd");
+  checkF(simd_extract(_mm256_hadd_ps(y8, z8), 0), 6.0, "mm256_hadd");
+  checkF(simd_extract(_mm256_max_ps(y8, z8), 5), 4.0, "mm256_max");
+  float32x8 yz = _mm256_cmpgt_ps(z8, y8);
+  checkF(simd_extract(yz, 1), -1.0, "mm256_cmpgt");
+  float32x8 ya = _mm256_broadcast_ps(&abuf[0]);
+  checkF(simd_extract(ya, 6), 0.0, "mm256_broadcast");
+
+  /* integer x86 */
+  int32x4 ia4 = _mm_set_epi32(4, 3, 2, 1);
+  int32x4 ib4 = _mm_set1_epi32(2);
+  checkI(simd_extract(_mm_mullo_epi32(ia4, ib4), 3), 8, "mm_mullo");
+  checkI(simd_extract(_mm_add_epi32(ia4, ib4), 2), 5, "mm_add_epi32");
+  checkI(simd_extract(_mm_sub_epi32(ia4, ib4), 1), 0, "mm_sub_epi32");
+  checkI(simd_extract(_mm_slli_epi32(ia4, 2), 3), 16, "mm_slli");
+  checkI(simd_extract(_mm_srai_epi32(ia4, 1), 0), 0, "mm_srai");
+  checkI(simd_extract(_mm_cmpeq_epi32(ia4, ia4), 2), -1, "mm_cmpeq_epi32");
+  checkI(simd_extract(_mm_abs_epi32(simd_splat_i32x4(-5)), 0), 5, "mm_abs");
+  int32x4 ie = _mm_cmplt_epi32(ia4, simd_splat_i32x4(3));
+  checkI(simd_extract(ie, 0), -1, "mm_cmplt_epi32");
+  checkI(simd_extract(ie, 3), 0, "mm_cmplt_epi32b");
+  checkI(_mm_movemask_epi8(simd_bitcast_i8x16(ie)), 0xFF, "mm_movemask_epi8");
+  int8x16 ibl8 = _mm_blendv_epi8(simd_splat_i8x16(-1), simd_splat_i8x16(1),
+                                 simd_splat_i8x16(0));
+  checkI(simd_extract(ibl8, 0), 1, "mm_blendv_epi8");
+  float32x4 ep = _mm_cvtepi32_ps(ia4);
+  checkF(simd_extract(ep, 2), 3.0, "mm_cvtepi32_ps");
+
+  /* AVX-512 mask cmp */
+  boolx16 m16 = _mm512_cmpeq_ps_mask(simd_splat_f32x16(1.0),
+                                     simd_splat_f32x16(1.0));
+  checkI(simd_bitmask(m16) as int64, 0xFFFF, "mm512_mask_eq");
+  boolx16 mlt = _mm512_cmplt_ps_mask(simd_splat_f32x16(1.0),
+                                     simd_splat_f32x16(2.0));
+  checkI(simd_bitmask(mlt) as int64, 0xFFFF, "mm512_mask_lt");
+  float32x16 mm = _mm512_set1_ps(1.5);
+  checkF(simd_extract(_mm512_add_ps(mm, mm), 15), 3.0, "mm512_add");
+  checkF(simd_extract(_mm512_fmadd_ps(mm, mm, mm), 0), 3.75, "mm512_fmadd");
+  float32x16 msel = _mm512_mask_blend_ps(mlt, simd_splat_f32x16(10.0),
+                                         simd_splat_f32x16(20.0));
+  checkF(simd_extract(msel, 7), 20.0, "mm512_blend");
+
+  /* ---- NEON layer ---- */
+  float32x4 na = vdupq_n_f32(2.0);
+  float32x4 nb = vdupq_n_f32(3.0);
+  checkF(simd_extract(vaddq_f32(na, nb), 0), 5.0, "neon_add");
+  checkF(simd_extract(vmulq_f32(na, nb), 2), 6.0, "neon_mul");
+  checkF(simd_extract(vminq_f32(na, nb), 1), 2.0, "neon_min");
+  checkF(simd_extract(vmaxq_f32(na, nb), 3), 3.0, "neon_max");
+  checkF(simd_extract(vabsq_f32(simd_splat_f32x4(-1.5)), 0), 1.5, "neon_abs");
+  boolx4 nm = vceqq_f32(na, nb);
+  check(simd_all(nm) == false, "neon_ceq");
+  checkF(vgetq_lane_f32(na, 1), 2.0, "neon_getq");
+  checkF(simd_extract(vsetq_lane_f32(na, 1, 7.0), 1), 7.0, "neon_setq");
+  checkF(vaddvq_f32(simd_splat_f32x4(1.0)), 4.0, "neon_addv");
+  checkF(vminvq_f32(simd_make_f32x4(4.0, 2.0, 3.0, 1.0)), 1.0, "neon_minv");
+  float32x4 nf = vcvtq_f32_s32(_mm_set_epi32(4, 3, 2, 1));
+  checkF(simd_extract(nf, 3), 4.0, "neon_cvt");
+  float32x4 nr = vreinterpretq_f32_s32(_mm_castps_si128(na));
+  checkF(simd_extract(nr, 1), 2.0, "neon_reinterpret");
+  int32x4 nrd = vreinterpretq_s32_f32(na);
+  float32x4 nrb = vreinterpretq_f32_s32(nrd);
+  checkF(simd_extract(nrb, 2), 2.0, "neon_reinterpret2");
+  int32x4 nadd = vaddq_s32(_mm_set1_epi32(10), _mm_set1_epi32(5));
+  checkI(simd_extract(nadd, 0), 15, "neon_vaddq_s32");
+  checkI(vaddvq_s32(nadd), 60, "neon_vaddvq_s32");
+
+  free(raw);
+
+  if (failed == 0) {
+    print("ALL SIMD TESTS PASSED\n");
+  } else {
+    print("SOME SIMD TESTS FAILED\n");
+  }
+}

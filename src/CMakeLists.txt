@@ -7,6 +7,7 @@ set(CORE_SOURCES
     utopia/CodeGen/TBAAManager.cpp
     utopia/CodeGen/Mangler.cpp
     utopia/CodeGen/Intrinsics.cpp
+    utopia/CodeGen/SimdIntrinsics.cpp
     utopia/Common/Logger.cpp
     utopia/Driver/Backend.cpp
     utopia/Driver/CompilerDriver.cpp
@@ -24,6 +25,7 @@ set(CORE_SOURCES
     utopia/Sema/DeclCollector.cpp
     utopia/Sema/TypeChecker.cpp
     utopia/Sema/TypeConversion.cpp
+    utopia/Sema/TemplateDeduction.cpp
     utopia/Sema/OverloadResolution.cpp
     utopia/Sema/EffectAnalyzer.cpp
     utopia/Sema/ControlFlowAnalyzer.cpp

@@ -23,6 +23,8 @@ The `utopia` command drives compilation, execution, formatting, and package mana
 | `-O<level>` | Optimization level (0–3) |
 | `-D<macro>` | Define a preprocessor macro |
 | `--target <triple>` | Target triple (e.g. `x86_64-pc-windows-msvc`) |
+| `--mcpu <cpu>` | Target CPU (e.g. `skylake-avx512`) |
+| `--mattr <features>` | Comma-separated target features (e.g. `+avx2,+fma`) |
 | `--sysroot <path>` | System root (e.g. Android NDK) |
 
 ## Examples

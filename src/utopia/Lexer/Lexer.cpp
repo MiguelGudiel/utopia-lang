@@ -76,12 +76,38 @@ void Lexer::advance() {
 Lexer::Lexer(std::string_view sourceCode)
     : source(sourceCode), cursor(0), line(1), col(1) {}
 
+static bool isVectorTypeName(std::string_view id) {
+  size_t x = id.find('x');
+  if (x == std::string_view::npos || x == 0 || x == id.size() - 1)
+    return false;
+  std::string_view elem = id.substr(0, x);
+  static const char *elemNames[] = {"int8",   "int16",  "int32",
+                                    "int64",  "uint8",  "uint16",
+                                    "uint32", "uint64", "float32",
+                                    "float64", "bool"};
+  bool elemOk = false;
+  for (const char *n : elemNames) {
+    if (elem == n) {
+      elemOk = true;
+      break;
+    }
+  }
+  if (!elemOk)
+    return false;
+  std::string_view lanes = id.substr(x + 1);
+  if (lanes.empty() || lanes.find_first_not_of("0123456789") !=
+                           std::string_view::npos)
+    return false;
+  return true;
+}
+
 static bool isTypeKeyword(std::string_view id) {
   return id == "int" || id == "int32" || id == "int64" || id == "int16" ||
          id == "int8" || id == "uint" || id == "uint32" || id == "uint64" ||
          id == "uint16" || id == "uint8" || id == "float" || id == "float32" ||
          id == "float64" || id == "double" || id == "char" || id == "rune" ||
-         id == "usize" || id == "bool" || id == "void";
+         id == "usize" || id == "bool" || id == "void" ||
+         isVectorTypeName(id);
 }
 
 Token Lexer::nextToken() {

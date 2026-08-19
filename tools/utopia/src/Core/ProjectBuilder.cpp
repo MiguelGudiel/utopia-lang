@@ -199,6 +199,8 @@ bool buildProjectRecursive(const fs::path &projRoot,
   options.isDebug = globalOpts.isDebug;
   options.doFormat = globalOpts.doFormat;
   options.targetTriple = globalOpts.targetTriple;
+  options.targetCpu = globalOpts.targetCpu;
+  options.targetFeatures = globalOpts.targetFeatures;
   options.sysroot = globalOpts.sysroot;
   options.asyncEnabled = globalOpts.asyncEnabled;
 
@@ -335,6 +337,8 @@ bool buildProjectRecursive(const fs::path &projRoot,
   inputs.emitLLVM = options.emitLLVM;
   inputs.emitAsm = options.emitAsm;
   inputs.targetTriple = options.targetTriple;
+  inputs.targetCpu = options.targetCpu;
+  inputs.targetFeatures = options.targetFeatures;
   inputs.sysroot = options.sysroot;
   inputs.buildScriptHash =
       fs::exists(buildUtpPath) ? ArtifactCache::hashFile(buildUtpPath) : "";

@@ -25,6 +25,8 @@ struct CompileOptions {
   std::string preludeRoot;
   std::string buildLibRoot;
   std::string targetTriple;
+  std::string targetCpu;
+  std::string targetFeatures;
   std::string sysroot;
   std::vector<std::string> includeDirs;
   std::vector<std::string> linkerFlags;

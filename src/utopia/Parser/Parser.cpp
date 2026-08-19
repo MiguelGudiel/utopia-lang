@@ -264,6 +264,8 @@ const Type *Parser::parseType(bool inNewExpr, bool allowRValueRef) {
     auto resolveType = [&](std::string_view name) -> const Type * {
       const Type *t = astCtx.getBuiltinTypeByName(name);
       if (!t)
+        t = astCtx.getVectorTypeByName(name);
+      if (!t)
         t = astCtx.getRecordType(name);
       if (!t)
         t = astCtx.getTypeAlias(name);

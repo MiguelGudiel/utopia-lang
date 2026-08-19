@@ -31,6 +31,8 @@ struct CacheInputs {
   bool emitLLVM = false;
   bool emitAsm = false;
   std::string targetTriple;
+  std::string targetCpu;
+  std::string targetFeatures;
   std::string sysroot;
   std::vector<std::string> macros;
   std::vector<std::string> linkerFlags;

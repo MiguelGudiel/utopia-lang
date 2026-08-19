@@ -81,6 +81,12 @@ void CodeGen::emitLocation(const ASTNode *node) {
   diEmitter.emitLocation(builder, node);
 }
 
+void CodeGen::reportError(int line, int column, int length,
+                          const std::string &message) {
+  diags.report({DiagLevel::Error, line, column, length, message,
+                currentFilePath});
+}
+
 llvm::Type *CodeGen::getLLVMType(const Type *type) {
   if (!type)
     return builder.getVoidTy();
@@ -155,6 +161,9 @@ llvm::Type *CodeGen::getLLVMType(const Type *type) {
     if (elemLL->isVoidTy())
       elemLL = builder.getInt8Ty();
     return llvm::ArrayType::get(elemLL, arrTy->getSize());
+  } else if (auto *vTy = llvm::dyn_cast<VectorType>(type)) {
+    return llvm::FixedVectorType::get(getLLVMType(vTy->getElementType()),
+                                      vTy->getLanes());
   } else if (auto *mapTy = llvm::dyn_cast<MapLiteralType>(type)) {
     /* The literal is lowered to two parallel arrays: keys and values. Empty
      * literals type their key/value as 'void', which LLVM rejects inside an
@@ -4418,10 +4427,14 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
     }
 
     /* Async calls return a pointer to the Future object; wrap it into the
-     * Future value type expected by the caller. */
+     * Future value type expected by the caller. The materialized temporary
+     * owns the future state and is exposed as the last temporary so a
+     * surrounding copy-initialization consumes it directly (without an
+     * extra raw byte-copy that would share the state without retaining it). */
     if (callRes && node->resolvedFunc && node->resolvedFunc->isAsync) {
       const Type *futTy = node->resolvedFunc->effectiveReturnType;
       if (futTy) {
+        lastTemporaryAlloca = nullptr;
         callRes = materializeFutureValue(futTy, callRes);
       }
     }
@@ -4439,7 +4452,13 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
       }
     }
 
-    lastTemporaryAlloca = nullptr;
+    /* Non-async calls: no owned temporary is produced, so clear any stale
+     * flag leaked by the argument evaluation. Async calls already set the
+     * flag to the materialized Future temporary above; keep it so the
+     * caller's copy-initialization copies/moves from the owned object. */
+    if (!node->resolvedFunc->isAsync) {
+      lastTemporaryAlloca = nullptr;
+    }
 
     return callRes;
 
@@ -7036,6 +7055,13 @@ llvm::Value *CodeGen::materializeFutureValue(const Type *futureType,
   if (const FunctionDeclNode *dtor = getCustomDestructor(futureType)) {
     cgCtx.addCleanup(tmp, dtor, futureType);
   }
+  /* The temporary owns the state (its destructor releases it). Expose it as
+   * the last temporary so copy-initializations ('Future<int> f = value()'),
+   * member calls ('value().then(...)') and by-value arguments copy/move from
+   * it directly. Without this, the loaded struct value is stored into a raw
+   * byte-copy temporary that never retains the state: the future then has
+   * more owners than references and its destructor double-releases. */
+  lastTemporaryAlloca = tmp;
   return createTBAALoad(llFutTy, tmp, futureType);
 }
 

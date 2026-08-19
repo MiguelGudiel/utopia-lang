@@ -56,8 +56,26 @@ bool Backend::process(llvm::Module *mod, BackendContext &backendCtx,
   llvm::TargetOptions opt;
   auto rm = std::optional<llvm::Reloc::Model>(llvm::Reloc::PIC_);
 
+  llvm::CodeGenOptLevel cgLevel = llvm::CodeGenOptLevel::None;
+  switch (options.optLevel) {
+  case 1:
+    cgLevel = llvm::CodeGenOptLevel::Less;
+    break;
+  case 2:
+    cgLevel = llvm::CodeGenOptLevel::Default;
+    break;
+  case 3:
+    cgLevel = llvm::CodeGenOptLevel::Aggressive;
+    break;
+  default:
+    cgLevel = llvm::CodeGenOptLevel::None;
+    break;
+  }
+
   std::unique_ptr<llvm::TargetMachine> targetMachine(
-      target->createTargetMachine(triple, "generic", "", opt, rm));
+      target->createTargetMachine(triple, options.targetCpu,
+                                  options.targetFeatures, opt, rm,
+                                  std::nullopt, cgLevel));
 
   mod->setDataLayout(targetMachine->createDataLayout());
 
@@ -176,7 +194,9 @@ bool Backend::process(llvm::Module *mod, BackendContext &backendCtx,
       llvm::legacy::PassManager passAsm;
 
       std::unique_ptr<llvm::TargetMachine> tmAsm(
-          target->createTargetMachine(triple, "generic", "", opt, rm));
+          target->createTargetMachine(triple, options.targetCpu,
+                                      options.targetFeatures, opt, rm,
+                                      std::nullopt, cgLevel));
 
       if (tmAsm->addPassesToEmitFile(passAsm, destAsm, nullptr,
                                      llvm::CodeGenFileType::AssemblyFile)) {

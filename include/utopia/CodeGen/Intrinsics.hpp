@@ -27,6 +27,8 @@ protected:
                        const FunctionDeclNode *dtor) const;
   llvm::AllocaInst *createEntryBlockAlloca(CodeGen &cg, llvm::Type *type,
                                            const std::string &varName) const;
+  void reportError(CodeGen &cg, int line, int col, int len,
+                   const std::string &message) const;
 
 public:
   virtual ~Intrinsic() = default;
@@ -58,6 +60,8 @@ private:
 
   void registerIntrinsic(std::string_view name,
                          std::unique_ptr<Intrinsic> intrinsic);
+
+  friend void registerSimdIntrinsics(IntrinsicRegistry &registry);
 };
 
 } // namespace utopia

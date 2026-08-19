@@ -31,7 +31,8 @@ enum class TypeKind {
   Enum,
   TemplateParam,
   TemplateInst,
-  Auto
+  Auto,
+  Vector
 };
 
 enum class BuiltinKind {
@@ -72,6 +73,7 @@ public:
   bool isFloat() const;
   bool isNumeric() const { return isInteger() || isFloat(); }
   bool isVoid() const;
+  bool isVectorType() const { return kind == TypeKind::Vector; }
 
   std::string toString() const;
 };
@@ -162,6 +164,27 @@ public:
   uint64_t getSize() const { return size; }
 
   static bool classof(const Type *t) { return t->getKind() == TypeKind::Array; }
+};
+
+/* A fixed-size SIMD vector, e.g. float32x4 or int8x16. It maps to an LLVM
+ * fixed-length vector type ('<4 x float>') and lowers to the best SIMD
+ * instructions available on the target (SSE/AVX/AVX-512, NEON, SVE, RVV...). */
+class VectorType : public Type {
+  const Type *elementType;
+  uint64_t lanes;
+
+public:
+  explicit VectorType(const Type *elem, uint64_t laneCount)
+      : Type(TypeKind::Vector), elementType(elem), lanes(laneCount) {}
+  const Type *getElementType() const { return elementType; }
+  uint64_t getLanes() const { return lanes; }
+  bool isBoolVector() const {
+    return elementType->isBuiltinType() &&
+           static_cast<const BuiltinType *>(elementType)->getBuiltinKind() ==
+               BuiltinKind::Bool;
+  }
+
+  static bool classof(const Type *t) { return t->getKind() == TypeKind::Vector; }
 };
 
 /* The compiler-internal type of a '{k: v, ...}' literal. It carries the
@@ -444,6 +467,11 @@ inline std::string Type::toString() const {
            "[" +
            std::to_string(static_cast<const ArrayType *>(this)->getSize()) +
            "]";
+  }
+  if (kind == TypeKind::Vector) {
+    auto *vTy = static_cast<const VectorType *>(this);
+    return vTy->getElementType()->toString() + "x" +
+           std::to_string(vTy->getLanes());
   }
   if (kind == TypeKind::MapLiteral) {
     auto *m = static_cast<const MapLiteralType *>(this);

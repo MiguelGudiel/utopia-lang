@@ -201,6 +201,50 @@ public:
     return nullptr;
   }
 
+  /* Returns the canonical vector type for the given element type and lane
+   * count, e.g. ('float32', 4) -> float32x4. */
+  const VectorType *getVectorType(const Type *elem, uint64_t lanes) {
+    auto it = vectorTypes.find(elem);
+    if (it != vectorTypes.end()) {
+      auto laneIt = it->second.find(lanes);
+      if (laneIt != it->second.end())
+        return laneIt->second;
+    }
+    auto *vTy = create<VectorType>(elem, lanes);
+    vectorTypes[elem][lanes] = vTy;
+    return vTy;
+  }
+
+  /* Resolves a vector type by its source spelling ('float32x4'). */
+  const Type *getVectorTypeByName(std::string_view name) {
+    auto x = name.find('x');
+    if (x == std::string_view::npos || x == 0 || x == name.size() - 1)
+      return nullptr;
+    std::string elemName(name.substr(0, x));
+    std::string lanesStr(name.substr(x + 1));
+    if (lanesStr.empty() ||
+        lanesStr.find_first_not_of("0123456789") != std::string::npos)
+      return nullptr;
+    uint64_t lanes = 0;
+    try {
+      lanes = std::stoull(lanesStr);
+    } catch (...) {
+      return nullptr;
+    }
+    if (lanes == 0 || lanes > 128)
+      return nullptr;
+    const Type *elem = getBuiltinTypeByName(elemName);
+    if (!elem)
+      return nullptr;
+    /* Restrict to the canonical element spellings the lexer recognizes. */
+    if (elem != Int8Ty && elem != Int16Ty && elem != Int32Ty &&
+        elem != Int64Ty && elem != UInt8Ty && elem != UInt16Ty &&
+        elem != UInt32Ty && elem != UInt64Ty && elem != Float32Ty &&
+        elem != Float64Ty && elem != BoolTy)
+      return nullptr;
+    return getVectorType(elem, lanes);
+  }
+
   const Type *getPromotedNumericType(const Type *lhs, const Type *rhs) const {
     if (!lhs->isNumeric() || !rhs->isNumeric()) {
       return nullptr;
@@ -391,6 +435,8 @@ private:
   llvm::BumpPtrAllocator allocator;
   std::vector<const ArrayType *> arrayTypes;
   std::vector<const MapLiteralType *> mapLiteralTypes;
+  std::unordered_map<const Type *, std::unordered_map<uint64_t, const VectorType *>>
+      vectorTypes;
   std::unordered_map<const Type *, const PointerType *> pointerTypes;
   std::unordered_map<const Type *, const ReferenceType *> referenceTypes;
   std::unordered_map<const Type *, const RValueReferenceType *>

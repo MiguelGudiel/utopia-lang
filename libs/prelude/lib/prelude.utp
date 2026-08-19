@@ -2,6 +2,9 @@
  * module that imports it): its template intrinsics (construct<T>) are
  * registered at parse time, and List's body uses them. */
 export "Memory/Core.utp";
+export "Simd/Core.utp";
+export "Simd/X86.utp";
+export "Simd/Neon.utp";
 export "String.utp";
 export "Core/Duration.utp";
 export "Core/Stopwatch.utp";

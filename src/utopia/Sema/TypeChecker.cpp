@@ -1592,6 +1592,16 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
     }
 
     if (tmplDecl) {
+      /* Partial explicit type arguments (deduced by the call site) are
+       * completed before this point; any other size mismatch is an error. */
+      if (node->templateArgs.size() != tmplDecl->templateParams.size()) {
+        return ctx->reportError(
+            node->line, node->column, node->length,
+            "Wrong number of template arguments for '" +
+                std::string(node->name) + "': expected " +
+                std::to_string(tmplDecl->templateParams.size()) +
+                ", got " + std::to_string(node->templateArgs.size()) + ".");
+      }
       /* Mangle from the fully-qualified template name so namespace-qualified
        * templates ('std.make_unique_Inner') resolve consistently with the
        * type-instantiation path. */
@@ -3270,6 +3280,16 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
 
         if (tmplDecl && !node->templateArgs.empty()) {
           const auto *tfn = static_cast<const FunctionDeclNode *>(tmplDecl);
+          /* Partial explicit type arguments are completed by call-site
+           * deduction before reaching this point. */
+          if (node->templateArgs.size() != tfn->templateParams.size()) {
+            return ctx->reportError(
+                node->line, node->column, node->length,
+                "Wrong number of template arguments for '" +
+                    std::string(node->memberName) + "': expected " +
+                    std::to_string(tfn->templateParams.size()) + ", got " +
+                    std::to_string(node->templateArgs.size()) + ".");
+          }
           std::string mangledName = std::string(tmplDecl->fqName);
           for (const auto *arg : node->templateArgs) {
             const Type *resArg = resolveIfTemplate(arg);
@@ -5098,6 +5118,139 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
   if (node->target->kind == NodeKind::Variable) {
     auto *varTarget = static_cast<const VariableNode *>(node->target);
 
+    /* Template argument deduction: 'findMax(100, 250)' / 'Box(42)'. When the
+     * callee is a template and the type arguments are missing (or only given
+     * partially), deduce them from the call arguments and fall through to
+     * the regular explicit-instantiation path below. */
+    bool dedIsLocal = false;
+    for (auto *d : ctx->lookup(varTarget->name)) {
+      if (d->kind == NodeKind::ParamDecl ||
+          (d->kind == NodeKind::VarDecl &&
+           !static_cast<const VarDeclNode *>(d)->isGlobal)) {
+        dedIsLocal = true;
+        break;
+      }
+    }
+    if (!dedIsLocal) {
+      const DeclNode *tmpl = nullptr;
+      auto regIt = ctx->templateRegistry.find(varTarget->name);
+      if (regIt != ctx->templateRegistry.end()) {
+        tmpl = regIt->second;
+      } else {
+        for (auto *d : ctx->lookup(varTarget->name)) {
+          if (d->isTemplate &&
+              (d->kind == NodeKind::ClassDecl ||
+               d->kind == NodeKind::StructDecl ||
+               d->kind == NodeKind::UnionDecl)) {
+            tmpl = d;
+            break;
+          }
+        }
+      }
+      if (tmpl && tmpl->isTemplate &&
+          varTarget->templateArgs.size() < tmpl->templateParams.size()) {
+        bool isCtorCall = tmpl->kind == NodeKind::ClassDecl ||
+                          tmpl->kind == NodeKind::StructDecl ||
+                          tmpl->kind == NodeKind::UnionDecl;
+        /* Class templates only support the all-or-nothing form: partial
+         * explicit type arguments are not allowed (C++ rule). */
+        if (!isCtorCall || varTarget->templateArgs.empty()) {
+          std::vector<const Type *> completeArgs;
+          std::string dedErr;
+          bool ok = false;
+          if (auto *tfn = llvm::dyn_cast<FunctionDeclNode>(tmpl)) {
+            /* Memory.construct<T> deduces its type from the destination
+             * pointer rather than the template parameter list; it is handled
+             * by checkMemoryConstruct below. The type-queries sizeof<T> and
+             * alignof<T> are likewise skipped: their argument is a dependent
+             * type value inside template bodies, and the template parameter
+             * is substituted by the enclosing template's instantiation
+             * (C++ defers these deductions to the point of instantiation). */
+            if (!(tfn->isIntrinsic &&
+                  (tfn->intrinsicName == "memory_construct" ||
+                   tfn->intrinsicName == "sizeof_expr" ||
+                   tfn->intrinsicName == "alignof_expr"))) {
+              ok = deduceTemplateArguments(tfn, argTypes, node->argNames,
+                                           varTarget->templateArgs,
+                                           completeArgs, dedErr);
+            }
+          } else {
+            ok = deduceClassTemplateArguments(tmpl, argTypes, node->argNames,
+                                              completeArgs, dedErr);
+          }
+          if (ok) {
+            /* Resolve the deduced arguments before they are stored on the
+             * call site: nested instantiations must be resolved records so
+             * the mangled names and cloned signatures match the regular
+             * type-resolution path ('sizeof(Future<int>)' must instantiate
+             * exactly like 'sizeof<Future<int>>' would). */
+            for (auto &dedArg : completeArgs)
+              dedArg = resolveIfTemplate(dedArg);
+            const_cast<VariableNode *>(varTarget)->templateArgs =
+                ctx->astCtx.copyArray<const Type *>(completeArgs);
+          } else {
+            /* Only report the deduction failure when no non-template
+             * candidate could take the call instead. */
+            bool hasOtherCandidate = false;
+            for (auto *d : ctx->lookup(varTarget->name)) {
+              if (d->isTemplate)
+                continue;
+              if (d->kind == NodeKind::FunctionDecl ||
+                  d->kind == NodeKind::ClassDecl ||
+                  d->kind == NodeKind::StructDecl ||
+                  d->kind == NodeKind::UnionDecl) {
+                hasOtherCandidate = true;
+                break;
+              }
+            }
+            const RecordType *curRec = ctx->getCurrentRecordContext();
+            const DeclNode *curRecDecl =
+                curRec ? curRec->getDeclaration() : nullptr;
+            while (curRecDecl && !hasOtherCandidate) {
+              llvm::ArrayRef<FunctionDeclNode *> methods;
+              if (curRecDecl->kind == NodeKind::ClassDecl)
+                methods = static_cast<const ClassDeclNode *>(curRecDecl)
+                              ->methods;
+              else if (curRecDecl->kind == NodeKind::StructDecl)
+                methods = static_cast<const StructDeclNode *>(curRecDecl)
+                              ->methods;
+              else if (curRecDecl->kind == NodeKind::UnionDecl)
+                methods = static_cast<const UnionDeclNode *>(curRecDecl)
+                              ->methods;
+              for (const auto *m : methods) {
+                if (m->name == varTarget->name && !m->isTemplate) {
+                  hasOtherCandidate = true;
+                  break;
+                }
+              }
+              if (curRecDecl->kind == NodeKind::ClassDecl) {
+                const ClassDeclNode *cDecl =
+                    static_cast<const ClassDeclNode *>(curRecDecl);
+                if (cDecl->baseClass) {
+                  if (auto *pType = llvm::dyn_cast<ClassType>(
+                          cDecl->baseClass->getUnqualifiedType())) {
+                    curRecDecl = pType->getDeclaration();
+                  } else {
+                    break;
+                  }
+                } else {
+                  break;
+                }
+              } else {
+                break;
+              }
+            }
+            if (!hasOtherCandidate) {
+              return ctx->reportError(
+                  node->line, node->column, node->length,
+                  "Could not deduce template arguments for '" +
+                      std::string(varTarget->name) + "': " + dedErr + ".");
+            }
+          }
+        }
+      }
+    }
+
     if (!varTarget->templateArgs.empty()) {
       /* Template classes used as constructor calls (e.g.
        * 'unique_ptr<Foo>(ptr)') are instantiated here so the target can be
@@ -5478,6 +5631,33 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
     if (!maRes)
       return maRes;
 
+    /* Namespace-qualified template functions called without explicit type
+     * arguments ('std.findMax(100, 250)'): the member access resolves to the
+     * raw template (function-pointer type); deduce the arguments from the
+     * call and re-resolve so the instantiated function is used. */
+    if (ma->templateArgs.empty() && ma->resolvedDecl &&
+        ma->resolvedDecl->kind == NodeKind::FunctionDecl &&
+        ma->resolvedDecl->isTemplate) {
+      auto *tfn = static_cast<const FunctionDeclNode *>(ma->resolvedDecl);
+      if (!(tfn->isIntrinsic && tfn->intrinsicName == "memory_construct")) {
+        std::vector<const Type *> deducedArgs;
+        std::string dedErr;
+        if (deduceTemplateArguments(tfn, argTypes, node->argNames, {},
+                                    deducedArgs, dedErr)) {
+          const_cast<MemberAccessNode *>(ma)->templateArgs =
+              ctx->astCtx.copyArray<const Type *>(deducedArgs);
+          auto reRes = dispatch(ma);
+          if (!reRes)
+            return reRes;
+        } else {
+          return ctx->reportError(
+              node->line, node->column, node->length,
+              "Could not deduce template arguments for '" +
+                  std::string(ma->memberName) + "': " + dedErr + ".");
+        }
+      }
+    }
+
     if (ma->isMethodRef) {
       const RecordType *recordTy = nullptr;
       const DeclNode *recDecl = nullptr;
@@ -5626,28 +5806,74 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
 
         for (const auto *method : allMethods) {
           if (method->name == ma->memberName) {
-            /* Method-level templates can be called without explicit type
-             * arguments: bind the method's template parameters positionally
-             * to the enclosing record's template arguments
-             * ('Future<int>.value(5)' binds R = int). */
+            /* Method-level templates: full explicit type arguments are
+             * applied as-is; otherwise the arguments are deduced from the
+             * call (C++-style deduction, e.g. 'box.wrap(5)' deduces
+             * T = int32). When deduction fails, a fallback binds the
+             * method's template parameters positionally to the enclosing
+             * record's template arguments ('Future<int>.value(5)' binds
+             * R = int). */
             const FunctionDeclNode *candidate = method;
             if (method->isTemplate && recordTy) {
-              if (ma->templateArgs.empty() &&
-                  recordTy->isTemplateInstantiation() &&
-                  method->templateParams.size() ==
-                      recordTy->getTemplateArgs().size()) {
-                /* Bind the method's template parameters positionally to the
-                 * enclosing record's template arguments. */
-                candidate = instantiateMethodTemplate(method, recordTy,
-                                                      ma->templateArgs);
-              } else if (!ma->templateArgs.empty() &&
-                         method->templateParams.size() ==
-                             ma->templateArgs.size()) {
+              candidate = nullptr;
+              if (!ma->templateArgs.empty() &&
+                  ma->templateArgs.size() == method->templateParams.size()) {
                 /* Explicit type arguments ('Future.delayed<void>(...)') are
                  * applied to every matching overload so the usual overload
                  * resolution picks the right signature. */
                 candidate = instantiateMethodTemplate(method, recordTy,
                                                       ma->templateArgs);
+              } else {
+                std::vector<const Type *> deducedArgs;
+                std::string dedErr;
+                if (deduceTemplateArguments(method, argTypes, node->argNames,
+                                            ma->templateArgs, deducedArgs,
+                                            dedErr)) {
+                  const RecordType *targetRec = recordTy;
+                  /* Static method templates on an uninstantiated template
+                   * record ('Future.delayed(10, fn)'): the deduced method
+                   * arguments also bind the record's own template
+                   * parameters, mirroring the language idiom where
+                   * 'Future<T>.delayed(...)' sets both (the method's
+                   * parameters and the record's). The record must be
+                   * instantiated so the method body resolves its members. */
+                  if (recDecl && recDecl->isTemplate &&
+                      !recordTy->isTemplateInstantiation() &&
+                      recDecl->templateParams.size() ==
+                          method->templateParams.size()) {
+                    std::string_view baseName = recDecl->fqName;
+                    if (baseName.empty()) {
+                      if (auto *c = llvm::dyn_cast<ClassDeclNode>(recDecl))
+                        baseName = c->name;
+                      else if (auto *s = llvm::dyn_cast<StructDeclNode>(recDecl))
+                        baseName = s->name;
+                      else if (auto *u = llvm::dyn_cast<UnionDeclNode>(recDecl))
+                        baseName = u->name;
+                    }
+                    auto argsRef =
+                        ctx->astCtx.copyArray<const Type *>(deducedArgs);
+                    const Type *inst = resolveIfTemplate(
+                        ctx->astCtx.getTemplateInstType(baseName, argsRef));
+                    if (inst) {
+                      const Type *u = inst->getUnqualifiedType();
+                      if (u->getKind() == TypeKind::Class ||
+                          u->getKind() == TypeKind::Struct ||
+                          u->getKind() == TypeKind::Union) {
+                        targetRec = static_cast<const RecordType *>(u);
+                      }
+                    }
+                  }
+                  candidate = instantiateMethodTemplate(method, targetRec,
+                                                        deducedArgs);
+                } else if (ma->templateArgs.empty() &&
+                           recordTy->isTemplateInstantiation() &&
+                           method->templateParams.size() ==
+                               recordTy->getTemplateArgs().size()) {
+                  /* Bind the method's template parameters positionally to the
+                   * enclosing record's template arguments. */
+                  candidate = instantiateMethodTemplate(method, recordTy,
+                                                        ma->templateArgs);
+                }
               }
             }
             if (!candidate)
@@ -6508,6 +6734,78 @@ SemaResult TypeCheckPass::checkMemoryDestruct(const FunctionCallNode *node) {
 }
 
 SemaResult TypeCheckPass::visit(const NewExprNode *node) {
+  /* Class-template argument deduction: 'new Box(42)' deduces the template
+   * arguments from the constructor call; 'new Box<int>(42)' stays explicit. */
+  const Type *allocU = node->allocatedType->getUnqualifiedType();
+  const DeclNode *ctadRec = nullptr;
+  if (allocU->getKind() != TypeKind::TemplateInst) {
+    if (auto *tp = llvm::dyn_cast<TemplateParamType>(allocU)) {
+      auto regIt = ctx->templateRegistry.find(tp->getName());
+      if (regIt != ctx->templateRegistry.end() && regIt->second->isTemplate &&
+          (regIt->second->kind == NodeKind::ClassDecl ||
+           regIt->second->kind == NodeKind::StructDecl ||
+           regIt->second->kind == NodeKind::UnionDecl)) {
+        ctadRec = regIt->second;
+      }
+    } else if (auto *rec = llvm::dyn_cast<RecordType>(allocU)) {
+      const DeclNode *decl = rec->getDeclaration();
+      if (decl && decl->isTemplate) {
+        ctadRec = decl;
+      } else {
+        /* Template records never receive a declaration on their uninstantiated
+         * record type (DeclCollector registers them in the template registry
+         * instead), so fall back to the registry by record name. */
+        auto regIt = ctx->templateRegistry.find(rec->getName());
+        if (regIt != ctx->templateRegistry.end() &&
+            regIt->second->isTemplate &&
+            (regIt->second->kind == NodeKind::ClassDecl ||
+             regIt->second->kind == NodeKind::StructDecl ||
+             regIt->second->kind == NodeKind::UnionDecl)) {
+          ctadRec = regIt->second;
+        }
+      }
+    }
+  }
+  if (ctadRec) {
+    std::vector<const Type *> argTypes;
+    bool hasErrors = false;
+    for (const auto &arg : node->args) {
+      const Type *t = arg->exprType;
+      if (!t) {
+        auto argType = dispatch(arg);
+        if (!argType) {
+          hasErrors = true;
+        } else {
+          t = *argType;
+        }
+      }
+      if (t)
+        argTypes.push_back(t);
+    }
+    if (!hasErrors) {
+      std::vector<const Type *> deducedArgs;
+      std::string dedErr;
+      if (deduceClassTemplateArguments(ctadRec, argTypes, node->argNames,
+                                       deducedArgs, dedErr)) {
+        std::string_view baseName = ctadRec->fqName;
+        if (baseName.empty()) {
+          if (auto *c = llvm::dyn_cast<ClassDeclNode>(ctadRec))
+            baseName = c->name;
+          else if (auto *s = llvm::dyn_cast<StructDeclNode>(ctadRec))
+            baseName = s->name;
+          else if (auto *u = llvm::dyn_cast<UnionDeclNode>(ctadRec))
+            baseName = u->name;
+        }
+        auto argsRef = ctx->astCtx.copyArray<const Type *>(deducedArgs);
+        const_cast<NewExprNode *>(node)->allocatedType =
+            ctx->astCtx.getTemplateInstType(baseName, argsRef);
+      } else {
+        return ctx->reportError(node->line, node->column, node->length,
+                                dedErr + ".");
+      }
+    }
+  }
+
   const_cast<NewExprNode *>(node)->allocatedType =
       resolveIfTemplate(node->allocatedType);
 

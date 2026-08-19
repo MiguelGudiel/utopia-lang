@@ -1,5 +1,6 @@
 #include "utopia/CodeGen/Intrinsics.hpp"
 #include "utopia/CodeGen/CodeGen.hpp"
+#include "utopia/CodeGen/SimdIntrinsics.hpp"
 #include "utopia/Common/Types.hpp"
 
 namespace utopia {
@@ -30,6 +31,11 @@ void Intrinsic::emitCleanupCall(CodeGen &cg, llvm::Value *ptr,
 llvm::AllocaInst *Intrinsic::createEntryBlockAlloca(
     CodeGen &cg, llvm::Type *type, const std::string &varName) const {
   return cg.createEntryBlockAlloca(type, varName);
+}
+
+void Intrinsic::reportError(CodeGen &cg, int line, int col, int len,
+                            const std::string &message) const {
+  cg.reportError(line, col, len, message);
 }
 
 
@@ -777,6 +783,7 @@ IntrinsicRegistry::IntrinsicRegistry() {
   registerIntrinsic("future_delay", std::make_unique<FutureDelayIntrinsic>());
   registerIntrinsic("future_delay_us",
                     std::make_unique<FutureDelayUsIntrinsic>());
+  registerSimdIntrinsics(*this);
 }
 
 const IntrinsicRegistry &IntrinsicRegistry::instance() {

@@ -76,7 +76,11 @@ struct UtopiaEventLoop {
 struct UtopiaFutureState {
   std::atomic<int32_t> refs;
   std::atomic<int32_t> flags; /* bit 0: completed */
-  std::mutex mtx;             /* guards head + flags */
+  /* Recursive: completing a future posts its continuations, whose resumption
+   * can complete another future (or the same one through a resumed coroutine
+   * chain) on the same thread while the outer completion still holds the
+   * lock. */
+  std::recursive_mutex mtx; /* guards head + flags */
   UtopiaContinuation *head;
   UtopiaEventLoop *ownerLoop;
   uint64_t valueSize;
@@ -321,7 +325,7 @@ void utopia_future_complete(void *state) {
   auto *s = static_cast<UtopiaFutureState *>(state);
   UtopiaContinuation *list = nullptr;
   {
-    std::lock_guard<std::mutex> lock(s->mtx);
+    std::lock_guard<std::recursive_mutex> lock(s->mtx);
     if (s->flags.load() & kUtopiaFutureCompleted) {
       return;
     }
@@ -357,7 +361,7 @@ void utopia_future_then(void *state, void (*resumeFn)(void *frame),
 
   bool completed = false;
   {
-    std::lock_guard<std::mutex> lock(s->mtx);
+    std::lock_guard<std::recursive_mutex> lock(s->mtx);
     if (s->flags.load() & kUtopiaFutureCompleted) {
       completed = true;
     } else {
@@ -412,7 +416,7 @@ static void postCallbackContinuation(UtopiaCallbackCont *cc) {
 
   bool completed = false;
   {
-    std::lock_guard<std::mutex> lock(s->mtx);
+    std::lock_guard<std::recursive_mutex> lock(s->mtx);
     if (s->flags.load() & kUtopiaFutureCompleted) {
       completed = true;
     } else {

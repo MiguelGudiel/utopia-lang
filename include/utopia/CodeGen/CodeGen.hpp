@@ -132,6 +132,10 @@ public:
 
   llvm::Value *getLValue(const ExprNode *node);
 
+  /* Reports an error diagnostic against the file currently being compiled. */
+  void reportError(int line, int column, int length,
+                   const std::string &message);
+
   /* Emits a runtime-library call (get-or-create the declaration). */
   llvm::CallInst *emitRuntimeCall(const std::string &name,
                                   llvm::Type *retTy,

@@ -130,6 +130,9 @@ public:
                                 const ASTNode *node);
   ExprNode *performImplicitConversion(ExprNode *expr, const Type *to);
 
+  /* Semantic context accessor for the template-deduction machinery. */
+  SemaContext &getContext() const { return *ctx; }
+
   /* Analyzes an AST node to emit warnings if a nodiscard value is ignored */
   void checkNodiscard(const ASTNode *node);
   void checkDeprecated(const DeclNode *decl, const ASTNode *node);
@@ -191,6 +194,26 @@ public:
   const FunctionDeclNode *instantiateMethodTemplate(
       const FunctionDeclNode *tmplDecl, const RecordType *recordTy,
       llvm::ArrayRef<const Type *> explicitArgs);
+
+  /* C++-style template argument deduction ('findMax(100, 250)'): deduces
+   * the template arguments of a function/method template from the call
+   * arguments, using the same P/A deduction rules as C++. 'explicitArgs'
+   * may be a (possibly empty) prefix of the template arguments spelled out
+   * at the call site; the remaining parameters are deduced. On success
+   * 'outArgs' receives one resolved type per template parameter. */
+  bool deduceTemplateArguments(
+      const FunctionDeclNode *tmplDecl,
+      llvm::ArrayRef<const Type *> argTypes,
+      llvm::ArrayRef<std::string_view> argNames,
+      llvm::ArrayRef<const Type *> explicitArgs,
+      std::vector<const Type *> &outArgs, std::string &outError);
+
+  /* Class-template argument deduction ('new Box(42)' / 'Box(42)'): tries
+   * every constructor of the template record as a deduction source. */
+  bool deduceClassTemplateArguments(
+      const DeclNode *tmplDecl, llvm::ArrayRef<const Type *> argTypes,
+      llvm::ArrayRef<std::string_view> argNames,
+      std::vector<const Type *> &outArgs, std::string &outError);
 
   /* Returns true when 't' (possibly behind a pointer/reference) is a
    * Future<T>; 'outValue' receives T when non-null. */

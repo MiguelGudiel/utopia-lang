@@ -314,6 +314,8 @@ std::string ArtifactCache::computeFingerprint(const CacheInputs &inputs) {
   data += sep + "emitllvm" + sep + (inputs.emitLLVM ? "1" : "0");
   data += sep + "emitasm" + sep + (inputs.emitAsm ? "1" : "0");
   data += sep + "triple" + sep + inputs.targetTriple;
+  data += sep + "cpu" + sep + inputs.targetCpu;
+  data += sep + "mattr" + sep + inputs.targetFeatures;
   data += sep + "sysroot" + sep + inputs.sysroot;
 
   std::vector<std::string> macros = inputs.macros;

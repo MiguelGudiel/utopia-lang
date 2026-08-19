@@ -66,6 +66,7 @@ This book is organized like the documentation of other systems languages, so you
 | Chapter | Description |
 | --- | --- |
 | [LLVM Code Generation](advanced/llvm-codegen.md) | The compilation pipeline and attribute inference |
+| [SIMD](advanced/simd.md) | Vector types and the portable/x86/NEON intrinsic layers |
 | [TBAA Metadata](advanced/tbaa.md) | Type-based alias analysis |
 | [Debug Info](advanced/debug-info.md) | DWARF emission |
 | [Intrinsics](advanced/intrinsics.md) | `sizeof`, `typeof`, and type reflection |

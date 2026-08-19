@@ -24,6 +24,14 @@ void OptionsParser::parseCommonOptions(const std::vector<std::string> &args,
       opts.targetTriple = args[++i];
     } else if (arg.starts_with("--target=")) {
       opts.targetTriple = arg.substr(9);
+    } else if (arg == "--mcpu" && i + 1 < args.size()) {
+      opts.targetCpu = args[++i];
+    } else if (arg.starts_with("--mcpu=")) {
+      opts.targetCpu = arg.substr(7);
+    } else if (arg == "--mattr" && i + 1 < args.size()) {
+      opts.targetFeatures = args[++i];
+    } else if (arg.starts_with("--mattr=")) {
+      opts.targetFeatures = arg.substr(8);
     } else if (arg == "--sysroot" && i + 1 < args.size()) {
       opts.sysroot = args[++i];
     } else if (arg.starts_with("--sysroot=")) {

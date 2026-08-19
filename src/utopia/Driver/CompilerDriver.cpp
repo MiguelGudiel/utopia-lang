@@ -325,6 +325,29 @@ bool CompilerDriver::run() {
       return false;
     }
 
+    /* Fail early when the program has no 'main': materializing a module
+     * without an entry point through the ORC JIT corrupts the host stack
+     * (the compiler's own argc/argv slot gets clobbered, crashing 'utopia'
+     * with a nondeterministic SEGV). */
+    bool hasMain = false;
+    for (const ModuleNode *modNode : compiledModules) {
+      for (const auto *stmt : modNode->statements) {
+        if (stmt->kind == NodeKind::FunctionDecl &&
+            static_cast<const FunctionDeclNode *>(stmt)->name == "main") {
+          hasMain = true;
+          break;
+        }
+      }
+      if (hasMain)
+        break;
+    }
+    if (!hasMain) {
+      std::cerr << "\033[1;31m[JIT Error]\033[0m Entry point symbol 'main' not "
+                   "resolved."
+                << std::endl;
+      return false;
+    }
+
     ScopedTimer timer("JIT Execution Engine");
     llvm::InitializeNativeTarget();
     llvm::InitializeNativeTargetAsmPrinter();

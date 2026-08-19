@@ -14,6 +14,8 @@ struct GlobalOptions {
   bool asyncEnabled = true;
   std::optional<int> cliOptLevel;
   std::string targetTriple;
+  std::string targetCpu;
+  std::string targetFeatures;
   std::string sysroot;
   std::string stdlibRoot;
   std::string preludeRoot;
