@@ -1,0 +1,9 @@
+project:
+  name: "final_this_params"
+
+build:
+  target: executable
+  source_dirs:
+    - src/
+  linker_flags:
+    - "-lm"

@@ -107,7 +107,8 @@ private:
   DeclNode *parseAnnotationDecl(llvm::ArrayRef<AnnotationNode *> annotations);
   DeclNode *parseTypedefDecl();
 
-  DeclNode *parseRecordDecl(TypeKind kind, bool isAbstract = false);
+  DeclNode *parseRecordDecl(TypeKind kind, bool isAbstract = false,
+                            bool isFinal = false);
   DeclNode *parseEnumDecl();
   BlockNode *parseBlock();
   BlockNode *parseStatementAsBlock();

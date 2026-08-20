@@ -10,11 +10,11 @@ llvm::Module *Compiler::compileToIR(ModuleNode *root,
                                     BackendContext &backendCtx,
                                     const std::string &moduleName,
                                     DiagnosticsEngine &diags,
-                                    bool emitDebugInfo,
+                                    bool emitDebugInfo, ASTContext &astCtx,
                                     bool asyncEnabled) {
   llvm::Module *llvmMod = backendCtx.createModule(moduleName);
   CodeGen codegen(backendCtx, *llvmMod, diags, emitDebugInfo,
-                  std::string(root->filePath), asyncEnabled);
+                  std::string(root->filePath), astCtx, asyncEnabled);
   codegen.dispatch(root);
 
   if (diags.hasErrors()) {

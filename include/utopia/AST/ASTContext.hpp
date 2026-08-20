@@ -431,6 +431,18 @@ public:
     return ns;
   }
 
+  /* ---- Dart-style const objects (shared across modules) ----
+   *
+   * 'constObjectCreations' maps a canonicalization key to the typed AST
+   * node that creates the object, so code generation in any module can
+   * rebuild the constant initializer from the original expression.
+   * 'constObjectFields' maps a key to (final field -> serialized constant
+   * value) so 'const b = constObj.field' stays evaluable cross-module. */
+  std::unordered_map<std::string, const ExprNode *> constObjectCreations;
+  std::unordered_map<std::string,
+                     std::unordered_map<std::string, std::string>>
+      constObjectFields;
+
 private:
   llvm::BumpPtrAllocator allocator;
   std::vector<const ArrayType *> arrayTypes;

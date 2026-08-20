@@ -59,6 +59,7 @@ enum class TokenType : uint8_t {
   UNION_KW,
   CLASS_KW,
   ABSTRACT_KW,
+  FINAL_KW,
   EXTENDS_KW,
   IMPLEMENTS_KW,
   SUPER_KW,

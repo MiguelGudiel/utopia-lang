@@ -1,0 +1,104 @@
+ /*
+ * Demonstrates the Dart-style 'final' modifier and initializing formal
+ * parameters ('this.x').
+ *
+ * - 'final' variables are assigned exactly once (declaration, 'this.x'
+ *   constructor parameter, or ': this.x = expr' initializer-list entry).
+ * - 'final' fields must be initialized at the declaration or by every
+ *   constructor; re-initializing them is a compile error.
+ * - 'final class' cannot be extended or implemented.
+ * - Initializing formals override declaration field initializers, and
+ *   initializer-list entries override both (Dart execution order).
+ */
+
+final class Counter {
+  final int32 base;
+  private int32 value = 10;
+
+  Counter(this.base) {}
+
+  public static Counter* fromOffset(int32 offset) {
+    return new Counter(offset + 100);
+  }
+
+  public int32 getValue() {
+    return this.value;
+  }
+
+  public void bump() {
+    this.value++;
+  }
+}
+
+class Point {
+  public final int32 x;
+  public final int32 y;
+  private final String label;
+
+  Point(this.x, this.y, {this.label = "origin"}) {}
+
+  public String describe() {
+    return label + "(" + x + "," + y + ")";
+  }
+}
+
+class Base {
+  public final int32 a;
+  Base(this.a) {}
+}
+
+class Derived extends Base {
+  public final int32 b;
+  Derived(int32 v, this.b) : super(v + 1) {}
+}
+
+class WithString {
+  public final String name;
+  public int32 count = 5;
+
+  WithString(this.name, {this.count = 99}) {}
+}
+
+struct Pair {
+  public final int32 first;
+  public final int32 second;
+
+  Pair(this.first, this.second) {}
+}
+
+final int32 GLOBAL_FINAL = 7;
+static final int32 STATIC_FINAL = 8;
+
+int main() {
+  final int32 local = 42;
+
+  Counter* c1 = new Counter(1);
+  Counter* c2 = Counter.fromOffset(5);
+  Point* p = new Point(3, 4, label: "pt");
+  Derived* d = new Derived(10, 20);
+  WithString* w1 = new WithString("defaulted");
+  WithString* w2 = new WithString("explicit", count: 123);
+  Pair pair = Pair(1, 2);
+
+  c1.bump();
+  c2.bump();
+  c2.bump();
+
+  print("c1 base=%d value=%d\n", c1.base, c1.getValue());
+  print("c2 base=%d value=%d\n", c2.base, c2.getValue());
+  print("%s\n", p.describe());
+  print("d a=%d b=%d\n", d.a, d.b);
+  print("w1 %s:%d\n", w1.name, w1.count);
+  print("w2 %s:%d\n", w2.name, w2.count);
+  print("pair %d %d\n", pair.first, pair.second);
+  print("finals %d %d %d\n", local, GLOBAL_FINAL, STATIC_FINAL);
+
+  delete c1;
+  delete c2;
+  delete p;
+  delete d;
+  delete w1;
+  delete w2;
+
+  return 0;
+}

@@ -1343,7 +1343,7 @@ void handleCompletion(const json &req) {
         "enum",      "typedef",   "annotation", "Function", "this",
         "null",      "true",      "false",      "public",   "private",
         "protected", "const",     "static",     "extern",   "required",
-        "operator",  "namespace", "using",      "abstract"};
+        "operator",  "namespace", "using",      "abstract", "final"};
 
     std::vector<std::string> primitives = {
         "int8",   "int16",   "int32",   "int64",  "uint8", "uint16", "uint32",

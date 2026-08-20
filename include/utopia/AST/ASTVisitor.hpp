@@ -148,6 +148,9 @@ public:
     case NodeKind::Delete:
       return static_cast<Derived *>(this)->visit(
           static_cast<const DeleteExprNode *>(node));
+    case NodeKind::ConstExpr:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const ConstExprNode *>(node));
     case NodeKind::DestructorCall:
       return static_cast<Derived *>(this)->visit(
           static_cast<const DestructorCallNode *>(node));

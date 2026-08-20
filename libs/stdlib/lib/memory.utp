@@ -38,6 +38,15 @@ void* construct<T>(void* ptr);
 void destruct(void* ptr);
 
 /*
+ * Returns whether 'ptr' points at a canonical const object (static
+ * read-only storage). Such objects are immortal: never delete them.
+ * Frameworks receiving objects by pointer can guard their cleanup with
+ * 'if (!Memory.isConst(ptr)) delete ptr;'.
+ */
+@intrinsic("memory_is_const")
+bool isConst(void* ptr);
+
+/*
  * Internal reference-count block shared by shared_ptr and weak_ptr.
  */
 class RefCountBlock {

@@ -22,6 +22,12 @@ public:
   std::vector<std::string> namespaceStack;
   const FunctionDeclNode *currentFunction = nullptr;
 
+  /* Nesting depth of Dart-style const contexts (const expressions and
+   * initializers of const variables). While non-zero, constructor calls
+   * that resolve to const constructors are evaluated as canonical const
+   * objects (implicit const, Dart 2 rule). */
+  int constContextDepth = 0;
+
   explicit SemaContext(ASTContext &ast, DiagnosticsEngine &de,
                        std::string_view path)
       : astCtx(ast), currentFile(path), diags(de) {

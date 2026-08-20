@@ -3,6 +3,9 @@
 #include "utopia/Common/Logger.hpp"
 #include "utopia/Sema/EffectAnalyzer.hpp"
 #include "utopia/Sema/Sema.hpp"
+#include <cstdio>
+#include <cstdlib>
+#include <limits>
 #include <string>
 
 namespace utopia {
@@ -1053,6 +1056,17 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
       hasErrors = true;
       const_cast<ClassDeclNode *>(node)->baseClass = nullptr;
     } else {
+      if (auto *baseDecl = llvm::dyn_cast_or_null<ClassDeclNode>(
+              static_cast<const ClassType *>(bTy)->getDeclaration())) {
+        if (baseDecl->isFinal) {
+          ctx->reportError(node->line, node->column, node->length,
+                           "Class '" + std::string(node->name) +
+                               "' cannot extend the final class '" +
+                               std::string(baseDecl->name) + "'.");
+          hasErrors = true;
+        }
+      }
+
       // Detection of inheritance cycles
       const ClassType *current = static_cast<const ClassType *>(bTy);
       bool cycle = false;
@@ -1130,6 +1144,17 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
       ctx->reportError(node->line, node->column, node->length,
                        "Interfaces must be of class type.");
       hasErrors = true;
+    } else if (auto *ifaceDecl = llvm::dyn_cast_or_null<ClassDeclNode>(
+                   static_cast<const ClassType *>(
+                       resolved->getUnqualifiedType())
+                       ->getDeclaration())) {
+      if (ifaceDecl->isFinal) {
+        ctx->reportError(node->line, node->column, node->length,
+                         "Class '" + std::string(node->name) +
+                             "' cannot implement the final class '" +
+                             std::string(ifaceDecl->name) + "'.");
+        hasErrors = true;
+      }
     }
     resolvedInterfaces.push_back(resolved);
   }
@@ -1474,6 +1499,59 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
       hasErrors = true;
   }
 
+  /* Dart-style const constructors: validate all of them after the fields
+   * (and this-params) are resolved. */
+  for (const auto *ctor : node->constructors) {
+    this->checkConstConstructor(ctor);
+  }
+
+  /* Dart 'final' field rules: a final field initialized at its declaration
+   * cannot be re-initialized by any constructor, and a final field without
+   * a declaration initializer must be initialized by every constructor
+   * (through 'this.x' parameters or ': this.x = expr' entries). */
+  for (const auto *field : node->fields) {
+    if (!field->isFinal || field->isStatic)
+      continue;
+    for (const auto *ctor : node->constructors) {
+      bool viaThisParam = false;
+      bool viaFieldInit = false;
+      for (const auto *param : ctor->params) {
+        if (param->isThisParam && param->name == field->varName) {
+          viaThisParam = true;
+          break;
+        }
+      }
+      for (const auto *init : ctor->fieldInitializers) {
+        if (auto *target = llvm::dyn_cast<MemberAccessNode>(init->target)) {
+          if (target->memberName == field->varName) {
+            viaFieldInit = true;
+            break;
+          }
+        }
+      }
+      if (field->initializer && (viaThisParam || viaFieldInit)) {
+        ctx->reportError(ctor->line, ctor->column, ctor->length,
+                         "The final field '" + std::string(field->varName) +
+                             "' is already initialized at its declaration.");
+        hasErrors = true;
+      }
+      if (viaThisParam && viaFieldInit) {
+        ctx->reportError(ctor->line, ctor->column, ctor->length,
+                         "The final field '" + std::string(field->varName) +
+                             "' is initialized twice in the initializer list "
+                             "of this constructor.");
+        hasErrors = true;
+      }
+      if (!field->initializer && !viaThisParam && !viaFieldInit) {
+        ctx->reportError(ctor->line, ctor->column, ctor->length,
+                         "The final field '" + std::string(field->varName) +
+                             "' must be initialized in every constructor or "
+                             "at its declaration.");
+        hasErrors = true;
+      }
+    }
+  }
+
   ctx->setCurrentRecordContext(prevContext);
 
   if (hasErrors) {
@@ -1755,6 +1833,7 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
                 for (const auto *fDecl : fields) {
                   if (fDecl->varName == node->name) {
                     checkDeprecated(fDecl, node);
+                    const_cast<VariableNode *>(node)->resolvedDecl = fDecl;
                     break;
                   }
                 }
@@ -2257,6 +2336,21 @@ SemaResult TypeCheckPass::visit(const UnaryOpNode *node) {
       return ctx->reportError(node->line, node->column, node->length,
                               "Cannot modify a constant variable");
     }
+    const DeclNode *targetDecl = nullptr;
+    if (auto *targetVar = llvm::dyn_cast<VariableNode>(node->expr)) {
+      targetDecl = targetVar->resolvedDecl;
+    } else if (auto *targetMa = llvm::dyn_cast<MemberAccessNode>(node->expr)) {
+      targetDecl = targetMa->resolvedDecl;
+    }
+    if (targetDecl && targetDecl->kind == NodeKind::VarDecl &&
+        static_cast<const VarDeclNode *>(targetDecl)->isFinal) {
+      return ctx->reportError(node->line, node->column, node->length,
+                              "Cannot modify the final variable '" +
+                                  std::string(static_cast<const VarDeclNode *>(
+                                                  targetDecl)
+                                                  ->varName) +
+                                  "'.");
+    }
     resType = opBase;
   } else {
     return ctx->reportError(node->line, node->column, node->length,
@@ -2390,6 +2484,23 @@ SemaResult TypeCheckPass::visit(const BinaryOpNode *node) {
   }
 
   if (cat == OpCategory::Relational) {
+    /* Pointer comparisons ignore top-level const qualifiers (Dart-style:
+     * constness is a value property, not part of the pointer type). */
+    const Type *lUnqualP = (*lhs)->getUnqualifiedType();
+    const Type *rUnqualP = (*rhs)->getUnqualifiedType();
+    if (lUnqualP->isPointerType() && rUnqualP->isPointerType()) {
+      const Type *lPointee = static_cast<const PointerType *>(lUnqualP)
+                                 ->getPointeeType()
+                                 ->getUnqualifiedType();
+      const Type *rPointee = static_cast<const PointerType *>(rUnqualP)
+                                 ->getPointeeType()
+                                 ->getUnqualifiedType();
+      if (lPointee->toString() == rPointee->toString()) {
+        node->promotedType = ctx->astCtx.getPointerType(lPointee);
+        node->exprType = ctx->astCtx.BoolTy;
+        return ctx->astCtx.BoolTy;
+      }
+    }
     if (!canImplicitlyCast(*lhs, *rhs)) {
       return ctx->reportError(node->line, node->column, node->length,
                               "Type mismatch in relational operation.");
@@ -2565,26 +2676,50 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
         "Variables with inferred type must be initialized.");
   }
 
-  if (node->initializer) {
-    bool pushedExpected = false;
-    if (!isAuto) {
-      if (const Type *expFn = getExpectedFunctionPtrType(declType)) {
-        ctx->pushExpectedFunctionType(expFn);
-        pushedExpected = true;
+    if (node->initializer) {
+      bool pushedExpected = false;
+      if (!isAuto) {
+        if (const Type *expFn = getExpectedFunctionPtrType(declType)) {
+          ctx->pushExpectedFunctionType(expFn);
+          pushedExpected = true;
+        }
       }
-    }
 
-    auto initRes = dispatch(node->initializer);
+      /* Dart rule: the initializer of a 'const' variable lives in a const
+       * context (implicit const applies to nested constructor calls). */
+      if (declType->isConstQualified() && !node->isExtern)
+        ctx->constContextDepth++;
 
-    if (pushedExpected)
-      ctx->popExpectedFunctionType();
+      auto initRes = dispatch(node->initializer);
 
-    if (!initRes) {
-      if (ctx->getScopeDepth() > 1) {
-        ctx->addDecl(node->varName, node);
+      if (declType->isConstQualified() && !node->isExtern)
+        ctx->constContextDepth--;
+
+      if (pushedExpected)
+        ctx->popExpectedFunctionType();
+
+      if (!initRes) {
+        if (ctx->getScopeDepth() > 1) {
+          ctx->addDecl(node->varName, node);
+        }
+        return initRes;
       }
-      return initRes;
-    }
+
+      /* Validate that the const initializer really is a constant expression
+       * and cache its serialized value. */
+      if (declType->isConstQualified() && !node->isExtern) {
+        std::string key;
+        if (!this->constEvaluate(node->initializer, true, key)) {
+          return ctx->reportError(
+              node->initializer->line, node->initializer->column,
+              node->initializer->length,
+              "The initializer of a 'const' variable must be a constant "
+              "expression.");
+        }
+        const_cast<VarDeclNode *>(node)->isConstExpr = true;
+        const_cast<VarDeclNode *>(node)->constKey = key;
+        initRes = node->initializer->exprType;
+      }
 
     if (isAuto) {
       const Type *inferred = *initRes;
@@ -2798,6 +2933,39 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
       declType->getKind() != TypeKind::RValueReference && !node->isExtern) {
     (void)ctx->reportError(node->line, node->column, node->length,
                            "Constant variables must be initialized.");
+  }
+
+  /* 'final' variables (locals, globals and static fields) require an
+   * initializer at the declaration; only instance fields may defer their
+   * initialization to the constructors. A variable is a field when the
+   * current record's declaration owns it; scope depth alone is unreliable
+   * because template instantiation type-checks clones inside an extra
+   * scope. */
+  if (node->isFinal && !node->initializer && !node->isExtern) {
+    bool isFieldDecl = false;
+    if (const RecordType *recCtx = ctx->getCurrentRecordContext()) {
+      if (const DeclNode *recDecl = recCtx->getDeclaration()) {
+        llvm::ArrayRef<VarDeclNode *> fields;
+        if (auto *cDecl = llvm::dyn_cast<ClassDeclNode>(recDecl))
+          fields = cDecl->fields;
+        else if (auto *sDecl = llvm::dyn_cast<StructDeclNode>(recDecl))
+          fields = sDecl->fields;
+        else if (auto *uDecl = llvm::dyn_cast<UnionDeclNode>(recDecl))
+          fields = uDecl->fields;
+        for (const auto *f : fields) {
+          if (f == node) {
+            isFieldDecl = true;
+            break;
+          }
+        }
+      }
+    }
+    if (!isFieldDecl || node->isStatic) {
+      (void)ctx->reportError(node->line, node->column, node->length,
+                             "The final variable '" +
+                                 std::string(node->varName) +
+                                 "' must be initialized at its declaration.");
+    }
   }
 
   if (node->isExtern && node->initializer) {
@@ -3083,6 +3251,28 @@ SemaResult TypeCheckPass::visit(const AssignNode *node) {
     return ctx->reportError(node->target->line, node->target->column,
                             node->target->length,
                             "Cannot assign to a constant variable");
+  }
+
+  /* Dart 'final' semantics: a final variable or field is written exactly
+   * once. Only constructor initializer-list entries (': this.x = expr') may
+   * write to a final field; everything else is an error. */
+  if (!node->isFieldInit) {
+    const DeclNode *targetDecl = nullptr;
+    if (auto *targetVar = llvm::dyn_cast<VariableNode>(node->target)) {
+      targetDecl = targetVar->resolvedDecl;
+    } else if (auto *targetMa =
+                   llvm::dyn_cast<MemberAccessNode>(node->target)) {
+      targetDecl = targetMa->resolvedDecl;
+    }
+    if (targetDecl && targetDecl->kind == NodeKind::VarDecl &&
+        static_cast<const VarDeclNode *>(targetDecl)->isFinal) {
+      return ctx->reportError(
+          node->target->line, node->target->column, node->target->length,
+          "Cannot assign to the final variable '" +
+              std::string(static_cast<const VarDeclNode *>(targetDecl)
+                              ->varName) +
+              "'.");
+    }
   }
 
   if (node->op != "=") {
@@ -3646,6 +3836,28 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
       node->exprType = field->type;
       node->isLValue = true;
 
+      /* The declaring record may differ from the object's type when the
+       * field is inherited; attach the field declaration so later checks
+       * (final writes) can inspect the declaration. */
+      const DeclNode *declaringDecl =
+          fieldRecTy ? fieldRecTy->getDeclaration() : nullptr;
+      if (declaringDecl) {
+        llvm::ArrayRef<VarDeclNode *> fields;
+        if (auto *cDecl = llvm::dyn_cast<ClassDeclNode>(declaringDecl))
+          fields = cDecl->fields;
+        else if (auto *sDecl = llvm::dyn_cast<StructDeclNode>(declaringDecl))
+          fields = sDecl->fields;
+        else if (auto *uDecl = llvm::dyn_cast<UnionDeclNode>(declaringDecl))
+          fields = uDecl->fields;
+
+        for (const auto *fDecl : fields) {
+          if (fDecl->varName == node->memberName) {
+            const_cast<MemberAccessNode *>(node)->resolvedDecl = fDecl;
+            break;
+          }
+        }
+      }
+
       if (const DeclNode *recDecl = recordTy->getDeclaration()) {
         llvm::ArrayRef<VarDeclNode *> fields;
         if (auto *cDecl = llvm::dyn_cast<ClassDeclNode>(recDecl))
@@ -3688,6 +3900,21 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
 
     if (recDecl) {
       if (staticAccessDecl) {
+        /* Dart-style named constructor reference: 'Foo.named(...)' must
+         * win over the field/method walk (the name may collide with an
+         * instance field). */
+        if (staticAccessDecl->kind == NodeKind::ClassDecl) {
+          for (const auto *ctor :
+               static_cast<const ClassDeclNode *>(staticAccessDecl)
+                   ->constructors) {
+            if (ctor->isNamedCtor && ctor->name == node->memberName) {
+              const_cast<MemberAccessNode *>(node)->isMethodRef = true;
+              const_cast<MemberAccessNode *>(node)->resolvedMethod = ctor;
+              node->exprType = ctx->astCtx.VoidTy;
+              return ctx->astCtx.VoidTy;
+            }
+          }
+        }
         llvm::ArrayRef<VarDeclNode *> staticFields;
         if (auto *cDecl = llvm::dyn_cast<ClassDeclNode>(staticAccessDecl))
           staticFields = cDecl->fields;
@@ -3959,6 +4186,23 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
             node->exprType = ctx->astCtx.VoidTy;
             checkDeprecated(method, node);
             return ctx->astCtx.VoidTy;
+          }
+        }
+
+        /* Dart-style named constructor reference: 'Foo.named(...)'.
+         * Constructors are not inherited, so only the root level matches. */
+        if (staticAccessDecl && currentRecDecl == recDecl &&
+            currentRecDecl->kind == NodeKind::ClassDecl) {
+          for (const auto *ctor :
+               static_cast<const ClassDeclNode *>(currentRecDecl)->constructors) {
+            if (ctor->isNamedCtor && ctor->name == node->memberName) {
+              const_cast<MemberAccessNode *>(node)->isMethodRef = true;
+              const_cast<MemberAccessNode *>(node)->resolvedMethod = ctor;
+              const_cast<MemberAccessNode *>(node)->resolvedDecl =
+                  currentRecDecl;
+              node->exprType = ctx->astCtx.VoidTy;
+              return ctx->astCtx.VoidTy;
+            }
           }
         }
 
@@ -4560,6 +4804,73 @@ SemaResult TypeCheckPass::visit(const FunctionDeclNode *node) {
     ctx->addDecl("this", thisParam);
   }
 
+  /* Whether this function is a constructor of its record: several checks
+   * (this-parameters, effect analysis) only apply to constructors. */
+  bool isCtor = false;
+
+  /* Validate 'this.x' parameters: they are only legal in constructors, and
+   * their types come from the record's fields (resolved during declaration
+   * collection; re-resolved here so template-instantiated constructors work
+   * even when that pass skipped them). */
+  if (node->parentRecord) {
+    const DeclNode *recDecl = node->parentRecord->getDeclaration();
+    llvm::ArrayRef<VarDeclNode *> recFields;
+    if (recDecl) {
+      if (auto *cDecl = llvm::dyn_cast<ClassDeclNode>(recDecl)) {
+        recFields = cDecl->fields;
+        for (const auto *c : cDecl->constructors)
+          if (c == node) isCtor = true;
+      } else if (auto *sDecl = llvm::dyn_cast<StructDeclNode>(recDecl)) {
+        recFields = sDecl->fields;
+        for (const auto *c : sDecl->constructors)
+          if (c == node) isCtor = true;
+      } else if (auto *uDecl = llvm::dyn_cast<UnionDeclNode>(recDecl)) {
+        recFields = uDecl->fields;
+        for (const auto *c : uDecl->constructors)
+          if (c == node) isCtor = true;
+      }
+    }
+    for (const auto *param : node->params) {
+      if (!param->isThisParam)
+        continue;
+      if (!isCtor) {
+        ctx->reportError(param->line, param->column, param->length,
+                         "Initializing formal parameters ('this." +
+                             std::string(param->name) +
+                             "') can only be used in constructors.");
+        hasErrors = true;
+        continue;
+      }
+      if (!param->type) {
+        const VarDeclNode *field = nullptr;
+        for (const auto *f : recFields) {
+          if (f->varName == param->name) {
+            field = f;
+            break;
+          }
+        }
+        if (!field) {
+          ctx->reportError(param->line, param->column, param->length,
+                           "No field named '" + std::string(param->name) +
+                               "' for 'this." + std::string(param->name) +
+                               "'.");
+          hasErrors = true;
+          continue;
+        }
+        if (field->isStatic) {
+          ctx->reportError(param->line, param->column, param->length,
+                           "Field '" + std::string(param->name) +
+                               "' is static; 'this." +
+                               std::string(param->name) +
+                               "' cannot initialize a static field.");
+          hasErrors = true;
+          continue;
+        }
+        const_cast<ParamDeclNode *>(param)->type = field->type;
+      }
+    }
+  }
+
   for (const auto *param : node->params) {
     /* Dispatch the parameter to ensure template instances are properly mapped
      * to their RecordType definitions */
@@ -4583,12 +4894,31 @@ SemaResult TypeCheckPass::visit(const FunctionDeclNode *node) {
     ctx->addDecl(param->name, param);
   }
 
+  /* Dart rule: the initializer list (super call + ': this.x = expr'
+   * entries) of a const constructor is a constant context, so constructor
+   * calls there are implicitly const. */
+  bool ctorInitIsConst = node->isConst && node->isMethod && node->parentRecord;
+  if (ctorInitIsConst)
+    ctx->constContextDepth++;
+
   if (node->superCall) {
     auto superRes = dispatch(node->superCall);
     if (!superRes) {
       hasErrors = true;
     }
   }
+
+  for (const auto *init : node->fieldInitializers) {
+    /* The 'isFieldInit' marker allows the assignment to write to final
+     * fields; the target itself is resolved like any member access. */
+    auto initRes = dispatch(init);
+    if (!initRes) {
+      hasErrors = true;
+    }
+  }
+
+  if (ctorInitIsConst)
+    ctx->constContextDepth--;
 
   if (node->body) {
     auto bodyRes = dispatch(node->body);
@@ -4612,7 +4942,24 @@ SemaResult TypeCheckPass::visit(const FunctionDeclNode *node) {
       EffectAnalyzer ea;
       if (node->superCall)
         ea.dispatch(node->superCall);
+      for (const auto *init : node->fieldInitializers)
+        ea.dispatch(init);
       ea.dispatch(node->body);
+
+      /* Constructors and destructors do more than their AST body shows:
+       * field declaration initializers, 'this.x' parameter stores and
+       * field-destructor cleanups are all lowered by CodeGen outside the
+       * body. An empty 'Box() {}' over a 'int v = 1;' field would
+       * otherwise analyze as memory(none), letting the optimizer delete
+       * the constructor call and leave the field uninitialized. */
+      bool isDtor = node->name == "~" && node->isMethod;
+      if (isCtor || isDtor) {
+        ea.writesMem = true;
+        if (isDtor) {
+          ea.readsMem = true;
+          ea.freesMem = true;
+        }
+      }
 
       node->isReadNone = !ea.readsMem && !ea.writesMem;
       node->isReadOnly = ea.readsMem && !ea.writesMem;
@@ -5546,7 +5893,7 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
                       (dotPos != std::string_view::npos)
                           ? recName.substr(dotPos + 1)
                           : recName;
-                  if (fDecl->name == simpleRecName) {
+                  if (fDecl->name == simpleRecName || fDecl->isNamedCtor) {
                     isConstructorCall = true;
                     constructorRecTy = fDecl->parentRecord;
                   }
@@ -5579,6 +5926,19 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
                     ? bestMatch->effectiveReturnType
                     : bestMatch->returnType);
             node->isLValue = (node->exprType->isReferenceType());
+          }
+
+          /* Implicit const (Dart 2 rule): inside a const context, invoking
+           * a const constructor produces a canonical const object. */
+          if (isConstructorCall && ctx->constContextDepth > 0 &&
+              bestMatch->isConst) {
+            std::string key;
+            if (!this->constEvaluate(node, true, key)) {
+              return ctx->reportError(
+                  node->line, node->column, node->length,
+                  "Arguments of a const object creation must be constant "
+                  "expressions.");
+            }
           }
 
           if (node->target->kind == NodeKind::Variable) {
@@ -5894,6 +6254,36 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
             }
           }
         }
+        /* Dart-style named constructor: 'Foo.named(args)' — constructors
+         * live outside the method tables, so resolve them explicitly when
+         * the receiver is a class reference. */
+        if (recDecl && recDecl->kind == NodeKind::ClassDecl) {
+          bool staticClassRef = false;
+          if (auto *v = llvm::dyn_cast<VariableNode>(ma->object))
+            staticClassRef = v->resolvedDecl == recDecl;
+          else if (auto *m = llvm::dyn_cast<MemberAccessNode>(ma->object))
+            staticClassRef = m->resolvedDecl == recDecl;
+          if (staticClassRef) {
+            for (const auto *ctor :
+                 static_cast<const ClassDeclNode *>(recDecl)->constructors) {
+              if (!ctor->isNamedCtor || ctor->name != ma->memberName)
+                continue;
+              int score = 0;
+              std::vector<ExprNode *> resolvedArgs;
+              auto errs = checkMatch(ctor, score, resolvedArgs);
+              if (errs.empty()) {
+                if (score > bestScore) {
+                  bestScore = score;
+                  bestMatch = ctor;
+                  bestResolvedArgs = resolvedArgs;
+                  overloadErrors.clear();
+                }
+              } else {
+                overloadErrors.push_back(errs);
+              }
+            }
+          }
+        }
         if (bestMatch) {
           const_cast<MemberAccessNode *>(ma)->resolvedMethod = bestMatch;
           const_cast<FunctionCallNode *>(node)->resolvedFunc = bestMatch;
@@ -5907,11 +6297,31 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
             return lambdaRes;
           }
 
-          node->exprType = resolveIfTemplate(
-              bestMatch->effectiveReturnType
-                  ? bestMatch->effectiveReturnType
-                  : bestMatch->returnType);
-          node->isLValue = (node->exprType->isReferenceType());
+          if (bestMatch->isNamedCtor) {
+            const Type *recTy = nullptr;
+            if (auto *c = llvm::dyn_cast<ClassDeclNode>(recDecl))
+              recTy = c->recordType;
+            node->exprType = recTy;
+            node->isLValue = false;
+          } else {
+            node->exprType = resolveIfTemplate(
+                bestMatch->effectiveReturnType
+                    ? bestMatch->effectiveReturnType
+                    : bestMatch->returnType);
+            node->isLValue = (node->exprType->isReferenceType());
+          }
+
+          /* Implicit const for named constructor calls (Dart 2 rule). */
+          if (bestMatch->isNamedCtor && ctx->constContextDepth > 0 &&
+              bestMatch->isConst) {
+            std::string key;
+            if (!this->constEvaluate(node, true, key)) {
+              return ctx->reportError(
+                  node->line, node->column, node->length,
+                  "Arguments of a const object creation must be constant "
+                  "expressions.");
+            }
+          }
 
           checkDeprecated(bestMatch, node);
           emitRValueRefWarnings(bestMatch, bestResolvedArgs);
@@ -7015,6 +7425,13 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
       std::vector<ExprNode *> bestResolvedArgs;
 
       for (const auto *ctor : ctors) {
+        /* Dart-style named constructor: 'new Foo.named(...)' only matches
+         * the named constructor. */
+        if (!node->namedCtorName.empty() &&
+            (!ctor->isNamedCtor || ctor->name != node->namedCtorName))
+          continue;
+        if (node->namedCtorName.empty() && ctor->isNamedCtor)
+          continue;
         if (!ctor->isPublic(ctor->name) &&
             ctx->getCurrentRecordContext() != recTy) {
           overloadErrors.push_back({"Constructor is private."});
@@ -7088,6 +7505,62 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
           continue;
         }
 
+        /* Fill parameters the call did not provide: default expressions
+         * are used verbatim, optional named parameters without a default
+         * fall back to a zero/false/null value, and required parameters
+         * produce a diagnostic. Mirrors the function-call matching so
+         * 'new' behaves like a direct constructor call. */
+        for (size_t p = 0; p < expectedParams; ++p) {
+          if (resolvedArgs[p])
+            continue;
+          const ParamDeclNode *param = ctor->params[p];
+          if (param->defaultValue) {
+            auto defNode = param->defaultValue;
+            if (!defNode->exprType) {
+              dispatch(defNode);
+            }
+            resolvedArgs[p] = defNode;
+            resolvedTypes[p] = defNode->exprType;
+            continue;
+          }
+          if (param->isRequired) {
+            errors.push_back("Missing required named parameter '" +
+                             std::string(param->name) + "'.");
+            continue;
+          }
+          if (!param->isNamed) {
+            errors.push_back("Missing mandatory positional parameter '" +
+                             std::string(param->name) + "'.");
+            continue;
+          }
+          const Type *pType = param->type;
+          const Type *unqual = pType->getUnqualifiedType();
+          if (unqual->isNumeric()) {
+            auto num = ctx->astCtx.create<NumberNode>("0", unqual->isFloat(),
+                                                      0, 0, 0);
+            num->exprType = pType;
+            resolvedArgs[p] = num;
+            resolvedTypes[p] = pType;
+          } else if (unqual->isBuiltinType() &&
+                     static_cast<const BuiltinType *>(unqual)
+                             ->getBuiltinKind() == BuiltinKind::Bool) {
+            auto bNode = ctx->astCtx.create<BoolNode>(false, 0, 0, 0);
+            bNode->exprType = pType;
+            resolvedArgs[p] = bNode;
+            resolvedTypes[p] = pType;
+          } else {
+            auto nNode = ctx->astCtx.create<NullNode>(0, 0, 0);
+            nNode->exprType = pType;
+            resolvedArgs[p] = nNode;
+            resolvedTypes[p] = pType;
+          }
+        }
+
+        if (!errors.empty()) {
+          overloadErrors.push_back(errors);
+          continue;
+        }
+
         int currentScore = 0;
         bool match = true;
 
@@ -7104,8 +7577,7 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
             break;
           }
 
-          if (explicitlyProvided[p] &&
-              canImplicitlyCast(resolvedTypes[p], paramType, false)) {
+          if (explicitlyProvided[p] && typesMatchExactly(resolvedTypes[p], paramType)) {
             currentScore += 10;
           }
 
@@ -7261,6 +7733,18 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
             !lambdaRes) {
           return lambdaRes;
         }
+
+        /* Implicit const (Dart 2 rule): 'const x = new Foo(...)' inside a
+         * const context creates a canonical const object. */
+        if (ctx->constContextDepth > 0 && bestMatch->isConst) {
+          std::string key;
+          if (!this->constEvaluate(node, true, key)) {
+            return ctx->reportError(
+                node->line, node->column, node->length,
+                "Arguments of a const object creation must be constant "
+                "expressions.");
+          }
+        }
       }
     }
   }
@@ -7359,12 +7843,871 @@ SemaResult TypeCheckPass::visit(const DestructorCallNode *node) {
   return node->exprType;
 }
 
+/* ==================== Dart-style const expressions ==================== */
+
+namespace {
+/* Returns the resolved constructor behind an object creation expression, or
+ * null when 'expr' is not a constructor invocation. */
+const FunctionDeclNode *resolveConstCtorCall(const ExprNode *expr) {
+  if (auto *n = llvm::dyn_cast<NewExprNode>(expr))
+    return n->resolvedConstructor;
+  if (auto *call = llvm::dyn_cast<FunctionCallNode>(expr)) {
+    const FunctionDeclNode *f = call->resolvedFunc;
+    if (!f || !f->parentRecord)
+      return nullptr;
+    if (f->isNamedCtor) {
+      if (auto *ma = llvm::dyn_cast<MemberAccessNode>(call->target))
+        return ma->memberName == f->name ? f : nullptr;
+      return nullptr;
+    }
+    std::string_view recName = f->parentRecord->getName();
+    size_t dot = recName.find_last_of('.');
+    std::string_view simple =
+        (dot != std::string_view::npos) ? recName.substr(dot + 1) : recName;
+    if (f->name == simple)
+      return f;
+  }
+  return nullptr;
+}
+
+/* Serializes a number in a deterministic form (hex floats, plain decimals)
+ * so canonical keys are identical across independently compiled modules. */
+void serializeNumber(const NumberNode *node, std::string &out) {
+  std::string numStr(node->raw);
+  bool isHex = numStr.length() > 2 && numStr[0] == '0' &&
+               (numStr[1] == 'x' || numStr[1] == 'X');
+  if (isHex)
+    numStr = numStr.substr(2);
+  while (!numStr.empty()) {
+    char back = numStr.back();
+    if (back == 'u' || back == 'U' || back == 'l' || back == 'L')
+      numStr.pop_back();
+    else if (!isHex && (back == 'f' || back == 'F'))
+      numStr.pop_back();
+    else
+      break;
+  }
+  if (node->isFloat) {
+    char buf[64];
+    double d = strtod(numStr.c_str(), nullptr);
+    snprintf(buf, sizeof(buf), "f:%a", d);
+    out = buf;
+    return;
+  }
+  /* Parse as unsigned; re-interpret as signed when it fits so '-5' and
+   * '5' serialize canonically. */
+  unsigned long long raw = strtoull(numStr.c_str(), nullptr, isHex ? 16 : 10);
+  long long sv = (long long)raw;
+  if (sv >= 0 && raw <= 0x7FFFFFFFFFFFFFFFULL)
+    out = "i:" + std::to_string((long long)raw);
+  else
+    out = "u:" + std::to_string((unsigned long long)raw);
+}
+} // namespace
+
+bool TypeCheckPass::constEvaluate(const ExprNode *expr, bool inConstContext,
+                                  std::string &out) {
+  if (!expr)
+    return false;
+  out.clear();
+
+  if (auto *ce = llvm::dyn_cast<ConstExprNode>(expr))
+    return this->constEvaluate(ce->expr, true, out);
+
+  /* Constructor invocation -> canonical const object. Implicit const
+   * applies inside const contexts (Dart 2 rule). */
+  if (const FunctionDeclNode *ctor = resolveConstCtorCall(expr)) {
+    if (!ctor->isConst) {
+      return false;
+    }
+
+    const RecordType *recTy = ctor->parentRecord;
+    if (!recTy) {
+      return false;
+    }
+
+    /* Canonical key: class name (template args included) | constructor
+     * name | (param signature) | (evaluated argument values). The
+     * constructor name separates default from named constructors so
+     * identical-looking calls through different constructors stay distinct
+     * (Dart canonicalization is per-constructor). */
+    std::string key = "o:";
+    key += std::string(recTy->getName());
+    if (recTy->isTemplateInstantiation()) {
+      key += "<";
+      for (size_t i = 0; i < recTy->getTemplateArgs().size(); ++i) {
+        if (i)
+          key += ",";
+        key += recTy->getTemplateArgs()[i]->toString();
+      }
+      key += ">";
+    }
+    key += "|" + std::string(ctor->name);
+    key += "|(";
+    for (size_t p = 0; p < ctor->params.size(); ++p) {
+      if (p)
+        key += ",";
+      key += ctor->params[p]->type->toString();
+    }
+    key += ")|(";
+
+    const auto *call = llvm::dyn_cast<FunctionCallNode>(expr);
+    const auto *newNode = llvm::dyn_cast<NewExprNode>(expr);
+    llvm::ArrayRef<ExprNode *> args =
+        call ? call->args
+             : (newNode ? newNode->args : llvm::ArrayRef<ExprNode *>());
+    llvm::ArrayRef<std::string_view> argNames =
+        call ? call->argNames
+             : (newNode ? newNode->argNames
+                        : llvm::ArrayRef<std::string_view>());
+
+    /* Map each parameter to its argument (positional args bind params in
+     * order; named args bind by name). */
+    std::vector<const ExprNode *> paramArgs(ctor->params.size(), nullptr);
+    size_t positional = 0;
+    for (size_t i = 0; i < args.size(); ++i) {
+      if (!argNames.empty() && !argNames[i].empty()) {
+        for (size_t p = 0; p < ctor->params.size(); ++p)
+          if (ctor->params[p]->name == argNames[i])
+            paramArgs[p] = args[i];
+      } else {
+        if (positional < ctor->params.size())
+          paramArgs[positional] = args[i];
+        ++positional;
+      }
+    }
+
+    /* Constructor parameters resolve to the caller's arguments while the
+     * const initializer (super call, ': this.x = expr' entries) runs. */
+    size_t envBase = this->constParamEnv.size();
+    for (size_t p = 0; p < ctor->params.size(); ++p)
+      this->constParamEnv.push_back({ctor->params[p], paramArgs[p]});
+
+    /* Verify the super-constructor chain is const and evaluate the super
+     * calls (their argument keys are needed by code generation to rebuild
+     * the embedded base-class fields). */
+    bool chainOk = true;
+    for (const FunctionDeclNode *c = ctor; c; ) {
+      if (!c->isConst) {
+        chainOk = false;
+        break;
+      }
+      if (!c->superCall)
+        break;
+      std::string superKey;
+      if (!this->constEvaluate(c->superCall, true, superKey)) {
+        chainOk = false;
+        break;
+      }
+      const FunctionDeclNode *baseCtor = resolveConstCtorCall(c->superCall);
+      if (!baseCtor) {
+        chainOk = false;
+        break;
+      }
+      c = baseCtor;
+    }
+    if (!chainOk) {
+      this->constParamEnv.resize(envBase);
+      return false;
+    }
+
+    for (size_t p = 0; p < ctor->params.size(); ++p) {
+      if (p)
+        key += ",";
+      if (!paramArgs[p]) {
+        this->constParamEnv.resize(envBase);
+        return false;
+      }
+      std::string val;
+      if (!this->constEvaluate(paramArgs[p], true, val)) {
+        this->constParamEnv.resize(envBase);
+        return false;
+      }
+      key += val;
+    }
+    key += ")";
+
+    const_cast<ExprNode *>(expr)->isConstExpr = true;
+    const_cast<ExprNode *>(expr)->constKey = key;
+    /* A const object creation yields a pointer to the canonical instance
+     * (like 'new'), matching Utopia's pointer-based class model. */
+    const_cast<ExprNode *>(expr)->exprType =
+        ctx->astCtx.getPointerType(ctor->parentRecord);
+    ctx->astCtx.constObjectCreations[key] = expr;
+    this->recordConstObjectFields(key, expr);
+    this->constParamEnv.resize(envBase);
+    out = key;
+    return true;
+  }
+
+  if (auto *num = llvm::dyn_cast<NumberNode>(expr)) {
+    serializeNumber(num, out);
+    const_cast<ExprNode *>(expr)->isConstExpr = true;
+    const_cast<ExprNode *>(expr)->constKey = out;
+    return true;
+  }
+  if (auto *boolNode = llvm::dyn_cast<BoolNode>(expr)) {
+    out = boolNode->value ? "b:1" : "b:0";
+    const_cast<ExprNode *>(expr)->isConstExpr = true;
+    const_cast<ExprNode *>(expr)->constKey = out;
+    return true;
+  }
+  if (auto *strNode = llvm::dyn_cast<StringNode>(expr)) {
+    std::string s = "s:";
+    for (char ch : strNode->value) {
+      if (ch == '\\' || ch == ':')
+        s += '\\';
+      s += ch;
+    }
+    out = s;
+    const_cast<ExprNode *>(expr)->isConstExpr = true;
+    const_cast<ExprNode *>(expr)->constKey = out;
+    return true;
+  }
+  if (llvm::isa<NullNode>(expr)) {
+    out = "n";
+    const_cast<ExprNode *>(expr)->isConstExpr = true;
+    const_cast<ExprNode *>(expr)->constKey = out;
+    return true;
+  }
+  if (auto *charNode = llvm::dyn_cast<CharNode>(expr)) {
+    out = "c:" + std::to_string(charNode->value);
+    const_cast<ExprNode *>(expr)->isConstExpr = true;
+    const_cast<ExprNode *>(expr)->constKey = out;
+    return true;
+  }
+  if (auto *runeNode = llvm::dyn_cast<RuneNode>(expr)) {
+    out = "r:" + std::to_string(runeNode->value);
+    const_cast<ExprNode *>(expr)->isConstExpr = true;
+    const_cast<ExprNode *>(expr)->constKey = out;
+    return true;
+  }
+
+  /* A const variable (const-qualified declaration) with a constant
+   * initializer. 'final' variables are NOT constant expressions (Dart
+   * rule: only const variables can be referenced in const contexts). */
+  if (auto *varNode = llvm::dyn_cast<VariableNode>(expr)) {
+    /* Constructor parameters inside a const initializer resolve to the
+     * caller's argument expressions (Dart rule). */
+    if (varNode->resolvedDecl &&
+        varNode->resolvedDecl->kind == NodeKind::ParamDecl) {
+      for (const auto &[param, arg] : this->constParamEnv) {
+        if (param == varNode->resolvedDecl && arg) {
+          if (this->constEvaluate(arg, true, out)) {
+            const_cast<ExprNode *>(expr)->isConstExpr = true;
+            const_cast<ExprNode *>(expr)->constKey = out;
+            return true;
+          }
+        }
+      }
+      return false;
+    }
+    if (varNode->resolvedDecl &&
+        varNode->resolvedDecl->kind == NodeKind::VarDecl) {
+      const auto *varDecl =
+          static_cast<const VarDeclNode *>(varNode->resolvedDecl);
+      if (!varDecl->type->isConstQualified())
+        return false;
+      if (!varDecl->initializer)
+        return false;
+      if (!varDecl->isConstExpr) {
+        /* Evaluate (and cache) the initializer as a const expression. */
+        std::string val;
+        if (!this->constEvaluate(varDecl->initializer, true, val))
+          return false;
+        varDecl->isConstExpr = true;
+        varDecl->constKey = val;
+      }
+      out = varDecl->constKey;
+      const_cast<ExprNode *>(expr)->isConstExpr = true;
+      const_cast<ExprNode *>(expr)->constKey = out;
+      return true;
+    }
+    return false;
+  }
+
+  /* Field access on a const object: 'constObj.finalField' (Dart rule). */
+  if (auto *ma = llvm::dyn_cast<MemberAccessNode>(expr)) {
+    if (ma->isEnumMember) {
+      int64_t val = 0;
+      if (ma->enumMember)
+        val = ma->enumMember->evaluatedValue;
+      out = "i:" + std::to_string(val);
+      const_cast<ExprNode *>(expr)->isConstExpr = true;
+      const_cast<ExprNode *>(expr)->constKey = out;
+      return true;
+    }
+    std::string baseKey;
+    if (!this->constEvaluate(ma->object, true, baseKey))
+      return false;
+    if (baseKey.rfind("o:", 0) != 0)
+      return false;
+    auto it = ctx->astCtx.constObjectFields.find(baseKey);
+    if (it == ctx->astCtx.constObjectFields.end())
+      return false;
+    auto fit = it->second.find(std::string(ma->memberName));
+    if (fit == it->second.end())
+      return false;
+    out = fit->second;
+    const_cast<ExprNode *>(expr)->isConstExpr = true;
+    const_cast<ExprNode *>(expr)->constKey = out;
+    return true;
+  }
+
+  if (auto *castNode = llvm::dyn_cast<CastNode>(expr)) {
+    std::string inner;
+    if (!this->constEvaluate(castNode->expr, true, inner))
+      return false;
+    /* Pointer-to-pointer casts (const object references) and numeric
+     * conversions keep the underlying value. */
+    const Type *src = castNode->expr->exprType
+                          ? castNode->expr->exprType->getUnqualifiedType()
+                          : nullptr;
+    const Type *dst = castNode->targetType
+                          ? castNode->targetType->getUnqualifiedType()
+                          : nullptr;
+    if (src && dst) {
+      bool srcPtr = src->isPointerType();
+      bool dstPtr = dst->isPointerType();
+      bool srcNum = src->isInteger() || src->isFloat();
+      bool dstNum = dst->isInteger() || dst->isFloat();
+      if (srcPtr && dstPtr && inner.rfind("o:", 0) == 0) {
+        out = inner;
+        const_cast<ExprNode *>(expr)->isConstExpr = true;
+        const_cast<ExprNode *>(expr)->constKey = out;
+        return true;
+      }
+      if (srcNum && dstNum) {
+        /* int -> int / float conversions: re-serialize through the value. */
+        if (inner.rfind("i:", 0) == 0 || inner.rfind("u:", 0) == 0) {
+          long long iv = (inner[1] == 'i')
+                             ? atoll(inner.c_str() + 2)
+                             : (long long)strtoull(inner.c_str() + 2, nullptr, 10);
+          if (dst->isFloat()) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "f:%a", (double)iv);
+            out = buf;
+          } else {
+            out = inner;
+          }
+        } else if (inner.rfind("f:", 0) == 0 && !dst->isFloat()) {
+          double dv = strtod(inner.c_str() + 2, nullptr);
+          out = "i:" + std::to_string((long long)dv);
+        } else {
+          out = inner;
+        }
+        const_cast<ExprNode *>(expr)->isConstExpr = true;
+        const_cast<ExprNode *>(expr)->constKey = out;
+        return true;
+      }
+    }
+    return false;
+  }
+  if (auto *implCast = llvm::dyn_cast<ImplicitCastNode>(expr)) {
+    std::string inner;
+    if (!this->constEvaluate(implCast->expr, true, inner))
+      return false;
+    out = inner;
+    const_cast<ExprNode *>(expr)->isConstExpr = true;
+    const_cast<ExprNode *>(expr)->constKey = out;
+    return true;
+  }
+
+  /* Dart-style const array literal: 'const [1, 2, 3]'. All elements must be
+   * constant expressions; identical content canonicalizes to one static
+   * backing array (elements of object type are canonical instances, so the
+   * serialized key is exact). */
+  if (auto *arrNode = llvm::dyn_cast<ArrayLiteralNode>(expr)) {
+    std::string elemTypeStr;
+    if (arrNode->exprType) {
+      const Type *arrTy = arrNode->exprType->getUnqualifiedType();
+      if (auto *at = llvm::dyn_cast<ArrayType>(arrTy))
+        elemTypeStr = at->getElementType()->getUnqualifiedType()->toString();
+      else
+        elemTypeStr = arrTy->toString();
+    }
+    std::string key = "A:" + elemTypeStr + "|";
+    for (size_t i = 0; i < arrNode->elements.size(); ++i) {
+      if (i)
+        key += ",";
+      std::string val;
+      if (!this->constEvaluate(arrNode->elements[i], true, val))
+        return false;
+      key += val;
+    }
+    out = key;
+    const_cast<ExprNode *>(expr)->isConstExpr = true;
+    const_cast<ExprNode *>(expr)->constKey = key;
+    return true;
+  }
+
+  if (auto *tern = llvm::dyn_cast<TernaryOpNode>(expr)) {
+    std::string cond;
+    if (!this->constEvaluate(tern->condition, true, cond))
+      return false;
+    const ExprNode *branch = nullptr;
+    if (cond == "b:1")
+      branch = tern->trueExpr;
+    else if (cond == "b:0")
+      branch = tern->falseExpr;
+    else if (cond == "i:1")
+      branch = tern->trueExpr;
+    else if (cond == "i:0")
+      branch = tern->falseExpr;
+    else
+      return false;
+    std::string val;
+    if (!this->constEvaluate(branch, true, val))
+      return false;
+    out = val;
+    const_cast<ExprNode *>(expr)->isConstExpr = true;
+    const_cast<ExprNode *>(expr)->constKey = out;
+    return true;
+  }
+
+  if (auto *bop = llvm::dyn_cast<BinaryOpNode>(expr)) {
+    std::string lhs, rhs;
+    bool lhsOk = this->constEvaluate(bop->left, true, lhs);
+    bool rhsOk = lhsOk && this->constEvaluate(bop->right, true, rhs);
+
+    auto isInt = [](const std::string &v) {
+      return v.rfind("i:", 0) == 0 || v.rfind("u:", 0) == 0;
+    };
+    auto isFloat = [](const std::string &v) { return v.rfind("f:", 0) == 0; };
+    auto intVal = [](const std::string &v) -> long long {
+      return v[1] == 'i' ? atoll(v.c_str() + 2)
+                         : (long long)strtoull(v.c_str() + 2, nullptr, 10);
+    };
+    auto floatVal = [](const std::string &v) -> double {
+      return strtod(v.c_str() + 2, nullptr);
+    };
+    auto toInt = [](long long v) {
+      if (v >= 0)
+        return "i:" + std::to_string(v);
+      return "u:" + std::to_string((unsigned long long)v);
+    };
+    auto isStr = [](const std::string &v) { return v.rfind("s:", 0) == 0; };
+
+    /* '&&' / '||' short-circuit; both sides must still be constant. */
+    if (bop->op == "&&" || bop->op == "||") {
+      if (!lhsOk || !isInt(lhs) && !(lhs == "b:0" || lhs == "b:1"))
+        return false;
+      bool lv = (lhs == "b:1" || lhs == "i:1");
+      if (bop->op == "&&" && !lv) {
+        out = "b:0";
+      } else if (bop->op == "||" && lv) {
+        out = "b:1";
+      } else {
+        if (!rhsOk)
+          return false;
+        bool rv = (rhs == "b:1" || rhs == "i:1");
+        out = bop->op == "&&" ? (rv ? "b:1" : "b:0")
+                              : (rv ? "b:1" : "b:0");
+      }
+      const_cast<ExprNode *>(expr)->isConstExpr = true;
+      const_cast<ExprNode *>(expr)->constKey = out;
+      return true;
+    }
+
+    if (!lhsOk || !rhsOk)
+      return false;
+
+    /* String concatenation. */
+    if (bop->op == "+" && isStr(lhs) && isStr(rhs)) {
+      out = "s:" + lhs.substr(2) + rhs.substr(2);
+      const_cast<ExprNode *>(expr)->isConstExpr = true;
+      const_cast<ExprNode *>(expr)->constKey = out;
+      return true;
+    }
+
+    bool floating = isFloat(lhs) || isFloat(rhs);
+    bool bothNumeric =
+        isInt(lhs) || isFloat(lhs) ? (isInt(rhs) || isFloat(rhs)) : false;
+
+    if (bop->op == "==" || bop->op == "!=") {
+      if (isStr(lhs) && isStr(rhs)) {
+        bool eq = lhs == rhs;
+        out = eq ? "b:1" : "b:0";
+      } else if (bothNumeric) {
+        bool eq = floating ? floatVal(lhs) == floatVal(rhs)
+                           : intVal(lhs) == intVal(rhs);
+        out = eq ? "b:1" : "b:0";
+      } else {
+        return false;
+      }
+      if (bop->op == "!=")
+        out = (out == "b:1") ? "b:0" : "b:1";
+      const_cast<ExprNode *>(expr)->isConstExpr = true;
+      const_cast<ExprNode *>(expr)->constKey = out;
+      return true;
+    }
+    if (bop->op == "<" || bop->op == "<=" || bop->op == ">" ||
+        bop->op == ">=") {
+      if (!bothNumeric)
+        return false;
+      bool r = false;
+      if (floating) {
+        double a = floatVal(lhs), b = floatVal(rhs);
+        r = bop->op == "<" ? a < b
+            : bop->op == "<=" ? a <= b
+            : bop->op == ">" ? a > b
+                             : a >= b;
+      } else {
+        long long a = intVal(lhs), b = intVal(rhs);
+        r = bop->op == "<" ? a < b
+            : bop->op == "<=" ? a <= b
+            : bop->op == ">" ? a > b
+                             : a >= b;
+      }
+      out = r ? "b:1" : "b:0";
+      const_cast<ExprNode *>(expr)->isConstExpr = true;
+      const_cast<ExprNode *>(expr)->constKey = out;
+      return true;
+    }
+    if (bop->op == "+" || bop->op == "-" || bop->op == "*" ||
+        bop->op == "/" || bop->op == "%" || bop->op == "&" ||
+        bop->op == "|" || bop->op == "^" || bop->op == "<<" ||
+        bop->op == ">>") {
+      if (!bothNumeric)
+        return false;
+      if (floating) {
+        double a = floatVal(lhs), b = floatVal(rhs), r = 0;
+        if (bop->op == "+")
+          r = a + b;
+        else if (bop->op == "-")
+          r = a - b;
+        else if (bop->op == "*")
+          r = a * b;
+        else if (bop->op == "/") {
+          if (b == 0.0)
+            return false;
+          r = a / b;
+        } else {
+          return false;
+        }
+        char buf[64];
+        snprintf(buf, sizeof(buf), "f:%a", r);
+        out = buf;
+      } else {
+        long long a = intVal(lhs), b = intVal(rhs), r = 0;
+        switch (bop->op[0]) {
+        case '+':
+          r = a + b;
+          break;
+        case '-':
+          r = a - b;
+          break;
+        case '*':
+          r = a * b;
+          break;
+        case '/':
+          if (b == 0)
+            return false;
+          r = a / b;
+          break;
+        case '%':
+          if (b == 0)
+            return false;
+          r = a % b;
+          break;
+        case '&':
+          r = a & b;
+          break;
+        case '|':
+          r = a | b;
+          break;
+        case '^':
+          r = a ^ b;
+          break;
+        default:
+          return false;
+        }
+        if (bop->op == "<<")
+          r = a << (b & 63);
+        else if (bop->op == ">>")
+          r = a >> (b & 63);
+        out = toInt(r);
+      }
+      const_cast<ExprNode *>(expr)->isConstExpr = true;
+      const_cast<ExprNode *>(expr)->constKey = out;
+      return true;
+    }
+    return false;
+  }
+
+  if (auto *uop = llvm::dyn_cast<UnaryOpNode>(expr)) {
+    std::string inner;
+    if (!this->constEvaluate(uop->expr, true, inner))
+      return false;
+    auto isIntV = [](const std::string &v) {
+      return v.rfind("i:", 0) == 0 || v.rfind("u:", 0) == 0;
+    };
+    auto isFloatV = [](const std::string &v) { return v.rfind("f:", 0) == 0; };
+    auto intV = [](const std::string &v) -> long long {
+      return v[1] == 'i' ? atoll(v.c_str() + 2)
+                         : (long long)strtoull(v.c_str() + 2, nullptr, 10);
+    };
+    auto floatV = [](const std::string &v) -> double {
+      return strtod(v.c_str() + 2, nullptr);
+    };
+    auto toIntV = [](long long v) {
+      if (v >= 0)
+        return "i:" + std::to_string(v);
+      return "u:" + std::to_string((unsigned long long)v);
+    };
+    if (uop->op == "-") {
+      if (isIntV(inner)) {
+        long long v = intV(inner);
+        if (v == std::numeric_limits<long long>::min()) {
+          out = "u:9223372036854775808";
+        } else {
+          out = toIntV(-v);
+        }
+      }
+      else if (isFloatV(inner)) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "f:%a", -floatV(inner));
+        out = buf;
+      } else
+        return false;
+    } else if (uop->op == "+") {
+      out = inner;
+    } else if (uop->op == "!") {
+      if (inner == "b:1")
+        out = "b:0";
+      else if (inner == "b:0")
+        out = "b:1";
+      else
+        return false;
+    } else if (uop->op == "~") {
+      if (isIntV(inner))
+        out = toIntV(~intV(inner));
+      else
+        return false;
+    } else {
+      return false;
+    }
+    const_cast<ExprNode *>(expr)->isConstExpr = true;
+    const_cast<ExprNode *>(expr)->constKey = out;
+    return true;
+  }
+
+  return false;
+}
+
+bool TypeCheckPass::constObjectFieldValue(const ExprNode *creation,
+                                          std::string_view fieldName,
+                                          std::string &out) {
+  const FunctionDeclNode *ctor = resolveConstCtorCall(creation);
+  if (!ctor)
+    return false;
+
+  const auto *call = llvm::dyn_cast<FunctionCallNode>(creation);
+  const auto *newNode = llvm::dyn_cast<NewExprNode>(creation);
+  llvm::ArrayRef<ExprNode *> args =
+      call ? call->args
+           : (newNode ? newNode->args : llvm::ArrayRef<ExprNode *>());
+  llvm::ArrayRef<std::string_view> argNames =
+      call ? call->argNames
+           : (newNode ? newNode->argNames
+                      : llvm::ArrayRef<std::string_view>());
+
+  /* this-parameter for the field. */
+  for (size_t p = 0; p < ctor->params.size(); ++p) {
+    if (!ctor->params[p]->isThisParam)
+      continue;
+    if (ctor->params[p]->name != fieldName)
+      continue;
+    const ExprNode *arg = nullptr;
+    size_t positional = 0;
+    for (size_t i = 0; i < args.size(); ++i) {
+      if (!argNames.empty() && !argNames[i].empty()) {
+        if (ctor->params[p]->name == argNames[i])
+          arg = args[i];
+      } else {
+        if (positional == p)
+          arg = args[i];
+        ++positional;
+      }
+    }
+    if (!arg)
+      return false;
+    return this->constEvaluate(arg, true, out);
+  }
+
+  /* ': this.field = expr' initializer-list entry. */
+  for (const auto *init : ctor->fieldInitializers) {
+    if (auto *target = llvm::dyn_cast<MemberAccessNode>(init->target)) {
+      if (target->memberName == fieldName)
+        return this->constEvaluate(init->value, true, out);
+    }
+  }
+
+  /* Declaration initializer of the field itself. */
+  if (ctor->parentRecord) {
+    if (const DeclNode *recDecl = ctor->parentRecord->getDeclaration()) {
+      llvm::ArrayRef<VarDeclNode *> fields;
+      if (auto *c = llvm::dyn_cast<ClassDeclNode>(recDecl))
+        fields = c->fields;
+      else if (auto *s = llvm::dyn_cast<StructDeclNode>(recDecl))
+        fields = s->fields;
+      else if (auto *u = llvm::dyn_cast<UnionDeclNode>(recDecl))
+        fields = u->fields;
+      for (const auto *f : fields) {
+        if (!f->isStatic && f->varName == fieldName && f->initializer)
+          return this->constEvaluate(f->initializer, true, out);
+      }
+    }
+  }
+
+  /* Inherited field: recurse through the super call. */
+  if (ctor->superCall) {
+    if (resolveConstCtorCall(ctor->superCall))
+      return this->constObjectFieldValue(ctor->superCall, fieldName, out);
+  }
+  return false;
+}
+
+void TypeCheckPass::recordConstObjectFields(const std::string &objectKey,
+                                            const ExprNode *creation) {
+  const FunctionDeclNode *ctor = resolveConstCtorCall(creation);
+  if (!ctor)
+    return;
+  if (!ctor->parentRecord)
+    return;
+
+  auto &fields = ctx->astCtx.constObjectFields[objectKey];
+  const ClassDeclNode *cls = nullptr;
+  if (const DeclNode *recDecl = ctor->parentRecord->getDeclaration())
+    cls = llvm::dyn_cast<ClassDeclNode>(recDecl);
+  if (cls) {
+    for (const auto *f : cls->fields) {
+      if (f->isStatic)
+        continue;
+      std::string val;
+      if (this->constObjectFieldValue(creation, f->varName, val))
+        fields[std::string(f->varName)] = val;
+    }
+  }
+  if (ctor->superCall) {
+    if (resolveConstCtorCall(ctor->superCall))
+      this->recordConstObjectFields(objectKey, ctor->superCall);
+  }
+}
+
+void TypeCheckPass::checkConstConstructor(const FunctionDeclNode *ctor) {
+  if (!ctor->isConst)
+    return;
+
+  /* Dart: a const constructor must have an empty body (assert-only bodies
+   * are not expressible in Utopia). */
+  if (ctor->body && !ctor->body->statements.empty()) {
+    (void)ctx->reportError(ctor->line, ctor->column, ctor->length,
+                           "A const constructor must have an empty body.");
+  }
+  if (ctor->isAsync) {
+    (void)ctx->reportError(ctor->line, ctor->column, ctor->length,
+                           "A const constructor cannot be 'async'.");
+  }
+  if (ctor->isVariadic) {
+    (void)ctx->reportError(ctor->line, ctor->column, ctor->length,
+                           "A const constructor cannot be variadic.");
+  }
+
+  /* Dart: all instance fields of a class with a const constructor must be
+   * final, and their declaration initializers must be constant
+   * expressions (needed to build the canonical instance). */
+  if (!ctor->parentRecord)
+    return;
+  if (const DeclNode *recDecl = ctor->parentRecord->getDeclaration()) {
+    if (auto *cls = llvm::dyn_cast<ClassDeclNode>(recDecl)) {
+      for (const auto *f : cls->fields) {
+        if (f->isStatic)
+          continue;
+        if (!f->isFinal) {
+          (void)ctx->reportError(
+              f->line, f->column, f->length,
+              "Class '" + std::string(cls->name) +
+                  "' has a const constructor, so all instance fields must "
+                  "be 'final' (Dart rule). Field '" +
+                  std::string(f->varName) + "' is not final.");
+          continue;
+        }
+        if (f->initializer) {
+          std::string val;
+          if (!this->constEvaluate(f->initializer, true, val)) {
+            (void)ctx->reportError(
+                f->line, f->column, f->length,
+                "The declaration initializer of final field '" +
+                    std::string(f->varName) +
+                    "' must be a constant expression for the class to have "
+                    "a const constructor.");
+          }
+        }
+      }
+    } else if (auto *st = llvm::dyn_cast<StructDeclNode>(recDecl)) {
+      (void)ctx->reportError(ctor->line, ctor->column, ctor->length,
+                             "Const constructors are only supported on "
+                             "classes (structs are value types).");
+      (void)st;
+    }
+  }
+}
+
+SemaResult TypeCheckPass::visit(const ConstExprNode *node) {
+  /* Establish the const context BEFORE dispatching the inner expression so
+   * nested constructor calls resolve as canonical const objects (implicit
+   * const) with their pointer types in place for overload resolution. */
+  ctx->constContextDepth++;
+  auto res = dispatch(node->expr);
+  ctx->constContextDepth--;
+  if (!res)
+    return res;
+
+  std::string key;
+  if (!this->constEvaluate(node->expr, true, key)) {
+    return ctx->reportError(node->line, node->column, node->length,
+                            "Not a constant expression.");
+  }
+
+  node->isConstExpr = true;
+  node->constKey = key;
+  node->isLValue = false;
+  if (const FunctionDeclNode *ctor = resolveConstCtorCall(node->expr)) {
+    node->exprType = ctx->astCtx.getPointerType(ctor->parentRecord);
+  } else {
+    node->exprType = node->expr->exprType;
+  }
+  return node->exprType;
+}
+
 SemaResult TypeCheckPass::visit(const DeleteExprNode *node) {
   auto ptrTy = dispatch(node->ptr);
   if (!ptrTy) {
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,
                                      "Cascading error in delete"});
   }
+
+  /* Canonical const objects live in static read-only storage; their
+   * destructors never run. Deleting one would destroy static memory, so
+   * it is a compile-time error (Dart has no delete; this is the manual
+   * memory adaptation). */
+  if (node->ptr->isConstExpr) {
+    return ctx->reportError(node->line, node->column, node->length,
+                            "Cannot delete a canonical const object (it "
+                            "lives in static storage and is never freed).");
+  }
+  if (auto *varNode = llvm::dyn_cast<VariableNode>(node->ptr)) {
+    if (varNode->resolvedDecl &&
+        varNode->resolvedDecl->kind == NodeKind::VarDecl &&
+        static_cast<const VarDeclNode *>(varNode->resolvedDecl)->isConstExpr) {
+      return ctx->reportError(
+          node->line, node->column, node->length,
+          "Cannot delete a canonical const object (it lives in static "
+          "storage and is never freed).");
+    }
+  }
+
   if (!(*ptrTy)->getUnqualifiedType()->isPointerType()) {
     return ctx->reportError(node->line, node->column, node->length,
                             "Cannot delete non-pointer type");

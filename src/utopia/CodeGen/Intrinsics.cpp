@@ -338,6 +338,41 @@ public:
   }
 };
 
+/* 'Memory.isConst(ptr)': whether the pointer addresses a canonical const
+ * object (static read-only storage). Lowers to the runtime registry walker
+ * '__utopia_is_const_ptr', which CodeGen emits once per module. */
+class MemoryIsConstIntrinsic : public Intrinsic {
+public:
+  llvm::Value *evaluateRuntime(CodeGen &cg,
+                               const FunctionCallNode *node) const override {
+    if (node->args.size() != 1)
+      return nullptr;
+
+    llvm::Value *ptr = cg.dispatch(node->args[0]);
+    if (!ptr)
+      return nullptr;
+    if (ptr->getType() != getBuilder(cg).getPtrTy())
+      ptr = getBuilder(cg).CreateBitCast(ptr, getBuilder(cg).getPtrTy());
+
+    llvm::Module &mod = getModule(cg);
+    llvm::FunctionType *fty =
+        llvm::FunctionType::get(getBuilder(cg).getInt1Ty(),
+                                {getBuilder(cg).getPtrTy()}, false);
+    llvm::Function *walker = mod.getFunction("__utopia_is_const_ptr");
+    if (!walker) {
+      walker = llvm::Function::Create(
+          fty, llvm::GlobalValue::LinkOnceODRLinkage,
+          "__utopia_is_const_ptr", mod);
+    }
+    return getBuilder(cg).CreateCall(walker, {ptr});
+  }
+
+  llvm::Constant *
+  evaluateConstant(CodeGen &cg, const FunctionCallNode *node) const override {
+    /* Not a compile-time constant in general. */
+    return nullptr;
+  }
+};
 
 namespace {
 
@@ -774,6 +809,8 @@ IntrinsicRegistry::IntrinsicRegistry() {
   registerIntrinsic("memory_free", std::make_unique<MemoryFreeIntrinsic>());
   registerIntrinsic("memory_destruct",
                     std::make_unique<MemoryDestructIntrinsic>());
+  registerIntrinsic("memory_is_const",
+                    std::make_unique<MemoryIsConstIntrinsic>());
   registerIntrinsic("hash_expr", std::make_unique<HashExprIntrinsic>());
   registerIntrinsic("future_value", std::make_unique<FutureValueIntrinsic>());
   registerIntrinsic("future_then", std::make_unique<FutureThenIntrinsic>());

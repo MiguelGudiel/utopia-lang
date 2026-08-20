@@ -52,6 +52,7 @@ public:
   ASTNode *visit(const IsExprNode *n);
   ASTNode *visit(const NewExprNode *n);
   ASTNode *visit(const DeleteExprNode *n);
+  ASTNode *visit(const ConstExprNode *n);
   ASTNode *visit(const DestructorCallNode *n);
   ASTNode *visit(const TypeLiteralNode *n);
   ASTNode *visit(const BlockNode *n);

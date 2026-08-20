@@ -238,7 +238,7 @@ bool BuildScriptRunner::run(const std::filesystem::path &scriptPath,
 
     llvm::Module *llvmMod =
         Compiler::compileToIR(const_cast<ModuleNode *>(modNode), backendCtx,
-                              unitStr, diagEngine, options.isDebug,
+                              unitStr, diagEngine, options.isDebug, astCtx,
                               options.asyncEnabled);
 
     if (!llvmMod || diagEngine.hasErrors()) {

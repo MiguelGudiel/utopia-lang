@@ -150,10 +150,12 @@ ASTNode *ASTCloner::visit(const TernaryOpNode *n) {  auto *node =
 }
 
 ASTNode *ASTCloner::visit(const AssignNode *n) {
-  return ctx.create<AssignNode>(n->op,
-                                static_cast<ExprNode *>(dispatch(n->target)),
-                                static_cast<ExprNode *>(dispatch(n->value)),
-                                n->line, n->column, n->length);
+  auto *node = ctx.create<AssignNode>(
+      n->op, static_cast<ExprNode *>(dispatch(n->target)),
+      static_cast<ExprNode *>(dispatch(n->value)), n->line, n->column,
+      n->length);
+  node->isFieldInit = n->isFieldInit;
+  return node;
 }
 
 ASTNode *ASTCloner::visit(const ArrayLiteralNode *n) {
@@ -253,6 +255,17 @@ ASTNode *ASTCloner::visit(const DeleteExprNode *n) {
   return node;
 }
 
+ASTNode *ASTCloner::visit(const ConstExprNode *n) {
+  auto *node = ctx.create<ConstExprNode>(
+      static_cast<ExprNode *>(dispatch(n->expr)), n->line, n->column,
+      n->length);
+  node->isConstExpr = n->isConstExpr;
+  node->constKey = n->constKey;
+  node->exprType = cloneType(n->exprType);
+  node->isLValue = n->isLValue;
+  return node;
+}
+
 ASTNode *ASTCloner::visit(const DestructorCallNode *n) {
   auto *node = ctx.create<DestructorCallNode>(
       static_cast<ExprNode *>(dispatch(n->object)), cloneType(n->targetType),
@@ -340,6 +353,7 @@ ASTNode *ASTCloner::visit(const VarDeclNode *n) {
   node->isStatic = n->isStatic;
   node->isWeak = n->isWeak;
   node->isExtern = n->isExtern;
+  node->isFinal = n->isFinal;
   node->externAlias = n->externAlias;
   node->hasPublicMod = n->hasPublicMod;
   node->hasPrivateMod = n->hasPrivateMod;
@@ -361,6 +375,7 @@ ASTNode *ASTCloner::visit(const ParamDeclNode *n) {
       n->defaultValue ? static_cast<ExprNode *>(dispatch(n->defaultValue))
                       : nullptr,
       n->isNamed, n->isRequired, n->line, n->column, n->length);
+  node->isThisParam = n->isThisParam;
   node->hasPublicMod = n->hasPublicMod;
   node->hasPrivateMod = n->hasPrivateMod;
   node->hasProtectedMod = n->hasProtectedMod;
@@ -380,6 +395,12 @@ ASTNode *ASTCloner::visit(const FunctionDeclNode *n) {
   node->params = cloneArray(n->params);
   if (n->superCall)
     node->superCall = static_cast<FunctionCallNode *>(dispatch(n->superCall));
+  if (!n->fieldInitializers.empty()) {
+    std::vector<AssignNode *> inits;
+    for (const auto *init : n->fieldInitializers)
+      inits.push_back(static_cast<AssignNode *>(dispatch(init)));
+    node->fieldInitializers = ctx.copyArray<AssignNode *>(inits);
+  }
   if (n->body)
     node->body = static_cast<BlockNode *>(dispatch(n->body));
   node->isStatic = n->isStatic;
@@ -467,6 +488,7 @@ ASTNode *ASTCloner::visit(const ClassDeclNode *n) {
   node->isOpaque = n->isOpaque;
   node->isTemplate = false;
   node->isAbstract = n->isAbstract;
+  node->isFinal = n->isFinal;
   node->endLine = n->endLine;
   node->alignment = n->alignment;
   node->isPacked = n->isPacked;

@@ -17,6 +17,7 @@ public:
   void visit(const DeleteExprNode *n);
   void visit(const DestructorCallNode *n);
   void visit(const NewExprNode *n);
+  void visit(const ConstExprNode *) {}
   void visit(const ImplicitCastNode *n);
   void visit(const LambdaNode *n);
   void visit(const ForNode *n);

@@ -4,6 +4,9 @@
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/Support/ModRef.h>
 #include <llvm/Transforms/Utils/ModuleUtils.h>
+#include <cctype>
+#include <cstdio>
+#include <cstdlib>
 #include <optional>
 #include <functional>
 #include <string>
@@ -59,9 +62,9 @@ static const std::unordered_map<std::string_view, AssignOpCode> assignOpMap = {
 
 CodeGen::CodeGen(BackendContext &bCtx, llvm::Module &llvmMod,
                  DiagnosticsEngine &diags, bool emitDebugInfo,
-                 std::string filePath, bool asyncEnabled)
+                 std::string filePath, ASTContext &astCtx, bool asyncEnabled)
     : backend(bCtx), ctx(bCtx.getLLVMContext()), mod(llvmMod), builder(ctx),
-      diags(diags), currentFilePath(std::move(filePath)),
+      diags(diags), astCtx(astCtx), currentFilePath(std::move(filePath)),
       asyncEnabled(asyncEnabled), diEmitter(llvmMod, emitDebugInfo),
       tbaaManager(ctx) {
 
@@ -305,6 +308,52 @@ CodeGen::createTypeReflectionConstant(const Type *t,
 
 llvm::Value *CodeGen::createImplicitCast(llvm::Value *src, llvm::Type *destTy) {
   return createImplicitCast(src, destTy, nullptr);
+}
+
+llvm::Value *CodeGen::lowerVariadicArg(const ExprNode *arg,
+                                       llvm::Value *value) {
+  if (!value || !arg || !arg->exprType)
+    return value;
+
+  const Type *argU = arg->exprType->getUnqualifiedType();
+  if (auto *rec = llvm::dyn_cast<RecordType>(argU)) {
+    /* A by-value String passed through '...' decays to its data pointer.
+     * printf's %s consumes exactly one machine word; forwarding the whole
+     * 24-byte struct would shift every later argument into the wrong
+     * register slot (e.g. '%s:%d' would print the String length as the
+     * integer). */
+    if (rec->getName() == "String" && value->getType()->isStructTy()) {
+      if (const FieldInfo *dataField = rec->getField("data")) {
+        llvm::Value *dataPtr =
+            builder.CreateExtractValue(value, dataField->index, "str.data");
+        if (dataPtr->getType()->isPointerTy())
+          return dataPtr;
+      }
+    }
+    return value;
+  }
+
+  /* Widen per the C ABI: sub-32-bit integers are sign/zero-extended to
+   * 32 bits and float32 promotes to float64. Passing them raw would make
+   * the callee's va_arg read garbage (e.g. %d on an i8 value). */
+  if (argU->getKind() == TypeKind::Builtin) {
+    auto bKind = static_cast<const BuiltinType *>(argU)->getBuiltinKind();
+    if (bKind == BuiltinKind::Float32 || value->getType()->isFloatTy()) {
+      return builder.CreateFPExt(value, builder.getDoubleTy());
+    }
+    if (value->getType()->isIntegerTy() &&
+        value->getType()->getIntegerBitWidth() < 32) {
+      bool isSigned = (bKind >= BuiltinKind::Int8 && bKind <= BuiltinKind::Int64);
+      return builder.CreateIntCast(value, builder.getInt32Ty(), isSigned);
+    }
+  } else if (value->getType()->isFloatTy()) {
+    return builder.CreateFPExt(value, builder.getDoubleTy());
+  } else if (value->getType()->isIntegerTy() &&
+             value->getType()->getIntegerBitWidth() < 32) {
+    /* Non-builtin (e.g. typedef) integer: zero-extend by default. */
+    return builder.CreateIntCast(value, builder.getInt32Ty(), false);
+  }
+  return value;
 }
 
 llvm::Value *CodeGen::createImplicitCast(llvm::Value *src, llvm::Type *destTy,
@@ -849,6 +898,22 @@ llvm::Value *CodeGen::materializeByValueArg(const ExprNode *arg,
 llvm::Constant *CodeGen::evaluateAsConstant(const ExprNode *node) {
   if (!node)
     return nullptr;
+
+  /* Dart-style const expressions: the Sema pass validated the expression
+   * and stored its serialized constant value; rebuild the LLVM constant
+   * from it (this also resolves canonical const objects to their static
+   * instances). Array-typed globals hold the constant VALUE; expression
+   * contexts get the decayed pointer from buildConstFromSerialized. */
+  if (node->isConstExpr && !node->constKey.empty()) {
+    if (node->constKey.rfind("A:", 0) == 0) {
+      if (llvm::Constant *v = buildConstArrayValue(node))
+        return v;
+    }
+    llvm::Constant *c =
+        buildConstFromSerialized(node, node->constKey, node->exprType);
+    if (c)
+      return c;
+  }
 
   if (auto *ternaryNode = llvm::dyn_cast<TernaryOpNode>(node)) {
     llvm::Constant *condC = evaluateAsConstant(ternaryNode->condition);
@@ -1523,7 +1588,7 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
     }
 
     llvm::Value *objPtr = nullptr;
-    if (maNode->object->exprType->isPointerType()) {
+    if (maNode->object->exprType->getUnqualifiedType()->isPointerType()) {
       objPtr = dispatch(maNode->object);
     } else {
       objPtr = getLValue(maNode->object);
@@ -1532,7 +1597,7 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
     if (!objPtr)
       return nullptr;
 
-    const Type *baseTy = maNode->object->exprType;
+    const Type *baseTy = maNode->object->exprType->getUnqualifiedType();
     if (baseTy->isPointerType())
       baseTy = static_cast<const PointerType *>(baseTy)->getPointeeType();
     else if (baseTy->isReferenceType() ||
@@ -2095,7 +2160,7 @@ llvm::Value *CodeGen::visit(const MemberAccessNode *node) {
     SymbolInfo sym = cgCtx.lookupDetailed("this");
     objPtr = builder.CreateLoad(builder.getPtrTy(), sym.value, "this.val");
   } else if (node->object->exprType &&
-             node->object->exprType->isPointerType()) {
+             node->object->exprType->getUnqualifiedType()->isPointerType()) {
     objPtr = dispatch(node->object);
   } else {
     objPtr = getLValue(node->object);
@@ -2122,7 +2187,7 @@ llvm::Value *CodeGen::visit(const MemberAccessNode *node) {
       baseTy = classTy->getBaseClass()->getUnqualifiedType();
     }
   } else {
-    baseTy = node->object->exprType;
+    baseTy = node->object->exprType->getUnqualifiedType();
     if (baseTy->isPointerType())
       baseTy = static_cast<const PointerType *>(baseTy)->getPointeeType();
     else if (baseTy->isReferenceType() ||
@@ -2668,6 +2733,7 @@ llvm::Value *CodeGen::visit(const BinaryOpNode *node) {
                          isAnd ? mergeBB : rhsBB);
 
     builder.SetInsertPoint(rhsBB);
+    size_t rhsCleanups = cgCtx.getCleanupCount();
     llvm::Value *rhsVal = dispatch(node->right);
     if (!rhsVal) {
       diags.report({DiagLevel::Error, node->line, node->column, node->length,
@@ -2675,6 +2741,11 @@ llvm::Value *CodeGen::visit(const BinaryOpNode *node) {
       return nullptr;
     }
     rhsVal = createImplicitCast(rhsVal, builder.getInt1Ty());
+    /* Temporaries created while evaluating the right operand (e.g. the
+     * String in `s == ""`) must die at the end of this branch: when the
+     * left operand short-circuits, they are never constructed, so the
+     * scope-end cleanup would destroy an uninitialized object. */
+    emitBranchCleanups(rhsCleanups);
     builder.CreateBr(mergeBB);
 
     theFunction->insert(theFunction->end(), mergeBB);
@@ -3333,7 +3404,28 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
 
   if (node->initializer) {
     if (baseUnqualTy->getKind() == TypeKind::Array) {
-      emitArrayLiteralInit(alloca, node->type, node->initializer);
+      if (node->initializer->isConstExpr &&
+          node->initializer->constKey.rfind("A:", 0) == 0) {
+        /* Const array literal: the variable holds the constant VALUE
+         * (the canonical static backing is shared via the decayed
+         * expression form). */
+        if (llvm::Constant *arrConst = buildConstArrayValue(node->initializer)) {
+          llvm::Align align = mod.getDataLayout().getABITypeAlign(ty);
+          llvm::Value *dst = alloca;
+          if (arrConst->getType() != ty) {
+            /* Empty arrays use a placeholder backing; zero the slot. */
+            builder.CreateMemSet(dst, builder.getInt8(0),
+                                 mod.getDataLayout().getTypeAllocSize(ty),
+                                 align);
+          } else {
+            createTBAAStore(arrConst, dst, node->type);
+          }
+        } else {
+          emitArrayLiteralInit(alloca, node->type, node->initializer);
+        }
+      } else {
+        emitArrayLiteralInit(alloca, node->type, node->initializer);
+      }
     } else {
       bool isRVO = false;
 
@@ -3342,7 +3434,8 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
             static_cast<const FunctionCallNode *>(node->initializer);
         if (callNode->target->kind == NodeKind::Variable) {
           if (callNode->resolvedFunc && callNode->resolvedFunc->isMethod &&
-              callNode->resolvedFunc->returnType->isVoid()) {
+              callNode->resolvedFunc->returnType->isVoid() &&
+              !callNode->isConstExpr) {
             isRVO = true;
             emitConstructorCall(callNode, alloca);
           }
@@ -4017,6 +4110,77 @@ llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
         }
       }
     }
+
+    /* 'Class(this.x)' parameters: each parameter is copied into its field
+     * after the declaration initializers, matching Dart where initializing
+     * formals override field initializers. Scalar and aggregate stores
+     * follow the same deep-copy rules as regular assignment. */
+    {
+      SymbolInfo thisSym = cgCtx.lookupDetailed("this");
+      if (thisSym.value) {
+        llvm::Value *thisPtr =
+            builder.CreateLoad(builder.getPtrTy(), thisSym.value, "this.val");
+        llvm::Type *llRecTy = getLLVMType(node->parentRecord);
+        for (const auto *param : node->params) {
+          if (!param->isThisParam)
+            continue;
+          const FieldInfo *fInfo = node->parentRecord->getField(param->name);
+          if (!fInfo)
+            continue;
+          llvm::Value *gep = builder.CreateStructGEP(
+              llRecTy, thisPtr, fInfo->index, param->name);
+
+          const Type *unqualFieldTy = fInfo->type->getUnqualifiedType();
+          if (unqualFieldTy->getKind() == TypeKind::Struct ||
+              unqualFieldTy->getKind() == TypeKind::Class ||
+              unqualFieldTy->getKind() == TypeKind::Union) {
+            SymbolInfo paramSym = cgCtx.lookupDetailed(param->name);
+            if (!paramSym.value)
+              continue;
+            llvm::Value *rvalAddr = paramSym.value;
+            if (!paramSym.isDirectAddress) {
+              rvalAddr = builder.CreateLoad(builder.getPtrTy(), rvalAddr,
+                                            "indirect.ref");
+            }
+            llvm::Align align = mod.getDataLayout().getABITypeAlign(
+                getLLVMType(fInfo->type));
+            uint64_t allocSize = mod.getDataLayout().getTypeAllocSize(
+                getLLVMType(fInfo->type));
+            builder.CreateMemSet(gep, builder.getInt8(0), allocSize, align);
+            llvm::SmallPtrSet<const RecordType *, 8> copyVisited;
+            if (isTriviallyCopyable(fInfo->type, copyVisited)) {
+              builder.CreateMemCpy(gep, align, rvalAddr, align, allocSize);
+            } else {
+              emitMemberWiseCopy(gep, rvalAddr, fInfo->type, false);
+            }
+          } else {
+            SymbolInfo paramSym = cgCtx.lookupDetailed(param->name);
+            if (!paramSym.value)
+              continue;
+            llvm::Value *paramAddr = paramSym.value;
+            if (!paramSym.isDirectAddress) {
+              paramAddr = builder.CreateLoad(builder.getPtrTy(), paramAddr,
+                                             "indirect.ref");
+            }
+            const Type *loadTy = fInfo->type;
+            if (loadTy->isReferenceType() ||
+                loadTy->getKind() == TypeKind::RValueReference) {
+              loadTy = static_cast<const ReferenceType *>(loadTy)
+                           ->getPointeeType();
+            }
+            llvm::Value *paramVal = createTBAALoad(
+                getLLVMType(loadTy), paramAddr, fInfo->type, param->name);
+            createTBAAStore(paramVal, gep, fInfo->type);
+          }
+        }
+      }
+    }
+
+    /* Constructor initializer-list entries (': this.x = expr') run after
+     * the this-parameters, in source order, still before the body. */
+    for (const auto *init : node->fieldInitializers) {
+      dispatch(init);
+    }
   }
 
   /* Automatically invoke destructors for aggregate fields inside destructors */
@@ -4110,6 +4274,13 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
    * placement NewExprNode; codegen visits that instead of the call. */
   if (node->loweredNew) {
     return visit(node->loweredNew);
+  }
+
+  /* Const constructor invocation -> canonical static instance. */
+  if (node->isConstExpr && !node->constKey.empty()) {
+    if (llvm::Constant *c = buildConstFromSerialized(node, node->constKey,
+                                                     node->exprType))
+      return c;
   }
 
   /* Top-level (module-scope) calls have no IR builder insert point;
@@ -4221,7 +4392,7 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
           SymbolInfo sym = cgCtx.lookupDetailed("this");
           objPtr =
               builder.CreateLoad(builder.getPtrTy(), sym.value, "this.val");
-        } else if (ma->object->exprType->isPointerType()) {
+        } else if (ma->object->exprType->getUnqualifiedType()->isPointerType()) {
           objPtr = dispatch(ma->object);
         } else {
           objPtr = getLValue(ma->object);
@@ -4365,32 +4536,7 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
             llvm::Type *paramTy = calleeTy->getParamType(llArgIdx);
             argVal = createImplicitCast(argVal, paramTy, arg->exprType);
           } else if (func->isVarArg()) {
-            /* Variadic arguments must be widened per the C ABI: sub-32-bit
-             * integers are sign/zero-extended to 32 bits and float32 is
-             * promoted to float64. Passing them raw would make the callee's
-             * va_arg read garbage (e.g. %d on an i8 value). */
-            const Type *argU = arg->exprType->getUnqualifiedType();
-            if (argU->getKind() == TypeKind::Builtin) {
-              auto bKind = static_cast<const BuiltinType *>(argU)
-                               ->getBuiltinKind();
-              if (bKind == BuiltinKind::Float32 ||
-                  argVal->getType()->isFloatTy()) {
-                argVal = builder.CreateFPExt(argVal, builder.getDoubleTy());
-              } else if (argVal->getType()->isIntegerTy() &&
-                         argVal->getType()->getIntegerBitWidth() < 32) {
-                bool isSigned = (bKind >= BuiltinKind::Int8 &&
-                                 bKind <= BuiltinKind::Int64);
-                argVal = builder.CreateIntCast(argVal, builder.getInt32Ty(),
-                                               isSigned);
-              }
-            } else if (argVal->getType()->isFloatTy()) {
-              argVal = builder.CreateFPExt(argVal, builder.getDoubleTy());
-            } else if (argVal->getType()->isIntegerTy() &&
-                       argVal->getType()->getIntegerBitWidth() < 32) {
-              /* Non-builtin (e.g. typedef) integer: zero-extend by default. */
-              argVal = builder.CreateIntCast(argVal, builder.getInt32Ty(),
-                                             false);
-            }
+            argVal = lowerVariadicArg(arg, argVal);
           }
         }
       }
@@ -4517,28 +4663,7 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
         argVal = createImplicitCast(argVal, llvmFTy->getParamType(argIdx),
                                     arg->exprType);
       } else if (llvmFTy->isVarArg()) {
-        /* Widen variadic arguments to at least 32 bits (C ABI): sub-32-bit
-         * integers are sign/zero-extended, float32 promotes to float64. */
-        const Type *argU = arg->exprType->getUnqualifiedType();
-        if (argU->getKind() == TypeKind::Builtin) {
-          auto bKind =
-              static_cast<const BuiltinType *>(argU)->getBuiltinKind();
-          if (bKind == BuiltinKind::Float32 ||
-              argVal->getType()->isFloatTy()) {
-            argVal = builder.CreateFPExt(argVal, builder.getDoubleTy());
-          } else if (argVal->getType()->isIntegerTy() &&
-                     argVal->getType()->getIntegerBitWidth() < 32) {
-            bool isSigned = (bKind >= BuiltinKind::Int8 &&
-                             bKind <= BuiltinKind::Int64);
-            argVal = builder.CreateIntCast(argVal, builder.getInt32Ty(),
-                                           isSigned);
-          }
-        } else if (argVal->getType()->isFloatTy()) {
-          argVal = builder.CreateFPExt(argVal, builder.getDoubleTy());
-        } else if (argVal->getType()->isIntegerTy() &&
-                   argVal->getType()->getIntegerBitWidth() < 32) {
-          argVal = builder.CreateIntCast(argVal, builder.getInt32Ty(), false);
-        }
+        argVal = lowerVariadicArg(arg, argVal);
       }
       argsArgs.push_back(argVal);
       argIdx++;
@@ -5242,6 +5367,10 @@ llvm::Value *CodeGen::visit(const ModuleNode *node) {
     dispatch(stmt);
   }
 
+  /* Runtime registry for Memory.isConst(): every canonical const object of
+   * this module is registered before main runs. */
+  this->emitConstRegistry();
+
   /* Finalize any generated dynamic module initializations safely */
   if (globalInitFunc) {
     llvm::BasicBlock *savedBB = builder.GetInsertBlock();
@@ -5359,7 +5488,642 @@ llvm::Value *CodeGen::visit(const ArraySubscriptNode *node) {
   return createTBAALoad(getLLVMType(loadTy), lval, loadTy);
 }
 
+/* ==================== Dart-style const objects ==================== */
+
+namespace {
+/* Mirrors Sema's resolver: the constructor behind an object creation. */
+const FunctionDeclNode *cgResolveConstCtorCall(const ExprNode *expr) {
+  if (auto *n = llvm::dyn_cast<NewExprNode>(expr))
+    return n->resolvedConstructor;
+  if (auto *call = llvm::dyn_cast<FunctionCallNode>(expr)) {
+    const FunctionDeclNode *f = call->resolvedFunc;
+    if (!f || !f->parentRecord)
+      return nullptr;
+    if (f->isNamedCtor) {
+      if (auto *ma = llvm::dyn_cast<MemberAccessNode>(call->target))
+        return ma->memberName == f->name ? f : nullptr;
+      return nullptr;
+    }
+    std::string_view recName = f->parentRecord->getName();
+    size_t dot = recName.find_last_of('.');
+    std::string_view simple =
+        (dot != std::string_view::npos) ? recName.substr(dot + 1) : recName;
+    if (f->name == simple)
+      return f;
+  }
+  return nullptr;
+}
+
+uint64_t fnv1a64(llvm::StringRef s) {
+  uint64_t h = 1469598103934665603ULL;
+  for (char c : s) {
+    h ^= (uint8_t)c;
+    h *= 1099511628211ULL;
+  }
+  return h;
+}
+} // namespace
+
+/* Finds the array literal behind an "A:" const value (the node may be an
+ * implicit cast or the const-expression wrapper). */
+static const ArrayLiteralNode *cgUnwrapConstArray(const ExprNode *node) {
+  if (auto *arr = llvm::dyn_cast<ArrayLiteralNode>(node))
+    return arr;
+  if (auto *ic = llvm::dyn_cast<ImplicitCastNode>(node))
+    return cgUnwrapConstArray(ic->expr);
+  if (auto *ce = llvm::dyn_cast<ConstExprNode>(node))
+    return cgUnwrapConstArray(ce->expr);
+  return nullptr;
+}
+
+/* One const-array element: nested const arrays are embedded as values. */
+llvm::Constant *CodeGen::buildConstArrayElement(const ExprNode *node) {
+  const Type *eu =
+      node->exprType ? node->exprType->getUnqualifiedType() : nullptr;
+  if (eu && eu->getKind() == TypeKind::Array && node->isConstExpr &&
+      node->constKey.rfind("A:", 0) == 0)
+    return buildConstArrayValue(node);
+  return buildConstFromSerialized(node, node->constKey, node->exprType);
+}
+
+llvm::Constant *CodeGen::buildConstArray(const ExprNode *node,
+                                         const std::string &key) {
+  const ArrayLiteralNode *arr = cgUnwrapConstArray(node);
+  if (!arr)
+    return nullptr;
+  const Type *arrTy = arr->exprType->getUnqualifiedType();
+  auto *at = llvm::dyn_cast<ArrayType>(arrTy);
+  if (!at)
+    return nullptr;
+  const Type *elemTy = at->getElementType();
+  llvm::Type *elemLL = getLLVMType(elemTy);
+
+  std::vector<llvm::Constant *> elems;
+  for (const auto *e : arr->elements) {
+    llvm::Constant *c = buildConstArrayElement(e);
+    if (!c)
+      return nullptr;
+    elems.push_back(c);
+  }
+
+  llvm::ArrayType *arrLL = llvm::ArrayType::get(elemLL, elems.size());
+  llvm::Constant *init;
+  if (elems.empty()) {
+    /* LLVM rejects zero-sized globals: a placeholder byte still yields a
+     * valid (immutable) base pointer for the decayed empty array. */
+    arrLL = llvm::ArrayType::get(builder.getInt8Ty(), 1);
+    init = llvm::ConstantAggregateZero::get(arrLL);
+  } else {
+    init = llvm::ConstantArray::get(arrLL, elems);
+  }
+
+  /* Canonical static backing: deterministic name + mergeable linkage so
+   * identical const arrays share one read-only array across modules. */
+  std::string name = "__const_";
+  for (char c : key) {
+    if (isalnum((unsigned char)c) || c == '_' || c == '.')
+      name += c;
+    else
+      name += '_';
+  }
+  if (name.size() > 160)
+    name.resize(160);
+  char buf[24];
+  snprintf(buf, sizeof(buf), "_%016llx", (unsigned long long)fnv1a64(key));
+  name += buf;
+
+  auto *gv = new llvm::GlobalVariable(mod, arrLL, /*isConstant*/ true,
+                                      llvm::GlobalValue::LinkOnceODRLinkage,
+                                      init, name);
+  gv->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+
+  llvm::Constant *zero = llvm::ConstantInt::get(builder.getInt32Ty(), 0);
+  return llvm::ConstantExpr::getInBoundsGetElementPtr(
+      arrLL, gv, llvm::ArrayRef<llvm::Constant *>{zero, zero});
+}
+
+/* The ConstantArray VALUE for a const array literal (for array-typed
+ * variables and globals, which hold the array, not a decayed pointer). */
+llvm::Constant *CodeGen::buildConstArrayValue(const ExprNode *node) {
+  const ArrayLiteralNode *arr = cgUnwrapConstArray(node);
+  if (!arr)
+    return nullptr;
+  const Type *arrTy = arr->exprType->getUnqualifiedType();
+  auto *at = llvm::dyn_cast<ArrayType>(arrTy);
+  if (!at)
+    return nullptr;
+  const Type *elemTy = at->getElementType();
+  llvm::Type *elemLL = getLLVMType(elemTy);
+
+  std::vector<llvm::Constant *> elems;
+  for (const auto *e : arr->elements) {
+    llvm::Constant *c = buildConstArrayElement(e);
+    if (!c)
+      return nullptr;
+    elems.push_back(c);
+  }
+  return llvm::ConstantArray::get(
+      llvm::ArrayType::get(elemLL, elems.size()), elems);
+}
+
+llvm::Constant *CodeGen::buildConstStringGlobal(llvm::StringRef value) {
+  llvm::Constant *strConst =
+      llvm::ConstantDataArray::getString(ctx, value, true);
+  /* Deterministic name + mergeable linkage: identical const strings in
+   * different modules share one backing buffer. */
+  llvm::SmallString<64> name;
+  name.append("__const_str_");
+  char buf[24];
+  snprintf(buf, sizeof(buf), "%016llx", (unsigned long long)fnv1a64(value));
+  name.append(buf);
+  auto *gv = new llvm::GlobalVariable(mod, strConst->getType(),
+                                      /*isConstant*/ true,
+                                      llvm::GlobalValue::LinkOnceODRLinkage,
+                                      strConst, name.str());
+  gv->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+  llvm::Constant *zero = llvm::ConstantInt::get(builder.getInt32Ty(), 0);
+  return llvm::ConstantExpr::getInBoundsGetElementPtr(
+      strConst->getType(), gv, llvm::ArrayRef<llvm::Constant *>{zero, zero});
+}
+
+/* String struct { data, len, cap } with data pointing at a static buffer.
+ * cap == len so any mutation reallocates before touching read-only memory;
+ * the struct is embedded in an immortal const object, so its destructor
+ * never runs. */
+llvm::Constant *CodeGen::buildConstString(llvm::StringRef value) {
+  llvm::Constant *dataPtr = buildConstStringGlobal(value);
+  std::vector<llvm::Constant *> elems;
+  elems.push_back(dataPtr);
+  elems.push_back(llvm::ConstantInt::get(builder.getInt64Ty(), value.size()));
+  elems.push_back(llvm::ConstantInt::get(builder.getInt64Ty(), value.size()));
+  return llvm::ConstantStruct::get(
+      llvm::StructType::get(ctx, {builder.getPtrTy(), builder.getInt64Ty(),
+                                  builder.getInt64Ty()},
+                            /*isPacked*/ false),
+      elems);
+}
+
+llvm::Constant *CodeGen::buildConstFromSerialized(const ExprNode *node,
+                                                  const std::string &key,
+                                                  const Type *expected) {
+  if (key.rfind("o:", 0) == 0) {
+    return getOrCreateCanonicalConst(node);
+  }
+  if (key.rfind("A:", 0) == 0) {
+    return buildConstArray(node, key);
+  }
+  if (key.rfind("s:", 0) == 0) {
+    /* Unescape '\:' and '\\'. */
+    std::string content;
+    content.reserve(key.size() - 2);
+    for (size_t i = 2; i < key.size(); ++i) {
+      if (key[i] == '\\' && i + 1 < key.size())
+        ++i;
+      content += key[i];
+    }
+    if (expected) {
+      const Type *u = expected->getUnqualifiedType();
+      if (u->getKind() == TypeKind::Class || u->getKind() == TypeKind::Struct) {
+        /* String value (or struct field) -> String struct constant. */
+        if (u->isPointerType()) {
+          /* handled below */
+        } else {
+          return buildConstString(content);
+        }
+      }
+      if (u->isPointerType()) {
+        return buildConstStringGlobal(content);
+      }
+    }
+    return buildConstString(content);
+  }
+  if (key.rfind("i:", 0) == 0 || key.rfind("u:", 0) == 0) {
+    bool isSigned = key[1] == 'i';
+    unsigned long long raw =
+        strtoull(key.c_str() + 2, nullptr, 10);
+    llvm::Type *ty = nullptr;
+    if (expected) {
+      const Type *u = expected->getUnqualifiedType();
+      ty = getLLVMType(u);
+    }
+    if (ty && ty->isFloatingPointTy()) {
+      llvm::APFloat apf(ty->getFltSemantics());
+      apf.convertFromAPInt(
+          llvm::APInt(64, raw, isSigned), isSigned,
+          llvm::APFloat::rmNearestTiesToEven);
+      return llvm::ConstantFP::get(ctx, apf);
+    }
+    if (ty && ty->isIntegerTy()) {
+      unsigned bits = ty->getIntegerBitWidth();
+      return llvm::ConstantInt::get(ctx,
+                                    llvm::APInt(bits, raw, isSigned));
+    }
+    return llvm::ConstantInt::get(builder.getInt64Ty(), raw, isSigned);
+  }
+  if (key.rfind("f:", 0) == 0) {
+    double d = strtod(key.c_str() + 2, nullptr);
+    llvm::Type *ty = nullptr;
+    if (expected) {
+      const Type *u = expected->getUnqualifiedType();
+      ty = getLLVMType(u);
+    }
+    if (ty && ty->isFloatingPointTy()) {
+      llvm::APFloat apf(ty->getFltSemantics());
+      apf.convertFromString(key.c_str() + 2, llvm::APFloat::rmNearestTiesToEven);
+      return llvm::ConstantFP::get(ctx, apf);
+    }
+    llvm::APFloat apd(d);
+    if (ty && ty->isIntegerTy()) {
+      llvm::APSInt api(ty->getIntegerBitWidth(), false);
+      bool isExact = false;
+      apd.convertToInteger(api, llvm::APFloat::rmTowardZero, &isExact);
+      return llvm::ConstantInt::get(ctx, api);
+    }
+    return llvm::ConstantFP::get(ctx, apd);
+  }
+  if (key == "b:0" || key == "b:1") {
+    if (expected) {
+      llvm::Type *ty = getLLVMType(expected->getUnqualifiedType());
+      if (ty->isIntegerTy())
+        return llvm::ConstantInt::get(ty, key == "b:1" ? 1 : 0);
+    }
+    return llvm::ConstantInt::get(builder.getInt1Ty(), key == "b:1" ? 1 : 0);
+  }
+  if (key == "n") {
+    return llvm::ConstantPointerNull::get(builder.getPtrTy());
+  }
+  if (key.rfind("c:", 0) == 0 || key.rfind("r:", 0) == 0) {
+    unsigned long long raw = strtoull(key.c_str() + 2, nullptr, 10);
+    if (expected) {
+      llvm::Type *ty = getLLVMType(expected->getUnqualifiedType());
+      if (ty->isIntegerTy())
+        return llvm::ConstantInt::get(ty, raw);
+    }
+    return llvm::ConstantInt::get(builder.getInt8Ty(), raw);
+  }
+  return nullptr;
+}
+
+void CodeGen::emitConstRegistry() {
+  if (canonicalConsts.empty())
+    return;
+
+  llvm::Type *ptrTy = builder.getPtrTy();
+  llvm::Type *i64Ty = builder.getInt64Ty();
+  llvm::StructType *entryTy =
+      llvm::StructType::get(ctx, {ptrTy, i64Ty});
+  llvm::StructType *nodeTy =
+      llvm::StructType::get(ctx, {ptrTy, i64Ty, ptrTy});
+
+  /* Per-module table of (address, byte size) of this module's consts. */
+  std::vector<llvm::Constant *> entries;
+  for (auto &kv : canonicalConsts) {
+    llvm::GlobalVariable *gv = kv.second;
+    uint64_t size = mod.getDataLayout().getTypeAllocSize(gv->getValueType());
+    entries.push_back(llvm::ConstantStruct::get(
+        entryTy, {gv, llvm::ConstantInt::get(i64Ty, size)}));
+  }
+  llvm::ArrayType *tblTy = llvm::ArrayType::get(entryTy, entries.size());
+  std::string modHash = std::to_string(fnv1a64(currentFilePath));
+  auto *tblGV = new llvm::GlobalVariable(
+      mod, tblTy, /*isConstant*/ true,
+      llvm::GlobalValue::LinkOnceODRLinkage,
+      llvm::ConstantArray::get(tblTy, entries),
+      "__utopia_const_tbl_" + modHash);
+  tblGV->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+
+  /* Registry node { table, count, next }: writable, chained at startup. */
+  llvm::Constant *nullPtr = llvm::ConstantPointerNull::get(
+      llvm::cast<llvm::PointerType>(ptrTy));
+  auto *nodeGV = new llvm::GlobalVariable(
+      mod, nodeTy, /*isConstant*/ false,
+      llvm::GlobalValue::LinkOnceODRLinkage,
+      llvm::ConstantStruct::get(
+          nodeTy, {tblGV,
+                   llvm::ConstantInt::get(i64Ty, entries.size()), nullPtr}),
+      "__utopia_const_node_" + modHash);
+
+  /* Shared list head (linkonce_odr folds all modules into one). */
+  llvm::GlobalVariable *headGV = mod.getGlobalVariable("__utopia_const_head");
+  if (!headGV) {
+    headGV = new llvm::GlobalVariable(mod, ptrTy, /*isConstant*/ false,
+                                      llvm::GlobalValue::LinkOnceODRLinkage,
+                                      nullPtr, "__utopia_const_head");
+  }
+
+  /* Append this module's node during global init (runs before main in
+   * both AOT and JIT). */
+  llvm::Function *initF =
+      globalInitFunc ? globalInitFunc : getOrCreateGlobalInitFunc();
+  llvm::IRBuilder<> tmpB(&initF->getEntryBlock(),
+                         initF->getEntryBlock().begin());
+  llvm::Value *head = tmpB.CreateLoad(ptrTy, headGV, "const.head");
+  llvm::Value *nextGep = tmpB.CreateStructGEP(nodeTy, nodeGV, 2);
+  tmpB.CreateStore(head, nextGep);
+  tmpB.CreateStore(nodeGV, headGV);
+
+  /* The walker: linear scan over the chained (address, size) ranges. The
+   * intrinsic may have already declared it; give the declaration a body. */
+  llvm::Function *walker = mod.getFunction("__utopia_is_const_ptr");
+  if (!walker) {
+    llvm::FunctionType *fty = llvm::FunctionType::get(
+        builder.getInt1Ty(), {ptrTy}, false);
+    walker = llvm::Function::Create(
+        fty, llvm::GlobalValue::LinkOnceODRLinkage, "__utopia_is_const_ptr",
+        mod);
+    walker->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+  }
+  if (walker->empty()) {
+
+    llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", walker);
+    llvm::BasicBlock *loop = llvm::BasicBlock::Create(ctx, "node.loop", walker);
+    llvm::BasicBlock *check =
+        llvm::BasicBlock::Create(ctx, "node.check", walker);
+    llvm::BasicBlock *inner = llvm::BasicBlock::Create(ctx, "inner", walker);
+    llvm::BasicBlock *innerBody =
+        llvm::BasicBlock::Create(ctx, "inner.body", walker);
+    llvm::BasicBlock *innerNext =
+        llvm::BasicBlock::Create(ctx, "inner.next", walker);
+    llvm::BasicBlock *nextNode =
+        llvm::BasicBlock::Create(ctx, "next.node", walker);
+    llvm::BasicBlock *retTrue =
+        llvm::BasicBlock::Create(ctx, "ret.true", walker);
+    llvm::BasicBlock *retFalse =
+        llvm::BasicBlock::Create(ctx, "ret.false", walker);
+
+    llvm::IRBuilder<> wb(entry);
+    llvm::Value *p = walker->arg_begin();
+    llvm::Value *headV = wb.CreateLoad(ptrTy, headGV, "head");
+    wb.CreateBr(loop);
+
+    wb.SetInsertPoint(loop);
+    llvm::PHINode *nodePhi = wb.CreatePHI(ptrTy, 2, "node");
+    nodePhi->addIncoming(headV, entry);
+    llvm::Value *isNull = wb.CreateICmpEQ(nodePhi, nullPtr);
+    wb.CreateCondBr(isNull, retFalse, check);
+
+    wb.SetInsertPoint(check);
+    llvm::Value *tblV =
+        wb.CreateLoad(ptrTy, wb.CreateStructGEP(nodeTy, nodePhi, 0), "tbl");
+    llvm::Value *cntV =
+        wb.CreateLoad(i64Ty, wb.CreateStructGEP(nodeTy, nodePhi, 1), "cnt");
+    wb.CreateBr(inner);
+
+    wb.SetInsertPoint(inner);
+    llvm::PHINode *iPhi = wb.CreatePHI(i64Ty, 2, "i");
+    iPhi->addIncoming(wb.getInt64(0), check);
+    llvm::Value *done = wb.CreateICmpUGE(iPhi, cntV);
+    wb.CreateCondBr(done, nextNode, innerBody);
+
+    wb.SetInsertPoint(innerBody);
+    llvm::Value *entGep =
+        wb.CreateInBoundsGEP(entryTy, tblV, iPhi, "entry");
+    llvm::Value *startV =
+        wb.CreateLoad(ptrTy, wb.CreateStructGEP(entryTy, entGep, 0), "start");
+    llvm::Value *sizeV =
+        wb.CreateLoad(i64Ty, wb.CreateStructGEP(entryTy, entGep, 1), "size");
+    llvm::Value *endV = wb.CreateGEP(wb.getInt8Ty(), startV, sizeV, "end");
+    llvm::Value *lo = wb.CreateICmpUGE(p, startV);
+    llvm::Value *hi = wb.CreateICmpULT(p, endV);
+    llvm::Value *inside = wb.CreateAnd(lo, hi);
+    wb.CreateCondBr(inside, retTrue, innerNext);
+
+    wb.SetInsertPoint(innerNext);
+    llvm::Value *iNext = wb.CreateAdd(iPhi, wb.getInt64(1));
+    iPhi->addIncoming(iNext, innerNext);
+    wb.CreateBr(inner);
+
+    wb.SetInsertPoint(nextNode);
+    llvm::Value *nextV =
+        wb.CreateLoad(ptrTy, wb.CreateStructGEP(nodeTy, nodePhi, 2), "next");
+    nodePhi->addIncoming(nextV, nextNode);
+    wb.CreateBr(loop);
+
+    wb.SetInsertPoint(retTrue);
+    wb.CreateRet(wb.getTrue());
+
+    wb.SetInsertPoint(retFalse);
+    wb.CreateRet(wb.getFalse());
+  }
+}
+
+llvm::GlobalVariable *CodeGen::getOrCreateCanonicalConst(const ExprNode *node) {
+  if (!node || !node->isConstExpr || node->constKey.rfind("o:", 0) != 0)
+    return nullptr;
+  const std::string &key = node->constKey;
+
+  auto it = canonicalConsts.find(key);
+  if (it != canonicalConsts.end())
+    return it->second;
+
+  /* The creation may be wrapped in a const-expression or implicit cast. */
+  while (auto *ce = llvm::dyn_cast<ConstExprNode>(node))
+    node = ce->expr;
+  while (auto *ic = llvm::dyn_cast<ImplicitCastNode>(node))
+    node = ic->expr;
+
+  const FunctionDeclNode *ctor = cgResolveConstCtorCall(node);
+  if (!ctor || !ctor->parentRecord)
+    return nullptr;
+
+  /* The creation AST node is shared through the AST context so modules
+   * that only see the const object by key can still rebuild the constant
+   * initializer from the original expression. */
+  const ExprNode *creation = node;
+  auto cit = astCtx.constObjectCreations.find(key);
+  if (cit != astCtx.constObjectCreations.end())
+    creation = cit->second;
+
+  std::vector<llvm::Constant *> fields;
+  llvm::Constant *init = buildConstObjectInitializer(creation, fields);
+  if (!init) {
+    return nullptr;
+  }
+
+  /* Deterministic symbol: identical constructions in any module produce
+   * the same name, and 'linkonce_odr' lets the linker fold them into a
+   * single address (canonicalization). */
+  std::string name = "__const_";
+  for (char c : key) {
+    if (isalnum((unsigned char)c) || c == '_' || c == '.')
+      name += c;
+    else
+      name += '_';
+  }
+  if (name.size() > 160)
+    name.resize(160);
+  char buf[24];
+  snprintf(buf, sizeof(buf), "_%016llx", (unsigned long long)fnv1a64(key));
+  name += buf;
+
+  llvm::StructType *structTy =
+      llvm::cast<llvm::StructType>(getLLVMType(ctor->parentRecord));
+  auto *gv = new llvm::GlobalVariable(mod, structTy,
+                                      /*isConstant*/ true,
+                                      llvm::GlobalValue::LinkOnceODRLinkage,
+                                      init, name);
+  gv->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+  canonicalConsts[key] = gv;
+  return gv;
+}
+
+llvm::Constant *CodeGen::buildConstObjectInitializer(
+    const ExprNode *creation, std::vector<llvm::Constant *> &fields) {
+  return buildConstObjectInitializerImpl(creation, fields, nullptr, nullptr);
+}
+
+llvm::Constant *CodeGen::buildConstObjectInitializerImpl(
+    const ExprNode *creation, std::vector<llvm::Constant *> &fields,
+    const FunctionDeclNode *parentCtor,
+    const std::vector<const ExprNode *> *parentParamArgs) {
+  const FunctionDeclNode *ctor = cgResolveConstCtorCall(creation);
+  if (!ctor || !ctor->parentRecord)
+    return nullptr;
+  const ClassType *classTy = llvm::cast<ClassType>(ctor->parentRecord);
+
+  const auto *call = llvm::dyn_cast<FunctionCallNode>(creation);
+  const auto *newNode = llvm::dyn_cast<NewExprNode>(creation);
+  llvm::ArrayRef<ExprNode *> args =
+      call ? call->args
+           : (newNode ? newNode->args : llvm::ArrayRef<ExprNode *>());
+  llvm::ArrayRef<std::string_view> argNames =
+      call ? call->argNames
+           : (newNode ? newNode->argNames
+                      : llvm::ArrayRef<std::string_view>());
+
+  /* Map params to args (positional in order, named by name). */
+  std::vector<const ExprNode *> paramArgs(ctor->params.size(), nullptr);
+  size_t positional = 0;
+  for (size_t i = 0; i < args.size(); ++i) {
+    if (!argNames.empty() && !argNames[i].empty()) {
+      for (size_t p = 0; p < ctor->params.size(); ++p)
+        if (ctor->params[p]->name == argNames[i])
+          paramArgs[p] = args[i];
+    } else {
+      if (positional < ctor->params.size())
+        paramArgs[positional] = args[i];
+      ++positional;
+    }
+  }
+
+  /* A super call forwards the enclosing constructor's parameters; resolve
+   * them against the caller's arguments (mirrors Sema's constParamEnv). */
+  if (parentCtor && parentParamArgs) {
+    for (size_t p = 0; p < paramArgs.size(); ++p) {
+      const ExprNode *a = paramArgs[p];
+      if (!a)
+        continue;
+      if (auto *v = llvm::dyn_cast<VariableNode>(a)) {
+        if (v->resolvedDecl &&
+            v->resolvedDecl->kind == NodeKind::ParamDecl) {
+          for (size_t pp = 0; pp < parentCtor->params.size(); ++pp) {
+            if (parentCtor->params[pp] == v->resolvedDecl) {
+              paramArgs[p] = (*parentParamArgs)[pp];
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  /* vptr first for polymorphic classes (getLLVMType layout). */
+  if (classTy->getIsPolymorphic()) {
+    fields.push_back(getOrCreateVTable(classTy));
+  }
+
+  /* Base-class fields, in layout order, from the const super call. */
+  if (ctor->superCall) {
+    if (!cgResolveConstCtorCall(ctor->superCall))
+      return nullptr;
+    if (!buildConstObjectInitializerImpl(ctor->superCall, fields, ctor,
+                                         &paramArgs))
+      return nullptr;
+  }
+
+  const ClassDeclNode *cls = nullptr;
+  if (const DeclNode *recDecl = classTy->getDeclaration())
+    cls = llvm::dyn_cast<ClassDeclNode>(recDecl);
+  if (!cls)
+    return nullptr;
+
+  for (const auto *f : cls->fields) {
+    if (f->isStatic)
+      continue;
+    llvm::Constant *val = nullptr;
+
+    /* Array fields embed the constant VALUE (not the decayed pointer). */
+    auto fieldValue = [&](const ExprNode *valueNode) -> llvm::Constant * {
+      /* ': this.field = param' entries reference the ctor parameters. */
+      if (auto *v = llvm::dyn_cast<VariableNode>(valueNode)) {
+        if (v->resolvedDecl &&
+            v->resolvedDecl->kind == NodeKind::ParamDecl) {
+          for (size_t pp = 0; pp < ctor->params.size(); ++pp) {
+            if (ctor->params[pp] == v->resolvedDecl) {
+              valueNode = paramArgs[pp];
+              break;
+            }
+          }
+        }
+      }
+      if (!valueNode)
+        return nullptr;
+      if (valueNode->isConstExpr && valueNode->constKey.rfind("A:", 0) == 0) {
+        const Type *fu = f->type->getUnqualifiedType();
+        if (fu->getKind() == TypeKind::Array)
+          return buildConstArrayValue(valueNode);
+      }
+      return buildConstFromSerialized(valueNode, valueNode->constKey, f->type);
+    };
+
+    /* this-parameter argument. */
+    for (size_t p = 0; p < ctor->params.size(); ++p) {
+      if (ctor->params[p]->isThisParam &&
+          ctor->params[p]->name == f->varName && paramArgs[p]) {
+        val = fieldValue(paramArgs[p]);
+        break;
+      }
+    }
+    /* ': this.field = expr' initializer-list entry. */
+    if (!val) {
+      for (const auto *init : ctor->fieldInitializers) {
+        if (auto *target = llvm::dyn_cast<MemberAccessNode>(init->target)) {
+          if (target->memberName == f->varName) {
+            val = fieldValue(init->value);
+            break;
+          }
+        }
+      }
+    }
+    /* Declaration initializer. */
+    if (!val && f->initializer) {
+      val = fieldValue(f->initializer);
+    }
+    if (!val) {
+      return nullptr;
+    }
+    fields.push_back(val);
+  }
+
+  return llvm::ConstantStruct::get(
+      llvm::cast<llvm::StructType>(getLLVMType(classTy)), fields);
+}
+
+llvm::Value *CodeGen::visit(const ConstExprNode *node) {
+  if (node->isConstExpr) {
+    if (llvm::Constant *c = buildConstFromSerialized(node, node->constKey,
+                                                     node->exprType))
+      return c;
+  }
+  return dispatch(node->expr);
+}
+
 llvm::Value *CodeGen::visit(const NewExprNode *node) {
+  if (node->isConstExpr) {
+    if (llvm::Constant *c = buildConstFromSerialized(node, node->constKey,
+                                                     node->exprType))
+      return c;
+  }
   llvm::Type *allocTy = getLLVMType(node->allocatedType);
   llvm::Value *sizeVal = nullptr;
   llvm::Value *arrSize64 = nullptr;

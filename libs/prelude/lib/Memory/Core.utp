@@ -44,6 +44,18 @@ public void* _construct<T>(void* ptr);
 @intrinsic("memory_destruct")
 void destruct(void* ptr);
 
+/*
+ * Returns whether 'ptr' points at a canonical const object (built at
+ * compile time in static read-only storage). Such objects are immortal:
+ * their destructors never run and they must never be freed. Frameworks
+ * that receive objects by pointer (e.g. a UI framework handed a widget)
+ * can query this before deleting: if isConst(ptr) is true, skip the
+ * delete; otherwise free normally. The check is O(N) over the program's
+ * const objects, which is negligible for real-world counts.
+ */
+@intrinsic("memory_is_const")
+public bool isConst(void* ptr);
+
 class Type {
   uint8* name;
   bool isClass;

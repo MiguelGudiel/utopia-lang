@@ -109,6 +109,7 @@ public:
   Piece *visit(const MapLiteralNode *node);
   Piece *visit(const NewExprNode *node);
   Piece *visit(const DeleteExprNode *node);
+  Piece *visit(const ConstExprNode *node);
   Piece *visit(const DestructorCallNode *node);
   Piece *visit(const TypeLiteralNode *node);
   Piece *visit(const NullNode *node);

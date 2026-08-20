@@ -1206,6 +1206,13 @@ Piece *PieceFactory::visit(const DeleteExprNode *node) {
   return create<ConcatPiece>(std::move(parts));
 }
 
+Piece *PieceFactory::visit(const ConstExprNode *node) {
+  std::vector<const Piece *> parts;
+  parts.push_back(create<TextPiece>("const "));
+  parts.push_back(dispatchExpr(node->expr));
+  return create<ConcatPiece>(std::move(parts));
+}
+
 Piece *PieceFactory::visit(const DestructorCallNode *node) {
   std::vector<const Piece *> parts;
   parts.push_back(dispatchExpr(node->object));
@@ -1251,6 +1258,8 @@ Piece *PieceFactory::visit(const VarDeclNode *node) {
     pfx += "protected ";
   if (node->isStatic)
     pfx += "static ";
+  if (node->isFinal)
+    pfx += "final ";
   if (node->type) {
     std::string typeStr = node->rawTypeStr.empty()
                               ? node->type->toString()
@@ -1276,13 +1285,17 @@ Piece *PieceFactory::visit(const ParamDeclNode *node) {
   std::string pfx = "";
   if (node->isRequired)
     pfx += "required ";
-  if (node->type) {
-    std::string typeStr = node->rawTypeStr.empty()
-                              ? node->type->toString()
-                              : std::string(node->rawTypeStr);
-    pfx += typeStr + " ";
+  if (node->isThisParam) {
+    pfx += "this." + std::string(node->name);
+  } else {
+    if (node->type) {
+      std::string typeStr = node->rawTypeStr.empty()
+                                ? node->type->toString()
+                                : std::string(node->rawTypeStr);
+      pfx += typeStr + " ";
+    }
+    pfx += std::string(node->name);
   }
-  pfx += std::string(node->name);
 
   Piece *p = create<TextPiece>(pfx);
   if (node->defaultValue) {
@@ -1370,10 +1383,23 @@ Piece *PieceFactory::visit(const FunctionDeclNode *node) {
 
   Piece *mainSig = create<ConcatPiece>(std::move(signature));
 
-  if (node->superCall) {
-    const Piece *superCallPiece = dispatchExpr(node->superCall);
+  if (!node->fieldInitializers.empty() || node->superCall) {
+    std::vector<const Piece *> initParts;
+    initParts.push_back(create<TextPiece>(" : "));
+    bool first = true;
+    for (const auto *init : node->fieldInitializers) {
+      if (!first)
+        initParts.push_back(create<TextPiece>(", "));
+      first = false;
+      initParts.push_back(dispatchExpr(init));
+    }
+    if (node->superCall) {
+      if (!first)
+        initParts.push_back(create<TextPiece>(", "));
+      initParts.push_back(dispatchExpr(node->superCall));
+    }
     mainSig = create<ConcatPiece>(std::vector<const Piece *>{
-        mainSig, create<TextPiece>(" : "), superCallPiece});
+        mainSig, create<ConcatPiece>(std::move(initParts))});
   }
 
   if (node->body) {
@@ -1483,6 +1509,9 @@ Piece *createRecord(PieceFactory *factory, const T *node, const char *kw) {
   if (auto *cls = llvm::dyn_cast<ClassDeclNode>(node)) {
     if (cls->isAbstract) {
       pfx += "abstract ";
+    }
+    if (cls->isFinal) {
+      pfx += "final ";
     }
   }
   pfx += std::string(kw) + " " + std::string(node->name);

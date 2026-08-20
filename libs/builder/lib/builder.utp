@@ -49,11 +49,11 @@ const uint8* _getTargetOS();
 @extern("UtopiaBuild_getTargetArch")
 const uint8* _getTargetArch();
 
-const String MAIN_PROJECT_ROOT = _getMainProjectRoot();
-const String CURRENT_PROJECT_ROOT = _getCurrentProjectRoot();
-const String OUTPUT_DIR = _getOutputDir();
-const String MAIN_OUTPUT_DIR = _getMainOutputDir();
-const String TARGET_TRIPLE = _getTargetTriple();
-const String BUILD_TYPE = _getBuildType();
-const String TARGET_OS = _getTargetOS();
-const String TARGET_ARCH = _getTargetArch();
+final String MAIN_PROJECT_ROOT = _getMainProjectRoot();
+final String CURRENT_PROJECT_ROOT = _getCurrentProjectRoot();
+final String OUTPUT_DIR = _getOutputDir();
+final String MAIN_OUTPUT_DIR = _getMainOutputDir();
+final String TARGET_TRIPLE = _getTargetTriple();
+final String BUILD_TYPE = _getBuildType();
+final String TARGET_OS = _getTargetOS();
+final String TARGET_ARCH = _getTargetArch();

@@ -1,10 +1,13 @@
 #pragma once
+#include "utopia/AST/AST.hpp"
+#include "utopia/AST/ASTContext.hpp"
 #include "utopia/AST/ASTVisitor.hpp"
 #include "utopia/CodeGen/BackendContext.hpp"
 #include "utopia/CodeGen/CodeGenContext.hpp"
 #include "utopia/CodeGen/DebugInfoEmitter.hpp"
 #include "utopia/CodeGen/TBAAManager.hpp"
 #include "utopia/Common/Diagnostics.hpp"
+#include <llvm/ADT/SmallString.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/InstrTypes.h>
 #include <llvm/IR/LLVMContext.h>
@@ -38,7 +41,8 @@ class CodeGen : public ASTVisitor<CodeGen, llvm::Value *> {
 
 public:
   CodeGen(BackendContext &bCtx, llvm::Module &llvmMod, DiagnosticsEngine &diags,
-          bool emitDebugInfo, std::string filePath, bool asyncEnabled = true);
+          bool emitDebugInfo, std::string filePath, ASTContext &astCtx,
+          bool asyncEnabled = true);
 
   llvm::Value *dispatch(const ASTNode *node);
 
@@ -80,6 +84,7 @@ public:
   llvm::Value *visit(const ArraySubscriptNode *node);
   llvm::Value *visit(const NewExprNode *node);
   llvm::Value *visit(const DeleteExprNode *node);
+  llvm::Value *visit(const ConstExprNode *node);
   llvm::Value *visit(const DestructorCallNode *node);
   llvm::Value *visit(const TypeLiteralNode *node);
   llvm::Value *visit(const ArrayLiteralNode *node);
@@ -151,6 +156,11 @@ public:
   /* Creates a pending future state sized for 'valueType'. */
   llvm::Value *createFutureState(const Type *valueType);
 
+  /* Lowers an argument passed through a C variadic tail: sub-32-bit values
+   * are widened per the C ABI and by-value Strings decay to their data
+   * pointer (the prelude's own printf wrappers call c_str() explicitly). */
+  llvm::Value *lowerVariadicArg(const ExprNode *arg, llvm::Value *value);
+
 private:
   llvm::Function *getOrCreateRuntimeFunction(const std::string &name,
                                              llvm::FunctionType *ty);
@@ -168,6 +178,7 @@ private:
   llvm::IRBuilder<> builder;
   CodeGenContext cgCtx;
   DiagnosticsEngine &diags;
+  ASTContext &astCtx;
   const FunctionDeclNode *currentFunc = nullptr;
   llvm::AllocaInst *lastTemporaryAlloca = nullptr;
   std::string currentFilePath;
@@ -202,6 +213,43 @@ private:
   llvm::Constant *evaluateAsConstant(const ExprNode *node);
   llvm::Function *getOrCreateFunction(const FunctionDeclNode *node);
   llvm::Function *getOrCreateGlobalInitFunc();
+
+  /* ---- Dart-style const objects ---- */
+
+  /* Canonical const objects: one read-only global per (class, ctor, args)
+   * key. 'linkonce_odr' + a deterministic name make identical constructions
+   * (in the same or different modules) merge into a single address. */
+  std::unordered_map<std::string, llvm::GlobalVariable *> canonicalConsts;
+
+  llvm::GlobalVariable *getOrCreateCanonicalConst(const ExprNode *creation);
+  /* Builds the constant initializer for a const object creation call. */
+  llvm::Constant *buildConstObjectInitializer(const ExprNode *creation,
+                                              std::vector<llvm::Constant *> &out);
+  /* Recursive initializer builder; the parent ctor's param->arg mapping is
+   * threaded through so 'super(param)' forwards resolve to constants. */
+  llvm::Constant *buildConstObjectInitializerImpl(
+      const ExprNode *creation, std::vector<llvm::Constant *> &out,
+      const FunctionDeclNode *parentCtor,
+      const std::vector<const ExprNode *> *parentParamArgs);
+  /* Constant String struct {data, len, cap} backed by a static buffer. */
+  llvm::Constant *buildConstString(llvm::StringRef value);
+  llvm::Constant *buildConstStringGlobal(llvm::StringRef value);
+  /* Rebuilds an LLVM constant from a serialized const value ("i:5",
+   * "s:hi", "o:key", ...) converted to 'expected'. */
+  llvm::Constant *buildConstFromSerialized(const ExprNode *node,
+                                           const std::string &key,
+                                           const Type *expected);
+  /* Emits the runtime const registry (per-module table + linked list head,
+   * populated by the module ctor) and the '__utopia_is_const_ptr' walker
+   * that backs Memory.isConst(). */
+  void emitConstRegistry();
+  /* Canonical static array for 'const [1, 2, 3]' (key "A:..."). */
+  llvm::Constant *buildConstArray(const ExprNode *node,
+                                  const std::string &key);
+  /* The ConstantArray value (for array-typed variables/globals). */
+  llvm::Constant *buildConstArrayValue(const ExprNode *node);
+  /* One const-array element: nested arrays are embedded as values. */
+  llvm::Constant *buildConstArrayElement(const ExprNode *node);
 
   llvm::LoadInst *createTBAALoad(llvm::Type *llTy, llvm::Value *ptr,
                                  const Type *utopiaTy,

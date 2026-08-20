@@ -91,6 +91,22 @@ const FunctionDeclNode *findBestConversionCtor(const Type *from,
   return best;
 }
 
+bool typesMatchExactly(const Type *a, const Type *b) {
+  if (!a || !b)
+    return false;
+
+  auto stripRef = [](const Type *t) {
+    if (t->isReferenceType()) {
+      t = static_cast<const ReferenceType *>(t)->getPointeeType();
+    } else if (t->getKind() == TypeKind::RValueReference) {
+      t = static_cast<const RValueReferenceType *>(t)->getPointeeType();
+    }
+    return t;
+  };
+
+  return stripRef(a)->getUnqualifiedType() == stripRef(b)->getUnqualifiedType();
+}
+
 bool canImplicitlyCast(const Type *from, const Type *to,
                        bool allowUserDefined) {
   if (!from || !to)

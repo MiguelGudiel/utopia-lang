@@ -45,6 +45,7 @@ enum class NodeKind : uint8_t {
   MapLiteral,
   New,
   Delete,
+  ConstExpr,
   DestructorCall,
   Null,
   EnumDecl,
@@ -101,6 +102,17 @@ struct ExprNode : public ASTNode {
   bool hasParens = false;
   mutable const Type *representedType = nullptr;
 
+  /* Dart-style const semantics (set by Sema):
+   *   isConstExpr    - the expression was validated as a compile-time
+   *                    constant expression (may be implicit: inside a const
+   *                    context, constructor calls are const).
+   *   constKey       - canonicalization key for const objects/values:
+   *                    identical keys mean identical instances (same
+   *                    address). Empty for plain scalar constants that do
+   *                    not produce canonical storage. */
+  mutable bool isConstExpr = false;
+  mutable std::string constKey;
+
   explicit ExprNode(NodeKind k, int l = 0, int c = 0, int len = 0)
       : ASTNode(k, l, c, len) {}
 
@@ -123,6 +135,7 @@ struct ExprNode : public ASTNode {
     case NodeKind::ArrayLiteral:
     case NodeKind::New:
     case NodeKind::Delete:
+    case NodeKind::ConstExpr:
     case NodeKind::Null:
     case NodeKind::ImplicitCast:
     case NodeKind::TypeLiteral:
@@ -483,8 +496,15 @@ struct VarDeclNode : public DeclNode {
   bool isStatic = false;
   bool isWeak = false;
   bool isExtern = false;
+  bool isFinal = false;
   std::string_view externAlias;
   std::string_view rawTypeStr;
+
+  /* Dart-style const: set by Sema when the declaration initializer was
+   * validated as a constant expression; constKey holds its serialized
+   * value (see ConstExprNode). */
+  mutable bool isConstExpr = false;
+  mutable std::string constKey;
 
   /* Reference to the resolved copy constructor for aggregate initialization */
   mutable const FunctionDeclNode *copyCtor = nullptr;
@@ -505,6 +525,11 @@ struct AssignNode : public ExprNode {
   ExprNode *target;
   ExprNode *value;
   mutable const FunctionDeclNode *overloadedOperator = nullptr;
+
+  /* Set by the parser when the node is a constructor initializer-list entry
+   * (': this.field = expr'): such assignments are the only context allowed
+   * to write to 'final' fields. */
+  bool isFieldInit = false;
 
   AssignNode(std::string_view o, ExprNode *t, ExprNode *v, int l, int c,
              int len)
@@ -552,6 +577,11 @@ struct ParamDeclNode : public DeclNode {
   bool isRequired;
   std::string_view rawTypeStr;
 
+  /* Dart-style initializing formal: 'Class(this.field)' declares a
+   * parameter whose value is stored into 'field' by the constructor. The
+   * type stays null until Sema resolves it from the record's fields. */
+  bool isThisParam = false;
+
   ParamDeclNode(const Type *t, std::string_view n, ExprNode *defVal, bool isN,
                 bool isReq, int l, int c, int len)
       : DeclNode(NodeKind::ParamDecl, l, c, len), type(t), name(n),
@@ -595,6 +625,16 @@ struct FunctionDeclNode : public DeclNode {
   std::string_view rawReturnTypeStr;
 
   FunctionCallNode *superCall = nullptr;
+
+  /* Constructor initializer-list entries (': this.field = expr'), stored
+   * as assignments. They run after the declaration field initializers,
+   * before the constructor body, matching Dart's execution order. */
+  llvm::ArrayRef<AssignNode *> fieldInitializers;
+
+  /* Dart-style named constructor: 'Foo.named(...)'. 'name' holds the
+   * simple constructor name ("named"); the class name comes from
+   * parentRecord. */
+  bool isNamedCtor = false;
 
   mutable bool isReadNone = false;
   mutable bool isReadOnly = false;
@@ -879,6 +919,10 @@ struct ClassDeclNode : public DeclNode {
   bool isOpaque = false;
   bool isAbstract = false;
 
+  /* Dart 'final class': cannot be extended or implemented by any other
+   * class. */
+  bool isFinal = false;
+
   ClassDeclNode(std::string_view n, int l, int c, int len)
       : DeclNode(NodeKind::ClassDecl, l, c, len), name(n), destructor(nullptr) {
   }
@@ -986,6 +1030,9 @@ struct NewExprNode : public ExprNode {
    * bitwise-copied from the argument instead of going through a ctor. */
   bool implicitCopyInit = false;
 
+  /* Dart-style named constructor: 'new Foo.named(...)'. */
+  std::string_view namedCtorName;
+
   /* Resolved custom allocator / deallocator ('operator new' /
    * 'operator delete' on the class or at file scope); null means the
    * default malloc/free. */
@@ -1000,6 +1047,21 @@ struct NewExprNode : public ExprNode {
 
   static bool classof(const ASTNode *node) {
     return node->kind == NodeKind::New;
+  }
+};
+
+/* Dart-style const expression: 'const Foo(1, 2)' or 'const <expr>'.
+ * Sema validates the inner expression as a compile-time constant and, for
+ * const object creations, computes 'constKey' so identical constructions
+ * canonicalize to the same static instance. */
+struct ConstExprNode : public ExprNode {
+  ExprNode *expr;
+
+  ConstExprNode(ExprNode *e, int l, int c, int len)
+      : ExprNode(NodeKind::ConstExpr, l, c, len), expr(e) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::ConstExpr;
   }
 };
 

@@ -374,10 +374,53 @@ void DeclCollectorPass::visit(const VarDeclNode *node) {
   ctx->addDecl(node->fqName, node);
 }
 
+/* Resolves the field types of 'this.x' constructor parameters before any
+ * mangling. The record body is fully parsed by declaration-collection time,
+ * so every field is known even when declared after the constructor. Reports
+ * an error for unknown fields (the type stays void so the mangler keeps
+ * working; compilation aborts on the error anyway). */
+static void resolveThisParamTypes(FunctionDeclNode *ctor,
+                                  llvm::ArrayRef<VarDeclNode *> fields,
+                                  SemaContext *ctx) {
+  for (auto *param : ctor->params) {
+    if (!param->isThisParam || param->type)
+      continue;
+    const VarDeclNode *field = nullptr;
+    for (const auto *f : fields) {
+      if (f->varName == param->name) {
+        field = f;
+        break;
+      }
+    }
+    if (!field) {
+      ctx->reportError(param->line, param->column, param->length,
+                       "No field named '" + std::string(param->name) +
+                           "' in record '" + std::string(ctor->name) +
+                           "' for 'this." + std::string(param->name) + "'.");
+      param->type = ctx->astCtx.VoidTy;
+      continue;
+    }
+    if (field->isStatic) {
+      ctx->reportError(param->line, param->column, param->length,
+                       "Field '" + std::string(param->name) +
+                           "' is static; 'this." + std::string(param->name) +
+                           "' cannot initialize a static field.");
+      param->type = ctx->astCtx.VoidTy;
+      continue;
+    }
+    param->type = field->type;
+  }
+}
+
 void DeclCollectorPass::visit(const UnionDeclNode *node) {
   if (node->isTemplate) {
     if (node->declFilePath.empty()) {
       const_cast<UnionDeclNode *>(node)->declFilePath = ctx->currentFile;
+    }
+    /* Class-template argument deduction inspects the constructor
+     * parameters, so 'this.x' types must be resolved even for templates. */
+    for (auto *ctor : node->constructors) {
+      resolveThisParamTypes(ctor, node->fields, ctx);
     }
     for (auto *method : node->methods) {
       if (method->declFilePath.empty()) {
@@ -430,6 +473,7 @@ void DeclCollectorPass::visit(const UnionDeclNode *node) {
     if (ctor->declFilePath.empty()) {
       const_cast<FunctionDeclNode *>(ctor)->declFilePath = ctx->currentFile;
     }
+    resolveThisParamTypes(ctor, node->fields, ctx);
     if (ctor->isImplicit) {
       const_cast<FunctionDeclNode *>(ctor)->hasPublicMod = node->hasPublicMod;
       const_cast<FunctionDeclNode *>(ctor)->hasPrivateMod = node->hasPrivateMod;
@@ -452,6 +496,7 @@ void DeclCollectorPass::visit(const UnionDeclNode *node) {
     if (method->declFilePath.empty()) {
       const_cast<FunctionDeclNode *>(method)->declFilePath = ctx->currentFile;
     }
+    resolveThisParamTypes(method, node->fields, ctx);
     bool isExport = false;
 
     for (const auto *ann : method->annotations) {
@@ -491,10 +536,11 @@ void DeclCollectorPass::visit(const UnionDeclNode *node) {
               if (cc == "cdecl" || cc == "stdcall" || cc == "fastcall") {
                 const_cast<FunctionDeclNode *>(method)->callingConv = cc;
               } else {
-                ctx->reportError(ann->args[1]->line, ann->args[1]->column,
-                                 ann->args[1]->length,
-                                 "Calling convention must be 'cdecl', "
-                                 "'stdcall', or 'fastcall'.");
+                ctx->reportError(
+                    ann->args[1]->line, ann->args[1]->column,
+                    ann->args[1]->length,
+                    "Calling convention must be 'cdecl', 'stdcall', or "
+                    "'fastcall'.");
               }
             } else {
               ctx->reportError(
@@ -533,6 +579,9 @@ void DeclCollectorPass::visit(const StructDeclNode *node) {
   if (node->isTemplate) {
     if (node->declFilePath.empty()) {
       const_cast<StructDeclNode *>(node)->declFilePath = ctx->currentFile;
+    }
+    for (auto *ctor : node->constructors) {
+      resolveThisParamTypes(ctor, node->fields, ctx);
     }
     for (auto *method : node->methods) {
       if (method->declFilePath.empty()) {
@@ -585,6 +634,7 @@ void DeclCollectorPass::visit(const StructDeclNode *node) {
     if (ctor->declFilePath.empty()) {
       const_cast<FunctionDeclNode *>(ctor)->declFilePath = ctx->currentFile;
     }
+    resolveThisParamTypes(ctor, node->fields, ctx);
     if (ctor->isImplicit) {
       const_cast<FunctionDeclNode *>(ctor)->hasPublicMod = node->hasPublicMod;
       const_cast<FunctionDeclNode *>(ctor)->hasPrivateMod = node->hasPrivateMod;
@@ -607,6 +657,7 @@ void DeclCollectorPass::visit(const StructDeclNode *node) {
     if (method->declFilePath.empty()) {
       const_cast<FunctionDeclNode *>(method)->declFilePath = ctx->currentFile;
     }
+    resolveThisParamTypes(method, node->fields, ctx);
     bool isExport = false;
 
     for (const auto *ann : method->annotations) {
@@ -689,6 +740,9 @@ void DeclCollectorPass::visit(const ClassDeclNode *node) {
     if (node->declFilePath.empty()) {
       const_cast<ClassDeclNode *>(node)->declFilePath = ctx->currentFile;
     }
+    for (auto *ctor : node->constructors) {
+      resolveThisParamTypes(ctor, node->fields, ctx);
+    }
     for (auto *method : node->methods) {
       if (method->declFilePath.empty()) {
         const_cast<FunctionDeclNode *>(method)->declFilePath =
@@ -740,13 +794,22 @@ void DeclCollectorPass::visit(const ClassDeclNode *node) {
     if (ctor->declFilePath.empty()) {
       const_cast<FunctionDeclNode *>(ctor)->declFilePath = ctx->currentFile;
     }
+    resolveThisParamTypes(ctor, node->fields, ctx);
     if (ctor->isImplicit) {
       const_cast<FunctionDeclNode *>(ctor)->hasPublicMod = node->hasPublicMod;
       const_cast<FunctionDeclNode *>(ctor)->hasPrivateMod = node->hasPrivateMod;
     }
     const_cast<FunctionDeclNode *>(ctor)->mangledName =
         Mangler::mangle(ctor, std::string(node->fqName));
-    ctx->addDecl(node->fqName, ctor);
+    if (ctor->isNamedCtor) {
+      /* Named constructors register under their own qualified name so
+       * overload sets of different names never collide. */
+      std::string ctorKey =
+          std::string(node->fqName) + "." + std::string(ctor->name);
+      ctx->addDecl(ctorKey, ctor);
+    } else {
+      ctx->addDecl(node->fqName, ctor);
+    }
   }
   if (node->destructor) {
     if (node->destructor->declFilePath.empty()) {
@@ -760,6 +823,7 @@ void DeclCollectorPass::visit(const ClassDeclNode *node) {
     if (method->declFilePath.empty()) {
       const_cast<FunctionDeclNode *>(method)->declFilePath = ctx->currentFile;
     }
+    resolveThisParamTypes(method, node->fields, ctx);
     bool isExport = false;
 
     for (const auto *ann : method->annotations) {

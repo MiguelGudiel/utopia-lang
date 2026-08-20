@@ -108,7 +108,7 @@ llvm::MDNode *TBAAManager::getTBAATagForExpr(CodeGen &cg,
     if (ma->isStaticFieldRef)
       return getTBAAAccessTag(cg, node->exprType);
 
-    const Type *baseTy = ma->object->exprType;
+    const Type *baseTy = ma->object->exprType->getUnqualifiedType();
     if (baseTy->isPointerType()) {
       baseTy = static_cast<const PointerType *>(baseTy)->getPointeeType();
     } else if (baseTy->isReferenceType() ||

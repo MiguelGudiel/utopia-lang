@@ -281,7 +281,7 @@ bool CompilerDriver::run() {
     llvm::Module *llvmMod =
         Compiler::compileToIR(const_cast<ModuleNode *>(modNode), backendCtx,
                               unitPath.string(), diagEngine, options.isDebug,
-                              options.asyncEnabled);
+                              astCtx, options.asyncEnabled);
 
     if (!llvmMod || diagEngine.hasErrors()) {
       std::cerr << "\033[1;31m[Fatal]\033[0m Compilation aborted for "
@@ -477,6 +477,12 @@ bool CompilerDriver::run() {
             fs::path(options.preludeRoot).parent_path().parent_path() /
             "async");
       }
+      /* Official install prefix baked in at build time (handles staged
+       * installs where preludeRoot lives in a local tools/ tree). */
+#ifdef UTOPIA_INTERNAL_LIB_PATH
+      asyncLibDirs.push_back(
+          fs::path(UTOPIA_INTERNAL_LIB_PATH) / "async");
+#endif
       /* Source layout: <repo>/build/runtime/utopia_async */
       if (!options.preludeRoot.empty()) {
         asyncLibDirs.push_back(

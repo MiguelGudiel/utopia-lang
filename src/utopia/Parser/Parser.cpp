@@ -128,6 +128,7 @@ bool Parser::isDeclaration() {
   if (currentToken().type == TokenType::CONST_KW ||
       currentToken().type == TokenType::VAR_KW ||
       currentToken().type == TokenType::STATIC_KW ||
+      currentToken().type == TokenType::FINAL_KW ||
       currentToken().type == TokenType::TYPE_KW) {
     return true;
   }
@@ -666,8 +667,90 @@ Parser::parseParameterList(bool &isVariadic, bool &hasTrailingComma,
       throw ParseException();
     }
 
+    /* Dart-style initializing formal: 'Class(this.field)' declares a
+     * parameter named 'field' whose type is the field's type. */
+    bool isThisParam = false;
+    if (currentToken().type == TokenType::THIS_KW &&
+        peekToken().type == TokenType::DOT &&
+        peekToken(2).type == TokenType::IDENTIFIER) {
+      isThisParam = true;
+    }
+
     const Type *pType = nullptr;
     std::string_view rawTypeStr;
+
+    if (isThisParam) {
+      int thisCol = currentToken().column;
+      advance();
+      advance();
+      std::string_view fieldName = currentToken().value;
+      int thisLen = 4 + 1 + (int)fieldName.length();
+      expect(TokenType::IDENTIFIER, "Expected field name after 'this.'");
+
+      ExprNode *defVal = nullptr;
+      if (match(TokenType::ASSIGN)) {
+        defVal = parseExpression();
+      }
+
+      if (isRequired && defVal) {
+        reportError(pLine, pCol, thisLen,
+                    "Required named parameter '" + std::string(fieldName) +
+                        "' cannot have a default value.");
+        throw ParseException();
+      }
+
+      /* The type is resolved from the record's fields during declaration
+       * collection and semantic analysis; until then it stays null. */
+      auto thisParam = astCtx.create<ParamDeclNode>(
+          nullptr, fieldName, defVal, inNamedBlock, isRequired, pLine, pCol,
+          thisLen);
+      thisParam->isThisParam = true;
+      thisParam->identifierColumn = thisCol;
+      thisParam->identifierLength = thisLen;
+      thisParam->rawTypeStr = "this." + std::string(fieldName);
+
+      if (!doc.empty())
+        thisParam->docString = astCtx.copyString(doc);
+      if (cursor > 0 && !tokens[cursor - 1].trailingComment.empty()) {
+        thisParam->trailingComment = tokens[cursor - 1].trailingComment;
+      }
+
+      for (auto *p : params) {
+        if (p->name == fieldName) {
+          reportError(pLine, pCol, thisLen,
+                      "Redefinition of parameter '" +
+                          std::string(fieldName) + "'.");
+          throw ParseException();
+        }
+      }
+
+      params.push_back(thisParam);
+
+      if (!match(TokenType::COMMA)) {
+        if (inNamedBlock) {
+          expect(TokenType::RBRACE,
+                 "Expected '}' to close named parameter list.");
+          if (match(TokenType::COMMA)) {
+            hasTrailingComma = true;
+          }
+        }
+        break;
+      } else {
+        if (inNamedBlock && currentToken().type == TokenType::RBRACE) {
+          hasTrailingComma = true;
+          advance();
+          if (match(TokenType::COMMA)) {
+            hasTrailingComma = true;
+          }
+          break;
+        }
+        if (currentToken().type == TokenType::RPAREN) {
+          hasTrailingComma = true;
+          break;
+        }
+      }
+      continue;
+    }
 
     /* Untyped parameters (Dart-style lambdas): an identifier not followed by
      * another identifier or type modifier is the parameter name itself. */
@@ -811,8 +894,11 @@ void Parser::checkRecordMemberRedefinition(
           sameSignature = false;
         } else {
           for (size_t i = 0; i < m->params.size(); ++i) {
-            if (m->params[i]->type->toString() !=
-                newMethod->params[i]->type->toString()) {
+            /* Skip unresolved 'this.x' parameter types here too; methods
+             * never carry them, constructors are handled elsewhere. */
+            if (!m->params[i]->type || !newMethod->params[i]->type ||
+                m->params[i]->type->toString() !=
+                    newMethod->params[i]->type->toString()) {
               sameSignature = false;
               break;
             }
@@ -853,8 +939,11 @@ void Parser::checkConstructorRedefinition(
       sameSignature = false;
     } else {
       for (size_t i = 0; i < c->params.size(); ++i) {
-        if (c->params[i]->type->toString() !=
-            newCtor->params[i]->type->toString()) {
+        /* Types of 'this.x' parameters are resolved after the record body
+         * is parsed; they cannot participate in the early signature check. */
+        if (!c->params[i]->type || !newCtor->params[i]->type ||
+            c->params[i]->type->toString() !=
+                newCtor->params[i]->type->toString()) {
           sameSignature = false;
           break;
         }
@@ -1193,6 +1282,18 @@ ASTNode *Parser::parseStatement() {
     advance();
   }
 
+  /* 'final' only applies to classes and variables. When it prefixes a
+   * record keyword it is consumed here; variable declarations keep the
+   * token for parseDeclarationOrFunction. */
+  bool isFinalDecl = false;
+  if (currentToken().type == TokenType::FINAL_KW &&
+      (peekToken().type == TokenType::CLASS_KW ||
+       peekToken().type == TokenType::STRUCT_KW ||
+       peekToken().type == TokenType::UNION_KW)) {
+    isFinalDecl = true;
+    advance();
+  }
+
   if (currentToken().type == TokenType::RBRACE ||
       currentToken().type == TokenType::EOF_TOK) {
     if (!annotations.empty()) {
@@ -1232,7 +1333,7 @@ ASTNode *Parser::parseStatement() {
   } else if (currentToken().type == TokenType::STRUCT_KW) {
     node = parseRecordDecl(TypeKind::Struct);
   } else if (currentToken().type == TokenType::CLASS_KW) {
-    node = parseRecordDecl(TypeKind::Class, isAbstract);
+    node = parseRecordDecl(TypeKind::Class, isAbstract, isFinalDecl);
   } else if (currentToken().type == TokenType::IF_KW) {
     node = parseIfStatement();
   } else if (currentToken().type == TokenType::FOR_KW) {
@@ -1261,6 +1362,14 @@ ASTNode *Parser::parseStatement() {
                 node ? node->length : currentToken().value.length(),
                 "The 'abstract' modifier is strictly permitted on class "
                 "declarations only.");
+  }
+
+  if (isFinalDecl && (!node || node->kind != NodeKind::ClassDecl)) {
+    reportError(node ? node->line : currentToken().line,
+                node ? node->column : currentToken().column,
+                node ? node->length : currentToken().value.length(),
+                "The 'final' modifier is strictly permitted on class "
+                "declarations and variables only.");
   }
 
   if (node) {
@@ -1472,6 +1581,8 @@ ForNode *Parser::parseForStatement() {
     if (currentToken().type == TokenType::TYPE_KW ||
         currentToken().type == TokenType::CONST_KW ||
         currentToken().type == TokenType::VAR_KW ||
+        currentToken().type == TokenType::FINAL_KW ||
+        currentToken().type == TokenType::STATIC_KW ||
         (currentToken().type == TokenType::IDENTIFIER &&
          (peekToken().type == TokenType::IDENTIFIER ||
           astCtx.getRecordType(currentToken().value) != nullptr))) {
@@ -1836,10 +1947,41 @@ ExprNode *Parser::parseUnary() {
     }
 
     const char *typeStart = currentToken().value.data();
+    /* 'new Foo.named(...)': when 'Foo.big' is not a type, the '.big' is a
+     * named constructor. parseType would swallow the qualified name, so
+     * hide the dot while the base type is parsed. */
+    bool newNamedCtor = false;
+    if (currentToken().type == TokenType::IDENTIFIER &&
+        peekToken().type == TokenType::DOT &&
+        peekToken(2).type == TokenType::IDENTIFIER &&
+        peekToken(3).type == TokenType::LPAREN) {
+      std::string qual = std::string(currentToken().value) + "." +
+                         std::string(peekToken(2).value);
+      bool isQualifiedType = astCtx.getRecordType(qual) ||
+                             astCtx.getTypeAlias(qual) ||
+                             astCtx.getEnumTypeByName(qual);
+      if (!isQualifiedType) {
+        newNamedCtor = true;
+        const_cast<Token &>(tokens[cursor + 1]).type = TokenType::UNKNOWN;
+      }
+    }
     const Type *allocTy = parseType(true);
+    if (newNamedCtor) {
+      const_cast<Token &>(tokens[cursor]).type = TokenType::DOT;
+    }
     const char *typeEnd =
         tokens[cursor - 1].value.data() + tokens[cursor - 1].value.length();
     std::string_view rawTypeStr(typeStart, typeEnd - typeStart);
+
+    /* Dart-style named constructor: 'new Foo.named(...)'. */
+    std::string_view namedCtorName;
+    if (currentToken().type == TokenType::DOT &&
+        peekToken().type == TokenType::IDENTIFIER &&
+        peekToken(2).type == TokenType::LPAREN) {
+      namedCtorName = peekToken().value;
+      advance();
+      advance();
+    }
 
     ExprNode *arraySize = nullptr;
 
@@ -1901,6 +2043,7 @@ ExprNode *Parser::parseUnary() {
     auto node = astCtx.create<NewExprNode>(allocTy, arraySize, argsRef,
                                            namesRef, hasParens, line, col,
                                            currentToken().column - col);
+    node->namedCtorName = namedCtorName;
     node->rawAllocatedTypeStr = rawTypeStr;
     node->rawArgs = argsRef;
     node->rawArgNames = namesRef;
@@ -1969,7 +2112,8 @@ ExprNode *Parser::parseTernary() {
   return expr;
 }
 
-DeclNode *Parser::parseRecordDecl(TypeKind kind, bool isAbstract) {
+DeclNode *Parser::parseRecordDecl(TypeKind kind, bool isAbstract,
+                                  bool isFinal) {
   int line = currentToken().line;
   int col = currentToken().column;
   advance();
@@ -2034,6 +2178,7 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind, bool isAbstract) {
       cNode->fqName = fqName;
       cNode->isOpaque = true;
       cNode->isAbstract = isAbstract;
+      cNode->isFinal = isFinal;
       cNode->recordType = recordTy;
       cNode->baseClass = baseClass;
       cNode->interfaces = astCtx.copyArray<const Type *>(interfaces);
@@ -2146,24 +2291,55 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind, bool isAbstract) {
     }
 
     bool isConstCtor = false;
+    bool isNamedCtor = false;
+    std::string_view ctorSimpleName = name;
     int ctorIdCol = currentToken().column;
-    if (currentToken().type == TokenType::CONST_KW &&
+
+    /* Default constructor: 'Foo(' or 'const Foo('. */
+    bool defaultCtorStart =
+        currentToken().type == TokenType::IDENTIFIER &&
+        currentToken().value == name && peekToken().type == TokenType::LPAREN;
+    bool constDefaultCtorStart =
+        currentToken().type == TokenType::CONST_KW &&
         peekToken().type == TokenType::IDENTIFIER &&
-        peekToken().value == name && peekToken(2).type == TokenType::LPAREN) {
+        peekToken().value == name && peekToken(2).type == TokenType::LPAREN;
+
+    /* Dart-style named constructor: 'Foo.name(' or 'const Foo.name('. */
+    bool namedCtorStart =
+        currentToken().type == TokenType::IDENTIFIER &&
+        currentToken().value == name && peekToken().type == TokenType::DOT &&
+        peekToken(2).type == TokenType::IDENTIFIER &&
+        peekToken(3).type == TokenType::LPAREN;
+    bool constNamedCtorStart =
+        currentToken().type == TokenType::CONST_KW &&
+        peekToken().type == TokenType::IDENTIFIER &&
+        peekToken().value == name && peekToken(2).type == TokenType::DOT &&
+        peekToken(3).type == TokenType::IDENTIFIER &&
+        peekToken(4).type == TokenType::LPAREN;
+
+    if (constDefaultCtorStart || constNamedCtorStart) {
       isConstCtor = true;
       ctorIdCol = peekToken().column;
     }
+    if (namedCtorStart || constNamedCtorStart) {
+      isNamedCtor = true;
+      /* 'Foo.name(' -> name at peek(2); 'const Foo.name(' -> peek(3). */
+      ctorSimpleName =
+          constNamedCtorStart ? peekToken(3).value : peekToken(2).value;
+    }
 
-    if (isConstCtor || (currentToken().type == TokenType::IDENTIFIER &&
-                        currentToken().value == name &&
-                        peekToken().type == TokenType::LPAREN)) {
+    if (isConstCtor || defaultCtorStart || namedCtorStart) {
       int cLine = currentToken().line;
       int cCol = currentToken().column;
 
       if (isConstCtor)
         advance();
       advance();
-      advance();
+      if (isNamedCtor) {
+        advance(); /* '.' */
+        advance(); /* the constructor name */
+      }
+      advance(); /* '(' */
 
       bool isVariadic = false;
       bool hasTrailingComma = false;
@@ -2171,68 +2347,128 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind, bool isAbstract) {
       expect(TokenType::RPAREN, "Expected ')'");
 
       FunctionCallNode *superCall = nullptr;
+      std::vector<AssignNode *> fieldInits;
       if (match(TokenType::COLON)) {
-        int superLine = currentToken().line;
-        int superCol = currentToken().column;
-        expect(TokenType::SUPER_KW, "Expected 'super' after ':'");
-        auto superVar =
-            astCtx.create<VariableNode>("super", superLine, superCol, 5);
+        bool sawSuper = false;
+        do {
+          if (currentToken().type == TokenType::SUPER_KW) {
+            if (sawSuper) {
+              reportError(currentToken().line, currentToken().column,
+                          currentToken().value.length(),
+                          "Only one 'super(...)' call is allowed in the "
+                          "initializer list.");
+              throw ParseException();
+            }
+            sawSuper = true;
 
-        expect(TokenType::LPAREN, "Expected '(' after 'super'");
+            int superLine = currentToken().line;
+            int superCol = currentToken().column;
+            expect(TokenType::SUPER_KW, "Expected 'super' after ':'");
+            auto superVar =
+                astCtx.create<VariableNode>("super", superLine, superCol, 5);
 
-        std::vector<ExprNode *> args;
-        std::vector<std::string_view> argNames;
-        bool namedStarted = false;
-        bool superTrailingComma = false;
+            expect(TokenType::LPAREN, "Expected '(' after 'super'");
 
-        if (currentToken().type != TokenType::RPAREN) {
-          do {
-            if (currentToken().type == TokenType::RPAREN) {
-              superTrailingComma = true;
-              break;
+            std::vector<ExprNode *> args;
+            std::vector<std::string_view> argNames;
+            bool namedStarted = false;
+            bool superTrailingComma = false;
+
+            if (currentToken().type != TokenType::RPAREN) {
+              do {
+                if (currentToken().type == TokenType::RPAREN) {
+                  superTrailingComma = true;
+                  break;
+                }
+
+                if (currentToken().type == TokenType::IDENTIFIER &&
+                    peekToken().type == TokenType::COLON) {
+                  namedStarted = true;
+                  argNames.push_back(currentToken().value);
+                  advance();
+                  advance();
+                  args.push_back(parseExpression());
+                } else {
+                  if (namedStarted) {
+                    reportError(currentToken().line, currentToken().column,
+                                currentToken().value.length(),
+                                "Positional arguments cannot appear after "
+                                "named arguments.");
+                    throw ParseException();
+                  }
+                  argNames.push_back("");
+                  args.push_back(parseExpression());
+                }
+
+              } while (match(TokenType::COMMA));
             }
 
-            if (currentToken().type == TokenType::IDENTIFIER &&
-                peekToken().type == TokenType::COLON) {
-              namedStarted = true;
-              argNames.push_back(currentToken().value);
-              advance();
-              advance();
-              args.push_back(parseExpression());
-            } else {
-              if (namedStarted) {
-                reportError(currentToken().line, currentToken().column,
-                            currentToken().value.length(),
-                            "Positional arguments cannot appear after named "
-                            "arguments.");
-                throw ParseException();
-              }
-              argNames.push_back("");
-              args.push_back(parseExpression());
+            int endCol =
+                currentToken().column + (int)currentToken().value.length();
+            expect(TokenType::RPAREN, "Expected ')'");
+
+            auto argsRef = astCtx.copyArray<ExprNode *>(args);
+            auto namesRef = astCtx.copyArray<std::string_view>(argNames);
+            superCall = astCtx.create<FunctionCallNode>(
+                superVar, argsRef, namesRef, superLine, superCol,
+                endCol - superCol);
+            superCall->rawArgs = argsRef;
+            superCall->rawArgNames = namesRef;
+            superCall->hasRawArgs = true;
+            superCall->hasTrailingComma = superTrailingComma;
+            superCall->isSuperCall = true;
+
+            /* Dart requires the super call to be the last initializer. */
+            if (currentToken().type == TokenType::COMMA) {
+              reportError(currentToken().line, currentToken().column,
+                          currentToken().value.length(),
+                          "The 'super(...)' call must be the last entry in "
+                          "the initializer list.");
+              throw ParseException();
             }
+            break;
+          }
 
-          } while (match(TokenType::COMMA));
-        }
+          if (sawSuper) {
+            reportError(currentToken().line, currentToken().column,
+                        currentToken().value.length(),
+                        "Field initializers cannot appear after the "
+                        "'super(...)' call.");
+            throw ParseException();
+          }
 
-        int endCol = currentToken().column + (int)currentToken().value.length();
-        expect(TokenType::RPAREN, "Expected ')'");
+          /* ': this.field = expr' field initializer. */
+          int fiLine = currentToken().line;
+          int fiCol = currentToken().column;
+          expect(TokenType::THIS_KW, "Expected 'this.field = expr' or "
+                                     "'super(...)' in initializer list");
+          expect(TokenType::DOT, "Expected '.' after 'this'");
+          std::string_view fiName = currentToken().value;
+          expect(TokenType::IDENTIFIER, "Expected field name after 'this.'");
+          int fiIdCol = currentToken().column - (int)fiName.length();
+          expect(TokenType::ASSIGN, "Expected '=' after field name");
+          auto fiValue = parseExpression();
+          int fiEndCol =
+              currentToken().column + (int)currentToken().value.length();
 
-        auto argsRef = astCtx.copyArray<ExprNode *>(args);
-        auto namesRef = astCtx.copyArray<std::string_view>(argNames);
-        superCall = astCtx.create<FunctionCallNode>(superVar, argsRef, namesRef,
-                                                    superLine, superCol,
-                                                    endCol - superCol);
-        superCall->rawArgs = argsRef;
-        superCall->rawArgNames = namesRef;
-        superCall->hasRawArgs = true;
-        superCall->hasTrailingComma = superTrailingComma;
-        superCall->isSuperCall = true;
+          auto thisVar = astCtx.create<VariableNode>("this", fiLine, fiCol, 4);
+          auto fieldAccess = astCtx.create<MemberAccessNode>(
+              thisVar, fiName, fiIdCol, fiCol, fiEndCol - fiCol);
+          auto fieldAssign = astCtx.create<AssignNode>(
+              "=", fieldAccess, fiValue, fiLine, fiCol, fiEndCol - fiCol);
+          fieldAssign->isFieldInit = true;
+          fieldInits.push_back(fieldAssign);
+        } while (match(TokenType::COMMA));
       }
 
       auto constructor =
-          astCtx.create<FunctionDeclNode>(astCtx.VoidTy, name, cLine, cCol,
-                                          isConstCtor, true, false, isVariadic);
+          astCtx.create<FunctionDeclNode>(astCtx.VoidTy, ctorSimpleName, cLine,
+                                          cCol, isConstCtor, true, false,
+                                          isVariadic);
+      constructor->isNamedCtor = isNamedCtor;
       constructor->superCall = superCall;
+      constructor->fieldInitializers =
+          astCtx.copyArray<AssignNode *>(fieldInits);
       constructor->parentRecord = recordTy;
       constructor->params = astCtx.copyArray<ParamDeclNode *>(params);
       constructor->annotations = memberAnnotations;
@@ -2240,7 +2476,7 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind, bool isAbstract) {
       constructor->hasPrivateMod = isPriv;
       constructor->hasProtectedMod = isProt;
       constructor->identifierColumn = ctorIdCol;
-      constructor->identifierLength = name.length();
+      constructor->identifierLength = ctorSimpleName.length();
       constructor->hasTrailingComma = hasTrailingComma;
 
       if (!doc.empty())
@@ -2262,9 +2498,14 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind, bool isAbstract) {
     bool isStatic = false;
     bool isExtern = false;
     bool isIntrinsic = false;
+    bool isFinalField = false;
 
-    while (currentToken().type == TokenType::STATIC_KW) {
-      isStatic = true;
+    while (currentToken().type == TokenType::STATIC_KW ||
+           currentToken().type == TokenType::FINAL_KW) {
+      if (currentToken().type == TokenType::STATIC_KW)
+        isStatic = true;
+      else
+        isFinalField = true;
       advance();
     }
 
@@ -2332,6 +2573,12 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind, bool isAbstract) {
     }
 
     if (match(TokenType::LPAREN)) {
+      if (isFinalField) {
+        reportError(mLine, mCol, memName.length(),
+                    "The 'final' modifier cannot be applied to a method.");
+        throw ParseException();
+      }
+
       bool isVariadic = false;
       bool hasTrailingComma = false;
       auto params = parseParameterList(isVariadic, hasTrailingComma);
@@ -2429,6 +2676,7 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind, bool isAbstract) {
       auto field = astCtx.create<VarDeclNode>(memType, memName, init, mLine,
                                               mCol, endCol - mCol);
       field->isStatic = isStatic;
+      field->isFinal = isFinalField;
       field->annotations = memberAnnotations;
       field->hasPublicMod = isPub;
       field->hasPrivateMod = isPriv;
@@ -2502,6 +2750,7 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind, bool isAbstract) {
     cNode->endLine = endLine;
     cNode->recordType = recordTy;
     cNode->isAbstract = isAbstract;
+    cNode->isFinal = isFinal;
     if (!tParams.empty()) {
       cNode->isTemplate = true;
       cNode->templateParams = astCtx.copyArray<std::string_view>(tParams);
@@ -2688,10 +2937,14 @@ DeclNode *Parser::parseDeclarationOrFunction(
   bool isExtern = false;
   bool isStatic = false;
   bool isIntrinsic = false;
+  bool isFinalDecl = false;
 
-  while (currentToken().type == TokenType::STATIC_KW) {
+  while (currentToken().type == TokenType::STATIC_KW ||
+         currentToken().type == TokenType::FINAL_KW) {
     if (currentToken().type == TokenType::STATIC_KW)
       isStatic = true;
+    else
+      isFinalDecl = true;
     advance();
   }
 
@@ -2710,6 +2963,11 @@ DeclNode *Parser::parseDeclarationOrFunction(
   bool isConstDecl = false;
 
   if (match(TokenType::VAR_KW)) {
+    if (isFinalDecl) {
+      reportError(line, col, 5,
+                  "The 'var' and 'final' modifiers cannot be combined.");
+      throw ParseException();
+    }
     isImplicitlyTyped = true;
     nodeType = astCtx.AutoTy;
     rawTypeStr = "var";
@@ -2717,11 +2975,23 @@ DeclNode *Parser::parseDeclarationOrFunction(
              peekToken().type == TokenType::IDENTIFIER &&
              (peekToken(2).type == TokenType::ASSIGN ||
               peekToken(2).type == TokenType::SEMICOLON)) {
+    if (isFinalDecl) {
+      reportError(line, col, 5,
+                  "The 'const' and 'final' modifiers cannot be combined.");
+      throw ParseException();
+    }
     advance();
     isImplicitlyTyped = true;
     isConstDecl = true;
     nodeType = astCtx.getConstType(astCtx.AutoTy);
     rawTypeStr = "const";
+  } else if (isFinalDecl && currentToken().type == TokenType::IDENTIFIER &&
+             (peekToken().type == TokenType::ASSIGN ||
+              peekToken().type == TokenType::SEMICOLON)) {
+    /* 'final x = 5;': type inferred from the initializer, like 'var'. */
+    isImplicitlyTyped = true;
+    nodeType = astCtx.AutoTy;
+    rawTypeStr = "final";
   }
 
   if (!isImplicitlyTyped) {
@@ -2882,11 +3152,19 @@ DeclNode *Parser::parseDeclarationOrFunction(
     varDecl->identifierColumn = idCol;
     varDecl->identifierLength = idLen;
     varDecl->isStatic = isStatic;
+    varDecl->isFinal = isFinalDecl;
 
     return varDecl;
   }
 
   if (match(TokenType::LPAREN)) {
+    if (isFinalDecl) {
+      reportError(line, col, idLen,
+                  "The 'final' modifier is strictly permitted on class "
+                  "declarations and variables only.");
+      throw ParseException();
+    }
+
     bool isVariadic = false;
     bool hasTrailingComma = false;
     auto params = parseParameterList(isVariadic, hasTrailingComma);
@@ -2955,6 +3233,7 @@ DeclNode *Parser::parseDeclarationOrFunction(
   varDecl->identifierColumn = idCol;
   varDecl->identifierLength = idLen;
   varDecl->isStatic = isStatic;
+  varDecl->isFinal = isFinalDecl;
 
   return varDecl;
 }
@@ -3444,6 +3723,16 @@ ExprNode *Parser::parsePrimary() {
     int len = currentToken().value.length();
     advance();
     return astCtx.create<NullNode>(line, col, len);
+  }
+
+  /* Dart-style const expression: 'const Foo(1, 2)', 'const expr'. Only in
+   * expression position; statement-level 'const' is a declaration. */
+  if (currentToken().type == TokenType::CONST_KW) {
+    int cLen = currentToken().value.length();
+    advance();
+    auto inner = parseUnary();
+    int endCol = inner->column + inner->length;
+    return astCtx.create<ConstExprNode>(inner, line, col, endCol - col);
   }
 
   if (currentToken().type == TokenType::LBRACKET) {

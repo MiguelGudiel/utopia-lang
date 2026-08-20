@@ -102,7 +102,7 @@ TypeCheckPass::resolveOverloadedOperator(const Type *lhsType,
                 break;
               }
 
-              if (canImplicitlyCast(argType, paramType, false)) {
+              if (typesMatchExactly(argType, paramType)) {
                 currentScore += 10;
               }
 
@@ -158,8 +158,7 @@ TypeCheckPass::resolveOverloadedOperator(const Type *lhsType,
           continue;
         }
 
-        currentScore +=
-            canImplicitlyCast(lhsType, lhsParamType, false) ? 10 : 1;
+        currentScore += typesMatchExactly(lhsType, lhsParamType) ? 10 : 1;
 
         for (size_t i = 0; i < args.size(); ++i) {
           const Type *argType = args[i]->exprType;
@@ -175,7 +174,7 @@ TypeCheckPass::resolveOverloadedOperator(const Type *lhsType,
             break;
           }
 
-          if (canImplicitlyCast(argType, paramType, false)) {
+          if (typesMatchExactly(argType, paramType)) {
             currentScore += 10;
           }
 

@@ -26,6 +26,16 @@ bool canImplicitlyCast(const Type *from, const Type *to,
 const FunctionDeclNode *findBestConversionCtor(const Type *from,
                                                const RecordType *recTy);
 
+/*
+ * True when the two types are identical after stripping references and
+ * qualifiers. Overload scoring uses this instead of a plain
+ * canImplicitlyCast(..., false): that check still accepts narrowing
+ * integer conversions (int32 -> uint8), which would let a char-pushing
+ * 'operator+(uint8)' outrank the String conversion constructor in
+ * 'string + int'.
+ */
+bool typesMatchExactly(const Type *a, const Type *b);
+
 class SemaPass {
 public:
   virtual ~SemaPass() = default;
@@ -87,6 +97,7 @@ public:
   void visit(const MapLiteralNode *) {}
   void visit(const NewExprNode *) {}
   void visit(const DeleteExprNode *) {}
+  void visit(const ConstExprNode *) {}
   void visit(const DestructorCallNode *) {}
   void visit(const TypeLiteralNode *) {}
   void visit(const NullNode *) {}
@@ -175,7 +186,38 @@ public:
   SemaResult visit(const MapLiteralNode *node);
   SemaResult visit(const NewExprNode *node);
   SemaResult visit(const DeleteExprNode *node);
+  SemaResult visit(const ConstExprNode *node);
   SemaResult visit(const DestructorCallNode *node);
+
+  /* ---- Dart-style const expressions ---- */
+
+  /* Validates 'expr' as a compile-time constant expression and computes its
+   * canonicalization key. 'inConstContext' enables implicit const (a
+   * constructor call inside a const expression is treated as const).
+   * On success returns true and fills 'out' with the serialized constant
+   * value ('i:5', 's:hi', 'o:key', ...). */
+  bool constEvaluate(const ExprNode *expr, bool inConstContext,
+                     std::string &out);
+
+  /* Serializes the value of a const object's field from its creation call
+   * (this-params, initializer-list entries, declaration initializers). */
+  bool constObjectFieldValue(const ExprNode *creation,
+                             std::string_view fieldName, std::string &out);
+
+  /* Validates a const constructor declaration (Dart rules). */
+  void checkConstConstructor(const FunctionDeclNode *ctor);
+
+  /* Records the per-object field values of a canonical const object so
+   * 'const b = a.field' can be evaluated. */
+  void recordConstObjectFields(const std::string &objectKey,
+                               const ExprNode *creation);
+
+  /* Active while evaluating a const constructor call: maps its parameters
+   * to the caller's argument expressions, so 'super(param)' and
+   * ': this.field = param' inside the const initializer resolve like Dart's
+   * const constructor parameters. */
+  std::vector<std::pair<const ParamDeclNode *, const ExprNode *>>
+      constParamEnv;
   SemaResult visit(const TypeLiteralNode *node);
   SemaResult visit(const NullNode *node);
   SemaResult visit(const EnumDeclNode *node);
@@ -282,6 +324,7 @@ public:
   void visit(const MapLiteralNode *node);
   void visit(const NewExprNode *node);
   void visit(const DeleteExprNode *node);
+  void visit(const ConstExprNode *) {}
   void visit(const DestructorCallNode *node);
   void visit(const NamespaceDeclNode *node);
   void visit(const UsingNode *node);
