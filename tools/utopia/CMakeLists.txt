@@ -23,10 +23,11 @@ target_link_libraries(utopia PRIVATE utopia_core CURL::libcurl)
 
 if(UNIX AND NOT APPLE)
     target_link_libraries(utopia PRIVATE
-        "-Wl,--whole-archive" utopia_async "-Wl,--no-whole-archive")
+        "-Wl,--whole-archive" utopia_async utopia_runtime
+        "-Wl,--no-whole-archive")
     target_link_options(utopia PRIVATE -rdynamic)
 else()
-    target_link_libraries(utopia PRIVATE utopia_async)
+    target_link_libraries(utopia PRIVATE utopia_async utopia_runtime)
 endif()
 
 if(WIN32)

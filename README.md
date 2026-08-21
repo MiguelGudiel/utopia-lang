@@ -37,6 +37,8 @@ Utopia combines a C/C++-style memory and execution model with a modern, Dart-ins
 - **Generics/templates** for classes, structs, unions, functions, and methods (e.g. `class Box<T>`, `T findMax<T>(T, T)`) with on-demand instantiation
 - **Operator overloading** (`operator+`, `operator==`, `operator[]`, `operator=`, unary and compound-assignment operators, etc.) including free-function operators
 - **Expression-bodied functions** (`=>`) and classic `if`/`else`, `while`, `for`, `switch`/`case`/`default`, `break`, `continue`, `return`, and ternary `?:`
+- **C++-style exceptions**: `try`/`catch`/`throw` with multiple catch clauses, `catch (...)`, references (`catch (T& e)`), bare `throw;` rethrows that preserve the dynamic type, derived-to-base and interface catch matching, and deterministic destructor unwinding through scopes. Any type can be thrown; records with custom destructors must be copyable
+- **`assert(expr)`** with source location reporting (no-op under `NDEBUG`) and the **`__FILE__` / `__LINE__`** source-location intrinsics
 
 ### Memory model
 
@@ -137,6 +139,7 @@ The `examples/` directory contains small, self-contained programs demonstrating 
 - Smart pointers with Rust-style auto-deref (`unique_ptr`, `shared_ptr`, `weak_ptr`)
 - Dart-style lambdas with inferred signatures (`() => 5`, `(x) => x * 2`)
 - Dart-style async/await (`Future<T>`, `await`, fire-and-forget, `runOnThread`, `then`, `wait`)
+- C++-style exceptions: try/catch/throw, rethrow, catch-all, destructor unwinding, `assert`, `__FILE__`/`__LINE__`
 - The extended standard library (`Duration`, `Stopwatch`, `DateTime`, `Random`, `Math`)
 - `List<T>` operations, copies, and the functional methods (`map`, `where`, `reduce`)
 - `Map<K, V>`, `HashMap`, and `SplayTreeMap` with `{key: value}` literals

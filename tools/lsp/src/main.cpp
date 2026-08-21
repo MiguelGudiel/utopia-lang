@@ -195,6 +195,30 @@ public:
     }
   }
 
+  void visit(const TryStmtNode *n) {
+    if (n->body && n->body->line <= targetLine)
+      dispatch(n->body);
+    for (const auto *clause : n->clauses) {
+      if (clause->line <= targetLine)
+        dispatch(clause->body);
+    }
+  }
+
+  void visit(const ThrowStmtNode *n) {
+    if (n->value)
+      dispatch(n->value);
+  }
+
+  void visit(const AssertStmtNode *n) {
+    if (n->condition)
+      dispatch(n->condition);
+  }
+
+  void visit(const ConstExprNode *n) {
+    if (n->expr && n->expr->line <= targetLine)
+      dispatch(n->expr);
+  }
+
   void visit(const AssignNode *n) {
     if (n->target)
       dispatch(n->target);
@@ -2883,6 +2907,30 @@ public:
       dispatch(n->value);
     for (auto *s : n->statements)
       dispatch(s);
+  }
+  void visit(const TryStmtNode *n) {
+    if (n->body)
+      dispatch(n->body);
+    for (const auto *clause : n->clauses) {
+      if (!clause->isCatchAll) {
+        highlightTypeString(clause->rawTypeStr, clause->line,
+                            clause->column + 7);
+      }
+      if (clause->body)
+        dispatch(clause->body);
+    }
+  }
+  void visit(const ThrowStmtNode *n) {
+    if (n->value)
+      dispatch(n->value);
+  }
+  void visit(const AssertStmtNode *n) {
+    if (n->condition)
+      dispatch(n->condition);
+  }
+  void visit(const ConstExprNode *n) {
+    if (n->expr)
+      dispatch(n->expr);
   }
   void visit(const AssignNode *n) {
     dispatch(n->target);

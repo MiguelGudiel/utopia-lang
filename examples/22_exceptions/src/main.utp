@@ -1,0 +1,101 @@
+/*
+ * C++-style exception handling: try / catch / throw, catch-all, rethrow,
+ * destructor unwinding, and the assert statement.
+ *
+ * Any type can be thrown and caught. Class hierarchies match derived-to-
+ * base, and destructor-bearing locals are destroyed while an exception
+ * unwinds through their scope.
+ */
+class BankAccount {
+  public String owner;
+  public int balance;
+  BankAccount(String owner, int balance) {
+    this.owner = owner;
+    this.balance = balance;
+  }
+  BankAccount(const BankAccount& other) {
+    owner = other.owner;
+    balance = other.balance;
+  }
+  ~BankAccount() {
+    print("closed account of %s\n", owner);
+  }
+}
+
+class InsufficientFunds {
+  public int needed;
+  InsufficientFunds(int needed) {
+    this.needed = needed;
+  }
+  InsufficientFunds(const InsufficientFunds& other) {
+    needed = other.needed;
+  }
+  ~InsufficientFunds() {
+    print("~InsufficientFunds\n");
+  }
+}
+
+/* Withdrawals may throw; the account is a destructor-bearing local, so it
+ * is destroyed while the exception propagates out of this function. */
+void withdraw(BankAccount* account, int amount) {
+  if (amount > account.balance) {
+    throw InsufficientFunds(amount - account.balance);
+  }
+  account.balance -= amount;
+}
+
+int main() {
+  int result = 0;
+
+  /* A typed catch with a binding variable. */
+  try {
+    BankAccount* acc = new BankAccount("Alice", 100);
+    withdraw(acc, 500);
+    delete acc;
+  } catch (InsufficientFunds e) {
+    print("1. overdraft: missing %d\n", e.needed);
+    if (e.needed != 400) result = 1;
+  }
+
+  /* Multiple catches are tried in order; 'catch (...)' matches anything. */
+  try {
+    throw 3.14;
+  } catch (int e) {
+    result = 1;
+  } catch (double d) {
+    print("2. caught double %.2f\n", d);
+  } catch (...) {
+    result = 1;
+  }
+
+  /* A bare 'throw;' rethrows the exception being handled, preserving its
+   * dynamic type. */
+  try {
+    try {
+      throw String("inner failure");
+    } catch (String s) {
+      print("3. inner '%s', rethrowing\n", s);
+      throw;
+    }
+  } catch (String s) {
+    print("3. outer caught '%s'\n", s);
+  }
+
+  /* Uncaught types propagate to the nearest enclosing handler. */
+  try {
+    try {
+      throw BankAccount("Bob", 0);
+    } catch (InsufficientFunds e) {
+      result = 1;
+    }
+  } catch (BankAccount b) {
+    print("4. propagated %s\n", b.owner);
+  }
+
+  /* Source-location intrinsics and assertions. */
+  print("5. %s:%d\n", __FILE__, __LINE__);
+  assert(result == 0);
+
+  print("ALL EXCEPTION TESTS PASSED\n");
+  return result;
+}

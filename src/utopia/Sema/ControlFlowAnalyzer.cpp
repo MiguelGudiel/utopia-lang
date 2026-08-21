@@ -136,6 +136,61 @@ void ControlFlowPass::visit(const WhileNode *node) {
   isReachable = wasReachable;
 }
 
+/* A try statement can exit either through the body completing normally or
+ * through a catch clause completing; a statement is definitely initialized
+ * only when both paths initialize it. The catch bodies are always
+ * reachable (an exception may be raised at any point). */
+void ControlFlowPass::visit(const TryStmtNode *node) {
+  bool wasReachable = isReachable;
+  auto initialStates = initStates;
+
+  dispatch(node->body);
+  bool bodyReachable = isReachable;
+  auto bodyStates = initStates;
+
+  isReachable = true;
+  initStates = initialStates;
+
+  bool anyClauseReachable = false;
+  std::unordered_map<const VarDeclNode *, bool> clauseStates = initialStates;
+
+  for (const auto *clause : node->clauses) {
+    dispatch(clause->body);
+    anyClauseReachable = anyClauseReachable || isReachable;
+    for (const auto &[var, state] : clauseStates) {
+      if (state) {
+        auto it = initStates.find(var);
+        if (it == initStates.end() || !it->second) {
+          clauseStates[var] = false;
+        }
+      }
+    }
+  }
+
+  /* A catch clause cannot fall through to code after the try when the
+   * body guarantees an exit (every path through the try returns). */
+  isReachable = bodyReachable || anyClauseReachable;
+  initStates = bodyStates;
+  for (auto &[var, state] : initStates) {
+    if (state) {
+      auto it = clauseStates.find(var);
+      if (it == clauseStates.end() || !it->second) {
+        state = false;
+      }
+    }
+  }
+}
+
+void ControlFlowPass::visit(const ThrowStmtNode *node) {
+  if (node->value)
+    dispatch(node->value);
+  isReachable = false;
+}
+
+void ControlFlowPass::visit(const AssertStmtNode *node) {
+  dispatch(node->condition);
+}
+
 void ControlFlowPass::visit(const SwitchNode *node) {
   dispatch(node->condition);
 

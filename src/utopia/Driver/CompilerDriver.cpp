@@ -219,6 +219,12 @@ bool CompilerDriver::run() {
     SemaContext semaCtx(astCtx, diagEngine, roots.front()->filePath);
     SemaPipeline pipeline;
 
+    /* 'assert' mirrors C/C++: it compiles to a no-op when NDEBUG is among
+     * the compiler-provided macros (release builds). */
+    semaCtx.ndebugEnabled =
+        options.publicMacros.contains("NDEBUG") ||
+        options.privateMacros.contains("NDEBUG");
+
     for (const ModuleNode *rootMod : roots) {
       if (!pipeline.run(rootMod, semaCtx) || diagEngine.hasErrors()) {
         std::cerr << "[Fatal] Semantic errors found." << std::endl;
@@ -467,43 +473,59 @@ bool CompilerDriver::run() {
       activeLinkerFlags.push_back(flag);
     }
 
-    /* Link the async runtime (event loop, threads, timers) when async
-     * support is enabled. */
-    if (options.asyncEnabled) {
-      std::vector<fs::path> asyncLibDirs;
-      /* Install layout: <prefix>/lib/utopia/async */
+    /* Locates a runtime library in the install/source layout. */
+    auto findRuntimeLib = [&](std::string_view libName,
+                              std::string_view installDir) -> fs::path {
+      std::vector<fs::path> libDirs;
+      /* Install layout: <prefix>/lib/utopia/<installDir> */
       if (!options.preludeRoot.empty()) {
-        asyncLibDirs.push_back(
-            fs::path(options.preludeRoot).parent_path().parent_path() /
-            "async");
+        libDirs.push_back(fs::path(options.preludeRoot).parent_path()
+                              .parent_path() /
+                          installDir);
       }
       /* Official install prefix baked in at build time (handles staged
        * installs where preludeRoot lives in a local tools/ tree). */
 #ifdef UTOPIA_INTERNAL_LIB_PATH
-      asyncLibDirs.push_back(
-          fs::path(UTOPIA_INTERNAL_LIB_PATH) / "async");
+      libDirs.push_back(fs::path(UTOPIA_INTERNAL_LIB_PATH) / installDir);
 #endif
-      /* Source layout: <repo>/build/runtime/utopia_async */
+      /* Source layout: <repo>/build/runtime/<libName> */
       if (!options.preludeRoot.empty()) {
-        asyncLibDirs.push_back(
-            fs::path(options.preludeRoot).parent_path().parent_path()
-                .parent_path() /
-            "build" / "runtime" / "utopia_async");
+        libDirs.push_back(fs::path(options.preludeRoot).parent_path()
+                              .parent_path()
+                              .parent_path() /
+                          "build" / "runtime" / libName);
       }
-
-      bool linked = false;
-      for (const auto &dir : asyncLibDirs) {
-        if (fs::exists(dir / "libutopia_async.a")) {
-          activeLinkerFlags.push_back("\"-L" + dir.string() + "\"");
-          activeLinkerFlags.push_back("-lutopia_async");
-          /* The async runtime is C++; the C linker needs the C++ runtime
-           * library for its exception/RTTI support. */
-          activeLinkerFlags.push_back("-lstdc++");
-          linked = true;
-          break;
+      for (const auto &dir : libDirs) {
+        if (fs::exists(dir / ("lib" + std::string(libName) + ".a"))) {
+          return dir;
         }
       }
-      if (!linked) {
+      return {};
+    };
+
+    /* The exception/runtime library is always required: it provides the
+     * personality function, the throw/catch machinery and 'assert'. */
+    fs::path runtimeDir = findRuntimeLib("utopia_runtime", "runtime");
+    if (!runtimeDir.empty()) {
+      activeLinkerFlags.push_back("\"-L" + runtimeDir.string() + "\"");
+      activeLinkerFlags.push_back("-lutopia_runtime");
+    } else {
+      Logger::warning(
+          "[Linker] libutopia_runtime.a not found; programs using "
+          "try/catch/throw or assert may fail to link.");
+    }
+
+    /* Link the async runtime (event loop, threads, timers) when async
+     * support is enabled. */
+    if (options.asyncEnabled) {
+      fs::path asyncDir = findRuntimeLib("utopia_async", "async");
+      if (!asyncDir.empty()) {
+        activeLinkerFlags.push_back("\"-L" + asyncDir.string() + "\"");
+        activeLinkerFlags.push_back("-lutopia_async");
+        /* The async runtime is C++; the C linker needs the C++ runtime
+         * library for its exception/RTTI support. */
+        activeLinkerFlags.push_back("-lstdc++");
+      } else {
         Logger::warning(
             "[Linker] libutopia_async.a not found; async programs may fail "
             "to link.");

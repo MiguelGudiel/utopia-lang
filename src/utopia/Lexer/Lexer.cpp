@@ -312,6 +312,14 @@ Token Lexer::parseToken() {
       return {TokenType::ASYNC_KW, id, startLine, startCol};
     if (id == "await")
       return {TokenType::AWAIT_KW, id, startLine, startCol};
+    if (id == "try")
+      return {TokenType::TRY_KW, id, startLine, startCol};
+    if (id == "catch")
+      return {TokenType::CATCH_KW, id, startLine, startCol};
+    if (id == "throw")
+      return {TokenType::THROW_KW, id, startLine, startCol};
+    if (id == "assert")
+      return {TokenType::ASSERT_KW, id, startLine, startCol};
     if (isTypeKeyword(id))
       return {TokenType::TYPE_KW, id, startLine, startCol};
     return {TokenType::IDENTIFIER, id, startLine, startCol};

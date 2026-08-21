@@ -337,6 +337,23 @@ void DeclCollectorPass::visit(const SwitchNode *node) {
   }
 }
 
+void DeclCollectorPass::visit(const TryStmtNode *node) {
+  dispatch(node->body);
+  for (const auto *clause : node->clauses) {
+    dispatch(clause->body);
+  }
+}
+
+void DeclCollectorPass::visit(const ThrowStmtNode *node) {
+  if (node->value) {
+    dispatch(node->value);
+  }
+}
+
+void DeclCollectorPass::visit(const AssertStmtNode *node) {
+  dispatch(node->condition);
+}
+
 void DeclCollectorPass::visit(const VarDeclNode *node) {
   bool isExtern = false;
   for (const auto *ann : node->annotations) {

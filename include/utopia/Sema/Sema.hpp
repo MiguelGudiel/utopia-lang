@@ -85,6 +85,9 @@ public:
   void visit(const WhileNode *node);
   void visit(const SwitchNode *node);
   void visit(const CaseNode *node) {}
+  void visit(const TryStmtNode *node);
+  void visit(const ThrowStmtNode *node);
+  void visit(const AssertStmtNode *node);
   void visit(const BreakNode *node) {}
   void visit(const ContinueNode *node) {}
   void visit(const ReturnNode *) {}
@@ -113,6 +116,15 @@ private:
   const FunctionDeclNode *
   resolveOverloadedOperator(const Type *lhsType, std::string_view opName,
                             const std::vector<ExprNode *> &args);
+
+  /* All non-template functions visited by the pass; drives the mayUnwind
+   * fixed-point analysis in run(). */
+  std::vector<const FunctionDeclNode *> allFunctions;
+
+  /* True when the function's own body contains a 'throw'/'try' statement or
+   * calls a function that may unwind (the callee's mayUnwind flag must be
+   * current, so this is only invoked from the fixed-point loop). */
+  bool computeFunctionMayUnwind(const FunctionDeclNode *fn);
 
   /* Dart-style type promotion: 'if (x is T) { ... }' narrows the type of the
    * resolved declaration to T (with the operand's pointer/reference
@@ -172,6 +184,9 @@ public:
   SemaResult visit(const ReturnNode *node);
   SemaResult visit(const CastNode *node);
   SemaResult visit(const IsExprNode *node);
+  SemaResult visit(const TryStmtNode *node);
+  SemaResult visit(const ThrowStmtNode *node);
+  SemaResult visit(const AssertStmtNode *node);
   SemaResult visit(const ParamDeclNode *node);
   SemaResult visit(const ModuleNode *node);
   SemaResult visit(const UnionDeclNode *node);
@@ -326,6 +341,9 @@ public:
   void visit(const DeleteExprNode *node);
   void visit(const ConstExprNode *) {}
   void visit(const DestructorCallNode *node);
+  void visit(const TryStmtNode *node);
+  void visit(const ThrowStmtNode *node);
+  void visit(const AssertStmtNode *node);
   void visit(const NamespaceDeclNode *node);
   void visit(const UsingNode *node);
   void visit(const AwaitExprNode *node);

@@ -137,7 +137,108 @@ bool TypeCheckPass::run(const ModuleNode *module, SemaContext &context) {
                          result.error().length, result.error().message);
   }
 
+  /* Fixed-point interprocedural analysis: a function may unwind when its
+   * body throws directly, or when it calls (directly, virtually or through
+   * a function pointer) a function that may unwind. Extern/intrinsic
+   * functions cannot throw; lambdas are analyzed as their own synthesized
+   * functions, so their bodies do not affect the enclosing function. */
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (const auto *fn : allFunctions) {
+      if (fn->mayUnwind)
+        continue;
+      if (computeFunctionMayUnwind(fn)) {
+        const_cast<FunctionDeclNode *>(fn)->mayUnwind = true;
+        changed = true;
+      }
+    }
+  }
+
   return !ctx->hasErrors();
+}
+
+/* Recursively walks a statement tree looking for anything that could make
+ * the containing function unwind. Lambda bodies are excluded: they compile
+ * to their own synthesized functions. */
+static bool statementMayUnwind(const ASTNode *node) {
+  if (!node)
+    return false;
+
+  switch (node->kind) {
+  case NodeKind::Throw:
+    return true;
+  case NodeKind::Lambda:
+    return false;
+  case NodeKind::FunctionCall: {
+    const auto *call = static_cast<const FunctionCallNode *>(node);
+    if (!call->resolvedFunc) {
+      /* Indirect (function-pointer) calls may unwind. */
+      return true;
+    }
+    const auto *callee = call->resolvedFunc;
+    if (callee->isExtern || callee->isIntrinsic || callee->isAsync)
+      return false;
+    if (callee->isVirtual || callee->isOverride)
+      return true; /* an override may throw */
+    return callee->mayUnwind;
+  }
+  case NodeKind::Block: {
+    const auto *block = static_cast<const BlockNode *>(node);
+    for (const auto *stmt : block->statements) {
+      if (statementMayUnwind(stmt))
+        return true;
+    }
+    return false;
+  }
+  case NodeKind::If: {
+    const auto *ifStmt = static_cast<const IfNode *>(node);
+    return statementMayUnwind(ifStmt->thenBlock) ||
+           statementMayUnwind(ifStmt->elseBlock);
+  }
+  case NodeKind::For: {
+    const auto *forStmt = static_cast<const ForNode *>(node);
+    return statementMayUnwind(forStmt->body);
+  }
+  case NodeKind::While: {
+    const auto *whileStmt = static_cast<const WhileNode *>(node);
+    return statementMayUnwind(whileStmt->body);
+  }
+  case NodeKind::Switch: {
+    const auto *switchStmt = static_cast<const SwitchNode *>(node);
+    for (const auto *c : switchStmt->cases) {
+      for (const auto *stmt : c->statements) {
+        if (statementMayUnwind(stmt))
+          return true;
+      }
+    }
+    return false;
+  }
+  case NodeKind::Try: {
+    const auto *tryStmt = static_cast<const TryStmtNode *>(node);
+    return statementMayUnwind(tryStmt->body);
+  }
+  case NodeKind::Assign: {
+    const auto *assign = static_cast<const AssignNode *>(node);
+    return statementMayUnwind(assign->value);
+  }
+  default:
+    return false;
+  }
+}
+
+bool TypeCheckPass::computeFunctionMayUnwind(const FunctionDeclNode *fn) {
+  if (fn->hasEH)
+    return true;
+  if (fn->superCall && statementMayUnwind(fn->superCall))
+    return true;
+  for (const auto *init : fn->fieldInitializers) {
+    if (statementMayUnwind(init))
+      return true;
+  }
+  if (statementMayUnwind(fn->body))
+    return true;
+  return false;
 }
 
 const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
@@ -2155,6 +2256,274 @@ SemaResult TypeCheckPass::visit(const WhileNode *node) {
   auto bodyRes = dispatch(node->body);
   if (!bodyRes)
     return bodyRes;
+
+  return ctx->astCtx.VoidTy;
+}
+
+/* C++-style exception handling. The try body is type-checked like any
+ * other block; each catch clause introduces a scope holding the optional
+ * binding variable, typed with the caught type. Catch matching happens at
+ * runtime (see CodeGen), so no static compatibility check is required
+ * beyond the caught type itself being valid. */
+SemaResult TypeCheckPass::visit(const TryStmtNode *node) {
+  if (ctx->getCurrentFunction() && ctx->getCurrentFunction()->isAsync) {
+    return ctx->reportError(
+        node->line, node->column, node->length,
+        "'try' is not supported inside async functions.");
+  }
+
+  if (const FunctionDeclNode *fn = ctx->getCurrentFunction())
+    const_cast<FunctionDeclNode *>(fn)->hasEH = true;
+
+  auto bodyRes = dispatch(node->body);
+  if (!bodyRes)
+    return bodyRes;
+
+  for (const auto *clause : node->clauses) {
+    if (clause->isCatchAll) {
+      ctx->enterCatch();
+      auto cRes = dispatch(clause->body);
+      ctx->exitCatch();
+      if (!cRes)
+        return cRes;
+      continue;
+    }
+
+    const Type *catchTy = clause->catchType;
+    if (!catchTy || catchTy->isVoid()) {
+      return ctx->reportError(
+          clause->line, clause->column, clause->length,
+          "Catch clause requires a valid caught type.");
+    }
+
+    const Type *resolvedTy = resolveIfTemplate(catchTy);
+    if (resolvedTy != catchTy)
+      const_cast<CatchClauseNode *>(clause)->catchType = resolvedTy;
+    catchTy = resolvedTy;
+
+    const Type *unqualTy = catchTy->getUnqualifiedType();
+    if (unqualTy->getKind() == TypeKind::Array) {
+      return ctx->reportError(
+          clause->line, clause->column, clause->length,
+          "Arrays cannot be caught; catch the element type instead.");
+    }
+
+    if (!checkTypeVisibility(catchTy, clause)) {
+      return std::unexpected(ErrorInfo{clause->line, clause->column,
+                                       clause->length, "Invalid catch type"});
+    }
+
+    /* Catch-by-value of a record with a custom destructor requires a copy
+     * constructor (C++ semantics): the thrown object is copied into the
+     * local variable and destroyed when the clause exits. */
+    if (!catchTy->isReferenceType() &&
+        catchTy->getKind() != TypeKind::RValueReference) {
+      if (unqualTy->getKind() == TypeKind::Class ||
+          unqualTy->getKind() == TypeKind::Struct ||
+          unqualTy->getKind() == TypeKind::Union) {
+        const auto *recTy = static_cast<const RecordType *>(unqualTy);
+        if (const auto *decl = recTy->getDeclaration()) {
+          llvm::ArrayRef<FunctionDeclNode *> ctors;
+          if (decl->kind == NodeKind::ClassDecl)
+            ctors = static_cast<const ClassDeclNode *>(decl)->constructors;
+          else if (decl->kind == NodeKind::StructDecl)
+            ctors = static_cast<const StructDeclNode *>(decl)->constructors;
+          else if (decl->kind == NodeKind::UnionDecl)
+            ctors = static_cast<const UnionDeclNode *>(decl)->constructors;
+
+          const FunctionDeclNode *copyCtor = nullptr;
+          for (auto *ctor : ctors) {
+            if (ctor->params.size() != 1)
+              continue;
+            const Type *pType = ctor->params[0]->type;
+            const Type *pointee = nullptr;
+            if (pType->isReferenceType()) {
+              pointee = static_cast<const ReferenceType *>(pType)
+                            ->getPointeeType();
+            } else if (pType->getKind() == TypeKind::RValueReference) {
+              pointee = static_cast<const RValueReferenceType *>(pType)
+                            ->getPointeeType();
+            }
+            if (pointee && pointee->getUnqualifiedType() == unqualTy) {
+              copyCtor = ctor;
+              break;
+            }
+          }
+
+          const FunctionDeclNode *dtor = nullptr;
+          if (decl->kind == NodeKind::ClassDecl)
+            dtor = static_cast<const ClassDeclNode *>(decl)->destructor;
+          else if (decl->kind == NodeKind::StructDecl)
+            dtor = static_cast<const StructDeclNode *>(decl)->destructor;
+          else if (decl->kind == NodeKind::UnionDecl)
+            dtor = static_cast<const UnionDeclNode *>(decl)->destructor;
+
+          if (copyCtor) {
+            if (!copyCtor->isPublic(copyCtor->name) &&
+                ctx->getCurrentRecordContext() != recTy) {
+              (void)ctx->reportError(
+                  clause->line, clause->column, clause->length,
+                  "Cannot catch by value: copy constructor is private.");
+            }
+            const_cast<CatchClauseNode *>(clause)->copyCtor = copyCtor;
+          } else if (dtor && !dtor->isImplicit) {
+            return ctx->reportError(
+                clause->line, clause->column, clause->length,
+                "Cannot catch by value: the type has a custom destructor "
+                "but no copy constructor.");
+          }
+        }
+      }
+    }
+
+    ScopeGuard guard(*ctx);
+
+    if (!clause->varName.empty()) {
+      auto *varDecl = ctx->astCtx.create<VarDeclNode>(
+          catchTy, clause->varName, nullptr, clause->line, clause->column,
+          clause->length);
+      varDecl->declFilePath = ctx->currentFile;
+      varDecl->isInitialized = true;
+      ctx->addDecl(clause->varName, varDecl);
+    }
+
+    ctx->enterCatch();
+    auto cRes = dispatch(clause->body);
+    ctx->exitCatch();
+    if (!cRes)
+      return cRes;
+  }
+
+  return ctx->astCtx.VoidTy;
+}
+
+/* 'throw expr;' raises a copy of the expression's value; a bare 'throw;'
+ * rethrows the exception currently being handled. Any type can be thrown
+ * (C++ rules); records with a custom destructor must be copyable. */
+SemaResult TypeCheckPass::visit(const ThrowStmtNode *node) {
+  if (ctx->getCurrentFunction() && ctx->getCurrentFunction()->isAsync) {
+    return ctx->reportError(
+        node->line, node->column, node->length,
+        "'throw' is not supported inside async functions.");
+  }
+
+  const FunctionDeclNode *fn = ctx->getCurrentFunction();
+  if (fn && fn->isMethod && fn->name == "~") {
+    return ctx->reportError(node->line, node->column, node->length,
+                            "Destructors cannot throw.");
+  }
+
+  if (fn)
+    const_cast<FunctionDeclNode *>(fn)->hasEH = true;
+
+  if (!node->value) {
+    if (!ctx->isInCatch()) {
+      return ctx->reportError(
+          node->line, node->column, node->length,
+          "A bare 'throw;' is only allowed inside a catch clause.");
+    }
+    const_cast<ThrowStmtNode *>(node)->isRethrow = true;
+    return ctx->astCtx.VoidTy;
+  }
+
+  auto valRes = dispatch(node->value);
+  if (!valRes)
+    return std::unexpected(valRes.error());
+
+  const Type *throwTy = *valRes;
+  if (throwTy->isVoid()) {
+    return ctx->reportError(node->value->line, node->value->column,
+                            node->value->length,
+                            "Cannot throw a void value.");
+  }
+
+  /* Arrays decay to pointers when thrown, mirroring C++. */
+  const Type *thrownTy = throwTy;
+  if (thrownTy->getUnqualifiedType()->getKind() == TypeKind::Array) {
+    thrownTy = ctx->astCtx.getPointerType(
+        static_cast<const ArrayType *>(thrownTy->getUnqualifiedType())
+            ->getElementType());
+  } else if (thrownTy->isReferenceType()) {
+    thrownTy = static_cast<const ReferenceType *>(thrownTy)->getPointeeType();
+  } else if (thrownTy->getKind() == TypeKind::RValueReference) {
+    thrownTy = static_cast<const RValueReferenceType *>(thrownTy)
+                   ->getPointeeType();
+  }
+
+  const Type *unqualTy = thrownTy->getUnqualifiedType();
+  if (unqualTy->getKind() == TypeKind::Class ||
+      unqualTy->getKind() == TypeKind::Struct ||
+      unqualTy->getKind() == TypeKind::Union) {
+    const auto *recTy = static_cast<const RecordType *>(unqualTy);
+    if (const auto *decl = recTy->getDeclaration()) {
+      llvm::ArrayRef<FunctionDeclNode *> ctors;
+      if (decl->kind == NodeKind::ClassDecl)
+        ctors = static_cast<const ClassDeclNode *>(decl)->constructors;
+      else if (decl->kind == NodeKind::StructDecl)
+        ctors = static_cast<const StructDeclNode *>(decl)->constructors;
+      else if (decl->kind == NodeKind::UnionDecl)
+        ctors = static_cast<const UnionDeclNode *>(decl)->constructors;
+
+      const FunctionDeclNode *copyCtor = nullptr;
+      for (auto *ctor : ctors) {
+        if (ctor->params.size() != 1)
+          continue;
+        const Type *pType = ctor->params[0]->type;
+        const Type *pointee = nullptr;
+        if (pType->isReferenceType()) {
+          pointee = static_cast<const ReferenceType *>(pType)
+                        ->getPointeeType();
+        } else if (pType->getKind() == TypeKind::RValueReference) {
+          pointee = static_cast<const RValueReferenceType *>(pType)
+                        ->getPointeeType();
+        }
+        if (pointee && pointee->getUnqualifiedType() == unqualTy) {
+          copyCtor = ctor;
+          break;
+        }
+      }
+
+      const FunctionDeclNode *dtor = nullptr;
+      if (decl->kind == NodeKind::ClassDecl)
+        dtor = static_cast<const ClassDeclNode *>(decl)->destructor;
+      else if (decl->kind == NodeKind::StructDecl)
+        dtor = static_cast<const StructDeclNode *>(decl)->destructor;
+      else if (decl->kind == NodeKind::UnionDecl)
+        dtor = static_cast<const UnionDeclNode *>(decl)->destructor;
+
+      if (dtor && !dtor->isImplicit && !copyCtor) {
+        return ctx->reportError(
+            node->value->line, node->value->column, node->value->length,
+            "Cannot throw: the type has a custom destructor but no copy "
+            "constructor.");
+      }
+      if (copyCtor) {
+        const_cast<ThrowStmtNode *>(node)->copyCtor = copyCtor;
+      }
+    }
+  }
+
+  return ctx->astCtx.VoidTy;
+}
+
+/* 'assert(expr)': the condition must be boolean-compatible; the runtime
+ * failure handler reports the source location and aborts. */
+SemaResult TypeCheckPass::visit(const AssertStmtNode *node) {
+  if (ctx->ndebugEnabled) {
+    const_cast<AssertStmtNode *>(node)->isNoOp = true;
+    return ctx->astCtx.VoidTy;
+  }
+
+  auto condRes = dispatch(node->condition);
+  if (!condRes)
+    return std::unexpected(condRes.error());
+
+  if (!canImplicitlyCast(*condRes, ctx->astCtx.BoolTy)) {
+    return ctx->reportError(node->condition->line, node->condition->column,
+                            node->condition->length,
+                            "Assert condition must evaluate to a boolean "
+                            "type.");
+  }
 
   return ctx->astCtx.VoidTy;
 }
@@ -4330,6 +4699,16 @@ static bool hasEscapingBreak(const ASTNode *node, int breakableDepth = 0) {
     }
     return false;
   }
+  case NodeKind::Try: {
+    const auto *tNode = static_cast<const TryStmtNode *>(node);
+    if (hasEscapingBreak(tNode->body, breakableDepth))
+      return true;
+    for (const auto *clause : tNode->clauses) {
+      if (hasEscapingBreak(clause->body, breakableDepth))
+        return true;
+    }
+    return false;
+  }
   default:
     return false;
   }
@@ -4340,6 +4719,10 @@ static bool guaranteesReturn(const ASTNode *node) {
     return false;
 
   if (node->kind == NodeKind::Return)
+    return true;
+
+  /* A throw never falls through. */
+  if (node->kind == NodeKind::Throw)
     return true;
 
   if (node->kind == NodeKind::Block) {
@@ -4397,6 +4780,19 @@ static bool guaranteesReturn(const ASTNode *node) {
         }
       }
     }
+  }
+
+  if (node->kind == NodeKind::Try) {
+    const auto *tryStmt = static_cast<const TryStmtNode *>(node);
+    /* The try statement only guarantees a return when the body and every
+     * catch clause end in a return or a throw. */
+    if (!guaranteesReturn(tryStmt->body))
+      return false;
+    for (const auto *clause : tryStmt->clauses) {
+      if (!guaranteesReturn(clause->body))
+        return false;
+    }
+    return true;
   }
 
   return false;
@@ -4690,6 +5086,12 @@ SemaResult TypeCheckPass::visit(const FunctionDeclNode *node) {
 
   const FunctionDeclNode *prevFunc = ctx->getCurrentFunction();
   ctx->setCurrentFunction(node);
+
+  /* Collect the function for the mayUnwind fixed-point analysis. */
+  if (std::find(allFunctions.begin(), allFunctions.end(), node) ==
+      allFunctions.end()) {
+    allFunctions.push_back(node);
+  }
 
   const_cast<FunctionDeclNode *>(node)->returnType =
       resolveIfTemplate(node->returnType);

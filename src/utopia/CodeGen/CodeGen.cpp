@@ -479,7 +479,12 @@ llvm::Function *CodeGen::getOrCreateFunction(const FunctionDeclNode *node) {
     func->setCallingConv(llvm::CallingConv::C);
   }
 
-  func->addFnAttr(llvm::Attribute::NoUnwind);
+  /* Functions that cannot unwind are marked nounwind so the optimizer can
+   * turn invokes into plain calls; functions that may unwind keep the
+   * attribute off (see the mayUnwind fixed-point analysis in Sema). */
+  if (!node->mayUnwind) {
+    func->addFnAttr(llvm::Attribute::NoUnwind);
+  }
 
   /* Async functions compile to LLVM coroutines: mark the function so the
    * CoroSplit pass recognizes it (LLVM 19+ requires the presplit attribute
@@ -641,7 +646,7 @@ void CodeGen::emitLoopCleanups(size_t targetDepth) {
     for (auto cleanupIt = scopeIt->cleanups.rbegin();
          cleanupIt != scopeIt->cleanups.rend(); ++cleanupIt) {
       emitCleanupCall(cleanupIt->instancePtr, cleanupIt->destructor,
-                      cleanupIt->type, cleanupIt->guard);
+                      cleanupIt->type, cleanupIt->guard, cleanupIt->runtimeFn);
     }
     for (auto lifeIt = scopeIt->lifetimes.rbegin();
          lifeIt != scopeIt->lifetimes.rend(); ++lifeIt) {
@@ -745,7 +750,9 @@ void CodeGen::emitConstructorCall(const FunctionCallNode *node,
     astParamIdx++;
   }
 
-  builder.CreateCall(func, argsArgs);
+  /* The constructor body may throw (e.g. it calls a throwing function), so
+   * route the call through the active landing pad when one exists. */
+  emitCallOrInvoke(func->getFunctionType(), func, argsArgs);
 }
 
 llvm::Value *CodeGen::dispatchValueOf(const ExprNode *arg) {
@@ -865,7 +872,7 @@ llvm::Value *CodeGen::materializeByValueArg(const ExprNode *arg,
 
   if (src) {
     llvm::Function *ctorFunc = getOrCreateFunction(copyOrMove);
-    builder.CreateCall(ctorFunc, {tmp, src});
+    emitCallOrInvoke(ctorFunc->getFunctionType(), ctorFunc, {tmp, src});
     if (srcOwnsRvalue) {
       const Type *srcUnqual = arg->exprType->getUnqualifiedType();
       if (srcUnqual->getKind() == TypeKind::Class ||
@@ -1441,7 +1448,7 @@ llvm::Value *CodeGen::visit(const ImplicitCastNode *node) {
         dtor = static_cast<const UnionDeclNode *>(decl)->destructor;
 
       if (dtor) {
-        cgCtx.addCleanup(temp, dtor, objectType);
+        registerScopeCleanup(temp, dtor, objectType);
       }
     }
   }
@@ -1474,7 +1481,7 @@ llvm::Value *CodeGen::visit(const ImplicitCastNode *node) {
   }
 
   argsArgs.push_back(argVal);
-  builder.CreateCall(ctorFunc, argsArgs);
+  emitCallOrInvoke(ctorFunc->getFunctionType(), ctorFunc, argsArgs);
 
   /* Track this cast's own temporary: 'node->expr' is evaluated above and
    * may leave a stale temporary from a nested expression (e.g. String
@@ -1688,7 +1695,7 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
     emitBranchCleanups(trueCleanups);
     if (lvalNeedsOwn) {
       if (const FunctionDeclNode *dtor = getCustomDestructor(unqualLval)) {
-        cgCtx.addCleanup(trueLVal, dtor, lvalTy, trueGuard);
+        registerScopeCleanup(trueLVal, dtor, lvalTy, trueGuard);
       }
     }
     trueBB = builder.GetInsertBlock();
@@ -1716,7 +1723,7 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
     emitBranchCleanups(falseCleanups);
     if (lvalNeedsOwn) {
       if (const FunctionDeclNode *dtor = getCustomDestructor(unqualLval)) {
-        cgCtx.addCleanup(falseLVal, dtor, lvalTy, falseGuard);
+        registerScopeCleanup(falseLVal, dtor, lvalTy, falseGuard);
       }
     }
     falseBB = builder.GetInsertBlock();
@@ -1794,7 +1801,7 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
       idxVal = createImplicitCast(idxVal, paramTy);
       argsArgs.push_back(idxVal);
 
-      return builder.CreateCall(func, argsArgs);
+      return emitCallOrInvoke(func->getFunctionType(), func, argsArgs);
     }
 
     llvm::Value *baseVal = getLValue(subNode->base);
@@ -2473,7 +2480,8 @@ llvm::Value *CodeGen::visit(const UnaryOpNode *node) {
     }
 
     llvm::Function *func = getOrCreateFunction(node->overloadedOperator);
-    llvm::Value *res = builder.CreateCall(func, {objPtr});
+    llvm::Value *res =
+        emitCallOrInvoke(func->getFunctionType(), func, {objPtr});
 
     if (node->isPostfix && oldVal) {
       return oldVal;
@@ -2703,7 +2711,7 @@ llvm::Value *CodeGen::visit(const BinaryOpNode *node) {
       argsArgs.push_back(rhsVal);
     }
 
-    auto res = builder.CreateCall(func, argsArgs);
+    auto res = emitCallOrInvoke(func->getFunctionType(), func, argsArgs);
     lastTemporaryAlloca = nullptr;
     return res;
   }
@@ -2931,7 +2939,7 @@ llvm::Value *CodeGen::visit(const TernaryOpNode *node) {
       if (const FunctionDeclNode *dtor =
               getCustomDestructor(unqualVal)) {
         builder.CreateStore(builder.getInt1(true), trueGuard);
-        cgCtx.addCleanup(owned, dtor, valTy, trueGuard);
+        registerScopeCleanup(owned, dtor, valTy, trueGuard);
       }
     } else {
       trueV = createImplicitCast(trueV, getLLVMType(node->exprType));
@@ -2958,7 +2966,7 @@ llvm::Value *CodeGen::visit(const TernaryOpNode *node) {
       if (const FunctionDeclNode *dtor =
               getCustomDestructor(unqualVal)) {
         builder.CreateStore(builder.getInt1(true), falseGuard);
-        cgCtx.addCleanup(owned, dtor, valTy, falseGuard);
+        registerScopeCleanup(owned, dtor, valTy, falseGuard);
       }
     } else {
       falseV = createImplicitCast(falseV, getLLVMType(node->exprType));
@@ -3275,7 +3283,8 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
                 builder.CreateMemSet(gvar, builder.getInt8(0), allocSize,
                                      align);
                 llvm::Function *ctorFunc = getOrCreateFunction(node->copyCtor);
-                builder.CreateCall(ctorFunc, {gvar, rvalAddr});
+                emitCallOrInvoke(ctorFunc->getFunctionType(), ctorFunc,
+                                  {gvar, rvalAddr});
               } else {
                 diags.report({DiagLevel::Error, node->line, node->column,
                               node->length,
@@ -3398,7 +3407,7 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
         dtor = static_cast<const UnionDeclNode *>(decl)->destructor;
     }
     if (dtor) {
-      cgCtx.addCleanup(alloca, dtor, node->type);
+      registerScopeCleanup(alloca, dtor, node->type);
     }
   }
 
@@ -3475,7 +3484,8 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
             builder.CreateMemSet(alloca, builder.getInt8(0), allocSize,
                                  align);
             llvm::Function *ctorFunc = getOrCreateFunction(node->copyCtor);
-            builder.CreateCall(ctorFunc, {alloca, rvalAddr});
+            emitCallOrInvoke(ctorFunc->getFunctionType(), ctorFunc,
+                            {alloca, rvalAddr});
             if (srcOwnsRvalue) {
               auto *srcRecTy =
                   static_cast<const RecordType *>(baseUnqualTy);
@@ -3579,7 +3589,7 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
           }
           if (emptyCtor) {
             llvm::Function *ctorFunc = getOrCreateFunction(emptyCtor);
-            builder.CreateCall(ctorFunc, {alloca});
+            emitCallOrInvoke(ctorFunc->getFunctionType(), ctorFunc, {alloca});
           }
         }
       }
@@ -3684,7 +3694,7 @@ llvm::Value *CodeGen::visit(const AssignNode *node) {
     }
     argsArgs.push_back(rhsVal);
 
-    auto res = builder.CreateCall(func, argsArgs);
+    auto res = emitCallOrInvoke(func->getFunctionType(), func, argsArgs);
     lastTemporaryAlloca = nullptr;
     return res;
   }
@@ -3917,12 +3927,26 @@ llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
   currentFunc = node;
   auto prevCoroInfo = std::move(coroInfo);
 
+  /* Per-function exception-handling state. */
+  ehExnSlot = nullptr;
+  ehSelSlot = nullptr;
+  ehResumeBlock = nullptr;
+  tryDispatchStack.clear();
+  tryTypeInfoStack.clear();
+
   funcScopeStarts.push_back(cgCtx.getAllScopes().size());
 
   diEmitter.emitFunctionStart(*this, func, node);
 
   llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", func);
   builder.SetInsertPoint(entry);
+
+  /* Functions that may unwind get the personality routine and exception
+   * tables; without it the unwinder would terminate the program when an
+   * exception crosses the frame. */
+  if (node->mayUnwind) {
+    func->setPersonalityFn(getOrCreatePersonalityFunction());
+  }
 
   CGScopeGuard guard(cgCtx);
 
@@ -3997,7 +4021,7 @@ llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
           else if (decl->kind == NodeKind::UnionDecl)
             dtor = static_cast<const UnionDeclNode *>(decl)->destructor;
           if (dtor && !dtor->isImplicit) {
-            cgCtx.addCleanup(alloca, dtor, paramDecl->type);
+            registerScopeCleanup(alloca, dtor, paramDecl->type);
           }
         }
       }
@@ -4222,7 +4246,7 @@ llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
             if (fDtor) {
               llvm::Value *fieldGep =
                   builder.CreateStructGEP(llvmBaseTy, thisPtr, f.index, f.name);
-              cgCtx.addCleanup(fieldGep, fDtor, f.type);
+              registerScopeCleanup(fieldGep, fDtor, f.type);
             }
           }
         }
@@ -4355,7 +4379,7 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
       astParamIdx++;
     }
 
-    return builder.CreateCall(calleeTy, func, argsArgs);
+    return emitCallOrInvoke(calleeTy, func, argsArgs);
   }
 
   llvm::Function *func = nullptr;
@@ -4478,7 +4502,7 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
             dtor = static_cast<const UnionDeclNode *>(decl)->destructor;
 
           if (dtor) {
-            cgCtx.addCleanup(instance, dtor, node->exprType);
+            registerScopeCleanup(instance, dtor, node->exprType);
           }
         }
       }
@@ -4552,7 +4576,8 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
       astParamIdx++;
     }
 
-    llvm::Value *callRes = builder.CreateCall(calleeTy, callee, argsArgs);
+    llvm::Value *callRes =
+        emitCallOrInvoke(calleeTy, callee, argsArgs);
 
     /* Reference-typed call results yield an address; load it so dispatch
      * returns the value (matching the operator[]/subscript convention).
@@ -4669,7 +4694,8 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
       argIdx++;
     }
 
-    llvm::Value *dynRes = builder.CreateCall(llvmFTy, dynamicFuncPtr, argsArgs);
+    llvm::Value *dynRes =
+        emitCallOrInvoke(llvmFTy, dynamicFuncPtr, argsArgs);
 
     /* Reference-typed function-pointer results yield an address; load it
      * (see the direct-call path above). */
@@ -4721,7 +4747,7 @@ llvm::Value *CodeGen::visit(const CastNode *node) {
           dtor = static_cast<const UnionDeclNode *>(decl)->destructor;
 
         if (dtor) {
-          cgCtx.addCleanup(temp, dtor, node->targetType);
+          registerScopeCleanup(temp, dtor, node->targetType);
           lastTemporaryAlloca = temp;
         }
       }
@@ -4755,7 +4781,7 @@ llvm::Value *CodeGen::visit(const CastNode *node) {
     }
 
     argsArgs.push_back(argVal);
-    builder.CreateCall(ctorFunc, argsArgs);
+    emitCallOrInvoke(ctorFunc->getFunctionType(), ctorFunc, argsArgs);
 
     if (!node->exprType->isVoid()) {
       if (node->exprType->isReferenceType() ||
@@ -4900,6 +4926,321 @@ llvm::Value *CodeGen::visit(const IsExprNode *node) {
   return result;
 }
 
+/* ---- Exception handling: try / catch / throw ---- */
+
+llvm::Value *CodeGen::visit(const TryStmtNode *node) {
+  llvm::Function *fn = builder.GetInsertBlock()->getParent();
+
+  llvm::BasicBlock *mergeBB = llvm::BasicBlock::Create(ctx, "try.merge", fn);
+  llvm::BasicBlock *dispatchBB =
+      llvm::BasicBlock::Create(ctx, "try.dispatch", fn);
+
+  std::vector<llvm::BasicBlock *> handlerBBs;
+  handlerBBs.reserve(node->clauses.size());
+  for (size_t i = 0; i < node->clauses.size(); ++i) {
+    handlerBBs.push_back(
+        llvm::BasicBlock::Create(ctx, "try.catch." + std::to_string(i), fn));
+  }
+
+  /* Catch clauses of this try, shared by every per-invoke landing pad of
+   * the try body. */
+  std::vector<llvm::Constant *> typeInfos;
+  typeInfos.reserve(node->clauses.size());
+  for (const auto *clause : node->clauses) {
+    llvm::Constant *ti = clause->isCatchAll
+                             ? llvm::ConstantPointerNull::get(
+                                   builder.getPtrTy())
+                             : getOrCreateTypeInfoForType(clause->catchType);
+    typeInfos.push_back(ti);
+  }
+
+  /* The try body runs with the try marked active. A bare 'throw;' inside a
+   * handler reloads the current exception from the shared EH slot. */
+  cgCtx.pushScope();
+  cgCtx.setCatchPad(dispatchBB);
+  cgCtx.bind("$catch_exn", getOrCreateEHExnSlot());
+  tryDispatchStack.push_back(dispatchBB);
+  tryTypeInfoStack.push_back(typeInfos);
+
+  dispatch(node->body);
+
+  if (!builder.GetInsertBlock()->getTerminator()) {
+    builder.CreateBr(mergeBB);
+  }
+
+  /* The handlers are not covered by the try's own region: exceptions
+   * raised inside them (a rethrow, a new throw, or a throwing call)
+   * propagate to the enclosing trys, so the innermost dispatch is popped
+   * before the handlers run. */
+  cgCtx.clearCatchPad();
+  tryDispatchStack.pop_back();
+  tryTypeInfoStack.pop_back();
+
+  if (dispatchBB->hasNPredecessorsOrMore(1)) {
+    /* Dispatch on the selector: it equals llvm.eh.typeid.for(@T) when the
+     * T clause matched, and 0 when a catch-all matched. */
+    builder.SetInsertPoint(dispatchBB);
+    llvm::Value *sel =
+        builder.CreateLoad(builder.getInt32Ty(), getOrCreateEHSelSlot(),
+                           "try.disp.sel");
+    llvm::Function *typeidFn = llvm::Intrinsic::getDeclaration(
+        &mod, llvm::Intrinsic::eh_typeid_for, {builder.getPtrTy()});
+    int catchAllHandler = -1;
+    for (size_t i = 0; i < node->clauses.size(); ++i) {
+      if (node->clauses[i]->isCatchAll) {
+        catchAllHandler = static_cast<int>(i);
+        break;
+      }
+    }
+
+    /* No clause of this try matched: an enclosing try may still catch the
+     * exception, so the chain continues into its dispatch (or resumes when
+     * this is the outermost try). The try's own entry was popped before
+     * its dispatch is emitted, so the top of the stack is the enclosing
+     * dispatch. */
+    auto outerTarget = [&]() -> llvm::BasicBlock * {
+      if (!tryDispatchStack.empty())
+        return tryDispatchStack.back();
+      return getOrCreateEHResumeBlock();
+    };
+
+    for (size_t i = 0; i < node->clauses.size(); ++i) {
+      if (node->clauses[i]->isCatchAll)
+        continue;
+
+      llvm::Value *tid =
+          builder.CreateCall(typeidFn, {typeInfos[i]}, "try.tid");
+      llvm::Value *match = builder.CreateICmpEQ(sel, tid, "try.match");
+
+      /* Whether a later (non-catch-all) clause still needs comparing. */
+      bool isLastTypeClause = true;
+      for (size_t j = i + 1; j < node->clauses.size(); ++j) {
+        if (!node->clauses[j]->isCatchAll) {
+          isLastTypeClause = false;
+          break;
+        }
+      }
+
+      if (isLastTypeClause) {
+        llvm::BasicBlock *elseTarget =
+            catchAllHandler >= 0 ? handlerBBs[catchAllHandler] : outerTarget();
+        builder.CreateCondBr(match, handlerBBs[i], elseTarget);
+      } else {
+        llvm::BasicBlock *nextBB =
+            llvm::BasicBlock::Create(ctx, "try.sel.next", fn);
+        builder.CreateCondBr(match, handlerBBs[i], nextBB);
+        builder.SetInsertPoint(nextBB);
+      }
+    }
+
+    /* No type clause matched: run this try's catch-all handler when it has
+     * one, otherwise continue into the enclosing try's dispatch. */
+    if (!builder.GetInsertBlock()->getTerminator()) {
+      builder.CreateBr(catchAllHandler >= 0 ? handlerBBs[catchAllHandler]
+                                            : outerTarget());
+    }
+
+    /* Each handler: enter the catch, initialize the binding variable from
+     * the thrown value, run the body and leave the catch. */
+    llvm::Function *beginCatch = getOrCreateRuntimeFunction(
+        "utopia_begin_catch",
+        llvm::FunctionType::get(builder.getPtrTy(), {builder.getPtrTy()},
+                                false));
+    llvm::Function *endCatch = getOrCreateRuntimeFunction(
+        "utopia_end_catch",
+        llvm::FunctionType::get(builder.getVoidTy(), {builder.getPtrTy()},
+                                false));
+
+    for (size_t i = 0; i < node->clauses.size(); ++i) {
+      const auto *clause = node->clauses[i];
+      builder.SetInsertPoint(handlerBBs[i]);
+
+      llvm::Value *exn = builder.CreateLoad(builder.getPtrTy(),
+                                            getOrCreateEHExnSlot(),
+                                            "try.handler.exn");
+      llvm::Value *valuePtr =
+          builder.CreateCall(beginCatch, {exn}, "catch.value");
+
+      /* The handler scope holds the binding variable and the end_catch
+       * cleanup, so both run however the body exits (normally, return,
+       * break, or a nested throw). */
+      cgCtx.pushScope();
+
+      if (!clause->isCatchAll && !clause->varName.empty()) {
+        const Type *catchTy = clause->catchType;
+        if (catchTy->isReferenceType() ||
+            catchTy->getKind() == TypeKind::RValueReference) {
+          /* A reference catch binds directly to the thrown object. */
+          cgCtx.bind(clause->varName, valuePtr);
+        } else {
+          llvm::Type *llTy = getLLVMType(catchTy);
+          llvm::AllocaInst *var =
+              createEntryBlockAlloca(llTy, std::string(clause->varName));
+          if (clause->copyCtor) {
+            /* Zero the destination first: copy constructors assign their
+             * members (e.g. String operator= frees the previous buffer),
+             * which is unsafe on uninitialized storage. */
+            emitDefaultInitialization(var, catchTy);
+            llvm::Function *cc = getOrCreateFunction(clause->copyCtor);
+            emitCallOrInvoke(cc->getFunctionType(), cc, {var, valuePtr});
+          } else {
+            llvm::Value *v = createTBAALoad(llTy, valuePtr, catchTy,
+                                            "catch.val");
+            createTBAAStore(v, var, catchTy);
+          }
+          cgCtx.bind(clause->varName, var);
+          if (const FunctionDeclNode *dtor =
+                  getCustomDestructor(catchTy)) {
+            registerScopeCleanup(var, dtor, catchTy);
+          }
+        }
+      }
+
+      cgCtx.addCleanup(exn, nullptr, nullptr, nullptr, endCatch);
+
+      dispatch(clause->body);
+
+      if (!builder.GetInsertBlock()->getTerminator()) {
+        emitScopeCleanups();
+        builder.CreateBr(mergeBB);
+      }
+      cgCtx.popScope();
+    }
+  } else {
+    /* Nothing in the try body can throw: the dispatch and handlers are
+     * unreachable. */
+    dispatchBB->eraseFromParent();
+    for (llvm::BasicBlock *bb : handlerBBs)
+      bb->eraseFromParent();
+  }
+
+  cgCtx.popScope();
+
+  builder.SetInsertPoint(mergeBB);
+  return nullptr;
+}
+
+llvm::Value *CodeGen::visit(const ThrowStmtNode *node) {
+  if (node->isRethrow) {
+    llvm::Value *slot = cgCtx.lookup("$catch_exn");
+    llvm::Value *exn = builder.CreateLoad(builder.getPtrTy(), slot,
+                                          "rethrow.exn");
+    llvm::Function *rethrowFn = getOrCreateRuntimeFunction(
+        "utopia_rethrow",
+        llvm::FunctionType::get(builder.getVoidTy(), {builder.getPtrTy()},
+                                false));
+    emitCallOrInvoke(rethrowFn->getFunctionType(), rethrowFn, {exn});
+    builder.CreateUnreachable();
+    return nullptr;
+  }
+
+  /* The thrown object is a copy of the expression's value; records with a
+   * custom destructor are copy-constructed into the exception storage, all
+   * other types are bit-copied. Arrays decay to pointers (C++ rules). */
+  const Type *thrownTy = node->value->exprType;
+  if (thrownTy->getUnqualifiedType()->getKind() == TypeKind::Array) {
+    thrownTy = astCtx.getPointerType(
+        static_cast<const ArrayType *>(thrownTy->getUnqualifiedType())
+            ->getElementType());
+  } else if (thrownTy->isReferenceType()) {
+    thrownTy = static_cast<const ReferenceType *>(thrownTy)->getPointeeType();
+  } else if (thrownTy->getKind() == TypeKind::RValueReference) {
+    thrownTy = static_cast<const RValueReferenceType *>(thrownTy)
+                   ->getPointeeType();
+  }
+  const Type *unqualTy = thrownTy->getUnqualifiedType();
+
+  llvm::Type *llTy = getLLVMType(thrownTy);
+  uint64_t size = mod.getDataLayout().getTypeAllocSize(llTy);
+
+  /* Locate the source value (l-value in place, r-values through the
+   * temporary machinery). */
+  llvm::Value *src = getLValue(node->value);
+  if (!src) {
+    lastTemporaryAlloca = nullptr;
+    llvm::Value *val = dispatch(node->value);
+    if (lastTemporaryAlloca) {
+      src = lastTemporaryAlloca;
+      lastTemporaryAlloca = nullptr;
+    } else if (val) {
+      src = createEntryBlockAlloca(llTy, "throw.tmp");
+      createTBAAStore(val, src, thrownTy);
+    }
+  }
+  if (!src)
+    return nullptr;
+
+  llvm::Function *allocFn = getOrCreateRuntimeFunction(
+      "utopia_allocate_exception",
+      llvm::FunctionType::get(builder.getPtrTy(), {builder.getInt64Ty()},
+                              false));
+  llvm::Value *slot = builder.CreateCall(
+      allocFn, {builder.getInt64(size)}, "throw.slot");
+
+  if (node->copyCtor) {
+    /* Zero the destination first: copy constructors assign their members
+     * (e.g. String operator= frees the previous buffer), which is unsafe
+     * on the uninitialized exception storage. */
+    llvm::Align align = mod.getDataLayout().getABITypeAlign(llTy);
+    builder.CreateMemSet(slot, builder.getInt8(0), size, align);
+    llvm::Function *cc = getOrCreateFunction(node->copyCtor);
+    emitCallOrInvoke(cc->getFunctionType(), cc, {slot, src});
+  } else {
+    llvm::Align align = mod.getDataLayout().getABITypeAlign(llTy);
+    builder.CreateMemCpy(slot, align, src, align,
+                         llvm::ConstantInt::get(builder.getInt64Ty(), size));
+  }
+
+  const FunctionDeclNode *dtor = getCustomDestructor(unqualTy);
+  llvm::Function *throwFn = getOrCreateRuntimeFunction(
+      "utopia_throw",
+      llvm::FunctionType::get(builder.getVoidTy(),
+                              {builder.getPtrTy(), builder.getPtrTy(),
+                               builder.getPtrTy()},
+                              false));
+  llvm::Constant *typeInfo = getOrCreateTypeInfoForType(thrownTy);
+  llvm::Value *dtorFn = dtor
+                            ? static_cast<llvm::Value *>(getOrCreateFunction(dtor))
+                            : static_cast<llvm::Value *>(
+                                  llvm::ConstantPointerNull::get(
+                                      builder.getPtrTy()));
+  emitCallOrInvoke(throwFn->getFunctionType(), throwFn,
+                   {slot, typeInfo, dtorFn});
+  builder.CreateUnreachable();
+  return nullptr;
+}
+
+llvm::Value *CodeGen::visit(const AssertStmtNode *node) {
+  if (node->isNoOp)
+    return nullptr;
+
+  llvm::Value *cond = dispatch(node->condition);
+  if (!cond)
+    return nullptr;
+
+  llvm::Function *fn = builder.GetInsertBlock()->getParent();
+  llvm::BasicBlock *okBB = llvm::BasicBlock::Create(ctx, "assert.ok", fn);
+  llvm::BasicBlock *failBB = llvm::BasicBlock::Create(ctx, "assert.fail", fn);
+  builder.CreateCondBr(cond, okBB, failBB);
+
+  builder.SetInsertPoint(failBB);
+  llvm::Value *fileStr =
+      builder.CreateGlobalStringPtr(currentFilePath, ".assert.file");
+  llvm::Function *failFn = getOrCreateRuntimeFunction(
+      "utopia_assert_failed",
+      llvm::FunctionType::get(builder.getVoidTy(),
+                              {builder.getPtrTy(), builder.getInt32Ty(),
+                               builder.getPtrTy()},
+                              false));
+  builder.CreateCall(failFn,
+                     {fileStr, builder.getInt32(node->line),
+                      llvm::ConstantPointerNull::get(builder.getPtrTy())});
+  builder.CreateUnreachable();
+
+  builder.SetInsertPoint(okBB);
+  return nullptr;
+}
+
 llvm::Value *CodeGen::visit(const ReturnNode *node) {
   /* Async functions store the value into the future state and complete the
    * future instead of returning directly. */
@@ -4978,7 +5319,8 @@ llvm::Value *CodeGen::visit(const ReturnNode *node) {
         for (auto cleanupIt = scope.cleanups.rbegin();
              cleanupIt != scope.cleanups.rend(); ++cleanupIt) {
           emitCleanupCall(cleanupIt->instancePtr, cleanupIt->destructor,
-                          cleanupIt->type, cleanupIt->guard);
+                          cleanupIt->type, cleanupIt->guard,
+                          cleanupIt->runtimeFn);
         }
         for (auto lifeIt = scope.lifetimes.rbegin();
              lifeIt != scope.lifetimes.rend(); ++lifeIt) {
@@ -5048,7 +5390,8 @@ llvm::Value *CodeGen::visit(const ReturnNode *node) {
       for (auto cleanupIt = scope.cleanups.rbegin();
            cleanupIt != scope.cleanups.rend(); ++cleanupIt) {
         emitCleanupCall(cleanupIt->instancePtr, cleanupIt->destructor,
-                        cleanupIt->type, cleanupIt->guard);
+                        cleanupIt->type, cleanupIt->guard,
+                        cleanupIt->runtimeFn);
       }
       for (auto lifeIt = scope.lifetimes.rbegin();
            lifeIt != scope.lifetimes.rend(); ++lifeIt) {
@@ -5199,7 +5542,7 @@ llvm::Value *CodeGen::visit(const ReturnNode *node) {
     for (auto cleanupIt = scope.cleanups.rbegin();
          cleanupIt != scope.cleanups.rend(); ++cleanupIt) {
       emitCleanupCall(cleanupIt->instancePtr, cleanupIt->destructor,
-                      cleanupIt->type, cleanupIt->guard);
+                      cleanupIt->type, cleanupIt->guard, cleanupIt->runtimeFn);
     }
 
     for (auto lifeIt = scope.lifetimes.rbegin();
@@ -5458,7 +5801,8 @@ llvm::Value *CodeGen::visit(const ArraySubscriptNode *node) {
     idxVal = createImplicitCast(idxVal, paramTy);
     argsArgs.push_back(idxVal);
 
-    llvm::Value *res = builder.CreateCall(func, argsArgs);
+    llvm::Value *res =
+        emitCallOrInvoke(func->getFunctionType(), func, argsArgs);
 
     if (node->exprType->isReferenceType() ||
         node->exprType->getKind() == TypeKind::RValueReference) {
@@ -6300,7 +6644,7 @@ llvm::Value *CodeGen::visit(const NewExprNode *node) {
       llvm::Value *elemPtr = builder.CreateInBoundsGEP(
           getLLVMType(elemUnqual), typedMem, idxVal);
       if (ctorFunc) {
-        builder.CreateCall(ctorFunc, {elemPtr});
+        emitCallOrInvoke(ctorFunc->getFunctionType(), ctorFunc, {elemPtr});
         storeVTableIfPolymorphic(elemPtr, elemUnqual);
       } else {
         /* Records without an explicit default constructor still need
@@ -6434,7 +6778,7 @@ llvm::Value *CodeGen::visit(const NewExprNode *node) {
         astParamIdx++;
       }
 
-      builder.CreateCall(ctorFunc, argsArgs);
+      emitCallOrInvoke(ctorFunc->getFunctionType(), ctorFunc, argsArgs);
       storeVTableIfPolymorphic(typedMem, elemUnqual);
     }
   }
@@ -6739,14 +7083,14 @@ llvm::Constant *CodeGen::getOrCreateTypeInfo(const ClassType *classTy) {
 
   auto *cDecl = llvm::cast<ClassDeclNode>(classTy->getDeclaration());
 
-  /* Slot 0: the parent's descriptor (null at the root of the hierarchy). */
+  /* Slot 0: the parent's descriptor (null at the root of the hierarchy).
+   * The chain is linked for every class (polymorphic or not): catch
+   * matching walks it to accept a thrown derived type in a base clause. */
   llvm::Constant *parentTD = llvm::ConstantPointerNull::get(builder.getPtrTy());
   if (cDecl->baseClass) {
     if (auto *pType = llvm::dyn_cast<ClassType>(
             cDecl->baseClass->getUnqualifiedType())) {
-      if (pType->getIsPolymorphic()) {
-        parentTD = getOrCreateTypeInfo(pType);
-      }
+      parentTD = getOrCreateTypeInfo(pType);
     }
   }
 
@@ -6784,6 +7128,46 @@ llvm::Constant *CodeGen::getOrCreateTypeInfo(const ClassType *classTy) {
   return new llvm::GlobalVariable(mod, infoTy, true,
                                   llvm::GlobalValue::LinkOnceODRLinkage, init,
                                   infoName);
+}
+
+/* Descriptor for any throwable/catchable type. Class types reuse the
+ * hierarchy descriptor (with the parent chain always linked); every other
+ * type gets a single-null descriptor whose address identifies it, so exact
+ * pointer comparison implements exact type matching. */
+llvm::Constant *CodeGen::getOrCreateTypeInfoForType(const Type *type) {
+  const Type *u = type->getUnqualifiedType();
+  if (auto *classTy = llvm::dyn_cast<ClassType>(u)) {
+    return getOrCreateTypeInfo(classTy);
+  }
+
+  std::string key = "t:" + u->toString();
+  if (auto it = ehTypeInfoCache.find(key); it != ehTypeInfoCache.end()) {
+    return it->second;
+  }
+
+  std::string infoName = "_ZTI";
+  for (char c : key) {
+    if (c == '.' || c == ' ' || c == '(' || c == ')' || c == ',' || c == '[' ||
+        c == ']' || c == ':' || c == '*' || c == '&')
+      infoName += '_';
+    else
+      infoName += c;
+  }
+
+  /* The descriptor layout mirrors the class form: slot 0 is the (absent)
+   * parent and slot 1 terminates the interface list, so the runtime walk
+   * reads exactly two slots. */
+  llvm::ArrayType *infoTy = llvm::ArrayType::get(builder.getPtrTy(), 2);
+  llvm::Constant *init = llvm::ConstantArray::get(
+      infoTy,
+      {llvm::ConstantPointerNull::get(builder.getPtrTy()),
+       llvm::ConstantPointerNull::get(builder.getPtrTy())});
+
+  auto *gv = new llvm::GlobalVariable(mod, infoTy, true,
+                                      llvm::GlobalValue::LinkOnceODRLinkage,
+                                      init, infoName);
+  ehTypeInfoCache[key] = gv;
+  return gv;
 }
 
 void CodeGen::emitDefaultInitialization(llvm::Value *ptr, const Type *type) {
@@ -6917,7 +7301,7 @@ void CodeGen::emitArrayDefaultConstruct(llvm::Value *ptr, const Type *arrayType,
   const Type *unqual = arrayType->getUnqualifiedType();
   if (unqual->getKind() != TypeKind::Array) {
     llvm::Function *ctorFunc = getOrCreateFunction(ctor);
-    builder.CreateCall(ctorFunc, {ptr});
+    emitCallOrInvoke(ctorFunc->getFunctionType(), ctorFunc, {ptr});
     return;
   }
 
@@ -7011,7 +7395,13 @@ void CodeGen::emitArrayLiteralInit(llvm::Value *targetAddr,
 
 void CodeGen::emitCleanupCall(llvm::Value *ptr, const FunctionDeclNode *dtor,
                               const Type *type, llvm::Value *guard) {
-  if (!ptr || !dtor)
+  emitCleanupCall(ptr, dtor, type, guard, nullptr);
+}
+
+void CodeGen::emitCleanupCall(llvm::Value *ptr, const FunctionDeclNode *dtor,
+                              const Type *type, llvm::Value *guard,
+                              llvm::Function *runtimeFn) {
+  if (!ptr || (!dtor && !runtimeFn))
     return;
 
   if (guard) {
@@ -7026,7 +7416,7 @@ void CodeGen::emitCleanupCall(llvm::Value *ptr, const FunctionDeclNode *dtor,
                                            "dtor.guard");
     builder.CreateCondBr(flag, doDtorBB, skipBB);
     builder.SetInsertPoint(doDtorBB);
-    emitCleanupCall(ptr, dtor, type);
+    emitCleanupCall(ptr, dtor, type, nullptr, runtimeFn);
     builder.CreateBr(skipBB);
     builder.SetInsertPoint(skipBB);
     return;
@@ -7073,7 +7463,8 @@ void CodeGen::emitCleanupCall(llvm::Value *ptr, const FunctionDeclNode *dtor,
     return;
   }
 
-  llvm::Function *dtorFunc = getOrCreateFunction(dtor);
+  llvm::Function *dtorFunc =
+      runtimeFn ? runtimeFn : getOrCreateFunction(dtor);
   builder.CreateCall(dtorFunc, {ptr});
 }
 
@@ -7088,7 +7479,7 @@ void CodeGen::emitBranchCleanups(size_t cleanupCount) {
     if (cleanups.back().guard)
       break;
     emitCleanupCall(cleanups.back().instancePtr, cleanups.back().destructor,
-                    cleanups.back().type);
+                    cleanups.back().type, nullptr, cleanups.back().runtimeFn);
     cgCtx.popCleanup();
   }
 }
@@ -7096,13 +7487,24 @@ void CodeGen::emitBranchCleanups(size_t cleanupCount) {
 void CodeGen::emitScopeCleanups() {
   const auto &scope = cgCtx.getCurrentScope();
   for (auto it = scope.cleanups.rbegin(); it != scope.cleanups.rend(); ++it) {
-    emitCleanupCall(it->instancePtr, it->destructor, it->type);
+    emitCleanupCall(it->instancePtr, it->destructor, it->type, it->guard,
+                    it->runtimeFn);
   }
 
   /* Flush lifetimes back to the execution environment upon natural closure */
   for (auto it = scope.lifetimes.rbegin(); it != scope.lifetimes.rend(); ++it) {
     emitLifetimeEnd(it->allocaInst, it->size);
   }
+}
+
+/* Registers a scope cleanup that runs when the scope exits normally. The
+ * unwinding counterpart is emitted per invoke site by emitCallOrInvoke,
+ * which captures the cleanups live at that point. */
+void CodeGen::registerScopeCleanup(llvm::Value *ptr,
+                                   const FunctionDeclNode *dtor,
+                                   const Type *type, llvm::Value *guard,
+                                   llvm::Function *runtimeFn) {
+  cgCtx.addCleanup(ptr, dtor, type, guard, runtimeFn);
 }
 
 
@@ -7165,6 +7567,156 @@ llvm::CallInst *CodeGen::emitRuntimeCall(const std::string &name,
       llvm::FunctionType::get(retTy, paramTys, false);
   llvm::Function *fn = getOrCreateRuntimeFunction(name, ty);
   return builder.CreateCall(fn, args);
+}
+
+/* The personality routine installed on every function that may unwind. */
+llvm::Function *CodeGen::getOrCreatePersonalityFunction() {
+  if (llvm::Function *f = mod.getFunction("utopia_personality"))
+    return f;
+
+  llvm::Type *i32Ty = builder.getInt32Ty();
+  llvm::Type *i64Ty = builder.getInt64Ty();
+  llvm::FunctionType *fty =
+      llvm::FunctionType::get(i32Ty,
+                              {i32Ty, i32Ty, i64Ty, builder.getPtrTy(),
+                               builder.getPtrTy()},
+                              false);
+  return getOrCreateRuntimeFunction("utopia_personality", fty);
+}
+
+/* The shared exception-pointer / selector slots of the current function,
+ * written by every landing pad and read by the dispatch, handlers and
+ * resumes. */
+llvm::AllocaInst *CodeGen::getOrCreateEHExnSlot() {
+  if (!ehExnSlot) {
+    ehExnSlot =
+        createEntryBlockAlloca(builder.getPtrTy(), "eh.exn.slot");
+  }
+  return ehExnSlot;
+}
+
+llvm::AllocaInst *CodeGen::getOrCreateEHSelSlot() {
+  if (!ehSelSlot) {
+    ehSelSlot =
+        createEntryBlockAlloca(builder.getInt32Ty(), "eh.sel.slot");
+  }
+  return ehSelSlot;
+}
+
+/* Emits the per-function exception resume block: reconstructs the landing
+ * pad value from the exception slots and resumes unwinding. */
+llvm::BasicBlock *CodeGen::getOrCreateEHResumeBlock() {
+  if (ehResumeBlock)
+    return ehResumeBlock;
+
+  llvm::Function *fn = builder.GetInsertBlock()->getParent();
+  ehResumeBlock = llvm::BasicBlock::Create(ctx, "eh.resume", fn);
+  llvm::BasicBlock *saved = builder.GetInsertBlock();
+  builder.SetInsertPoint(ehResumeBlock);
+  llvm::Value *exn = builder.CreateLoad(builder.getPtrTy(),
+                                        getOrCreateEHExnSlot(), "eh.r.exn");
+  llvm::Value *sel = builder.CreateLoad(builder.getInt32Ty(),
+                                        getOrCreateEHSelSlot(), "eh.r.sel");
+  llvm::Value *v = llvm::PoisonValue::get(
+      llvm::StructType::get(ctx, {builder.getPtrTy(), builder.getInt32Ty()}));
+  v = builder.CreateInsertValue(v, exn, 0);
+  v = builder.CreateInsertValue(v, sel, 1);
+  builder.CreateResume(v);
+  builder.SetInsertPoint(saved);
+  return ehResumeBlock;
+}
+
+/* Runs every pending scope cleanup (innermost first) into the current
+ * block; used by landing pads to destroy the objects alive at an invoke
+ * site before the exception continues. */
+void CodeGen::emitScopeCleanupsInPad() {
+  auto allScopes = cgCtx.getAllScopes();
+  for (auto it = allScopes.rbegin(); it != allScopes.rend(); ++it) {
+    for (auto cIt = it->cleanups.rbegin(); cIt != it->cleanups.rend(); ++cIt) {
+      emitCleanupCall(cIt->instancePtr, cIt->destructor, cIt->type,
+                      cIt->guard, cIt->runtimeFn);
+    }
+  }
+}
+
+llvm::Value *CodeGen::emitCallOrInvoke(llvm::FunctionType *fty,
+                                       llvm::Value *callee,
+                                       llvm::ArrayRef<llvm::Value *> args,
+                                       const llvm::Twine &name) {
+  if (!currentFunc || !currentFunc->mayUnwind) {
+    return builder.CreateCall(fty, callee, args);
+  }
+
+  llvm::Function *fn = builder.GetInsertBlock()->getParent();
+  llvm::Value *result = nullptr;
+
+  /* Inside a try: the invoke routes to a fresh landing pad that captures the
+   * cleanups live at this site plus the catch clauses of every enclosing
+   * try (innermost first), then falls into the innermost catch dispatch.
+   * The dispatch chains outward, so an exception that matches an enclosing
+   * try's clause is routed there without a second search. */
+  if (cgCtx.isTryActive()) {
+    llvm::BasicBlock *pad = llvm::BasicBlock::Create(ctx, name + ".pad", fn);
+    llvm::BasicBlock *cont =
+        llvm::BasicBlock::Create(ctx, name + ".cont", fn);
+
+    std::vector<llvm::Constant *> clauses;
+    for (const auto &tryTypes : tryTypeInfoStack) {
+      clauses.insert(clauses.end(), tryTypes.begin(), tryTypes.end());
+    }
+    llvm::BasicBlock *saved = builder.GetInsertBlock();
+    builder.SetInsertPoint(pad);
+    llvm::StructType *lpTy =
+        llvm::StructType::get(ctx, {builder.getPtrTy(), builder.getInt32Ty()});
+    bool hasCleanups = cgCtx.hasActiveCleanups();
+    llvm::LandingPadInst *lp = builder.CreateLandingPad(
+        lpTy, (hasCleanups ? 1 : 0) + clauses.size(), name + ".lp");
+    if (hasCleanups)
+      lp->setCleanup(true);
+    for (llvm::Constant *ti : clauses)
+      lp->addClause(ti);
+    builder.CreateStore(builder.CreateExtractValue(lp, 0, name + ".exn"),
+                        getOrCreateEHExnSlot());
+    builder.CreateStore(builder.CreateExtractValue(lp, 1, name + ".sel"),
+                        getOrCreateEHSelSlot());
+    if (hasCleanups)
+      emitScopeCleanupsInPad();
+    builder.CreateBr(tryDispatchStack.back());
+    builder.SetInsertPoint(saved);
+
+    result = builder.CreateInvoke(fty, callee, cont, pad, args);
+    builder.SetInsertPoint(cont);
+    return result;
+  }
+
+  /* Outside any try but with destructor-bearing objects live: the invoke
+   * routes to a landing pad that runs them and resumes unwinding. */
+  if (cgCtx.hasActiveCleanups()) {
+    llvm::BasicBlock *pad = llvm::BasicBlock::Create(ctx, name + ".pad", fn);
+    llvm::BasicBlock *cont =
+        llvm::BasicBlock::Create(ctx, name + ".cont", fn);
+
+    llvm::BasicBlock *saved = builder.GetInsertBlock();
+    builder.SetInsertPoint(pad);
+    llvm::StructType *lpTy =
+        llvm::StructType::get(ctx, {builder.getPtrTy(), builder.getInt32Ty()});
+    llvm::LandingPadInst *lp =
+        builder.CreateLandingPad(lpTy, 1, name + ".lp");
+    lp->setCleanup(true);
+    builder.CreateStore(builder.CreateExtractValue(lp, 0, name + ".exn"),
+                        getOrCreateEHExnSlot());
+    builder.CreateStore(builder.CreateExtractValue(lp, 1, name + ".sel"),
+                        getOrCreateEHSelSlot());
+    emitScopeCleanupsInPad();
+    builder.CreateBr(getOrCreateEHResumeBlock());
+    builder.SetInsertPoint(saved);
+
+    result = builder.CreateInvoke(fty, callee, cont, pad, args);
+    builder.SetInsertPoint(cont);
+    return result;
+  }
+
+  return builder.CreateCall(fty, callee, args);
 }
 
 /* Returns the destructor for a record type, or null when there is none (or
@@ -7328,13 +7880,13 @@ void CodeGen::emitMemberWiseCopy(llvm::Value *dst, llvm::Value *src,
     if (isAssignment) {
       if (const FunctionDeclNode *op = findAssignmentOperator(elem)) {
         llvm::Function *fn = getOrCreateFunction(op);
-        builder.CreateCall(fn, {dst, src});
+        emitCallOrInvoke(fn->getFunctionType(), fn, {dst, src});
         return;
       }
     } else {
       if (const FunctionDeclNode *cc = findCopyOrMoveCtor(type, false)) {
         llvm::Function *fn = getOrCreateFunction(cc);
-        builder.CreateCall(fn, {dst, src});
+        emitCallOrInvoke(fn->getFunctionType(), fn, {dst, src});
         return;
       }
     }

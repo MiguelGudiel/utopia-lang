@@ -166,6 +166,15 @@ public:
     case NodeKind::Await:
       return static_cast<Derived *>(this)->visit(
           static_cast<const AwaitExprNode *>(node));
+    case NodeKind::Try:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const TryStmtNode *>(node));
+    case NodeKind::Throw:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const ThrowStmtNode *>(node));
+    case NodeKind::Assert:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const AssertStmtNode *>(node));
     default:
       /* Dispatch failure routing to prevent silent segfaults on unmapped nodes
        */

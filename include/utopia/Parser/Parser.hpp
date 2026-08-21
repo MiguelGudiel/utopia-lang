@@ -117,6 +117,9 @@ private:
   ExprNode *parseExpressionStatement();
   ForNode *parseForStatement();
   WhileNode *parseWhileStatement();
+  TryStmtNode *parseTryStatement();
+  ThrowStmtNode *parseThrowStatement();
+  AssertStmtNode *parseAssertStatement();
   SwitchNode *parseSwitchStatement();
   BreakNode *parseBreakStatement();
   ContinueNode *parseContinueStatement();

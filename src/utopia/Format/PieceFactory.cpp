@@ -1241,6 +1241,50 @@ Piece *PieceFactory::visit(const UsingNode *node) {
   return create<TextPiece>("using " + std::string(node->name) + ";");
 }
 
+/* 'try { ... } catch (T e) { ... } catch (...) { ... }': every catch clause
+ * gets its own block section, always split, mirroring the C++ style. */
+Piece *PieceFactory::visit(const TryStmtNode *node) {
+  auto *ctrl = create<ControlFlowPiece>();
+
+  const Piece *tryHeader = create<ConcatPiece>(std::vector<const Piece *>{
+      create<TextPiece>("try"), create<SpacePiece>()});
+  ctrl->add(tryHeader, dispatchStmt(node->body), node->body->hasBraces);
+
+  for (const auto *clause : node->clauses) {
+    std::string header = "catch (";
+    if (clause->isCatchAll) {
+      header += "...";
+    } else {
+      header += std::string(clause->rawTypeStr);
+      if (!clause->varName.empty()) {
+        header += " " + std::string(clause->varName);
+      }
+    }
+    header += ") ";
+    const Piece *catchHeader = create<TextPiece>(header);
+    ctrl->add(catchHeader, dispatchStmt(clause->body),
+              clause->body->hasBraces);
+  }
+
+  ctrl->pin(State::Split);
+  return ctrl;
+}
+
+Piece *PieceFactory::visit(const ThrowStmtNode *node) {
+  if (!node->value) {
+    return create<TextPiece>("throw;");
+  }
+  return create<ConcatPiece>(std::vector<const Piece *>{
+      create<TextPiece>("throw "), dispatchExpr(node->value),
+      create<TextPiece>(";")});
+}
+
+Piece *PieceFactory::visit(const AssertStmtNode *node) {
+  return create<ConcatPiece>(std::vector<const Piece *>{
+      create<TextPiece>("assert("), dispatchExpr(node->condition),
+      create<TextPiece>(");")});
+}
+
 /* ---------- Declarations ---------- */
 
 Piece *PieceFactory::visit(const VarDeclNode *node) {

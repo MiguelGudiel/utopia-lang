@@ -23,6 +23,19 @@ struct CleanupInfo {
    * temporaries created conditionally (e.g. ternary branches), where the
    * object may never have been constructed. */
   llvm::Value *guard = nullptr;
+  /* Optional direct runtime function (e.g. utopia_end_catch) invoked with
+   * instancePtr; used when no AST destructor exists. */
+  llvm::Function *runtimeFn = nullptr;
+};
+
+/* Per-scope exception-handling state. Only try-activity is tracked per
+ * scope: exception landing pads are created on demand per invoke site (see
+ * CodeGen::emitCallOrInvoke), capturing the cleanups and catch clauses
+ * active at that point, so no standing pads are needed. */
+struct EHPadInfo {
+  enum class Kind { None, Catch } kind = Kind::None;
+  /* Non-null while the try statement's body is being emitted. */
+  llvm::BasicBlock *marker = nullptr;
 };
 
 struct LifetimeInfo {
@@ -34,6 +47,7 @@ struct CGLocalScope {
   std::unordered_map<std::string, SymbolInfo> symbols;
   std::vector<CleanupInfo> cleanups;
   std::vector<LifetimeInfo> lifetimes;
+  EHPadInfo ehInfo;
 };
 
 struct LoopInfo {
@@ -57,9 +71,46 @@ public:
 
   /* Registers a dynamic object for later destruction upon exiting the block */
   void addCleanup(llvm::Value *ptr, const FunctionDeclNode *dtor,
-                  const Type *type = nullptr, llvm::Value *guard = nullptr) {
+                  const Type *type = nullptr, llvm::Value *guard = nullptr,
+                  llvm::Function *runtimeFn = nullptr) {
     if (!scopes.empty()) {
-      scopes.back().cleanups.push_back({ptr, dtor, type, guard});
+      scopes.back().cleanups.push_back({ptr, dtor, type, guard, runtimeFn});
+    }
+  }
+
+  /* Marks the current scope as being inside a try statement's body. */
+  void setCatchPad(llvm::BasicBlock *marker) {
+    if (!scopes.empty()) {
+      scopes.back().ehInfo.kind = EHPadInfo::Kind::Catch;
+      scopes.back().ehInfo.marker = marker;
+    }
+  }
+
+  /* True while inside a try statement's body. */
+  bool isTryActive() const {
+    for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
+      if (it->ehInfo.kind == EHPadInfo::Kind::Catch) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /* True when any live scope holds a pending destructor cleanup. */
+  bool hasActiveCleanups() const {
+    for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
+      if (!it->cleanups.empty())
+        return true;
+    }
+    return false;
+  }
+
+  /* Resets the current scope's try marker (used when a try statement
+   * finishes: its handlers are not covered by the try's own region). */
+  void clearCatchPad() {
+    if (!scopes.empty()) {
+      scopes.back().ehInfo.kind = EHPadInfo::Kind::None;
+      scopes.back().ehInfo.marker = nullptr;
     }
   }
 

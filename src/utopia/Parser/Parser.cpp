@@ -1340,6 +1340,12 @@ ASTNode *Parser::parseStatement() {
     node = parseForStatement();
   } else if (currentToken().type == TokenType::WHILE_KW) {
     node = parseWhileStatement();
+  } else if (currentToken().type == TokenType::TRY_KW) {
+    node = parseTryStatement();
+  } else if (currentToken().type == TokenType::THROW_KW) {
+    node = parseThrowStatement();
+  } else if (currentToken().type == TokenType::ASSERT_KW) {
+    node = parseAssertStatement();
   } else if (currentToken().type == TokenType::SWITCH_KW) {
     node = parseSwitchStatement();
   } else if (currentToken().type == TokenType::BREAK_KW) {
@@ -1628,6 +1634,117 @@ WhileNode *Parser::parseWhileStatement() {
   int len = (body->column + body->length) - col;
   auto node = astCtx.create<WhileNode>(cond, body, line, col, len);
   node->endLine = body->endLine;
+  return node;
+}
+
+/* C++-style exception handling: 'try { ... } catch (T e) { ... }' with an
+ * arbitrary number of catch clauses. 'catch (...)' matches every type. */
+TryStmtNode *Parser::parseTryStatement() {
+  int line = currentToken().line;
+  int col = currentToken().column;
+  advance();
+
+  auto body = parseBlock();
+
+  std::vector<CatchClauseNode *> clauses;
+  int endLine = body->endLine;
+  int endCol = body->column + body->length;
+
+  while (currentToken().type == TokenType::CATCH_KW) {
+    int cLine = currentToken().line;
+    int cCol = currentToken().column;
+    advance();
+
+    expect(TokenType::LPAREN, "Expected '(' after 'catch'");
+
+    const Type *catchType = nullptr;
+    std::string_view varName = "";
+    bool isCatchAll = false;
+    std::string_view rawTypeStr = "";
+
+    if (currentToken().type == TokenType::ELLIPSIS) {
+      isCatchAll = true;
+      advance();
+    } else {
+      const char *typeStart = currentToken().value.data();
+      catchType = parseType();
+      const char *typeEnd = tokens[cursor - 1].value.data() +
+                            tokens[cursor - 1].value.length();
+      rawTypeStr =
+          astCtx.copyString(std::string_view(typeStart, typeEnd - typeStart));
+    }
+
+    /* Optional binding variable: 'catch (T e)'. */
+    if (currentToken().type == TokenType::IDENTIFIER) {
+      varName = currentToken().value;
+      advance();
+    }
+
+    expect(TokenType::RPAREN, "Expected ')' after catch parameter");
+
+    auto cBody = parseBlock();
+
+    auto clause = astCtx.create<CatchClauseNode>(catchType, varName, cBody,
+                                                 cLine, cCol, 1);
+    clause->rawTypeStr = rawTypeStr;
+    clause->isCatchAll = isCatchAll;
+    clause->length = (cBody->column + cBody->length) - cCol;
+    clause->endLine = cBody->endLine;
+    clauses.push_back(clause);
+
+    endLine = cBody->endLine;
+    endCol = cBody->column + cBody->length;
+  }
+
+  if (clauses.empty()) {
+    reportError(currentToken().line, currentToken().column,
+                (int)currentToken().value.length(),
+                "Expected at least one 'catch' clause after 'try' block");
+  }
+
+  int len = endCol - col;
+  auto node =
+      astCtx.create<TryStmtNode>(body, astCtx.copyArray<CatchClauseNode *>(clauses),
+                                 line, col, len);
+  node->endLine = endLine;
+  return node;
+}
+
+/* 'throw expr;' or a bare 'throw;' inside a catch clause (rethrow). */
+ThrowStmtNode *Parser::parseThrowStatement() {
+  int line = currentToken().line;
+  int col = currentToken().column;
+  advance();
+
+  ExprNode *value = nullptr;
+  if (currentToken().type != TokenType::SEMICOLON) {
+    value = parseExpression();
+  }
+
+  int len = currentToken().column + (int)currentToken().value.length() - col;
+  expect(TokenType::SEMICOLON, "Expected ';' after throw expression");
+
+  auto node = astCtx.create<ThrowStmtNode>(value, line, col, len);
+  node->endLine = tokens[cursor - 1].line;
+  return node;
+}
+
+/* 'assert(expr);' aborts with the source location when the expression is
+ * false. */
+AssertStmtNode *Parser::parseAssertStatement() {
+  int line = currentToken().line;
+  int col = currentToken().column;
+  advance();
+
+  expect(TokenType::LPAREN, "Expected '(' after 'assert'");
+  auto cond = parseExpression();
+  expect(TokenType::RPAREN, "Expected ')' after assert condition");
+
+  int len = currentToken().column + (int)currentToken().value.length() - col;
+  expect(TokenType::SEMICOLON, "Expected ';' after assert statement");
+
+  auto node = astCtx.create<AssertStmtNode>(cond, line, col, len);
+  node->endLine = tokens[cursor - 1].line;
   return node;
 }
 
@@ -4019,6 +4136,20 @@ ExprNode *Parser::parsePrimary() {
   if (currentToken().type == TokenType::IDENTIFIER) {
     std::string_view name = currentToken().value;
     int len = (int)name.length();
+
+    /* Compile-time source-location intrinsics, mirroring C/C++: __FILE__
+     * expands to the current file path and __LINE__ to the line number. */
+    if (name == "__FILE__") {
+      advance();
+      std::string_view fileStr = astCtx.copyString(filePath);
+      return astCtx.create<StringNode>(fileStr, line, col, len);
+    }
+    if (name == "__LINE__") {
+      advance();
+      std::string lineStr = std::to_string(line);
+      std::string_view lineView = astCtx.copyString(lineStr);
+      return astCtx.create<NumberNode>(lineView, false, line, col, len);
+    }
 
     /* A bare template parameter used in a value position is a type
      * reference: 'sizeof(T)', 'alignof(T)', 'typeof(T)'. */

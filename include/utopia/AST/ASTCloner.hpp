@@ -79,6 +79,9 @@ public:
   ASTNode *visit(const ImplicitCastNode *n);
   ASTNode *visit(const NamespaceDeclNode *n);
   ASTNode *visit(const UsingNode *n);
+  ASTNode *visit(const TryStmtNode *n);
+  ASTNode *visit(const ThrowStmtNode *n);
+  ASTNode *visit(const AssertStmtNode *n);
 };
 
 } // namespace utopia

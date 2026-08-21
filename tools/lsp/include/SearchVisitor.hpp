@@ -354,6 +354,35 @@ public:
 
   const ASTNode *visit(const UsingNode *n) { return isHit(n) ? n : nullptr; }
 
+  const ASTNode *visit(const TryStmtNode *n) {
+    if (auto found = find(n->body))
+      return found;
+    for (const auto *clause : n->clauses)
+      if (auto found = find(clause->body))
+        return found;
+    return isHit(n) ? n : nullptr;
+  }
+
+  const ASTNode *visit(const ThrowStmtNode *n) {
+    if (n->value)
+      if (auto found = find(n->value))
+        return found;
+    return isHit(n) ? n : nullptr;
+  }
+
+  const ASTNode *visit(const ConstExprNode *n) {
+    if (n->expr)
+      if (auto found = find(n->expr))
+        return found;
+    return isHit(n) ? n : nullptr;
+  }
+
+  const ASTNode *visit(const AssertStmtNode *n) {
+    if (auto found = find(n->condition))
+      return found;
+    return isHit(n) ? n : nullptr;
+  }
+
   const ASTNode *visit(const AnnotationDeclNode *n) {
     for (auto *f : n->fields)
       if (auto found = find(f))

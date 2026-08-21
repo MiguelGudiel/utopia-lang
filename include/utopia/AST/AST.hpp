@@ -57,7 +57,11 @@ enum class NodeKind : uint8_t {
   Await,
   NamespaceDecl,
   Using,
-  Is
+  Is,
+  Try,
+  Catch,
+  Throw,
+  Assert
 };
 
 struct ASTNode {
@@ -89,6 +93,9 @@ struct StmtNode : public ASTNode {
     case NodeKind::Continue:
     case NodeKind::Return:
     case NodeKind::Using:
+    case NodeKind::Try:
+    case NodeKind::Throw:
+    case NodeKind::Assert:
       return true;
     default:
       return false;
@@ -643,6 +650,16 @@ struct FunctionDeclNode : public DeclNode {
   mutable bool isWillReturn = false;
   mutable bool isMustProgress = false;
 
+  /* Exception handling state, computed during semantic analysis:
+   *   hasEH      - the body (transitively through its try/catch clauses)
+   *                contains a 'throw' or a 'try' statement.
+   *   mayUnwind  - fixed-point: hasEH, or the body calls a function that
+   *                may unwind, or performs an indirect/virtual call. Such
+   *                functions must not be marked 'nounwind' and need EH
+   *                landing pads for their scopes. */
+  mutable bool hasEH = false;
+  mutable bool mayUnwind = false;
+
   /* Virtual method resolution offset */
   uint32_t vtableIndex = 0;
 
@@ -1129,6 +1146,87 @@ struct UsingNode : public StmtNode {
 
   static bool classof(const ASTNode *node) {
     return node->kind == NodeKind::Using;
+  }
+};
+
+/* One 'catch' clause of a try statement. Never dispatched on its own: the
+ * visitor for TryStmtNode walks the clauses directly. */
+struct CatchClauseNode : public ASTNode {
+  /* The caught type (null for 'catch (...)'). References and r-value
+   * references bind to the thrown object without copying. */
+  const Type *catchType;
+  std::string_view rawTypeStr;
+  /* Optional binding variable name (empty for 'catch (...)' and for
+   * unnamed clauses). */
+  std::string_view varName;
+  BlockNode *body;
+  bool isCatchAll = false;
+
+  /* For catch-by-value of a record with a custom destructor: the copy
+   * constructor used to copy the thrown value into the local variable. */
+  mutable const FunctionDeclNode *copyCtor = nullptr;
+
+  CatchClauseNode(const Type *t, std::string_view vn, BlockNode *b, int l,
+                  int c, int len)
+      : ASTNode(NodeKind::Catch, l, c, len), catchType(t), varName(vn),
+        body(b) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Catch;
+  }
+};
+
+/* C++-style exception handling: 'try { ... } catch (T e) { ... }'. The
+ * clauses are matched in order at runtime; 'catch (...)' catches every
+ * type. */
+struct TryStmtNode : public StmtNode {
+  BlockNode *body;
+  llvm::ArrayRef<CatchClauseNode *> clauses;
+
+  TryStmtNode(BlockNode *b, llvm::ArrayRef<CatchClauseNode *> c, int l, int col,
+              int len)
+      : StmtNode(NodeKind::Try, l, col, len), body(b), clauses(c) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Try;
+  }
+};
+
+/* 'throw expr;' raises an exception with C++ semantics (any type can be
+ * thrown). A bare 'throw;' (value == nullptr) rethrows the exception
+ * currently being handled and is only valid inside a catch clause. */
+struct ThrowStmtNode : public StmtNode {
+  ExprNode *value;
+
+  /* Set by Sema when the statement is a bare 'throw;' inside a catch. */
+  mutable bool isRethrow = false;
+
+  /* Copy constructor used to move the thrown value into the exception
+   * storage (records with a custom destructor only). */
+  mutable const FunctionDeclNode *copyCtor = nullptr;
+
+  ThrowStmtNode(ExprNode *v, int l, int c, int len)
+      : StmtNode(NodeKind::Throw, l, c, len), value(v) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Throw;
+  }
+};
+
+/* 'assert(expr)': evaluates the condition and aborts with the source
+ * location when it is false. No-op when NDEBUG is defined. */
+struct AssertStmtNode : public StmtNode {
+  ExprNode *condition;
+
+  /* Set by Sema when NDEBUG is defined: the statement compiles to nothing,
+   * mirroring C/C++ release builds. */
+  mutable bool isNoOp = false;
+
+  AssertStmtNode(ExprNode *cond, int l, int c, int len)
+      : StmtNode(NodeKind::Assert, l, c, len), condition(cond) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::Assert;
   }
 };
 } // namespace utopia

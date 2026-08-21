@@ -200,6 +200,33 @@ void EffectAnalyzer::visit(const IfNode *n) {
     dispatch(n->elseBlock);
 }
 
+void EffectAnalyzer::visit(const TryStmtNode *n) {
+  dispatch(n->body);
+  for (const auto *clause : n->clauses) {
+    dispatch(clause->body);
+  }
+}
+
+void EffectAnalyzer::visit(const ThrowStmtNode *n) {
+  /* Throwing goes through the runtime: it allocates the exception record,
+   * writes it and frees it when a handler exits. */
+  writesMem = true;
+  readsMem = true;
+  freesMem = true;
+  hasSync = true;
+  potentiallyInfinite = true;
+  if (n->value)
+    dispatch(n->value);
+}
+
+void EffectAnalyzer::visit(const AssertStmtNode *n) {
+  /* The failure path calls the runtime (print + abort). */
+  writesMem = true;
+  readsMem = true;
+  hasSync = true;
+  dispatch(n->condition);
+}
+
 void EffectAnalyzer::visit(const CastNode *n) {
   if (n->conversionConstructor) {
     writesMem = true;

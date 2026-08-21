@@ -72,6 +72,9 @@ public:
   llvm::Value *visit(const ReturnNode *node);
   llvm::Value *visit(const CastNode *node);
   llvm::Value *visit(const IsExprNode *node);
+  llvm::Value *visit(const TryStmtNode *node);
+  llvm::Value *visit(const ThrowStmtNode *node);
+  llvm::Value *visit(const AssertStmtNode *node);
   llvm::Value *visit(const ParamDeclNode *node);
   llvm::Value *visit(const ModuleNode *node);
   llvm::Value *visit(const MemberAccessNode *node);
@@ -100,6 +103,23 @@ public:
   llvm::Value *createImplicitCast(llvm::Value *src, llvm::Type *destTy,
                                   const Type *srcType);
   void emitLoopCleanups(size_t targetDepth);
+
+  /* Emits a call, or an invoke to a landing pad when the function may
+   * unwind and either a try is active or destructor-bearing objects are
+   * live: the pad captures the cleanups active at the invoke site (plus
+   * the innermost try's catch clauses) so no chained pads are needed. */
+  llvm::Value *emitCallOrInvoke(llvm::FunctionType *fty, llvm::Value *callee,
+                                llvm::ArrayRef<llvm::Value *> args,
+                                const llvm::Twine &name = "");
+
+  /* Shared EH slots / resume block of the current function (created on
+   * demand, reset per function). */
+  llvm::AllocaInst *getOrCreateEHExnSlot();
+  llvm::AllocaInst *getOrCreateEHSelSlot();
+  llvm::BasicBlock *getOrCreateEHResumeBlock();
+  /* Runs every live scope's cleanups (innermost first) into the current
+   * block; used by landing pads. */
+  void emitScopeCleanupsInPad();
 
   /* Async support (shared with the Future intrinsics). */
 
@@ -164,6 +184,8 @@ public:
 private:
   llvm::Function *getOrCreateRuntimeFunction(const std::string &name,
                                              llvm::FunctionType *ty);
+  /* The exception-handling personality routine (from libutopia_runtime). */
+  llvm::Function *getOrCreatePersonalityFunction();
   void setupAsyncFunction(const FunctionDeclNode *node, llvm::Function *func);
   void emitAsyncReturn(const FunctionDeclNode *node, llvm::Value *value,
                        bool valueIsLValue);
@@ -204,6 +226,18 @@ private:
 
   /* Cache of compiler-generated async helper functions. */
   std::unordered_map<std::string, llvm::Function *> asyncHelpers;
+
+  /* Cache of per-type EH descriptors created by getOrCreateTypeInfoForType
+   * for non-class types. */
+  std::unordered_map<std::string, llvm::Constant *> ehTypeInfoCache;
+
+  /* Per-function exception handling state (reset per function). */
+  llvm::AllocaInst *ehExnSlot = nullptr;
+  llvm::AllocaInst *ehSelSlot = nullptr;
+  llvm::BasicBlock *ehResumeBlock = nullptr;
+  /* Innermost try's catch dispatch + clauses, used by per-invoke pads. */
+  std::vector<llvm::BasicBlock *> tryDispatchStack;
+  std::vector<std::vector<llvm::Constant *>> tryTypeInfoStack;
 
   llvm::Function *globalInitFunc = nullptr;
 
@@ -274,6 +308,12 @@ private:
    * dynamic type chain at runtime. */
   llvm::Constant *getOrCreateTypeInfo(const ClassType *classTy);
 
+  /* RTTI descriptor for any throwable type: classes get the hierarchy
+   * descriptor above (with the parent chain always linked so derived-to-base
+   * catch matching works for non-polymorphic classes too); every other type
+   * gets a single-null descriptor whose address identifies the type. */
+  llvm::Constant *getOrCreateTypeInfoForType(const Type *type);
+
   void emitLifetimeStart(llvm::AllocaInst *allocaInst, uint64_t size);
   void emitLifetimeEnd(llvm::AllocaInst *allocaInst, uint64_t size);
 
@@ -296,6 +336,17 @@ private:
   void emitCleanupCall(llvm::Value *ptr, const FunctionDeclNode *dtor,
                        const Type *type = nullptr,
                        llvm::Value *guard = nullptr);
+  /* Overload accepting a direct runtime function (e.g. utopia_end_catch)
+   * instead of an AST destructor. */
+  void emitCleanupCall(llvm::Value *ptr, const FunctionDeclNode *dtor,
+                       const Type *type, llvm::Value *guard,
+                       llvm::Function *runtimeFn);
+  /* Registers a scope cleanup and, for destructor-bearing locals of
+   * functions that may unwind, the matching exception cleanup landing
+   * pad. */
+  void registerScopeCleanup(llvm::Value *ptr, const FunctionDeclNode *dtor,
+                            const Type *type, llvm::Value *guard = nullptr,
+                            llvm::Function *runtimeFn = nullptr);
   void emitScopeCleanups();
   void emitBranchCleanups(size_t cleanupCount);
   /* Emits a per-member copy (construction or assignment) for records

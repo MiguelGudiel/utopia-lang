@@ -63,6 +63,9 @@ public:
 
   void visit(const NamespaceDeclNode *n);
   void visit(const UsingNode *n);
+  void visit(const TryStmtNode *n);
+  void visit(const ThrowStmtNode *n);
+  void visit(const AssertStmtNode *n);
 };
 
 } // namespace utopia

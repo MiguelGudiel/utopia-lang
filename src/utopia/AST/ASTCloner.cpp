@@ -531,6 +531,40 @@ ASTNode *ASTCloner::visit(const UsingNode *n) {
   return ctx.create<UsingNode>(n->name, n->line, n->column, n->length);
 }
 
+ASTNode *ASTCloner::visit(const TryStmtNode *n) {
+  std::vector<CatchClauseNode *> clauses;
+  for (const auto *clause : n->clauses) {
+    auto *body = static_cast<BlockNode *>(dispatch(clause->body));
+    auto *cloned = ctx.create<CatchClauseNode>(
+        cloneType(clause->catchType), clause->varName, body, clause->line,
+        clause->column, clause->length);
+    cloned->rawTypeStr = clause->rawTypeStr;
+    cloned->isCatchAll = clause->isCatchAll;
+    clauses.push_back(cloned);
+  }
+  auto *node = ctx.create<TryStmtNode>(
+      static_cast<BlockNode *>(dispatch(n->body)),
+      ctx.copyArray<CatchClauseNode *>(clauses), n->line, n->column, n->length);
+  node->endLine = n->endLine;
+  return node;
+}
+
+ASTNode *ASTCloner::visit(const ThrowStmtNode *n) {
+  auto *node = ctx.create<ThrowStmtNode>(
+      n->value ? static_cast<ExprNode *>(dispatch(n->value)) : nullptr, n->line,
+      n->column, n->length);
+  node->endLine = n->endLine;
+  return node;
+}
+
+ASTNode *ASTCloner::visit(const AssertStmtNode *n) {
+  auto *node = ctx.create<AssertStmtNode>(
+      static_cast<ExprNode *>(dispatch(n->condition)), n->line, n->column,
+      n->length);
+  node->endLine = n->endLine;
+  return node;
+}
+
 ASTNode *ASTCloner::visit(const ModuleNode *n) { return nullptr; }
 ASTNode *ASTCloner::visit(const TypedefDeclNode *n) { return nullptr; }
 ASTNode *ASTCloner::visit(const EnumDeclNode *n) { return nullptr; }

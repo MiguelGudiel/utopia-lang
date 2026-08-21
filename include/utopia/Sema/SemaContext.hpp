@@ -28,6 +28,14 @@ public:
    * objects (implicit const, Dart 2 rule). */
   int constContextDepth = 0;
 
+  /* Nesting depth of catch-clause bodies. A bare 'throw;' is only legal
+   * while non-zero. */
+  int catchDepth = 0;
+
+  /* True when NDEBUG was defined by the preprocessor: 'assert' becomes a
+   * no-op, mirroring C/C++ release builds. */
+  bool ndebugEnabled = false;
+
   explicit SemaContext(ASTContext &ast, DiagnosticsEngine &de,
                        std::string_view path)
       : astCtx(ast), currentFile(path), diags(de) {
@@ -275,6 +283,10 @@ public:
   void enterSwitch() { switchDepth++; }
   void exitSwitch() { switchDepth--; }
   bool isInBreakable() const { return loopDepth > 0 || switchDepth > 0; }
+
+  void enterCatch() { catchDepth++; }
+  void exitCatch() { catchDepth--; }
+  bool isInCatch() const { return catchDepth > 0; }
 
   /* Virtual-method slot registry. Every polymorphic method in the program
    * is assigned a slot derived from its (sorted) name, shared by every
