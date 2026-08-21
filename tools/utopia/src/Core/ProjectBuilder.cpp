@@ -136,7 +136,8 @@ bool buildProjectRecursive(const fs::path &projRoot,
                            CompileOptions &parentOptions, bool isSubproject,
                            const std::string &linkType,
                            const GlobalOptions &globalOpts,
-                           std::string *outFingerprint) {
+                           std::string *outFingerprint,
+                           int *outJitExitCode) {
   fs::path manifestPath = projRoot / "build.yaml";
   if (!fs::exists(manifestPath)) {
     std::cerr << "Fatal: build.yaml not found at " << projRoot << ".\n";
@@ -293,7 +294,7 @@ bool buildProjectRecursive(const fs::path &projRoot,
 
     std::string depFingerprint;
     if (!buildProjectRecursive(depPath, options, true, dep.linkType,
-                               globalOpts, &depFingerprint)) {
+                               globalOpts, &depFingerprint, nullptr)) {
       return false;
     }
 
@@ -352,6 +353,11 @@ bool buildProjectRecursive(const fs::path &projRoot,
       options.target == "executable") {
     inputs.linkerFlags = options.linkerFlags;
   }
+  inputs.includeDirs = options.includeDirs;
+  for (const auto &pkg : options.packages) {
+    inputs.packages.push_back(pkg.first + "=" + pkg.second);
+  }
+  inputs.outputName = options.outputName;
   for (const auto &src : config.resolvedSources) {
     inputs.sources.push_back(fs::weakly_canonical(src.path).string());
   }
@@ -381,6 +387,19 @@ bool buildProjectRecursive(const fs::path &projRoot,
   if (!restored) {
     CompilerDriver driver(options);
     if (!driver.run()) {
+      return false;
+    }
+    if (outJitExitCode) {
+      *outJitExitCode = driver.jitExitCode;
+    }
+
+    /* Fresh builds must prove they produced the artifact: a driver that
+     * reports success while leaving nothing on disk would otherwise make
+     * 'utopia build' exit 0 with no binary. */
+    if (!options.doFormat && !options.isJIT && !fs::is_regular_file(artifactPath)) {
+      std::cerr << "Fatal: build reported success but no artifact was "
+                   "produced at "
+                << artifactPath << ".\n";
       return false;
     }
 
@@ -472,9 +491,9 @@ bool buildProjectRecursive(const fs::path &projRoot,
 
 bool buildProject(const fs::path &projRoot, CompileOptions &parentOptions,
                   bool isSubproject, const std::string &linkType,
-                  const GlobalOptions &globalOpts) {
+                  const GlobalOptions &globalOpts, int *outJitExitCode) {
   return buildProjectRecursive(projRoot, parentOptions, isSubproject, linkType,
-                               globalOpts, nullptr);
+                               globalOpts, nullptr, outJitExitCode);
 }
 
 } // namespace utopia

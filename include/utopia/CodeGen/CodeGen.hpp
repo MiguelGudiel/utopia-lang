@@ -157,6 +157,12 @@ public:
 
   llvm::Value *getLValue(const ExprNode *node);
 
+  /* Returns the 'this' slot address of the current method. Reports an error
+   * and returns nullptr when 'this' is not bound (top-level code, static
+   * functions): callers must check before dereferencing, since a null
+   * 'this' slot would otherwise produce a silent segfault in codegen. */
+  llvm::Value *lookupThis(const ASTNode *errSite);
+
   /* Reports an error diagnostic against the file currently being compiled. */
   void reportError(int line, int column, int length,
                    const std::string &message);

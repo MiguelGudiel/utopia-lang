@@ -18,7 +18,9 @@ int RunCommand::execute(const std::vector<std::string> &args,
   GlobalOptions globalOpts;
   std::filesystem::path startPath = std::filesystem::current_path();
 
-  OptionsParser::parseCommonOptions(args, globalOpts, startPath);
+  if (!OptionsParser::parseCommonOptions(args, globalOpts, startPath)) {
+    return 1;
+  }
   globalOpts.isJIT = true;
 
   std::filesystem::path projRoot = findProjectRoot(startPath);
@@ -31,11 +33,16 @@ int RunCommand::execute(const std::vector<std::string> &args,
   globalOpts.compilerId = ArtifactCache::computeCompilerId(executablePath);
 
   CompileOptions dummyOptions;
-  if (!buildProject(projRoot, dummyOptions, false, "", globalOpts)) {
+  int jitExitCode = 0;
+  if (!buildProject(projRoot, dummyOptions, false, "", globalOpts,
+                    &jitExitCode)) {
     return 1;
   }
 
-  return 0;
+  /* The user program's exit code is part of the command's result: 'run'
+   * returning 0 for a program that failed would hide the failure from
+   * scripts and CI. */
+  return jitExitCode;
 }
 
 } // namespace utopia

@@ -74,8 +74,25 @@ int main(int argc, char **argv) {
 
     if (commands.find(subCmdStr) != commands.end()) {
       selectedCmd = commands[subCmdStr];
+    } else if (subCmdStr != "help" && subCmdStr != "--help" &&
+               subCmdStr != "-h" && subCmdStr[0] == '-') {
+      /* Unknown option directly after the binary name ('utopia --frobnicate'):
+       * the legacy path would treat it as the source path and build whatever
+       * build.yaml is around, silently ignoring the option. */
+      std::cerr << "\033[1;31m[Error]\033[0m Unknown option: " << subCmdStr
+                << "\n";
+      printHelp(commands);
+      return 1;
     } else {
-      /* Allow legacy fallback to 'build' if no valid subcommand is provided */
+      /* Legacy fallback to 'build' when a bare path is given without a
+       * subcommand ('utopia main.utp'). */
+      std::filesystem::path legacyPath(subCmdStr);
+      if (!std::filesystem::exists(legacyPath)) {
+        std::cerr << "\033[1;31m[Error]\033[0m Unknown command: '" << subCmdStr
+                  << "'. Use 'utopia help' to list available commands.\n";
+        printHelp(commands);
+        return 1;
+      }
       selectedCmd = commands["build"];
       argOffset = 1;
     }

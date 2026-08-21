@@ -566,11 +566,82 @@ ASTNode *ASTCloner::visit(const AssertStmtNode *n) {
 }
 
 ASTNode *ASTCloner::visit(const ModuleNode *n) { return nullptr; }
-ASTNode *ASTCloner::visit(const TypedefDeclNode *n) { return nullptr; }
-ASTNode *ASTCloner::visit(const EnumDeclNode *n) { return nullptr; }
-ASTNode *ASTCloner::visit(const EnumMemberNode *n) { return nullptr; }
-ASTNode *ASTCloner::visit(const AnnotationDeclNode *n) { return nullptr; }
-ASTNode *ASTCloner::visit(const AnnotationNode *n) { return nullptr; }
-ASTNode *ASTCloner::visit(const ImplicitCastNode *n) { return nullptr; }
+
+ASTNode *ASTCloner::visit(const TypedefDeclNode *n) {
+  auto *node = ctx.create<TypedefDeclNode>(n->aliasName, nullptr, n->line,
+                                           n->column, n->length);
+  node->targetType = cloneType(n->targetType);
+  node->targetEntityName = n->targetEntityName;
+  node->rawTargetTypeStr = n->rawTargetTypeStr;
+  node->annotations = n->annotations;
+  node->hasPublicMod = n->hasPublicMod;
+  node->hasPrivateMod = n->hasPrivateMod;
+  node->hasProtectedMod = n->hasProtectedMod;
+  node->docString = n->docString;
+  node->trailingComment = n->trailingComment;
+  node->endLine = n->endLine;
+  return node;
+}
+
+ASTNode *ASTCloner::visit(const EnumMemberNode *n) {
+  auto *node = ctx.create<EnumMemberNode>(
+      n->name,
+      n->initializer ? static_cast<ExprNode *>(dispatch(n->initializer))
+                     : nullptr,
+      n->line, n->column, n->length);
+  node->evaluatedValue = n->evaluatedValue;
+  node->endLine = n->endLine;
+  return node;
+}
+
+ASTNode *ASTCloner::visit(const EnumDeclNode *n) {
+  auto *node = ctx.create<EnumDeclNode>(n->name, cloneType(n->underlyingType),
+                                        n->line, n->column, n->length);
+  node->members = cloneArray(n->members);
+  node->enumType = n->enumType;
+  node->hasTrailingComma = n->hasTrailingComma;
+  node->annotations = n->annotations;
+  node->hasPublicMod = n->hasPublicMod;
+  node->hasPrivateMod = n->hasPrivateMod;
+  node->hasProtectedMod = n->hasProtectedMod;
+  node->docString = n->docString;
+  node->trailingComment = n->trailingComment;
+  node->endLine = n->endLine;
+  return node;
+}
+
+ASTNode *ASTCloner::visit(const AnnotationNode *n) {
+  auto *node =
+      ctx.create<AnnotationNode>(n->name, cloneArray(n->args), n->line,
+                                 n->column, n->length);
+  node->hasTrailingComma = n->hasTrailingComma;
+  node->endLine = n->endLine;
+  return node;
+}
+
+ASTNode *ASTCloner::visit(const AnnotationDeclNode *n) {
+  auto *node =
+      ctx.create<AnnotationDeclNode>(n->name, n->line, n->column, n->length);
+  node->fields = cloneArray(n->fields);
+  node->constructor = llvm::dyn_cast_or_null<FunctionDeclNode>(
+      n->constructor ? dispatch(n->constructor) : nullptr);
+  node->recordType = n->recordType;
+  node->annotations = n->annotations;
+  node->hasPublicMod = n->hasPublicMod;
+  node->hasPrivateMod = n->hasPrivateMod;
+  node->hasProtectedMod = n->hasProtectedMod;
+  node->docString = n->docString;
+  node->trailingComment = n->trailingComment;
+  node->endLine = n->endLine;
+  return node;
+}
+
+ASTNode *ASTCloner::visit(const ImplicitCastNode *n) {
+  auto *node = ctx.create<ImplicitCastNode>(
+      static_cast<ExprNode *>(dispatch(n->expr)), cloneType(n->targetType),
+      n->conversionConstructor, n->line, n->column, n->length);
+  node->endLine = n->endLine;
+  return node;
+}
 
 } // namespace utopia

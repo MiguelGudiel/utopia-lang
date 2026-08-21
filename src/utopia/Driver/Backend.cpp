@@ -77,6 +77,14 @@ bool Backend::process(llvm::Module *mod, BackendContext &backendCtx,
                                   options.targetFeatures, opt, rm,
                                   std::nullopt, cgLevel));
 
+  if (!targetMachine) {
+    std::cerr << "\033[1;31m[Backend Error]\033[0m Failed to create target "
+                 "machine for triple: "
+              << triple.getTriple() << " (cpu: '" << options.targetCpu
+              << "', features: '" << options.targetFeatures << "').\n";
+    return false;
+  }
+
   mod->setDataLayout(targetMachine->createDataLayout());
 
   llvm::PassBuilder pb(targetMachine.get());
@@ -197,6 +205,12 @@ bool Backend::process(llvm::Module *mod, BackendContext &backendCtx,
           target->createTargetMachine(triple, options.targetCpu,
                                       options.targetFeatures, opt, rm,
                                       std::nullopt, cgLevel));
+
+      if (!tmAsm) {
+        std::cerr << "\033[1;31m[Backend Error]\033[0m Failed to create target "
+                     "machine for assembly emission.\n";
+        return false;
+      }
 
       if (tmAsm->addPassesToEmitFile(passAsm, destAsm, nullptr,
                                      llvm::CodeGenFileType::AssemblyFile)) {

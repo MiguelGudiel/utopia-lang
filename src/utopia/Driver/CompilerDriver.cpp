@@ -10,6 +10,7 @@
 #include "utopia/Sema/Sema.hpp"
 
 #include <fstream>
+#include <sstream>
 #include <iostream>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
@@ -199,9 +200,44 @@ bool CompilerDriver::run() {
     /* Format every root translation unit: 'roots' are deduplicated by
      * absolute path, so each resolved source is written exactly once. */
     for (const ModuleNode *root : roots) {
+      std::string original;
+      {
+        std::ifstream inFile(std::string(root->filePath), std::ios::binary);
+        if (inFile) {
+          std::stringstream buffer;
+          buffer << inFile.rdbuf();
+          original = buffer.str();
+        }
+      }
       std::string formatted = Formatter::format(root);
+
+      /* An empty result for a non-empty source means the formatter hit a
+       * construct it cannot render: writing it would erase the user's
+       * file, so refuse and report instead. */
+      if (formatted.empty() && !original.empty()) {
+        std::cerr << "\033[1;31m[Format Error]\033[0m Formatter produced no "
+                     "output for: "
+                  << root->filePath
+                  << " (unsupported construct); file was left unchanged."
+                  << std::endl;
+        return false;
+      }
+
       std::ofstream outFile(std::string(root->filePath));
+      if (!outFile) {
+        std::cerr << "\033[1;31m[Format Error]\033[0m Cannot open file for "
+                     "writing: "
+                  << root->filePath << std::endl;
+        return false;
+      }
       outFile << formatted;
+      outFile.close();
+      if (!outFile) {
+        std::cerr << "\033[1;31m[Format Error]\033[0m Failed to write "
+                     "formatted source to: "
+                  << root->filePath << std::endl;
+        return false;
+      }
       std::cout << "\033[1;32m[Format Success]\033[0m Formatted "
                 << root->filePath << std::endl;
     }
@@ -413,7 +449,7 @@ bool CompilerDriver::run() {
     }
 
     int (*mainFn)() = mainSym->toPtr<int (*)()>();
-    int result = mainFn();
+    jitExitCode = mainFn();
 
     /* Deinitialize globals */
     if (auto deinitErr = jit->deinitialize(jit->getMainJITDylib())) {
@@ -421,7 +457,7 @@ bool CompilerDriver::run() {
     }
 
     Logger::debug("\033[1;32m[JIT Execution Finished]\033[0m Exit code: " +
-                  std::to_string(result));
+                  std::to_string(jitExitCode));
   } else {
     ScopedTimer timer("Linking");
 
@@ -471,6 +507,16 @@ bool CompilerDriver::run() {
         continue;
       }
       activeLinkerFlags.push_back(flag);
+    }
+
+    /* The prelude is always compiled in, and its Math module references the
+     * C math functions (acos, sqrt, ...). On glibc/BSD they live in a
+     * separate libm that must be linked explicitly; without it every build
+     * fails at link time with an undefined symbol. macOS and Windows keep
+     * the math functions in the system libc, and Android resolves them
+     * through the NDK sysroot automatically. */
+    if (!isAndroidTarget && !triple.isOSWindows() && !triple.isMacOSX()) {
+      activeLinkerFlags.push_back("-lm");
     }
 
     /* Locates a runtime library in the install/source layout. */
@@ -551,6 +597,20 @@ bool CompilerDriver::run() {
       }
     }
 
+    /* The linker subprocess can report success and still leave no output
+     * (missing tool, killed output write, misconfigured wrapper). Never
+     * print '[Build Success]' without the artifact actually being on disk:
+     * a silent missing binary is the failure mode this guard exists for. */
+    auto verifyArtifact = [&](const fs::path &artifactPath) -> bool {
+      if (!fs::is_regular_file(artifactPath)) {
+        std::cerr << "\033[1;31m[Fatal]\033[0m Linker reported success but "
+                     "no output file was produced at: "
+                  << artifactPath.string() << std::endl;
+        return false;
+      }
+      return true;
+    };
+
     if (options.target == "shared_library" || options.target == "shared") {
       fs::path binOut = outDir / "bin";
       if (!fs::exists(binOut))
@@ -574,6 +634,8 @@ bool CompilerDriver::run() {
                      "library.\n";
         return false;
       }
+      if (!verifyArtifact(libPath))
+        return false;
       Logger::info("\033[1;32m[Build Success]\033[0m " + libPath);
     } else if (options.target == "library" ||
                options.target == "static_library" ||
@@ -597,6 +659,8 @@ bool CompilerDriver::run() {
                      "library.\n";
         return false;
       }
+      if (!verifyArtifact(libPath))
+        return false;
       Logger::info("\033[1;32m[Build Success]\033[0m " + libPath);
     } else {
       fs::path binOut = outDir / "bin";
@@ -611,6 +675,8 @@ bool CompilerDriver::run() {
         std::cerr << "\033[1;31m[Fatal]\033[0m Linker step failed.\n";
         return false;
       }
+      if (!verifyArtifact(executablePath))
+        return false;
       Logger::info("\033[1;32m[Build Success]\033[0m " + executablePath);
     }
   }

@@ -601,8 +601,20 @@ const Type *Parser::applyArrayDeclarator(const Type *baseType) {
       expect(TokenType::RBRACKET, "Expected ']'");
       if (sizeExpr->kind == NodeKind::Number &&
           !static_cast<NumberNode *>(sizeExpr)->isFloat) {
-        sizes.push_back(std::stoull(
-            std::string(static_cast<NumberNode *>(sizeExpr)->raw), nullptr, 0));
+        uint64_t size = 0;
+        try {
+          size = std::stoull(
+              std::string(static_cast<NumberNode *>(sizeExpr)->raw), nullptr,
+              0);
+        } catch (const std::exception &) {
+          /* Out-of-range or malformed literals (e.g. 'int[0x]') must not
+           * terminate the compiler with a raw exception: report them like
+           * any other source error. */
+          reportError(sizeExpr->line, sizeExpr->column, sizeExpr->length,
+                      "Array size literal is out of range");
+          size = 1;
+        }
+        sizes.push_back(size);
       } else {
         reportError(sizeExpr->line, sizeExpr->column, sizeExpr->length,
                     "Array size must be a constant integer literal");

@@ -8,7 +8,12 @@ namespace utopia {
 
 class OptionsParser {
 public:
-  static void parseCommonOptions(const std::vector<std::string> &args,
+  /* Parses the CLI arguments into 'opts'. Returns false when an option is
+   * malformed or unknown; the offending argument is printed to stderr so
+   * the caller can abort before doing anything (silently ignoring a
+   * misspelled flag would produce a build that does not do what the user
+   * asked for). */
+  static bool parseCommonOptions(const std::vector<std::string> &args,
                                  GlobalOptions &opts,
                                  std::filesystem::path &startPath);
 

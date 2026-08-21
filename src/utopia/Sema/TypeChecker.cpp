@@ -101,6 +101,22 @@ static size_t pushDeclNamespace(SemaContext *ctx, const std::string &ns) {
   return count;
 }
 
+/* Parses the integer argument of an '@align' annotation. Out-of-range
+ * literals make std::stoull throw, which would otherwise escape as an
+ * internal exception with no source location: report the error and signal
+ * failure instead. */
+static bool parseAlignValue(SemaContext *ctx, const NumberNode *num,
+                            const AnnotationNode *ann, uint64_t &outValue) {
+  try {
+    outValue = std::stoull(std::string(num->raw), nullptr, 0);
+    return true;
+  } catch (const std::exception &) {
+    ctx->reportError(ann->line, ann->column, ann->length,
+                     "Alignment value is out of range.");
+    return false;
+  }
+}
+
 static const std::unordered_map<std::string_view, OpCategory> opCategoryMap = {
     {"&&", OpCategory::Logical},         {"||", OpCategory::Logical},
     {"==", OpCategory::Relational},      {"!=", OpCategory::Relational},
@@ -963,9 +979,11 @@ SemaResult TypeCheckPass::visit(const UnionDeclNode *node) {
             "The @align annotation requires a single integer constant.");
         hasErrors = true;
       } else {
-        uint64_t alignVal = std::stoull(
-            std::string(llvm::cast<NumberNode>(ann->args[0])->raw), nullptr, 0);
-        if (alignVal == 0 || (alignVal & (alignVal - 1)) != 0) {
+        uint64_t alignVal = 0;
+        if (!parseAlignValue(ctx, llvm::cast<NumberNode>(ann->args[0]), ann,
+                             alignVal)) {
+          hasErrors = true;
+        } else if (alignVal == 0 || (alignVal & (alignVal - 1)) != 0) {
           auto err = ctx->reportError(ann->line, ann->column, ann->length,
                                       "Alignment must be a power of 2.");
           hasErrors = true;
@@ -1059,9 +1077,11 @@ SemaResult TypeCheckPass::visit(const StructDeclNode *node) {
             "The @align annotation requires a single integer constant.");
         hasErrors = true;
       } else {
-        uint64_t alignVal = std::stoull(
-            std::string(llvm::cast<NumberNode>(ann->args[0])->raw), nullptr, 0);
-        if (alignVal == 0 || (alignVal & (alignVal - 1)) != 0) {
+        uint64_t alignVal = 0;
+        if (!parseAlignValue(ctx, llvm::cast<NumberNode>(ann->args[0]), ann,
+                             alignVal)) {
+          hasErrors = true;
+        } else if (alignVal == 0 || (alignVal & (alignVal - 1)) != 0) {
           auto err = ctx->reportError(ann->line, ann->column, ann->length,
                                       "Alignment must be a power of 2.");
           hasErrors = true;
@@ -1204,9 +1224,11 @@ SemaResult TypeCheckPass::visit(const ClassDeclNode *node) {
             "The @align annotation requires a single integer constant.");
         hasErrors = true;
       } else {
-        uint64_t alignVal = std::stoull(
-            std::string(llvm::cast<NumberNode>(ann->args[0])->raw), nullptr, 0);
-        if (alignVal == 0 || (alignVal & (alignVal - 1)) != 0) {
+        uint64_t alignVal = 0;
+        if (!parseAlignValue(ctx, llvm::cast<NumberNode>(ann->args[0]), ann,
+                             alignVal)) {
+          hasErrors = true;
+        } else if (alignVal == 0 || (alignVal & (alignVal - 1)) != 0) {
           auto err = ctx->reportError(ann->line, ann->column, ann->length,
                                       "Alignment must be a power of 2.");
           hasErrors = true;
@@ -1677,16 +1699,30 @@ SemaResult TypeCheckPass::visit(const EnumDeclNode *node) {
       int64_t val = 0;
       auto *init = mem->initializer;
 
+      auto parseEnumInt = [&](const NumberNode *num,
+                              const std::string &kind) -> bool {
+        try {
+          val = std::stoll(std::string(num->raw), nullptr, 0);
+          return true;
+        } catch (const std::exception &) {
+          ctx->reportError(num->line, num->column, num->length,
+                           kind + " value is out of range for an enum member");
+          hasErrors = true;
+          return false;
+        }
+      };
+
       if (init->kind == NodeKind::Number) {
-        val =
-            std::stoll(std::string(static_cast<const NumberNode *>(init)->raw),
-                       nullptr, 0);
+        parseEnumInt(static_cast<const NumberNode *>(init),
+                     "Enum member literal");
       } else if (init->kind == NodeKind::UnaryOp) {
         auto uop = static_cast<const UnaryOpNode *>(init);
         if (uop->op == "-" && uop->expr->kind == NodeKind::Number) {
-          val = -std::stoll(
-              std::string(static_cast<const NumberNode *>(uop->expr)->raw),
-              nullptr, 0);
+          if (!parseEnumInt(static_cast<const NumberNode *>(uop->expr),
+                            "Enum member literal")) {
+            continue;
+          }
+          val = -val;
         } else {
           ctx->reportError(
               init->line, init->column, init->length,
@@ -1722,6 +1758,19 @@ SemaResult TypeCheckPass::visit(const TypeLiteralNode *node) {
    * sizeof/typeof/alignof see the concrete record type at codegen. */
   const_cast<TypeLiteralNode *>(node)->representedType =
       resolveIfTemplate(node->representedType);
+
+  /* A placeholder that survives resolution is an unresolved type name
+   * ('sizeof(UndefinedType)'): template bodies are not type-checked until
+   * instantiation, so by the time this runs genuine template parameters
+   * have already been substituted away. Report it here instead of leaving
+   * codegen to trip on a location-less error. */
+  const Type *rep = node->representedType;
+  if (rep && rep->getKind() == TypeKind::TemplateParam) {
+    return ctx->reportError(node->line, node->column, node->length,
+                            "Unknown type in type literal: '" +
+                                rep->toString() + "'");
+  }
+
   node->exprType = ctx->astCtx.TypeValTy;
   node->isLValue = false;
   return node->exprType;
@@ -2300,6 +2349,15 @@ SemaResult TypeCheckPass::visit(const TryStmtNode *node) {
     if (resolvedTy != catchTy)
       const_cast<CatchClauseNode *>(clause)->catchType = resolvedTy;
     catchTy = resolvedTy;
+
+    /* An unresolved catch type (typo) would otherwise propagate a
+     * placeholder into codegen, where it fails with a location-less error
+     * (or never): report it at the clause. */
+    if (catchTy->getKind() == TypeKind::TemplateParam) {
+      return ctx->reportError(clause->line, clause->column, clause->length,
+                              "Unknown type in catch clause: '" +
+                                  catchTy->toString() + "'");
+    }
 
     const Type *unqualTy = catchTy->getUnqualifiedType();
     if (unqualTy->getKind() == TypeKind::Array) {
@@ -3271,9 +3329,11 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
             ann->line, ann->column, ann->length,
             "The @align annotation requires a single integer constant.");
       } else {
-        uint64_t alignVal = std::stoull(
-            std::string(llvm::cast<NumberNode>(ann->args[0])->raw), nullptr, 0);
-        if (alignVal == 0 || (alignVal & (alignVal - 1)) != 0) {
+        uint64_t alignVal = 0;
+        if (!parseAlignValue(ctx, llvm::cast<NumberNode>(ann->args[0]), ann,
+                             alignVal)) {
+          /* error already reported */
+        } else if (alignVal == 0 || (alignVal & (alignVal - 1)) != 0) {
           (void)ctx->reportError(ann->line, ann->column, ann->length,
                                  "Alignment must be a power of 2.");
         } else {
@@ -7018,6 +7078,14 @@ SemaResult TypeCheckPass::visit(const CastNode *node) {
 SemaResult TypeCheckPass::visit(const IsExprNode *node) {
   const_cast<IsExprNode *>(node)->targetType =
       resolveIfTemplate(node->targetType);
+
+  /* An unresolved target ('x is UndefinedType') would otherwise compile to
+   * a constant 'false' with no diagnostic: report it as a real error. */
+  if (node->targetType->getKind() == TypeKind::TemplateParam) {
+    return ctx->reportError(node->line, node->column, node->length,
+                            "Unknown type in 'is' expression: '" +
+                                node->targetType->toString() + "'");
+  }
 
   auto srcRes = dispatch(node->expr);
   if (!srcRes) {

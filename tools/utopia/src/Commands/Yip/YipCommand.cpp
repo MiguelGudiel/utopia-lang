@@ -242,10 +242,27 @@ int YipCommand::handleLogin(const std::vector<std::string> &args) {
   }
 
   std::filesystem::path utopiaDir = std::filesystem::path(homeDir) / ".utopia";
-  std::filesystem::create_directories(utopiaDir);
+  std::error_code ec;
+  std::filesystem::create_directories(utopiaDir, ec);
+  if (ec) {
+    std::cerr << "Error: cannot create " << utopiaDir << ": " << ec.message()
+              << "\n";
+    return 1;
+  }
 
   std::ofstream f(utopiaDir / "credentials.json");
+  if (!f) {
+    std::cerr << "Error: cannot write credentials to " << utopiaDir
+              << "/credentials.json\n";
+    return 1;
+  }
   f << nlohmann::json{{"token", token}}.dump(2);
+  f.close();
+  if (!f) {
+    std::cerr << "Error: failed while writing credentials to " << utopiaDir
+              << "/credentials.json\n";
+    return 1;
+  }
 
   std::cout << "\033[1;32m[Success]\033[0m API token saved successfully.\n";
   std::cout << "You are now authenticated and ready to publish packages.\n";
@@ -399,8 +416,15 @@ int YipCommand::handleGet(const std::vector<std::string> &args) {
     visitedProjects.insert(absPath.string());
 
     std::filesystem::path manifestPath = absPath / "build.yaml";
-    if (!std::filesystem::exists(manifestPath))
+    if (!std::filesystem::exists(manifestPath)) {
+      /* A local path dependency without a manifest cannot be resolved; a
+       * silent skip would report success while the package is missing. */
+      std::cerr << "Error: local dependency '" << absPath.string()
+                << "' has no build.yaml. Did you forget to run 'utopia yip "
+                   "get'?\n";
+      overallError = true;
       return;
+    }
 
     ProjectConfig config;
     try {
@@ -559,8 +583,11 @@ int YipCommand::handleAdd(const std::vector<std::string> &args) {
     return 1;
   }
 
-  std::cout << "Adding package '" << args[0] << "' to build.yaml...\n";
-  return 0;
+  /* The add flow is not implemented yet; printing a success message without
+   * touching build.yaml would silently pretend the package is available. */
+  std::cerr << "Error: 'yip add' is not implemented yet. Add the dependency "
+               "manually to the 'dependencies' section of build.yaml.\n";
+  return 1;
 }
 
 } // namespace utopia

@@ -1,6 +1,7 @@
 #include "Core/EnvLoader.hpp"
 #include <cstdlib>
 #include <fstream>
+#include <iostream>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -16,6 +17,13 @@ static void trim(std::string &s) {
 void EnvLoader::load(const std::filesystem::path &envPath) {
   std::ifstream file(envPath);
   if (!file.is_open()) {
+    /* A missing file is a normal configuration state (debug.env is
+     * optional), but an existing file that cannot be read hides variables
+     * the build may depend on (e.g. YIP_BASE_URL). */
+    if (std::filesystem::exists(envPath)) {
+      std::cerr << "[Warning] Environment file " << envPath
+                << " exists but cannot be read.\n";
+    }
     return;
   }
 
@@ -28,6 +36,8 @@ void EnvLoader::load(const std::filesystem::path &envPath) {
 
     auto delimiterPos = line.find('=');
     if (delimiterPos == std::string::npos) {
+      std::cerr << "[Warning] Ignoring malformed line in " << envPath
+                << ": missing '='.\n";
       continue;
     }
 

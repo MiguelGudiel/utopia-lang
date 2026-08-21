@@ -36,6 +36,9 @@ struct CacheInputs {
   std::string sysroot;
   std::vector<std::string> macros;
   std::vector<std::string> linkerFlags;
+  std::vector<std::string> includeDirs;
+  std::vector<std::string> packages;
+  std::string outputName;
   std::string buildScriptHash;
   std::vector<std::string> sources;
   std::vector<std::string> dependencies;

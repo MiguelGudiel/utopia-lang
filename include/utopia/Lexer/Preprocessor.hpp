@@ -40,6 +40,9 @@ private:
     return !condStack.empty() && !condStack.back().currentlyActive;
   }
 
+  void reportError(std::string_view message);
+  void reportWarning(std::string_view message);
+
   int getUTF8CharLength(unsigned char c);
   void advance();
   void processDirective();

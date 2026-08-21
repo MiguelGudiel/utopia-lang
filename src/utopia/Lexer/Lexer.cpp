@@ -73,8 +73,18 @@ void Lexer::advance() {
   }
 }
 
-Lexer::Lexer(std::string_view sourceCode)
-    : source(sourceCode), cursor(0), line(1), col(1) {}
+Lexer::Lexer(std::string_view sourceCode, DiagnosticsEngine *diags,
+             std::string filePath)
+    : source(sourceCode), cursor(0), line(1), col(1), diags(diags),
+      filePath(std::move(filePath)) {}
+
+/* Reports a lexing error against the current position. */
+void Lexer::reportError(int line, int col, std::string_view message) {
+  if (diags) {
+    diags->report({DiagLevel::Error, line, col, 1, std::string(message),
+                   filePath});
+  }
+}
 
 static bool isVectorTypeName(std::string_view id) {
   size_t x = id.find('x');
@@ -148,12 +158,19 @@ Token Lexer::parseToken() {
              !(source[cursor] == '*' && source[cursor + 1] == '/')) {
         advance();
       }
-      if (cursor + 1 < source.length()) {
+      bool terminated = cursor + 1 < source.length();
+      if (terminated) {
         advance();
         advance();
       }
       size_t endStr = cursor;
       std::string_view val(source.data() + startStr, endStr - startStr);
+      if (!terminated) {
+        /* A block comment that never closes silently swallows the rest of
+         * the file: flag it so the user is told the trailing code was
+         * ignored. */
+        reportError(startLine, startCol, "Unterminated block comment");
+      }
       return {TokenType::COMMENT, val, startLine, startCol};
     }
   }
@@ -172,12 +189,18 @@ Token Lexer::parseToken() {
     advance();
     advance();
     while (cursor < source.length() && source[cursor] != '\'') {
-      if (source[cursor] == '\\')
+      if (source[cursor] == '\\') {
         advance();
+        if (cursor >= source.length())
+          break;
+      }
       advance();
     }
-    if (cursor < source.length())
+    if (cursor >= source.length()) {
+      reportError(startLine, startCol, "Unterminated rune literal");
+    } else {
       advance();
+    }
     return {TokenType::RUNE_LITERAL,
             std::string_view(start, cursor - (start - source.data())),
             startLine, startCol};
@@ -186,12 +209,18 @@ Token Lexer::parseToken() {
   if (c == '\'') {
     advance();
     while (cursor < source.length() && source[cursor] != '\'') {
-      if (source[cursor] == '\\')
+      if (source[cursor] == '\\') {
         advance();
+        if (cursor >= source.length())
+          break;
+      }
       advance();
     }
-    if (cursor < source.length())
+    if (cursor >= source.length()) {
+      reportError(startLine, startCol, "Unterminated character literal");
+    } else {
       advance();
+    }
     return {TokenType::CHAR_LITERAL,
             std::string_view(start, cursor - (start - source.data())),
             startLine, startCol};
@@ -201,12 +230,17 @@ Token Lexer::parseToken() {
     advance();
     size_t startStr = cursor;
     while (cursor < source.length() && source[cursor] != '"') {
-      if (source[cursor] == '\\')
+      if (source[cursor] == '\\') {
         advance();
+        if (cursor >= source.length())
+          break;
+      }
       advance();
     }
     size_t len = cursor - startStr;
-    if (cursor < source.length()) {
+    if (cursor >= source.length()) {
+      reportError(startLine, startCol, "Unterminated string literal");
+    } else {
       advance();
     }
     return {TokenType::STRING_LITERAL,

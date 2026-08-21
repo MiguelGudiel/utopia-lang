@@ -24,11 +24,24 @@ bool SemaPipeline::run(const ModuleNode *module, SemaContext &ctx) {
         return false;
       }
     } catch (const std::exception &e) {
+      /* Report through the diagnostics engine as well: the driver only
+       * prints its generic '[Fatal] Semantic errors found.' when
+       * hasErrors() is true, and the LSP consumes diags, so a raw stderr
+       * line alone would leave editors with no visible error. */
+      ctx.diags.report({DiagLevel::Error, 0, 0, 0,
+                        "Internal compiler error in Sema pass '" +
+                            std::string(pass->getName()) + "': " + e.what(),
+                        std::string(ctx.currentFile)});
       std::cerr << "\033[1;31m[Fatal]\033[0m Exception caught in Sema pass '"
                 << pass->getName() << "': " << e.what() << "\n"
                 << std::flush;
       return false;
     } catch (...) {
+      ctx.diags.report({DiagLevel::Error, 0, 0, 0,
+                        "Internal compiler error: hardware/OS fault in Sema "
+                        "pass '" +
+                            std::string(pass->getName()) + "'",
+                        std::string(ctx.currentFile)});
       std::cerr << "\033[1;31m[Fatal]\033[0m Hardware/OS fault in Sema pass '"
                 << pass->getName() << "'.\n"
                 << std::flush;

@@ -9,6 +9,7 @@ class PPExprParser {
   std::string_view str;
   size_t pos = 0;
   const std::unordered_set<std::string> &macros;
+  bool hasError = false;
 
   void skipWhitespace() {
     while (pos < str.length() &&
@@ -45,7 +46,9 @@ class PPExprParser {
     }
     if (match("(")) {
       bool val = parseOrExpr();
-      match(")");
+      if (!match(")")) {
+        hasError = true;
+      }
       return val;
     }
     std::string_view id = matchId();
@@ -56,6 +59,10 @@ class PPExprParser {
         return false;
       return macros.count(std::string(id)) > 0;
     }
+    /* Unrecognized token in the condition (e.g. '1', '==', garbage): the
+     * expression cannot be evaluated, so treat it as an error rather than
+     * silently skipping the block. */
+    hasError = true;
     return false;
   }
 
@@ -95,7 +102,18 @@ public:
   PPExprParser(std::string_view s, const std::unordered_set<std::string> &m)
       : str(s), macros(m) {}
 
-  bool eval() { return parseOrExpr(); }
+  /* Returns false on a syntax error; 'hasError' distinguishes a failed
+   * expression from a genuine 'false'. */
+  bool eval() {
+    bool value = parseOrExpr();
+    skipWhitespace();
+    if (pos < str.length()) {
+      hasError = true;
+    }
+    return value;
+  }
+
+  bool errored() const { return hasError; }
 };
 
 Preprocessor::Preprocessor(std::string_view sourceCode,
@@ -133,7 +151,33 @@ void Preprocessor::advance() {
 
 bool Preprocessor::evaluateCondition(std::string_view expr) {
   PPExprParser parser(expr, definedMacros);
-  return parser.eval();
+  bool value = parser.eval();
+  if (parser.errored()) {
+    reportError("Invalid expression in preprocessor condition: '" +
+                std::string(expr) + "'");
+  }
+  return value;
+}
+
+void Preprocessor::reportError(std::string_view message) {
+  /* Preprocessor failures must reach the DiagnosticsEngine: they gate the
+   * whole compilation, and a Logger-only print leaves hasErrors() false so
+   * a broken build would keep going (or worse, produce a binary). */
+  if (diags) {
+    diags->report(
+        {DiagLevel::Error, line, col, 1, std::string(message), filePath});
+  } else {
+    Logger::error("Preprocessor error: " + std::string(message));
+  }
+}
+
+void Preprocessor::reportWarning(std::string_view message) {
+  if (diags) {
+    diags->report(
+        {DiagLevel::Warning, line, col, 1, std::string(message), filePath});
+  } else {
+    Logger::warning("Preprocessor warning: " + std::string(message));
+  }
 }
 
 void Preprocessor::processDirective() {
@@ -181,7 +225,7 @@ void Preprocessor::processDirective() {
     condStack.push_back({pActive, cond, cond});
   } else if (kw == "elif") {
     if (condStack.empty()) {
-      Logger::error("Preprocessor error: #elif without #if");
+      reportError("#elif without matching #if");
       return;
     }
     auto &state = condStack.back();
@@ -198,7 +242,7 @@ void Preprocessor::processDirective() {
     }
   } else if (kw == "else") {
     if (condStack.empty()) {
-      Logger::error("Preprocessor error: #else without #if");
+      reportError("#else without matching #if");
       return;
     }
     auto &state = condStack.back();
@@ -210,7 +254,7 @@ void Preprocessor::processDirective() {
     }
   } else if (kw == "endif") {
     if (condStack.empty()) {
-      Logger::error("Preprocessor error: #endif without #if");
+      reportError("#endif without matching #if");
       return;
     }
     condStack.pop_back();
@@ -224,16 +268,18 @@ void Preprocessor::processDirective() {
     }
   } else if (kw == "error") {
     if (!skipMode()) {
-      Logger::error(std::string(args));
-      throw std::runtime_error("Preprocessor #error: " + std::string(args));
+      /* Report through diags instead of throwing: a throw aborts the whole
+       * build without a file/line and produces a location-less crash message
+       * in the LSP, while a diagnostic keeps the error in the pipeline. */
+      reportError("#error: " + std::string(args));
     }
   } else if (kw == "warning") {
     if (!skipMode()) {
-      Logger::warning(std::string(args));
+      reportWarning(std::string(args));
     }
   } else {
     if (!skipMode()) {
-      Logger::warning("Unknown preprocessor directive: " + std::string(kw));
+      reportWarning("Unknown preprocessor directive: " + std::string(kw));
     }
   }
 
@@ -314,7 +360,7 @@ std::string Preprocessor::process() {
   }
 
   if (!condStack.empty()) {
-    Logger::error("Preprocessor error: Unclosed #if block at end of file");
+    reportError("Unclosed #if block at end of file");
   }
 
   return output;

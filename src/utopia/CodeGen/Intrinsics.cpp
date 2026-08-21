@@ -53,7 +53,11 @@ public:
       uint64_t size = getModule(cg).getDataLayout().getTypeAllocSize(llTy);
       return getBuilder(cg).getInt64(size);
     }
-    return getBuilder(cg).getInt64(0);
+    /* A malformed sizeof would otherwise compile to the constant 0 with no
+     * diagnostic: never emit a silently wrong size. */
+    reportError(cg, node->line, node->column, node->length,
+                "sizeof requires exactly one argument with a known type.");
+    return nullptr;
   }
 };
 
@@ -71,7 +75,9 @@ public:
       uint64_t size = getModule(cg).getDataLayout().getTypeAllocSize(llTy);
       return getBuilder(cg).getInt64(size);
     }
-    return getBuilder(cg).getInt64(0);
+    reportError(cg, node->line, node->column, node->length,
+                "sizeof requires exactly one argument with a known type.");
+    return nullptr;
   }
 };
 
@@ -79,9 +85,7 @@ class TypeofTypeIntrinsic : public Intrinsic {
 public:
   llvm::Value *evaluateRuntime(CodeGen &cg,
                                const FunctionCallNode *node) const override {
-    llvm::Constant *constVal = evaluateConstant(cg, node);
-    return constVal ? constVal
-                    : llvm::UndefValue::get(getLLVMType(cg, node->exprType));
+    return evaluateConstant(cg, node);
   }
 
   llvm::Constant *
@@ -91,6 +95,10 @@ public:
           cg, node->args[0]->representedType,
           llvm::cast<llvm::StructType>(getLLVMType(cg, node->exprType)));
     }
+    /* typeof failing silently would leave an undefined value in the
+     * program: report it instead. */
+    reportError(cg, node->line, node->column, node->length,
+                "typeof requires exactly one argument with a known type.");
     return nullptr;
   }
 };
@@ -99,9 +107,7 @@ class TypeofExprIntrinsic : public Intrinsic {
 public:
   llvm::Value *evaluateRuntime(CodeGen &cg,
                                const FunctionCallNode *node) const override {
-    llvm::Constant *constVal = evaluateConstant(cg, node);
-    return constVal ? constVal
-                    : llvm::UndefValue::get(getLLVMType(cg, node->exprType));
+    return evaluateConstant(cg, node);
   }
 
   llvm::Constant *
@@ -111,6 +117,8 @@ public:
           cg, node->args[0]->exprType,
           llvm::cast<llvm::StructType>(getLLVMType(cg, node->exprType)));
     }
+    reportError(cg, node->line, node->column, node->length,
+                "typeof requires exactly one argument with a known type.");
     return nullptr;
   }
 };
@@ -143,7 +151,9 @@ public:
       }
       return getBuilder(cg).getInt64(align);
     }
-    return getBuilder(cg).getInt64(0);
+    reportError(cg, node->line, node->column, node->length,
+                "alignof requires exactly one argument with a known type.");
+    return nullptr;
   }
 };
 
@@ -173,7 +183,9 @@ public:
       }
       return getBuilder(cg).getInt64(align);
     }
-    return getBuilder(cg).getInt64(0);
+    reportError(cg, node->line, node->column, node->length,
+                "alignof requires exactly one argument with a known type.");
+    return nullptr;
   }
 };
 

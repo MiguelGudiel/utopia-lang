@@ -83,58 +83,74 @@ TypeCheckPass::resolveOverloadedOperator(const Type *lhsType,
 
       for (auto *m : methods) {
         if (m->name == opFuncName) {
-          if (m->params.size() == args.size()) {
-            bool match = true;
-            int currentScore = 0;
+          /* Instance methods receive 'this' implicitly: they declare only
+           * the operand parameters. Static methods (like global operators)
+           * declare the left operand as their first parameter. Matching
+           * both under 'params.size() == args.size()' made a static
+           * operator with too few parameters win and then index past the
+           * end of 'params' at the call site. */
+          size_t paramBase = m->isStatic ? 1 : 0;
+          if (m->params.size() != paramBase + args.size()) {
+            continue;
+          }
 
-            for (size_t i = 0; i < args.size(); ++i) {
-              const Type *argType = args[i]->exprType;
-              const Type *paramType = m->params[i]->type;
+          if (m->isStatic &&
+              !canImplicitlyCast(lhsType, m->params[0]->type)) {
+            continue;
+          }
 
-              if (paramType->getKind() == TypeKind::Array) {
-                paramType = ctx->astCtx.getPointerType(
-                    static_cast<const ArrayType *>(paramType)
-                        ->getElementType());
-              }
+          bool match = true;
+          int currentScore = m->isStatic
+                                 ? (typesMatchExactly(lhsType, m->params[0]->type)
+                                        ? 10
+                                        : 1)
+                                 : 0;
 
-              if (!canImplicitlyCast(argType, paramType)) {
+          for (size_t i = 0; i < args.size(); ++i) {
+            const Type *argType = args[i]->exprType;
+            const Type *paramType = m->params[paramBase + i]->type;
+
+            if (paramType->getKind() == TypeKind::Array) {
+              paramType = ctx->astCtx.getPointerType(
+                  static_cast<const ArrayType *>(paramType)->getElementType());
+            }
+
+            if (!canImplicitlyCast(argType, paramType)) {
+              match = false;
+              break;
+            }
+
+            if (typesMatchExactly(argType, paramType)) {
+              currentScore += 10;
+            }
+
+            bool isLValue = args[i]->isLValue;
+            if (paramType->getKind() == TypeKind::RValueReference) {
+              if (isLValue) {
                 match = false;
                 break;
               }
-
-              if (typesMatchExactly(argType, paramType)) {
-                currentScore += 10;
-              }
-
-              bool isLValue = args[i]->isLValue;
-              if (paramType->getKind() == TypeKind::RValueReference) {
-                if (isLValue) {
-                  match = false;
-                  break;
-                }
-                currentScore += 3;
-              } else if (paramType->isReferenceType()) {
-                const Type *pointee =
-                    static_cast<const ReferenceType *>(paramType)
-                        ->getPointeeType();
-                if (!pointee->isConstQualified()) {
-                  if (!isLValue) {
-                    currentScore += 1;
-                  } else {
-                    currentScore += 3;
-                  }
+              currentScore += 3;
+            } else if (paramType->isReferenceType()) {
+              const Type *pointee =
+                  static_cast<const ReferenceType *>(paramType)->getPointeeType();
+              if (!pointee->isConstQualified()) {
+                if (!isLValue) {
+                  currentScore += 1;
                 } else {
-                  currentScore += 2;
+                  currentScore += 3;
                 }
               } else {
-                currentScore += 1;
+                currentScore += 2;
               }
+            } else {
+              currentScore += 1;
             }
+          }
 
-            if (match && currentScore > bestScore) {
-              bestScore = currentScore;
-              bestMatch = m;
-            }
+          if (match && currentScore > bestScore) {
+            bestScore = currentScore;
+            bestMatch = m;
           }
         }
       }

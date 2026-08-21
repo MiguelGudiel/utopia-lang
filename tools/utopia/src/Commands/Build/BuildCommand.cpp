@@ -18,7 +18,9 @@ int BuildCommand::execute(const std::vector<std::string> &args,
   GlobalOptions globalOpts;
   std::filesystem::path startPath = std::filesystem::current_path();
 
-  OptionsParser::parseCommonOptions(args, globalOpts, startPath);
+  if (!OptionsParser::parseCommonOptions(args, globalOpts, startPath)) {
+    return 1;
+  }
 
   std::filesystem::path projRoot = findProjectRoot(startPath);
   if (projRoot.empty()) {

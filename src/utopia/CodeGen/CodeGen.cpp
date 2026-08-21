@@ -1565,9 +1565,11 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
       return nullptr;
 
     if (maNode->isSuperAccess) {
-      SymbolInfo sym = cgCtx.lookupDetailed("this");
+      llvm::Value *thisAddr = lookupThis(maNode);
+      if (!thisAddr)
+        return nullptr;
       llvm::Value *thisPtr =
-          builder.CreateLoad(builder.getPtrTy(), sym.value, "this.val");
+          builder.CreateLoad(builder.getPtrTy(), thisAddr, "this.val");
       const RecordType *currRec =
           currentFunc ? currentFunc->parentRecord : nullptr;
       if (auto *classTy = llvm::dyn_cast_or_null<ClassType>(currRec)) {
@@ -1828,14 +1830,17 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
     auto *varNode = static_cast<const VariableNode *>(node);
 
     if (varNode->name == "super") {
-      SymbolInfo sym = cgCtx.lookupDetailed("this");
-      return builder.CreateLoad(builder.getPtrTy(), sym.value, "super.this");
+      llvm::Value *thisAddr = lookupThis(varNode);
+      if (!thisAddr)
+        return nullptr;
+      return builder.CreateLoad(builder.getPtrTy(), thisAddr, "super.this");
     }
 
     if (varNode->isField) {
-      SymbolInfo sym = cgCtx.lookupDetailed("this");
+      llvm::Value *thisAddr = lookupThis(varNode);
+      if (!thisAddr)
+        return nullptr;
 
-      llvm::Value *thisAddr = sym.value;
       llvm::Value *thisPtr =
           builder.CreateLoad(builder.getPtrTy(), thisAddr, "this.val");
       llvm::Type *llvmBaseTy = getLLVMType(varNode->parentType);
@@ -2085,19 +2090,29 @@ llvm::Value *CodeGen::visit(const EnumDeclNode *node) { return nullptr; }
 llvm::Value *CodeGen::visit(const EnumMemberNode *node) { return nullptr; }
 
 llvm::Value *CodeGen::visit(const TypeLiteralNode *node) {
-  return llvm::UndefValue::get(builder.getInt8Ty());
+  /* A type name is not a runtime value: sizeof/typeof/alignof read the
+   * literal's representedType without dispatching it, so reaching this
+   * visit means the user used a type where a value was expected. Emitting
+   * 'undef' would produce a silently garbage program. */
+  reportError(node->line, node->column, node->length,
+              "A type name cannot be used as a runtime value (types are "
+              "compile-time only; use typeof/sizeof/alignof to inspect them).");
+  return nullptr;
 }
 
 llvm::Value *CodeGen::visit(const VariableNode *node) {
   if (node->name == "super") {
-    SymbolInfo sym = cgCtx.lookupDetailed("this");
-    return builder.CreateLoad(builder.getPtrTy(), sym.value, "super.this");
+    llvm::Value *thisAddr = lookupThis(node);
+    if (!thisAddr)
+      return nullptr;
+    return builder.CreateLoad(builder.getPtrTy(), thisAddr, "super.this");
   }
 
   if (node->isField) {
-    SymbolInfo sym = cgCtx.lookupDetailed("this");
+    llvm::Value *thisAddr = lookupThis(node);
+    if (!thisAddr)
+      return nullptr;
 
-    llvm::Value *thisAddr = sym.value;
     llvm::Value *thisPtr =
         builder.CreateLoad(builder.getPtrTy(), thisAddr, "this.val");
     llvm::Type *llvmBaseTy = getLLVMType(node->parentType);
@@ -2155,8 +2170,15 @@ llvm::Value *CodeGen::visit(const MemberAccessNode *node) {
                             ? std::string(varDecl->varName)
                             : varDecl->mangledName;
     SymbolInfo sym = cgCtx.lookupDetailed(gName);
-    if (!sym.value)
+    if (!sym.value) {
+      /* The l-value path reports the same condition; a missing global here
+       * is a Sema/codegen inconsistency that must not vanish into a null
+       * propagated up the expression tree. */
+      reportError(node->line, node->column, node->length,
+                  "Static field '" + std::string(node->memberName) +
+                      "' has no backing storage (declaration not emitted).");
       return nullptr;
+    }
     return createTBAALoad(getLLVMType(node->exprType), sym.value,
                           tbaaManager.getTBAATagForExpr(*this, node),
                           node->memberName);
@@ -2164,8 +2186,10 @@ llvm::Value *CodeGen::visit(const MemberAccessNode *node) {
 
   llvm::Value *objPtr = nullptr;
   if (node->isSuperAccess) {
-    SymbolInfo sym = cgCtx.lookupDetailed("this");
-    objPtr = builder.CreateLoad(builder.getPtrTy(), sym.value, "this.val");
+    llvm::Value *thisAddr = lookupThis(node);
+    if (!thisAddr)
+      return nullptr;
+    objPtr = builder.CreateLoad(builder.getPtrTy(), thisAddr, "this.val");
   } else if (node->object->exprType &&
              node->object->exprType->getUnqualifiedType()->isPointerType()) {
     objPtr = dispatch(node->object);
@@ -2749,6 +2773,13 @@ llvm::Value *CodeGen::visit(const BinaryOpNode *node) {
       return nullptr;
     }
     rhsVal = createImplicitCast(rhsVal, builder.getInt1Ty());
+    /* The right operand's dispatch may have redirected the insert point
+     * into freshly created blocks (e.g. the continuation of an invoke for
+     * a call that can unwind, or a nested short-circuit). The branch to
+     * merge lands in that final block, which is therefore the PHI's real
+     * predecessor — recording 'rhsBB' instead would leave a PHI whose
+     * predecessors do not match (LLVM IR verification failure). */
+    llvm::BasicBlock *rhsExitBB = builder.GetInsertBlock();
     /* Temporaries created while evaluating the right operand (e.g. the
      * String in `s == ""`) must die at the end of this branch: when the
      * left operand short-circuits, they are never constructed, so the
@@ -2760,7 +2791,7 @@ llvm::Value *CodeGen::visit(const BinaryOpNode *node) {
     builder.SetInsertPoint(mergeBB);
     llvm::PHINode *phi = builder.CreatePHI(builder.getInt1Ty(), 2);
     phi->addIncoming(builder.getInt1(isAnd ? 0 : 1), lhsBB);
-    phi->addIncoming(rhsVal, rhsBB);
+    phi->addIncoming(rhsVal, rhsExitBB);
     lastTemporaryAlloca = nullptr;
     return phi;
   }
@@ -3871,17 +3902,25 @@ llvm::Value *CodeGen::visit(const MapLiteralNode *node) {
     llvm::Value *keyPtr = builder.CreateInBoundsGEP(
         keysArrTy, keysField, {builder.getInt32(0), builder.getInt32(i)});
     llvm::Value *keyVal = dispatch(node->keys[i]);
-    if (keyVal) {
-      keyVal = createImplicitCast(keyVal, getLLVMType(keyTy));
-      createTBAAStore(keyVal, keyPtr, keyTy);
+    if (!keyVal) {
+      reportError(node->keys[i]->line, node->keys[i]->column,
+                  node->keys[i]->length,
+                  "Failed to evaluate map literal key.");
+      return nullptr;
     }
+    keyVal = createImplicitCast(keyVal, getLLVMType(keyTy));
+    createTBAAStore(keyVal, keyPtr, keyTy);
     llvm::Value *valPtr = builder.CreateInBoundsGEP(
         valuesArrTy, valuesField, {builder.getInt32(0), builder.getInt32(i)});
     llvm::Value *valVal = dispatch(node->values[i]);
-    if (valVal) {
-      valVal = createImplicitCast(valVal, getLLVMType(valTy));
-      createTBAAStore(valVal, valPtr, valTy);
+    if (!valVal) {
+      reportError(node->values[i]->line, node->values[i]->column,
+                  node->values[i]->length,
+                  "Failed to evaluate map literal value.");
+      return nullptr;
     }
+    valVal = createImplicitCast(valVal, getLLVMType(valTy));
+    createTBAAStore(valVal, valPtr, valTy);
   }
   return tempMap;
 }
@@ -4322,9 +4361,11 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
     if (!node->resolvedFunc)
       return nullptr;
 
-    SymbolInfo sym = cgCtx.lookupDetailed("this");
+    llvm::Value *thisAddr = lookupThis(node);
+    if (!thisAddr)
+      return nullptr;
     llvm::Value *thisPtr =
-        builder.CreateLoad(builder.getPtrTy(), sym.value, "this.val");
+        builder.CreateLoad(builder.getPtrTy(), thisAddr, "this.val");
 
     std::vector<llvm::Value *> argsArgs;
     argsArgs.push_back(thisPtr);
@@ -4413,9 +4454,11 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
           !node->resolvedFunc->isStatic && node->resolvedFunc->parentRecord) {
         llvm::Value *objPtr = nullptr;
         if (ma->isSuperAccess) {
-          SymbolInfo sym = cgCtx.lookupDetailed("this");
-          objPtr =
-              builder.CreateLoad(builder.getPtrTy(), sym.value, "this.val");
+          llvm::Value *thisAddr = lookupThis(ma);
+          if (!thisAddr)
+            return nullptr;
+          objPtr = builder.CreateLoad(builder.getPtrTy(), thisAddr,
+                                      "this.val");
         } else if (ma->object->exprType->getUnqualifiedType()->isPointerType()) {
           objPtr = dispatch(ma->object);
         } else {
@@ -7376,20 +7419,27 @@ void CodeGen::emitArrayLiteralInit(llvm::Value *targetAddr,
           emitArrayLiteralInit(elemPtr, elemTy, lit->elements[i]);
         } else {
           llvm::Value *val = dispatch(lit->elements[i]);
-          if (val) {
-            val = createImplicitCast(val, getLLVMType(elemTy));
-            createTBAAStore(val, elemPtr, elemTy);
+          if (!val) {
+            reportError(lit->elements[i]->line, lit->elements[i]->column,
+                        lit->elements[i]->length,
+                        "Failed to evaluate array literal element.");
+            return;
           }
+          val = createImplicitCast(val, getLLVMType(elemTy));
+          createTBAAStore(val, elemPtr, elemTy);
         }
       }
     }
   } else {
     llvm::Value *srcVal = dispatch(initExpr);
-    if (srcVal) {
-      llvm::Type *destTy = getLLVMType(unqualTarget);
-      srcVal = createImplicitCast(srcVal, destTy);
-      createTBAAStore(srcVal, targetAddr, targetType);
+    if (!srcVal) {
+      reportError(initExpr->line, initExpr->column, initExpr->length,
+                  "Failed to evaluate array initializer.");
+      return;
     }
+    llvm::Type *destTy = getLLVMType(unqualTarget);
+    srcVal = createImplicitCast(srcVal, destTy);
+    createTBAAStore(srcVal, targetAddr, targetType);
   }
 }
 
@@ -8611,10 +8661,16 @@ void CodeGen::emitMainWrapper(llvm::Function *userMain,
     builder.CreateRet(builder.getInt32(0));
   } else {
     /* Synchronous main: drive the event loop until every future scheduled
-     * during main has settled, mirroring the Dart event loop semantics. */
+     * during main has settled, mirroring the Dart event loop semantics.
+     * The user's exit code must reach the OS: scripts and CI depend on it,
+     * and 'utopia run' forwards it as the command's own exit code. */
     emitRuntimeCall("utopia_loop_run_all", builder.getVoidTy(), {});
-    builder.CreateRet(
-        llvm::ConstantInt::get(builder.getInt32Ty(), 0));
+    if (fut->getType()->isIntegerTy(32)) {
+      builder.CreateRet(fut);
+    } else {
+      builder.CreateRet(
+          llvm::ConstantInt::get(builder.getInt32Ty(), 0));
+    }
   }
 }
 
@@ -8690,6 +8746,16 @@ llvm::Value *CodeGen::visit(const AwaitExprNode *node) {
   llvm::Value *val = readFutureValue(state, valueTy);
   node->exprType = valueTy;
   return val;
+}
+
+llvm::Value *CodeGen::lookupThis(const ASTNode *errSite) {
+  SymbolInfo sym = cgCtx.lookupDetailed("this");
+  if (sym.value)
+    return sym.value;
+  reportError(errSite->line, errSite->column, errSite->length,
+              "'this' is not bound in this context (super/field access "
+              "outside an instance method).");
+  return nullptr;
 }
 
 } // namespace utopia

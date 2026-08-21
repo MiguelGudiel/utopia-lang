@@ -1,20 +1,37 @@
 #pragma once
 #include "utopia/AST/AST.hpp"
+#include <expected>
 #include <iostream>
 #include <type_traits>
 
 namespace utopia {
 
+namespace detail {
+template <typename T> struct is_expected : std::false_type {};
+template <typename V, typename E>
+struct is_expected<std::expected<V, E>> : std::true_type {
+  using value_type = V;
+  using error_type = E;
+};
+} // namespace detail
+
 template <typename Derived, typename R> class ASTVisitor {
 public:
   R dispatch(const ASTNode *node) {
-    /* Trap null pointers at the traversal boundary to prevent silent
-     * propagation of unhandled expected types across the pipeline */
+    /* Trap null pointers at the traversal boundary: a null child is a
+     * compiler bug, but it must surface as a reported failure, not as a
+     * silent "success" (a value-initialized std::expected looks like a
+     * successful null Type* and propagates into dereferences). */
     if (!node) [[unlikely]] {
       if constexpr (std::is_void_v<R>) {
         return;
+      } else if constexpr (detail::is_expected<R>::value) {
+        return std::unexpected(
+            typename detail::is_expected<R>::error_type{
+                0, 0, 0, "Internal error: null AST node reached the "
+                         "analysis pipeline"});
       } else {
-        return R{};
+        return nullptr;
       }
     }
 

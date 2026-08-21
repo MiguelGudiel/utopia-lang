@@ -51,6 +51,10 @@ public:
   explicit CompilerDriver(const CompileOptions &options);
   bool run();
 
+  /* Exit code of the user program after a JIT run; meaningful only when
+   * run() returned true and options.isJIT was set. */
+  int jitExitCode = 0;
+
 private:
   CompileOptions options;
   std::string readFile(const std::string &path);

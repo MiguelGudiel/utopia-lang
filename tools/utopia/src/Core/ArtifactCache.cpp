@@ -330,6 +330,24 @@ std::string ArtifactCache::computeFingerprint(const CacheInputs &inputs) {
     data += sep + "lflag" + sep + f;
   }
 
+  /* Include dirs, package roots and the output name all change what gets
+   * compiled or where symbols land: they were previously missing from the
+   * fingerprint, so changing build.yaml's include_dirs silently reused a
+   * stale cached artifact. */
+  std::vector<std::string> incDirs = inputs.includeDirs;
+  std::sort(incDirs.begin(), incDirs.end());
+  for (const auto &d : incDirs) {
+    data += sep + "incdir" + sep + d;
+  }
+
+  std::vector<std::string> pkgs = inputs.packages;
+  std::sort(pkgs.begin(), pkgs.end());
+  for (const auto &p : pkgs) {
+    data += sep + "pkg" + sep + p;
+  }
+
+  data += sep + "outname" + sep + inputs.outputName;
+
   data += sep + "script" + sep + inputs.buildScriptHash;
 
   /* The content of every source file, ordered for determinism. */
@@ -364,6 +382,15 @@ bool ArtifactCache::restore(const std::string &name, const std::string &version,
     return false;
   }
 
+  /* The cache entry must itself contain the artifact: verifying only after
+   * the copy would accept a stale binary left over in outputDir when the
+   * entry's tree is missing or corrupt, and then report '[Cache Hit]' for
+   * an artifact the cache never provided. */
+  if (!fs::is_regular_file(entry / expectedArtifact.filename())) {
+    fs::remove_all(entry);
+    return false;
+  }
+
   for (const char *sub : {"bin", "lib"}) {
     copyTree(entry / sub, outputDir / sub);
   }
@@ -372,7 +399,8 @@ bool ArtifactCache::restore(const std::string &name, const std::string &version,
   }
 
   if (!fs::is_regular_file(expectedArtifact)) {
-    /* Corrupt or partial entry; drop it so it gets rebuilt. */
+    /* The copy did not reach the expected location; drop the entry so it
+     * gets rebuilt. */
     fs::remove_all(entry);
     return false;
   }
