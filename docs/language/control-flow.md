@@ -31,6 +31,93 @@ for (int j = 0; j < 10; j++) {
 
 `break` exits the innermost loop or switch; `continue` skips to the next iteration. The compiler validates that `break`/`continue` appear inside a breakable construct.
 
+## For-in (Dart-style)
+
+`for (var x in expr)` iterates any value whose type provides the structural
+iteration protocol — there is no `Iterable` hierarchy and no virtual
+dispatch:
+
+```utp
+List<String> names = ["ada", "grace"];
+for (var name in names) {
+  print("%s\n", name.c_str());
+}
+
+Map<String, int> scores = {"ada": 9001, "grace": 42};
+for (var k in scores) {          // iterating a Map yields its KEYS
+  print("%s=%d\n", k.c_str(), scores[k]);
+}
+for (var e in scores.entries()) { // key/value pairs
+  print("%s -> %d\n", e.key.c_str(), e.value);
+}
+```
+
+### The protocol
+
+`expr.iterator()` must return a value whose type provides:
+
+```utp
+bool moveNext();  // advances; false once exhausted
+T&   current();   // the current element (valid after a successful moveNext)
+```
+
+`List<T>`, `Map<K, V>`, `HashMap<K, V>`, `SplayTreeMap<K, V>`,
+`ListLiteralView<T>` and any user type defining the protocol are iterable.
+Iterating a `Map`/`HashMap`/`SplayTreeMap` yields the keys; use
+`map.entries()` for key/value pairs.
+
+The protocol is purely structural (duck typing): a type is iterable exactly
+when it declares `iterator()` — nothing is inherited, no vtable is involved,
+and the cursors are tiny value types returned by value. All of the prelude's
+cursors and their `moveNext()`/`current()` methods are `@inline`, so the
+optimizer reduces every loop to the same machine code as a manual walk
+(raw pointer walk for `List`, linked-list walk for `Map`, parent-pointer
+tree walk for `SplayTreeMap`).
+
+### Loop variable forms
+
+| Form        | Semantics                                                        |
+|-------------|------------------------------------------------------------------|
+| `var x`     | copies the element each iteration (rebindable, Dart semantics)   |
+| `final x`   | non-rebindable copy                                              |
+| `var& x`    | binds a mutable reference to the element (no copy; writes through) |
+| `final& x`  | binds a const reference to the element (no copy, read-only)      |
+| `T x`       | explicit element type (implicitly converted each iteration)      |
+
+```utp
+List<int> nums = [10, 20, 30];
+for (var& n in nums) {   // zero-cost in-place mutation
+  n = n * 2;
+}
+```
+
+### Array literals and fixed-size arrays
+
+`T[N]` iterables (including `[...]` literals) lower to a plain index loop
+over the array itself — no view object is created:
+
+```utp
+for (var x in [1, 2, 3, 4]) {
+  print("%d ", x);        // 1 2 3 4
+}
+```
+
+### Lifetime
+
+The iterable expression is evaluated exactly once. For r-value iterables the
+compiler materializes a stack temporary whose lifetime covers the whole
+loop (C++ range-for semantics), so `for (var x in getList())` is safe.
+The cursors are invalidated by mutations that move elements (insertions
+that grow a `List`, insertions that grow a map's table, any
+`SplayTreeMap`/`HashMap` mutation).
+
+### Errors
+
+- Iterating a type without `iterator()` is an error (`Cannot iterate a
+  value of type 'X'`).
+- `moveNext()` must return a boolean and `current()` a non-void type.
+- `break`/`continue` work as in any other loop.
+
 ## Switch
 
 ```utp

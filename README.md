@@ -37,6 +37,7 @@ Utopia combines a C/C++-style memory and execution model with a modern, Dart-ins
 - **Generics/templates** for classes, structs, unions, functions, and methods (e.g. `class Box<T>`, `T findMax<T>(T, T)`) with on-demand instantiation
 - **Operator overloading** (`operator+`, `operator==`, `operator[]`, `operator=`, unary and compound-assignment operators, etc.) including free-function operators
 - **Expression-bodied functions** (`=>`) and classic `if`/`else`, `while`, `for`, `switch`/`case`/`default`, `break`, `continue`, `return`, and ternary `?:`
+- **Dart-style `for-in` loops** (`for (var x in list)`) over any type with the structural `iterator()`/`moveNext()`/`current()` protocol — `List`, `Map` (keys), `map.entries()`, `HashMap`, `SplayTreeMap`, array literals and user-defined types. Zero-cost like C++: no `Iterable` hierarchy, no vtables, no allocation; `@inline` cursors collapse to plain index/pointer walks, and `var x` / `var& x` / `final& x` control copy vs. reference binding
 - **C++-style exceptions**: `try`/`catch`/`throw` with multiple catch clauses, `catch (...)`, references (`catch (T& e)`), bare `throw;` rethrows that preserve the dynamic type, derived-to-base and interface catch matching, and deterministic destructor unwinding through scopes. Any type can be thrown; records with custom destructors must be copyable
 - **`assert(expr)`** with source location reporting (no-op under `NDEBUG`) and the **`__FILE__` / `__LINE__`** source-location intrinsics
 
@@ -82,8 +83,8 @@ Utopia combines a C/C++-style memory and execution model with a modern, Dart-ins
 ### Standard library
 
 - **`String`**: construction from any primitive, `+`/`==`/`!=` operators, indexing, `length()`, `c_str()`, `toInt()`/`toFloat()`, `clear()`, `push_back()`
-- **`List<T>`**: dynamic generic list with `push()`, indexing, copy semantics, and array-literal initialization
-- **`Map<K, V>` / `HashMap<K, V>` / `SplayTreeMap<K, V>`**: Dart-style maps with map-literal initialization (`{"key": value}`) — `Map` preserves insertion order (LinkedHashMap, O(1) average lookups), `HashMap` is an unordered open-addressing table, and `SplayTreeMap` keeps keys sorted (O(log n) amortized); all deep-copy on assignment and accept the same literal
+- **`List<T>`**: dynamic generic list with `push()`, indexing, copy semantics, array-literal initialization, and Dart-style `for-in` iteration (`for (var x in list)`, `for (var& x in list)`)
+- **`Map<K, V>` / `HashMap<K, V>` / `SplayTreeMap<K, V>`**: Dart-style maps with map-literal initialization (`{"key": value}`) — `Map` preserves insertion order (LinkedHashMap, O(1) average lookups), `HashMap` is an unordered open-addressing table, and `SplayTreeMap` keeps keys sorted (O(log n) amortized); all deep-copy on assignment and accept the same literal. All three support `for-in` over keys and `entries()` for key/value pairs
 - **`Console`**: `print`, `printLine`, `readLine`, `clear`; global `print(format, ...)` with `printf`-style formatting
 - **`Math`**: numeric limits constants (`INT32_MAX`, `FLOAT64_MIN`, ...)
 - **`Memory`**: `malloc`/`free` bindings and type reflection (`Type`, `MethodInfo`)
@@ -146,6 +147,7 @@ The `examples/` directory contains small, self-contained programs demonstrating 
 - Abstract classes and abstract methods
 - Multiple interfaces via `implements`
 - Polymorphism and virtual dispatch through base and interface pointers
+- Dart-style `for-in` loops over `List`, `Map` (keys), `map.entries()`, `HashMap`, `SplayTreeMap`, array literals, and user-defined types with the structural iterator protocol
 
 Each example is a standalone project with its own `build.yaml` manifest.
 

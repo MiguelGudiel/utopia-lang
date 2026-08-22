@@ -138,6 +138,7 @@ public:
   void visit(const BlockNode *node);
   void visit(const IfNode *node);
   void visit(const ForNode *node);
+  void visit(const ForInNode *node);
   void visit(const WhileNode *node);
   void visit(const SwitchNode *node);
   void visit(const CaseNode *node);

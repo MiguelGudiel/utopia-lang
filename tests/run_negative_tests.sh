@@ -127,5 +127,19 @@ run_case "super call not last in initializer list" \
   "must be the last entry in the initializer list" \
   'class A { public int32 x; A() : super(), this.x = 5 {} } int main() { return 0; }'
 
+# for-in: protocol and header validation
+run_case "for-in over a non-iterable type" \
+  "Cannot iterate a value of type 'int32'" \
+  'int main() { int32 x = 5; for (var v in x) { print("%lld", v); } return 0; }'
+run_case "for-in over a String" \
+  "No member named 'iterator'" \
+  'int main() { String s = "hi"; for (var v in s) { print("%s", v.c_str()); } return 0; }'
+run_case "for-in missing 'in'" \
+  "Expected ';' after variable declaration" \
+  'int main() { List<int32> l; for (var x of l) {} return 0; }'
+run_case "for-in over an untyped literal" \
+  "Cannot iterate an untyped (empty) array literal" \
+  'int main() { for (var x in []) { print("%lld", x); } return 0; }'
+
 printf 'PASS=%d FAIL=%d\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

@@ -658,6 +658,18 @@ void UnusedCodePass::visit(const ForNode *node) {
   dispatch(node->body);
 }
 
+void UnusedCodePass::visit(const ForInNode *node) {
+  /* Runs after TypeCheckPass: the loop variable usage is tracked through
+   * the lowered form (declaration + while loop). */
+  if (node->desugared) {
+    dispatch(node->desugared);
+    return;
+  }
+  dispatch(node->loopVar);
+  dispatch(node->iterable);
+  dispatch(node->body);
+}
+
 void UnusedCodePass::visit(const WhileNode *node) {
   dispatch(node->condition);
   dispatch(node->body);

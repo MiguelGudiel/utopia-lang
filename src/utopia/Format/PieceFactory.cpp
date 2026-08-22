@@ -1844,6 +1844,26 @@ Piece *PieceFactory::visit(const ForNode *node) {
   return ctrl;
 }
 
+Piece *PieceFactory::visit(const ForInNode *node) {
+  std::string pfx =
+      node->loopVar->rawTypeStr.empty()
+          ? node->loopVar->type->toString()
+          : std::string(node->loopVar->rawTypeStr);
+  const Piece *decl = create<TextPiece>(
+      pfx + " " + std::string(node->loopVar->varName));
+
+  const Piece *header = create<ConcatPiece>(std::vector<const Piece *>{
+      create<TextPiece>("for"), create<SpacePiece>(),
+      create<TextPiece>("("), decl, create<TextPiece>(" in "),
+      dispatchExpr(node->iterable), create<TextPiece>(")"),
+      create<SpacePiece>()});
+
+  auto *ctrl = create<ControlFlowPiece>();
+  ctrl->add(header, dispatchStmt(node->body),
+            /*isBlock=*/node->body->hasBraces);
+  return ctrl;
+}
+
 Piece *PieceFactory::visit(const SwitchNode *node) {
   const Piece *header = create<ConcatPiece>(std::vector<const Piece *>{
       create<TextPiece>("switch"), create<SpacePiece>(),
@@ -2014,6 +2034,38 @@ Piece *PieceFactory::visit(const ModuleNode *node) {
           text = "export \"" + std::string(item.text) + "\";";
         } else {
           text = "#" + std::string(item.text);
+        }
+        if (!item.doc.empty()) {
+          /* The directive's own leading comments stay with it; the top of
+           * the file keeps only the real module doc. Trailing newlines map
+           * to the whitespace after the block, like statement doc strings. */
+          std::string itemDoc = std::string(item.doc);
+          int trailingNewlines = 0;
+          while (!itemDoc.empty() && itemDoc.back() == '\n') {
+            trailingNewlines++;
+            itemDoc.pop_back();
+          }
+          /* The element boundary before this piece emits one newline, so
+           * the first leading newline is not part of the comment block. */
+          if (!itemDoc.empty() && itemDoc.front() == '\n') {
+            itemDoc.erase(0, 1);
+          }
+          /* Map the trailing gap to whitespace. The sequence emits one
+           * newline before and one after this element; an empty piece
+           * already sits between two emitted newlines, so it needs one
+           * fewer. */
+          int effectiveTrailing = itemDoc.empty() ? trailingNewlines - 1
+                                                  : trailingNewlines;
+          Whitespace trailing = Whitespace::Space;
+          if (effectiveTrailing > 1) {
+            trailing = Whitespace::BlankLine;
+          } else if (effectiveTrailing == 1) {
+            trailing = Whitespace::Newline;
+          }
+          if (!itemDoc.empty() || trailingNewlines > 1) {
+            seq.add(create<CommentPiece>(itemDoc, trailing), Indent::None,
+                    /*allowBlankAfter=*/true);
+          }
         }
         seq.add(create<TextPiece>(text), Indent::None, /*allowBlankAfter=*/true);
         interveningItems++;

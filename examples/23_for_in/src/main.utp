@@ -1,0 +1,124 @@
+/*
+ * Dart-style 'for (var x in ...)' loops over List, Map (keys), map.entries(),
+ * HashMap, SplayTreeMap, array literals and user-defined types.
+ *
+ * Iteration is a structural protocol — 'iterator()' must return a value
+ * with 'bool moveNext()' and 'T& current()' — with no Iterable hierarchy
+ * and no vtables. The compiler lowers each loop to a plain while loop and
+ * @inline'd cursors collapse to the same machine code as a manual index
+ * walk (or a raw pointer walk). 'var x' copies each element (rebindable,
+ * Dart semantics), 'var& x' binds a mutable reference (no copy),
+ * 'final& x' a const reference.
+ */
+
+/* A user-defined iterable: the protocol is structural, so any type with
+ * iterator()/moveNext()/current() can be used with for-in. */
+class Range {
+  int64 _from;
+  int64 _to;
+  Range(int64 from, int64 to) {
+    this._from = from;
+    this._to = to;
+  }
+  RangeIterator iterator() {
+    return RangeIterator(this);
+  }
+}
+
+class RangeIterator {
+  int64 _next;
+  int64 _to;
+
+  RangeIterator() {
+    this._next = 0;
+    this._to = 0;
+  }
+
+  RangeIterator(Range* r) {
+    this._next = r._from;
+    this._to = r._to;
+  }
+
+  bool moveNext() {
+    if (this._next >= this._to) return false;
+    this._next++;
+    return true;
+  }
+
+  int64 current() {
+    return this._next - 1;
+  }
+}
+
+int main() {
+  List<String> names;
+  names.push("ada");
+  names.push("grace");
+  names.push("linus");
+
+  print("-- List, copies (Dart semantics) --\n");
+  for (var name in names) {
+    print("  %s\n", name.c_str());
+  }
+
+  print("-- List, reference binding: double every element in place --\n");
+  List<int> scores;
+  scores.push(10);
+  scores.push(20);
+  scores.push(30);
+  for (var& s in scores) {
+    s = s * 2;
+  }
+  for (var s in scores) {
+    print("  %d", s);
+  }
+  print("\n");
+
+  print("-- Map: iterating a map yields its KEYS --\n");
+  Map<String, int> scores2 = {"ada": 9001, "grace": 42};
+  for (var k in scores2) {
+    print("  %s=%d\n", k.c_str(), scores2[k]);
+  }
+
+  print("-- Map: key/value pairs via map.entries() --\n");
+  for (var e in scores2.entries()) {
+    print("  %s -> %d\n", e.key.c_str(), e.value);
+  }
+
+  print("-- HashMap (unspecified order) --\n");
+  HashMap<int, String> byId = {1: "one", 2: "two"};
+  for (var id in byId) {
+    print("  %d", id);
+  }
+  print("\n");
+
+  print("-- SplayTreeMap (ascending key order) --\n");
+  SplayTreeMap<String, int> board = {"bob": 5, "ada": 10, "zoe": 3};
+  for (var k in board) {
+    print("  %s", k.c_str());
+  }
+  print("\n");
+
+  print("-- Array literals are iterated directly (zero-cost GEP walk) --\n");
+  for (var x in [1, 2, 3, 4, 5]) {
+    print("  %d", x);
+  }
+  print("\n");
+
+  print("-- break / continue --\n");
+  for (var n in [1, 2, 3, 4, 5, 6]) {
+    if (n == 2) continue;
+    if (n == 5) break;
+    print("  %d", n);
+  }
+  print("\n");
+
+  print("-- User-defined type (structural protocol) --\n");
+  Range r = Range(1, 4);
+  for (var n in r) {
+    print("  %d", n);
+  }
+  print("\n");
+
+  return 0;
+}

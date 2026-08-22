@@ -405,13 +405,36 @@ static bool isDirectiveComment(std::string_view c) {
 }
 
 std::string Parser::consumeModuleComments(
-    std::vector<ModuleNode::TopLevelItem> &items) {
+    std::vector<ModuleNode::TopLevelItem> &items,
+    std::string *preDirectiveDoc) {
   std::string doc;
+  bool pastDirective = false;
+
+  auto target = [&]() -> std::string & {
+    return (preDirectiveDoc && !pastDirective) ? *preDirectiveDoc : doc;
+  };
 
   for (size_t i = 0; i < currentToken().leadingComments.size(); ++i) {
     auto c = currentToken().leadingComments[i];
 
     if (isDirectiveComment(c)) {
+      /* The gap before the first directive belongs to the leading comment
+       * block (e.g. the module header): preserve the blank lines the user
+       * wrote between it and the directive. */
+      if (!pastDirective && preDirectiveDoc && i > 0) {
+        auto prev = currentToken().leadingComments[i - 1];
+        const char *gapStart = prev.data() + prev.length();
+        const char *gapEnd = c.data();
+        if (gapEnd != nullptr && gapStart <= gapEnd) {
+          int newlines = 0;
+          for (const char *p = gapStart; p < gapEnd; ++p) {
+            if (*p == '\n')
+              newlines++;
+          }
+          *preDirectiveDoc += std::string(newlines, '\n');
+        }
+      }
+
       ModuleNode::TopLevelItem item;
       item.kind = ModuleNode::TopLevelItem::Kind::Directive;
       std::string_view text = c.substr(1);
@@ -421,8 +444,11 @@ std::string Parser::consumeModuleComments(
       }
       item.text = astCtx.copyString(text);
       items.push_back(item);
+      pastDirective = true;
       continue;
     }
+
+    std::string &out = target();
 
     if (i > 0) {
       auto prev = currentToken().leadingComments[i - 1];
@@ -436,12 +462,12 @@ std::string Parser::consumeModuleComments(
         }
         if (newlines == 0)
           newlines = 1;
-        doc += std::string(newlines, '\n');
+        out += std::string(newlines, '\n');
       } else {
-        doc += "\n";
+        out += "\n";
       }
     }
-    doc += c;
+    out += c;
   }
 
   if (!currentToken().leadingComments.empty()) {
@@ -454,9 +480,9 @@ std::string Parser::consumeModuleComments(
         if (*p == '\n')
           newlines++;
       }
-      doc += std::string(newlines, '\n');
+      target() += std::string(newlines, '\n');
     } else {
-      doc += "\n";
+      target() += "\n";
     }
   }
 
@@ -482,14 +508,8 @@ ModuleNode *Parser::parseModule(std::string_view filePath) {
           (currentToken().value == "import" ||
            currentToken().value == "export")) {
 
-        std::string importDoc = consumeModuleComments(topLevelItems);
-        if (!importDoc.empty()) {
-          if (moduleDoc.empty()) {
-            moduleDoc = importDoc;
-          } else {
-            moduleDoc += importDoc;
-          }
-        }
+        std::string importDoc = consumeModuleComments(topLevelItems,
+                                                   &moduleDoc);
 
         bool isExport = (currentToken().value == "export");
         int kwLine = currentToken().line;
@@ -538,6 +558,9 @@ ModuleNode *Parser::parseModule(std::string_view filePath) {
         item.kind = isExport ? ModuleNode::TopLevelItem::Kind::Export
                              : ModuleNode::TopLevelItem::Kind::Import;
         item.text = path;
+        /* The leading comments keep their raw gaps: the formatter maps the
+         * trailing newlines to the whitespace after the comment block. */
+        item.doc = astCtx.copyString(importDoc);
         topLevelItems.push_back(item);
 
         /* Synchronously invoke the module loader upon evaluating an
@@ -561,7 +584,8 @@ ModuleNode *Parser::parseModule(std::string_view filePath) {
         }
 
       } else if (currentToken().type == TokenType::NAMESPACE_KW) {
-        std::string doc = consumeModuleComments(topLevelItems);
+        std::string doc =
+            consumeModuleComments(topLevelItems, &moduleDoc);
         bool isFileScoped = false;
         auto ns = parseNamespaceDecl(isFileScoped);
         if (!doc.empty()) {
@@ -582,7 +606,8 @@ ModuleNode *Parser::parseModule(std::string_view filePath) {
         topLevelItems.push_back(
             {ModuleNode::TopLevelItem::Kind::Statement, {}, ns});
       } else if (currentToken().type == TokenType::USING_KW) {
-        std::string doc = consumeModuleComments(topLevelItems);
+        std::string doc =
+            consumeModuleComments(topLevelItems, &moduleDoc);
         auto u = parseUsing();
         if (!doc.empty()) {
           u->docString = astCtx.copyString(doc);
@@ -597,10 +622,16 @@ ModuleNode *Parser::parseModule(std::string_view filePath) {
           advance();
           continue;
         }
-        std::string doc = consumeModuleComments(topLevelItems);
+        std::string doc =
+            consumeModuleComments(topLevelItems, &moduleDoc);
         auto stmt = parseStatement();
         if (stmt) {
-          if (!doc.empty() && stmt->docString.empty()) {
+          /* A doc that is only the trailing gap to the statement (the
+           * directive's line terminator) is not comment content. */
+          std::string docTrimmed = doc;
+          while (!docTrimmed.empty() && docTrimmed.back() == '\n')
+            docTrimmed.pop_back();
+          if (!docTrimmed.empty() && stmt->docString.empty()) {
             stmt->docString = astCtx.copyString(doc);
           }
           statements.push_back(stmt);
@@ -613,8 +644,12 @@ ModuleNode *Parser::parseModule(std::string_view filePath) {
     }
   }
 
-  std::string eofDoc = consumeModuleComments(topLevelItems);
-  if (!eofDoc.empty()) {
+  std::string eofDoc =
+      consumeModuleComments(topLevelItems, &moduleDoc);
+  std::string eofDocTrimmed = eofDoc;
+  while (!eofDocTrimmed.empty() && eofDocTrimmed.back() == '\n')
+    eofDocTrimmed.pop_back();
+  if (!eofDocTrimmed.empty()) {
     if (!statements.empty()) {
       ASTNode *lastStmt = statements.back();
       std::string combined;
@@ -1700,12 +1735,16 @@ IfNode *Parser::parseIfStatement() {
   return node;
 }
 
-ForNode *Parser::parseForStatement() {
+StmtNode *Parser::parseForStatement() {
   int line = currentToken().line;
   int col = currentToken().column;
   advance();
 
   expect(TokenType::LPAREN, "Expected '(' after 'for'");
+
+  if (isForInHeader()) {
+    return parseForInStatement(line, col);
+  }
 
   ASTNode *initStmt = nullptr;
   if (currentToken().type != TokenType::SEMICOLON) {
@@ -1741,6 +1780,102 @@ ForNode *Parser::parseForStatement() {
 
   int len = (body->column + body->length) - col;
   auto node = astCtx.create<ForNode>(initStmt, cond, inc, body, line, col, len);
+  node->endLine = body->endLine;
+  return node;
+}
+
+/* Lookahead over the 'for (...)' header: this is a Dart-style for-in loop
+ * ('for (var x in e)', 'for (final& x in e)', 'for (T x in e)') when an
+ * identifier is followed by the contextual keyword 'in' before any ';', '='
+ * or '(' appears. 'in' is not a reserved word, so it stays an IDENTIFIER and
+ * is only recognized here. No valid C-style for can contain the adjacent
+ * pair 'name in' before ';'/'='/(' — 'in' is not an operator — so the scan
+ * never misclassifies a classic for loop. */
+bool Parser::isForInHeader() {
+  size_t i = 0;
+  while (true) {
+    TokenType t = peekToken(i).type;
+    if (t == TokenType::EOF_TOK || t == TokenType::SEMICOLON ||
+        t == TokenType::ASSIGN || t == TokenType::LPAREN ||
+        t == TokenType::RPAREN) {
+      return false;
+    }
+    if (t == TokenType::IDENTIFIER) {
+      TokenType next = peekToken(i + 1).type;
+      if (next == TokenType::IDENTIFIER && peekToken(i + 1).value == "in") {
+        return true;
+      }
+    }
+    i++;
+  }
+}
+
+ForInNode *Parser::parseForInStatement(int line, int col) {
+  bool isFinalDecl = false;
+  bool isRefBinding = false;
+  bool isImplicitlyTyped = false;
+  const Type *nodeType = nullptr;
+  std::string_view rawTypeStr;
+
+  if (match(TokenType::VAR_KW)) {
+    isImplicitlyTyped = true;
+    nodeType = astCtx.AutoTy;
+    rawTypeStr = "var";
+  } else if (match(TokenType::FINAL_KW)) {
+    isFinalDecl = true;
+    isImplicitlyTyped = true;
+    nodeType = astCtx.AutoTy;
+    rawTypeStr = "final";
+  }
+
+  if (isImplicitlyTyped) {
+    /* 'var& x' / 'final& x': bind a reference to the element (no copy);
+     * 'final&' also binds a const reference. Sema fixes the type up to
+     * Reference(T) / Reference(const T) from the iterator's element type. */
+    if (currentToken().type == TokenType::AMPERSAND) {
+      isRefBinding = true;
+      advance();
+      rawTypeStr = astCtx.copyString(std::string(rawTypeStr) + "&");
+    }
+  } else {
+    const char *typeStart = currentToken().value.data();
+    nodeType = parseType();
+    const char *typeEnd =
+        tokens[cursor - 1].value.data() + tokens[cursor - 1].value.length();
+    rawTypeStr = std::string_view(typeStart, typeEnd - typeStart);
+  }
+
+  int idCol = currentToken().column;
+  std::string_view id = currentToken().value;
+  int idLen = (int)id.length();
+  expect(TokenType::IDENTIFIER,
+         "Expected an identifier for the for-in loop variable");
+
+  if (!(currentToken().type == TokenType::IDENTIFIER &&
+        currentToken().value == "in")) {
+    reportError(currentToken().line, currentToken().column,
+                (int)currentToken().value.length(),
+                "Expected 'in' after the for-in loop variable");
+    throw ParseException();
+  }
+  advance();
+
+  auto iterable = parseExpression();
+  expect(TokenType::RPAREN, "Expected ')' after the for-in iterable");
+
+  auto body = parseStatementAsBlock();
+
+  auto varDecl =
+      astCtx.create<VarDeclNode>(nodeType, id, nullptr, line, idCol, idLen);
+  varDecl->fqName = astCtx.copyString(getFQName(id));
+  varDecl->rawTypeStr = rawTypeStr;
+  varDecl->isFinal = isFinalDecl;
+  varDecl->identifierColumn = idCol;
+  varDecl->identifierLength = idLen;
+
+  int len = (body->column + body->length) - col;
+  auto node = astCtx.create<ForInNode>(varDecl, iterable, body, line, col, len);
+  node->isRefBinding = isRefBinding;
   node->endLine = body->endLine;
   return node;
 }

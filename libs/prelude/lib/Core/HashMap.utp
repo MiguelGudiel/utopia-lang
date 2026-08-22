@@ -1,4 +1,5 @@
 import "../Memory/Core.utp";
+import "Map.utp";
 export "MapLiteralView.utp";
 
 /* Internal: inline bucket with a 1-byte state (0 empty, 1 occupied,
@@ -30,6 +31,101 @@ struct _HashMapBucket<K, V> {
  * std::unordered_map, references into the map are invalidated by inserts
  * that grow the table.
  */
+/*
+ * HashMapKeyIterator<K, V> — the for-in cursor of HashMap<K, V>, scanning
+ * the bucket table for occupied slots (state == 1).
+ */
+class HashMapKeyIterator<K, V> {
+  HashMap<K, V>* _map;
+  int64 _next; /* next bucket index to inspect; past _mask = exhausted */
+
+  HashMapKeyIterator() {
+    this._map = null;
+    this._next = 0;
+  }
+
+  HashMapKeyIterator(HashMap<K, V>* map) {
+    this._map = map;
+    this._next = 0;
+  }
+
+  @inline
+  bool moveNext() {
+    if (this._map == null) return false;
+    while (this._next <= this._map._mask) {
+      if (this._map._bucketPtr(this._next)[0].state == 1) {
+        this._next++;
+        return true;
+      }
+      this._next++;
+    }
+    return false;
+  }
+
+  /* The current key, valid after a successful moveNext(). */
+  @inline
+  K& current() {
+    return this._map._bucketPtr(this._next - 1)[0].key;
+  }
+}
+
+/* A non-owning view over a HashMap's entries. */
+class HashMapEntryIterator<K, V> {
+  HashMap<K, V>* _map;
+  int64 _next;
+
+  HashMapEntryIterator() {
+    this._map = null;
+    this._next = 0;
+  }
+
+  HashMapEntryIterator(HashMap<K, V>* map) {
+    this._map = map;
+    this._next = 0;
+  }
+
+  @inline
+  bool moveNext() {
+    if (this._map == null) return false;
+    while (this._next <= this._map._mask) {
+      if (this._map._bucketPtr(this._next)[0].state == 1) {
+        this._next++;
+        return true;
+      }
+      this._next++;
+    }
+    return false;
+  }
+
+  /* The current pair, copied from the live bucket. */
+  @inline
+  MapEntry<K, V> current() {
+    return MapEntry<K, V>(this._map._bucketPtr(this._next - 1)[0].key,
+                          this._map._bucketPtr(this._next - 1)[0].value);
+  }
+}
+
+class HashMapEntryView<K, V> {
+  HashMap<K, V>* _map;
+
+  HashMapEntryView() {
+    this._map = null;
+  }
+
+  HashMapEntryView(HashMap<K, V>* map) {
+    this._map = map;
+  }
+
+  @inline
+  HashMapEntryIterator<K, V> iterator() {
+    return HashMapEntryIterator<K, V>(this._map);
+  }
+}
+
+/* The for-in cursor of HashMapEntryView, scanning the bucket table. */
+
+
+
 class HashMap<K, V> {
   RawMemory _buckets; /* _HashMapBucket<K,V>[] */
   int64 _count;       /* live entries */
@@ -335,6 +431,23 @@ class HashMap<K, V> {
       }
     }
     return result;
+  }
+
+  /* for-in support: a zero-cost cursor over the KEYS, in table order
+   * (unspecified order, like Dart's HashMap). Use map.entries() for
+   * key/value pairs. The cursor is a tiny value type (map pointer + bucket
+   * index) with @inline moveNext()/current(); no Iterable hierarchy, no
+   * vtables, no allocation. */
+  @inline
+  HashMapKeyIterator<K, V> iterator() {
+    return HashMapKeyIterator<K, V>(this);
+  }
+
+  /* A lightweight, non-owning view over the map's entries (holds a pointer
+   * to the map — no copy). Iterating yields MapEntry<K, V> values. */
+  @inline
+  HashMapEntryView<K, V> entries() {
+    return HashMapEntryView<K, V>(this);
   }
 }
 

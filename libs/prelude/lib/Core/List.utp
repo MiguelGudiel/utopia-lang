@@ -9,6 +9,47 @@ export "ListLiteralView.utp";
  * on the old), which for types with move constructors (e.g. String) is a
  * pointer steal with no per-element allocation.
  */
+/*
+ * ListIterator<T> — the for-in cursor of List<T>: a tiny value type holding
+ * the element base pointer, the next offset and the length. It is returned
+ * by value; with @inline the iteration is a raw pointer walk. Inserting
+ * into the list while iterating invalidates the cursor (reallocation moves
+ * the elements).
+ */
+class ListIterator<T> {
+  T* _base;
+  usize _offset;
+  usize _length;
+
+  ListIterator() {
+    this._base = null;
+    this._offset = 0;
+    this._length = 0;
+  }
+
+  ListIterator(List<T>* list) {
+    this._base = list._elem(0);
+    this._offset = 0;
+    this._length = list._length;
+  }
+
+  /* Advances to the next element; returns false once the list is
+   * exhausted. */
+  @inline
+  bool moveNext() {
+    if (this._offset >= this._length) return false;
+    this._offset++;
+    return true;
+  }
+
+  /* The current element, valid after a successful moveNext(). */
+  @inline
+  T& current() {
+    return this._base[this._offset - 1];
+  }
+}
+
+
 class List<T> {
   RawMemory _raw;
   usize _length;
@@ -344,4 +385,14 @@ class List<T> {
       _construct<T>(this._elem((j + 1) as usize), key as T&&);
     }
   }
+
+  /* for-in support ('for (var x in list)'): a zero-cost cursor over the raw
+   * element storage, in order. moveNext()/current() are @inline, so the
+   * whole loop compiles to the same machine code as a manual index walk —
+   * no Iterable hierarchy, no vtables, no allocation. */
+  @inline
+  ListIterator<T> iterator() {
+    return ListIterator<T>(this);
+  }
 }
+

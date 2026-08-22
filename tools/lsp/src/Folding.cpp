@@ -64,6 +64,14 @@ public:
     if (n->body)
       dispatch(n->body);
   }
+  void visit(const ForInNode *n) {
+    if (n->loopVar)
+      dispatch(n->loopVar);
+    if (n->iterable)
+      dispatch(n->iterable);
+    if (n->body)
+      dispatch(n->body);
+  }
   void visit(const WhileNode *n) {
     if (n->condition)
       dispatch(n->condition);

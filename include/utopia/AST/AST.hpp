@@ -26,6 +26,7 @@ enum class NodeKind : uint8_t {
   Block,
   If,
   For,
+  ForIn,
   While,
   Switch,
   Case,
@@ -87,6 +88,7 @@ struct StmtNode : public ASTNode {
     case NodeKind::Block:
     case NodeKind::If:
     case NodeKind::For:
+    case NodeKind::ForIn:
     case NodeKind::While:
     case NodeKind::Switch:
     case NodeKind::Break:
@@ -772,6 +774,50 @@ struct ForNode : public StmtNode {
   }
 };
 
+/* Dart-style 'for (var x in iterable)' loop.
+ *
+ * The header variable (loopVar) mirrors a normal declaration:
+ *   'var x'    -> type AutoTy, copies each element into 'x' per iteration
+ *   'final x'  -> type AutoTy, non-rebindable copy
+ *   'var& x'   -> type AutoTy + isRefBinding: binds a reference to the
+ *                 element (no copy); fixed up by Sema to Reference(T)
+ *   'final& x' -> type AutoTy + isRefBinding + isFinal: const reference
+ *   'T x'      -> explicit element type (copies/checks against T)
+ *   'T& x'     -> explicit reference binding
+ *
+ * Iteration is a structural protocol with zero indirection, not an Iterable
+ * hierarchy: '<expr>.iterator()' must return a value whose type provides
+ * 'bool moveNext()' and an element accessor 'current()' (T&). List and Map
+ * are plain records; nothing inherits an Iterable and no vtables exist.
+ *
+ * Sema lowers the loop to plain code:
+ *   T& __range = <expr>;              // no copy; rvalues live in a temp
+ *   var __it = __range.iterator();
+ *   while (__it.moveNext()) {
+ *     <loopVar> = __it.current();
+ *     <body>
+ *   }
+ * The lowered tree is stored in 'desugared' and CodeGen executes it as-is
+ * (the optimizer inlines iterator()/moveNext()/current() into a plain
+ * index loop).
+ */
+struct ForInNode : public StmtNode {
+  VarDeclNode *loopVar;
+  ExprNode *iterable;
+  BlockNode *body;
+  bool isRefBinding = false;
+  mutable ASTNode *desugared = nullptr;
+
+  ForInNode(VarDeclNode *var, ExprNode *iter, BlockNode *b, int l, int c,
+            int len)
+      : StmtNode(NodeKind::ForIn, l, c, len), loopVar(var), iterable(iter),
+        body(b) {}
+
+  static bool classof(const ASTNode *node) {
+    return node->kind == NodeKind::ForIn;
+  }
+};
+
 struct WhileNode : public StmtNode {
   ExprNode *condition;
   BlockNode *body;
@@ -877,6 +923,10 @@ struct ModuleNode : public ASTNode {
      * leading '#'. */
     std::string_view text;
     ASTNode *node = nullptr; /* Statement items */
+    /* Leading comments of an import/export directive. Kept so the ordered
+     * formatter path can print them right before the directive instead of
+     * hoisting them to the top of the module. */
+    std::string_view doc;
   };
   llvm::ArrayRef<TopLevelItem> topLevelItems;
 

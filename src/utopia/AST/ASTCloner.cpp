@@ -305,6 +305,19 @@ ASTNode *ASTCloner::visit(const ForNode *n) {
   return node;
 }
 
+ASTNode *ASTCloner::visit(const ForInNode *n) {
+  auto *node = ctx.create<ForInNode>(
+      static_cast<VarDeclNode *>(dispatch(n->loopVar)),
+      static_cast<ExprNode *>(dispatch(n->iterable)),
+      static_cast<BlockNode *>(dispatch(n->body)), n->line, n->column,
+      n->length);
+  node->isRefBinding = n->isRefBinding;
+  node->endLine = n->endLine;
+  /* 'desugared' is rebuilt from scratch when the clone is type-checked (the
+   * cloner only runs on templates, whose bodies are not checked yet). */
+  return node;
+}
+
 ASTNode *ASTCloner::visit(const WhileNode *n) {
   auto *node =
       ctx.create<WhileNode>(static_cast<ExprNode *>(dispatch(n->condition)),

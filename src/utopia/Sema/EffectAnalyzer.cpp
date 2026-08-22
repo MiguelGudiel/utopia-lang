@@ -86,6 +86,18 @@ void EffectAnalyzer::visit(const ForNode *n) {
   dispatch(n->body);
 }
 
+void EffectAnalyzer::visit(const ForInNode *n) {
+  /* The lowered while loop (see TypeCheckPass) is a normal loop for the
+   * purpose of effect analysis. */
+  potentiallyInfinite = true;
+  if (n->desugared) {
+    dispatch(n->desugared);
+    return;
+  }
+  dispatch(n->iterable);
+  dispatch(n->body);
+}
+
 void EffectAnalyzer::visit(const WhileNode *n) {
   potentiallyInfinite = true;
   dispatch(n->condition);

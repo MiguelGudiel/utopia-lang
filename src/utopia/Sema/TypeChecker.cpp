@@ -8,6 +8,13 @@
 #include <limits>
 #include <string>
 
+namespace {
+/* Counter for the hidden temporaries of desugared for-in loops
+ * ('__forin_range_N$'), keeping nested loops' names unique across every
+ * pipeline run (the driver may re-run Sema). */
+int forInTempCounter = 0;
+}
+
 namespace utopia {
 
 namespace {
@@ -215,6 +222,10 @@ static bool statementMayUnwind(const ASTNode *node) {
   case NodeKind::For: {
     const auto *forStmt = static_cast<const ForNode *>(node);
     return statementMayUnwind(forStmt->body);
+  }
+  case NodeKind::ForIn: {
+    const auto *forInStmt = static_cast<const ForInNode *>(node);
+    return statementMayUnwind(forInStmt->body);
   }
   case NodeKind::While: {
     const auto *whileStmt = static_cast<const WhileNode *>(node);
@@ -2290,15 +2301,294 @@ SemaResult TypeCheckPass::visit(const ForNode *node) {
   return ctx->astCtx.VoidTy;
 }
 
+/* Dart-style 'for (var x in expr)' loop.
+ *
+ * Two lowerings are produced, both executed as plain code with no vtables,
+ * no Iterable hierarchy and no allocation:
+ *
+ *   - Record (or pointer/reference-to-record) iterables follow the
+ *     structural protocol 'expr.iterator() -> { bool moveNext(); T&
+ *     current(); }':
+ *         T& __range = expr;                 // no copy; an rvalue is
+ *                                            // materialized in a stack
+ *                                            // temp for the loop's life
+ *         var __it = __range.iterator();
+ *         while (__it.moveNext()) {
+ *           <loopVar> = __it.current();
+ *           <body>
+ *         }
+ *     The range binding keeps iterators pointing into an rvalue alive
+ *     (C++ lifetime-extension semantics), so 'for (var x in getList())'
+ *     is safe. @inline'd iterators collapse to an index loop in LLVM.
+ *
+ *   - Array iterables ('T[N]', including '[...]' literals) lower to a
+ *     plain index loop over the array itself:
+ *         for (usize i = 0; i < N; i++) {
+ *           <loopVar> = <expr>[i];
+ *           <body>
+ *         }
+ *     The array is evaluated once (it is the subscript base), and element
+ *     access is a raw GEP — the maximum-zero-cost path.
+ *
+ * The header variable semantics follow the declaration form:
+ *   'var x'    copy of the element each iteration (rebindable, Dart-like)
+ *   'final x'  non-rebindable copy
+ *   'var& x'   binds a reference to the element (no copy)
+ *   'final& x' binds a const reference to the element
+ *   'T x'      explicit element type (cast-checked each iteration)
+ */
+SemaResult TypeCheckPass::visit(const ForInNode *node) {
+  ScopeGuard guard(*ctx, ScopeKind::ControlFlowInit);
+  auto &ac = ctx->astCtx;
+
+  const int line = node->line;
+  const int col = node->column;
+  const int len = node->length;
+
+  auto iterableRes = dispatch(node->iterable);
+  if (!iterableRes)
+    return std::unexpected(iterableRes.error());
+
+  const Type *iterableTy = (*iterableRes)->getUnqualifiedType();
+
+  /* Fixed-size arrays: index loop, no iterator protocol. */
+  if (iterableTy->getKind() == TypeKind::Array) {
+    return lowerForInArray(node, iterableTy, line, col, len);
+  }
+
+  if (!llvm::isa<RecordType>(iterableTy)) {
+    return ctx->reportError(
+        line, col, len,
+        "Cannot iterate a value of type '" + iterableTy->toString() +
+            "': for-in requires a record type with an 'iterator()' method "
+            "(List, Map, String views, or a user type providing the "
+            "iterator()/moveNext()/current() protocol), or a fixed-size "
+            "array.");
+  }
+
+  /* The iterable is evaluated exactly once, as the initializer of the
+   * hidden range binding below (Sema already checked it; CodeGen lowers the
+   * binding into a reference — direct bind for lvalues, stack temporary for
+   * rvalues — so no copy happens either way). */
+  std::string rangeName = "__forin_range_" + std::to_string(forInTempCounter++);
+  std::string itName = "__forin_it_" + std::to_string(forInTempCounter++);
+  std::string_view rangeNameSv = ac.copyString(rangeName);
+  std::string_view itNameSv = ac.copyString(itName);
+
+  auto *rangeVar = ac.create<VarDeclNode>(
+      ac.getReferenceType(iterableTy), rangeNameSv, node->iterable, line, col,
+      len);
+  rangeVar->declFilePath = ctx->currentFile;
+  rangeVar->isInitialized = true;
+  /* Not dispatched: the initializer is already fully checked, and skipping
+   * the visit avoids re-checking it (and the spurious rvalue-binding
+   * warning for 'for (var x in getList())'). CodeGen executes the decl as a
+   * plain reference binding. */
+  ctx->addDecl(rangeNameSv, rangeVar);
+
+  /* var __it = __range.iterator(); */
+  auto *rangeRef = ac.create<VariableNode>(rangeNameSv, line, col, 1);
+  auto *iteratorMa = ac.create<MemberAccessNode>(
+      rangeRef, ac.copyString("iterator"), line, col, len);
+  auto *iteratorCall =
+      ac.create<FunctionCallNode>(iteratorMa, llvm::ArrayRef<ExprNode *>(), llvm::ArrayRef<std::string_view>(), line, col, len);
+  auto *itVar =
+      ac.create<VarDeclNode>(ac.AutoTy, itNameSv, iteratorCall, line, col, len);
+  itVar->declFilePath = ctx->currentFile;
+  itVar->isInitialized = true;
+  auto itRes = dispatch(itVar);
+  if (!itRes)
+    return std::unexpected(itRes.error());
+
+  /* Probe 'it.current()' on a throwaway node to learn the element type;
+   * the real call below is dispatched exactly once, inside the loop
+   * variable declaration. */
+  auto *probeItRef = ac.create<VariableNode>(itNameSv, line, col, 1);
+  auto *probeCurrentMa = ac.create<MemberAccessNode>(
+      probeItRef, ac.copyString("current"), line, col, len);
+  auto *probeCurrentCall =
+      ac.create<FunctionCallNode>(probeCurrentMa, llvm::ArrayRef<ExprNode *>(), llvm::ArrayRef<std::string_view>(), line, col, len);
+  auto curRes = dispatch(probeCurrentCall);
+  if (!curRes)
+    return std::unexpected(curRes.error());
+
+  const Type *curTy = *curRes;
+  if (curTy->isVoid()) {
+    return ctx->reportError(line, col, len,
+                            "The iterator's 'current()' method must return "
+                            "an element type, not 'void'.");
+  }
+
+  const Type *elementTy = curTy;
+  if (elementTy->isReferenceType()) {
+    elementTy = static_cast<const ReferenceType *>(elementTy)->getPointeeType();
+  }
+
+  /* Loop variable declaration: 'var x' keeps AutoTy (copy semantics);
+   * 'var& x'/'final& x' bind a (const) reference to the element. */
+  auto *loopVar = node->loopVar;
+  if (node->isRefBinding) {
+    const Type *boundTy =
+        loopVar->isFinal ? ac.getConstType(elementTy) : elementTy;
+    loopVar->type = ac.getReferenceType(boundTy);
+    loopVar->isInitialized = true;
+  }
+
+  auto *itRef = ac.create<VariableNode>(itNameSv, line, col, 1);
+  auto *currentMa = ac.create<MemberAccessNode>(
+      itRef, ac.copyString("current"), line, col, len);
+  auto *currentCall =
+      ac.create<FunctionCallNode>(currentMa, llvm::ArrayRef<ExprNode *>(), llvm::ArrayRef<std::string_view>(), line, col, len);
+  loopVar->initializer = currentCall;
+  loopVar->isInitialized = true;
+
+  /* bool moveNext() loop condition (checked on a node that is then stored
+   * in the desugared tree; it is dispatched only once here — CodeGen runs
+   * a separate visitor). */
+  auto *mnItRef = ac.create<VariableNode>(itNameSv, line, col, 1);
+  auto *mnMa = ac.create<MemberAccessNode>(
+      mnItRef, ac.copyString("moveNext"), line, col, len);
+  auto *mnCall = ac.create<FunctionCallNode>(mnMa, llvm::ArrayRef<ExprNode *>(), llvm::ArrayRef<std::string_view>(), line, col, len);
+  auto mnRes = dispatch(mnCall);
+  if (!mnRes)
+    return std::unexpected(mnRes.error());
+  if (!canImplicitlyCast(*mnRes, ctx->astCtx.BoolTy)) {
+    return ctx->reportError(
+        line, col, len,
+        "The iterator's 'moveNext()' method must return a boolean type.");
+  }
+
+  /* Body scope: the loop variable lives here, visible to the body. */
+  ScopeGuard bodyGuard(*ctx);
+  LoopGuard loopGuard(*ctx);
+  auto varRes = dispatch(loopVar);
+  if (!varRes)
+    return std::unexpected(varRes.error());
+  auto bodyRes = dispatch(node->body);
+  if (!bodyRes)
+    return bodyRes;
+
+  /* Assemble the desugared tree: { T& range = expr; var it = ...;
+   * while (it.moveNext()) { loopVar = it.current(); body } } */
+  std::vector<ASTNode *> bodyStmts;
+  bodyStmts.push_back(loopVar);
+  for (auto *s : node->body->statements)
+    bodyStmts.push_back(s);
+  auto *whileBody = ac.create<BlockNode>(line, col);
+  whileBody->statements = ac.copyArray<ASTNode *>(bodyStmts);
+  auto *whileNode = ac.create<WhileNode>(mnCall, whileBody, line, col, len);
+  whileNode->endLine = node->endLine;
+
+  std::vector<ASTNode *> outerStmts;
+  outerStmts.push_back(rangeVar);
+  outerStmts.push_back(itVar);
+  outerStmts.push_back(whileNode);
+  auto *outerBlock = ac.create<BlockNode>(line, col);
+  outerBlock->statements = ac.copyArray<ASTNode *>(outerStmts);
+  outerBlock->endLine = node->endLine;
+
+  const_cast<ForInNode *>(node)->desugared = outerBlock;
+  return ctx->astCtx.VoidTy;
+}
+
+SemaResult TypeCheckPass::lowerForInArray(const ForInNode *node,
+                                          const Type *arrayTy, int line,
+                                          int col, int len) {
+  auto &ac = ctx->astCtx;
+  const auto *arrTy = static_cast<const ArrayType *>(arrayTy);
+  const Type *elemTy = arrTy->getElementType();
+  const uint64_t arrSize = arrTy->getSize();
+
+  if (elemTy->isVoid()) {
+    return ctx->reportError(line, col, len,
+                            "Cannot iterate an untyped (empty) array "
+                            "literal: the element type is unknown.");
+  }
+
+  /* Hidden counter: 'var __i = 0; __i < N; __i++'. */
+  std::string idxName = "__forin_idx_" + std::to_string(forInTempCounter++);
+  std::string_view idxNameSv = ac.copyString(idxName);
+
+  auto *zeroNode = ac.create<NumberNode>("0", false, line, col, 1);
+  auto *idxVar =
+      ac.create<VarDeclNode>(ac.USizeTy, idxNameSv, zeroNode, line, col, len);
+  idxVar->declFilePath = ctx->currentFile;
+  idxVar->isInitialized = true;
+  auto idxRes = dispatch(idxVar);
+  if (!idxRes)
+    return std::unexpected(idxRes.error());
+
+  auto *idxRef = ac.create<VariableNode>(idxNameSv, line, col, 1);
+  std::string sizeStr = std::to_string(arrSize);
+  auto *sizeNode = ac.create<NumberNode>(ac.copyString(sizeStr), false, line,
+                                         col, (int)sizeStr.length());
+  auto *condNode = ac.create<BinaryOpNode>("<", idxRef, sizeNode, line, col);
+
+  auto *incRef = ac.create<VariableNode>(idxNameSv, line, col, 1);
+  auto *incNode =
+      ac.create<UnaryOpNode>("++", incRef, line, col, /*postfix=*/true);
+
+  /* <loopVar> = <expr>[__i]; — the original iterable expression is the
+   * subscript base and is evaluated once. */
+  auto *subIdx = ac.create<VariableNode>(idxNameSv, line, col, 1);
+  auto *subscript = ac.create<ArraySubscriptNode>(node->iterable, subIdx, line,
+                                                  col, len);
+
+  auto *loopVar = node->loopVar;
+  if (node->isRefBinding) {
+    const Type *boundTy =
+        loopVar->isFinal ? ac.getConstType(elemTy) : elemTy;
+    loopVar->type = ac.getReferenceType(boundTy);
+    loopVar->isInitialized = true;
+  }
+  loopVar->initializer = subscript;
+  loopVar->isInitialized = true;
+
+  /* Type-check the synthesized pieces in order (the desugared tree is only
+   * executed by CodeGen afterwards). */
+  auto condRes = dispatch(condNode);
+  if (!condRes)
+    return std::unexpected(condRes.error());
+  if (!canImplicitlyCast(*condRes, ctx->astCtx.BoolTy)) {
+    return ctx->reportError(line, col, len,
+                            "Array for-in bound must be a boolean type.");
+  }
+  auto incRes = dispatch(incNode);
+  if (!incRes)
+    return std::unexpected(incRes.error());
+
+  ScopeGuard bodyGuard(*ctx);
+  LoopGuard loopGuard(*ctx);
+  auto varRes = dispatch(loopVar);
+  if (!varRes)
+    return std::unexpected(varRes.error());
+  auto bodyRes = dispatch(node->body);
+  if (!bodyRes)
+    return bodyRes;
+
+  std::vector<ASTNode *> bodyStmts;
+  bodyStmts.push_back(loopVar);
+  for (auto *s : node->body->statements)
+    bodyStmts.push_back(s);
+  auto *bodyBlock = ac.create<BlockNode>(line, col);
+  bodyBlock->statements = ac.copyArray<ASTNode *>(bodyStmts);
+
+  auto *forNode = ac.create<ForNode>(idxVar, condNode, incNode, bodyBlock,
+                                     line, col, len);
+  forNode->endLine = node->endLine;
+  const_cast<ForInNode *>(node)->desugared = forNode;
+  return ctx->astCtx.VoidTy;
+}
+
 SemaResult TypeCheckPass::visit(const WhileNode *node) {
   auto condRes = dispatch(node->condition);
   if (!condRes)
     return std::unexpected(condRes.error());
 
   if (!canImplicitlyCast(*condRes, ctx->astCtx.BoolTy)) {
-    return ctx->reportError(
-        node->condition->line, node->condition->column, node->condition->length,
-        "While loop condition must evaluate to a boolean type.");
+    return ctx->reportError(node->condition->line, node->condition->column,
+                            node->condition->length,
+                            "While loop condition must evaluate to a boolean type.");
   }
 
   LoopGuard loopGuard(*ctx);
@@ -2308,7 +2598,6 @@ SemaResult TypeCheckPass::visit(const WhileNode *node) {
 
   return ctx->astCtx.VoidTy;
 }
-
 /* C++-style exception handling. The try body is type-checked like any
  * other block; each catch clause introduces a scope holding the optional
  * binding variable, typed with the caught type. Catch matching happens at
@@ -4746,6 +5035,10 @@ static bool hasEscapingBreak(const ASTNode *node, int breakableDepth = 0) {
   }
   case NodeKind::For: {
     const auto *fNode = static_cast<const ForNode *>(node);
+    return hasEscapingBreak(fNode->body, breakableDepth + 1);
+  }
+  case NodeKind::ForIn: {
+    const auto *fNode = static_cast<const ForInNode *>(node);
     return hasEscapingBreak(fNode->body, breakableDepth + 1);
   }
   case NodeKind::Switch: {
@@ -9397,6 +9690,12 @@ struct LambdaCaptureChecker {
       walk(f->initStatement);
       walk(f->condition);
       walk(f->increment);
+      walk(f->body);
+      break;
+    }
+    case NodeKind::ForIn: {
+      auto *f = static_cast<const ForInNode *>(node);
+      walk(f->iterable);
       walk(f->body);
       break;
     }

@@ -181,6 +181,13 @@ void collectDecls(const ASTNode *node, std::vector<const DeclNode *> &decls,
     collectDecls(f->body, decls, usings);
     break;
   }
+  case NodeKind::ForIn: {
+    auto *f = static_cast<const ForInNode *>(node);
+    collectDecls(f->loopVar, decls, usings);
+    collectDecls(f->iterable, decls, usings);
+    collectDecls(f->body, decls, usings);
+    break;
+  }
   case NodeKind::While: {
     auto *w = static_cast<const WhileNode *>(node);
     collectDecls(w->condition, decls, usings);

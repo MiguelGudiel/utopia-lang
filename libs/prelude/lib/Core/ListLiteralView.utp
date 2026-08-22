@@ -1,4 +1,53 @@
+/*
+ * ListLiteralView<T>: a non-owning view over the raw storage of an array
+ * literal ('[1, 2, 3]'). The literal lives in static read-only storage (or
+ * a function-entry temporary), so the view is just a data pointer + length
+ * and costs nothing to build or copy.
+ *
+ * It also implements the for-in protocol (iterator()/moveNext()/current()),
+ * so 'for (var x in [1, 2, 3])' and 'for (var& x in someView)' work with
+ * zero indirection: iteration is a raw pointer walk over the literal.
+ */
+/*
+ * ListLiteralViewIterator<T> — the for-in cursor of ListLiteralView.
+ */
+class ListLiteralViewIterator<T> {
+  const T* _base;
+  usize _offset;
+  usize _length;
+
+  ListLiteralViewIterator() {
+    this._base = null;
+    this._offset = 0;
+    this._length = 0;
+  }
+
+  ListLiteralViewIterator(ListLiteralView<T>* view) {
+    this._base = view.data;
+    this._offset = 0;
+    this._length = view.length;
+  }
+
+  @inline
+  bool moveNext() {
+    if (this._offset >= this._length) return false;
+    this._offset++;
+    return true;
+  }
+
+  @inline
+  const T& current() {
+    return this._base[this._offset - 1];
+  }
+}
+
 struct ListLiteralView<T> {
   const T* data;
   usize length;
+
+  @inline
+  ListLiteralViewIterator<T> iterator() {
+    return ListLiteralViewIterator<T>(this);
+  }
 }
+

@@ -2346,6 +2346,18 @@ llvm::Value *CodeGen::visit(const ForNode *node) {
   return nullptr;
 }
 
+/* Dart-style for-in: Sema lowered the loop to plain code (a reference
+ * binding for the iterable + an iterator()/moveNext()/current() while loop,
+ * or a plain index loop over fixed-size arrays). The lowered tree is fully
+ * type-checked, so code generation is a plain dispatch — iterator calls are
+ * regular, statically-resolved, @inline-able calls; there is no Iterable
+ * hierarchy, no vtable, and no allocation. */
+llvm::Value *CodeGen::visit(const ForInNode *node) {
+  if (!node->desugared)
+    return nullptr;
+  return dispatch(node->desugared);
+}
+
 llvm::Value *CodeGen::visit(const WhileNode *node) {
   llvm::Function *theFunction = builder.GetInsertBlock()->getParent();
   llvm::BasicBlock *condBB =

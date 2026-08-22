@@ -1,5 +1,6 @@
 import "../Memory/Core.utp";
 import "List.utp";
+import "Map.utp";
 export "MapLiteralView.utp";
 
 /* Internal: BST node with parent pointers for bottom-up splaying. */
@@ -28,6 +29,137 @@ struct _SplayNode<K, V> {
  * Unlike the hash maps, no operator== is required: equality is derived from
  * the ordering.
  */
+/*
+ * SplayTreeKeyIterator<K, V> — the for-in cursor of SplayTreeMap<K, V>,
+ * walking the tree in-order via the nodes' parent pointers.
+ */
+class SplayTreeKeyIterator<K, V> {
+  SplayTreeMap<K, V>* _map;
+  _SplayNode<K, V>* _prev; /* node current() reports */
+  _SplayNode<K, V>* _next; /* next node to visit; null = end */
+
+  SplayTreeKeyIterator() {
+    this._map = null;
+    this._prev = null;
+    this._next = null;
+  }
+
+  SplayTreeKeyIterator(SplayTreeMap<K, V>* map) {
+    this._map = map;
+    this._prev = null;
+    this._next = map._root;
+    while (this._next != null && this._next[0].left != null) {
+      this._next = this._next[0].left;
+    }
+  }
+
+  /* In-order successor of 'n' (null when 'n' is the last node). */
+  @inline
+  _SplayNode<K, V>* _successor(_SplayNode<K, V>* n) {
+    if (n[0].right != null) {
+      _SplayNode<K, V>* m = n[0].right;
+      while (m[0].left != null) {
+        m = m[0].left;
+      }
+      return m;
+    }
+    _SplayNode<K, V>* p = n[0].parent;
+    while (p != null && n == p[0].right) {
+      n = p;
+      p = p[0].parent;
+    }
+    return p;
+  }
+
+  @inline
+  bool moveNext() {
+    if (this._next == null) return false;
+    this._prev = this._next;
+    this._next = this._successor(this._next);
+    return true;
+  }
+
+  /* The current key, valid after a successful moveNext(). */
+  @inline
+  K& current() {
+    return this._prev[0].key;
+  }
+}
+
+/* A non-owning view over a SplayTreeMap's entries. */
+class SplayTreeEntryIterator<K, V> {
+  SplayTreeMap<K, V>* _map;
+  _SplayNode<K, V>* _prev;
+  _SplayNode<K, V>* _next;
+
+  SplayTreeEntryIterator() {
+    this._map = null;
+    this._prev = null;
+    this._next = null;
+  }
+
+  SplayTreeEntryIterator(SplayTreeMap<K, V>* map) {
+    this._map = map;
+    this._prev = null;
+    this._next = map._root;
+    while (this._next != null && this._next[0].left != null) {
+      this._next = this._next[0].left;
+    }
+  }
+
+  @inline
+  _SplayNode<K, V>* _successor(_SplayNode<K, V>* n) {
+    if (n[0].right != null) {
+      _SplayNode<K, V>* m = n[0].right;
+      while (m[0].left != null) {
+        m = m[0].left;
+      }
+      return m;
+    }
+    _SplayNode<K, V>* p = n[0].parent;
+    while (p != null && n == p[0].right) {
+      n = p;
+      p = p[0].parent;
+    }
+    return p;
+  }
+
+  @inline
+  bool moveNext() {
+    if (this._next == null) return false;
+    this._prev = this._next;
+    this._next = this._successor(this._next);
+    return true;
+  }
+
+  /* The current pair, copied from the live node. */
+  @inline
+  MapEntry<K, V> current() {
+    return MapEntry<K, V>(this._prev[0].key, this._prev[0].value);
+  }
+}
+
+class SplayTreeEntryView<K, V> {
+  SplayTreeMap<K, V>* _map;
+
+  SplayTreeEntryView() {
+    this._map = null;
+  }
+
+  SplayTreeEntryView(SplayTreeMap<K, V>* map) {
+    this._map = map;
+  }
+
+  @inline
+  SplayTreeEntryIterator<K, V> iterator() {
+    return SplayTreeEntryIterator<K, V>(this._map);
+  }
+}
+
+/* The for-in cursor of SplayTreeEntryView, walking the tree in-order. */
+
+
+
 class SplayTreeMap<K, V> {
   _SplayNode<K, V>* _root;
   int64 _count;
@@ -435,6 +567,25 @@ class SplayTreeMap<K, V> {
       x = x[0].right;
     }
     return result;
+  }
+
+  /* for-in support: a zero-cost cursor over the KEYS, in ascending order.
+   * The cursor walks the tree with the nodes' parent pointers (no stack, no
+   * allocation); moveNext()/current() are @inline, so the loop lowers to a
+   * plain tree walk — no Iterable hierarchy, no vtables. Use map.entries()
+   * for key/value pairs. Mutating the tree while iterating invalidates the
+   * cursor. */
+  @inline
+  SplayTreeKeyIterator<K, V> iterator() {
+    return SplayTreeKeyIterator<K, V>(this);
+  }
+
+  /* A lightweight, non-owning view over the map's entries (holds a pointer
+   * to the map — no copy). Iterating yields MapEntry<K, V> values in
+   * ascending key order. */
+  @inline
+  SplayTreeEntryView<K, V> entries() {
+    return SplayTreeEntryView<K, V>(this);
   }
 }
 

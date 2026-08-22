@@ -1,0 +1,9 @@
+project:
+  name: "for_in"
+
+build:
+  target: executable
+  source_dirs:
+    - src/
+  sources:
+    - "main.utp"

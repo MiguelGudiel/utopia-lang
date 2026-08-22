@@ -170,6 +170,7 @@ public:
   void visit(const BlockNode *n);
   void visit(const IfNode *n);
   void visit(const ForNode *n);
+  void visit(const ForInNode *n);
   void visit(const WhileNode *n);
   void visit(const SwitchNode *n);
   void visit(const CaseNode *n);

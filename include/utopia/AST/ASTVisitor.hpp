@@ -105,6 +105,9 @@ public:
     case NodeKind::For:
       return static_cast<Derived *>(this)->visit(
           static_cast<const ForNode *>(node));
+    case NodeKind::ForIn:
+      return static_cast<Derived *>(this)->visit(
+          static_cast<const ForInNode *>(node));
     case NodeKind::While:
       return static_cast<Derived *>(this)->visit(
           static_cast<const WhileNode *>(node));

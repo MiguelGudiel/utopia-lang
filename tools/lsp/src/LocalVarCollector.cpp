@@ -74,6 +74,15 @@ void LocalVarCollector::visit(const ForNode *n) {
     dispatch(n->body);
 }
 
+void LocalVarCollector::visit(const ForInNode *n) {
+  if (n->loopVar && n->loopVar->line <= targetLine)
+    dispatch(n->loopVar);
+  if (n->iterable)
+    dispatch(n->iterable);
+  if (n->body && n->body->line <= targetLine)
+    dispatch(n->body);
+}
+
 void LocalVarCollector::visit(const WhileNode *n) {
   if (n->condition)
     dispatch(n->condition);

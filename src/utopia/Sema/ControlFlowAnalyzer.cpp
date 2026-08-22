@@ -126,6 +126,22 @@ void ControlFlowPass::visit(const ForNode *node) {
   isReachable = wasReachable;
 }
 
+/* For-in runs after TypeCheckPass, which lowered the loop into a plain
+ * while loop whose loop variable has an initializer — so the definite
+ * initialization analysis runs on the lowered form. */
+void ControlFlowPass::visit(const ForInNode *node) {
+  if (node->desugared) {
+    dispatch(node->desugared);
+    return;
+  }
+  bool wasReachable = isReachable;
+  dispatch(node->iterable);
+  auto initialStates = initStates;
+  dispatch(node->body);
+  initStates = initialStates;
+  isReachable = wasReachable;
+}
+
 void ControlFlowPass::visit(const WhileNode *node) {
   bool wasReachable = isReachable;
   dispatch(node->condition);

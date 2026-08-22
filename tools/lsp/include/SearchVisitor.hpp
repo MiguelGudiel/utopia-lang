@@ -144,6 +144,16 @@ public:
     return isHit(n) ? n : nullptr;
   }
 
+  const ASTNode *visit(const ForInNode *n) {
+    if (auto found = find(n->loopVar))
+      return found;
+    if (auto found = find(n->iterable))
+      return found;
+    if (auto found = find(n->body))
+      return found;
+    return isHit(n) ? n : nullptr;
+  }
+
   const ASTNode *visit(const WhileNode *n) {
     if (auto found = find(n->condition))
       return found;

@@ -82,6 +82,7 @@ public:
   void visit(const FunctionCallNode *) {}
   void visit(const IfNode *node);
   void visit(const ForNode *node);
+  void visit(const ForInNode *node);
   void visit(const WhileNode *node);
   void visit(const SwitchNode *node);
   void visit(const CaseNode *node) {}
@@ -176,7 +177,10 @@ public:
   SemaResult visit(const FunctionCallNode *node);
   SemaResult visit(const IfNode *node);
   SemaResult visit(const ForNode *node);
+  SemaResult visit(const ForInNode *node);
   SemaResult visit(const WhileNode *node);
+  SemaResult lowerForInArray(const ForInNode *node, const Type *arrayTy,
+                             int line, int col, int len);
   SemaResult visit(const SwitchNode *node);
   SemaResult visit(const CaseNode *node) { return ctx->astCtx.VoidTy; }
   SemaResult visit(const BreakNode *node);
@@ -297,6 +301,7 @@ public:
   /* Memory.destruct(ptr): verifies the argument is a typed pointer so the
    * pointee's destructor can be resolved at codegen. */
   SemaResult checkMemoryDestruct(const FunctionCallNode *node);
+
 };
 
 class ControlFlowPass : public SemaPass,
@@ -317,6 +322,7 @@ public:
   void visit(const BlockNode *node);
   void visit(const IfNode *node);
   void visit(const ForNode *node);
+  void visit(const ForInNode *node);
   void visit(const WhileNode *node);
   void visit(const SwitchNode *node);
   void visit(const CaseNode *node);

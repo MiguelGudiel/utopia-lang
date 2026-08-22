@@ -102,7 +102,8 @@ private:
    * string, so the formatter never moves code across conditional
    * branches. */
   std::string consumeModuleComments(
-      std::vector<ModuleNode::TopLevelItem> &items);
+      std::vector<ModuleNode::TopLevelItem> &items,
+      std::string *preDirectiveDoc = nullptr);
   ExprNode *parseArrayLiteral();
   ExprNode *parseMapLiteral();
   NamespaceDeclNode *parseNamespaceDecl(bool &isFileScoped);
@@ -123,7 +124,9 @@ private:
   BlockNode *parseFunctionBody(const Type *returnType);
   ReturnNode *parseReturn();
   ExprNode *parseExpressionStatement();
-  ForNode *parseForStatement();
+  StmtNode *parseForStatement();
+  ForInNode *parseForInStatement(int line, int col);
+  bool isForInHeader();
   WhileNode *parseWhileStatement();
   TryStmtNode *parseTryStatement();
   ThrowStmtNode *parseThrowStatement();

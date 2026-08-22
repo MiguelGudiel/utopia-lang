@@ -35,6 +35,137 @@ struct _LinkedMapEntry<K, V> {
  * the map are invalidated by inserting elements (until the table stops
  * growing).
  */
+/*
+ * MapKeyIterator<K, V> — the for-in cursor of Map<K, V>, walking the
+ * insertion-order list of entries (index 0 is the list sentinel). It is
+ * returned by value and iterates the keys with no copies.
+ */
+class MapKeyIterator<K, V> {
+  Map<K, V>* _map;
+  int64 _prev; /* index of the entry current() reports */
+  int64 _next; /* index of the next entry to visit; 0 = end (sentinel) */
+
+  MapKeyIterator() {
+    this._map = null;
+    this._prev = 0;
+    this._next = 0;
+  }
+
+  MapKeyIterator(Map<K, V>* map) {
+    this._map = map;
+    this._prev = 0;
+    this._next = map._entryPtr(0)[0].next;
+  }
+
+  @inline
+  bool moveNext() {
+    if (this._next == 0) return false;
+    this._prev = this._next;
+    this._next = this._map._entryPtr(this._next)[0].next;
+    return true;
+  }
+
+  /* The current key, valid after a successful moveNext(). */
+  @inline
+  K& current() {
+    return this._map._entryPtr(this._prev)[0].key;
+  }
+}
+
+/*
+ * MapEntry<K, V> — a key/value pair (Dart's MapEntry). current() of
+ * MapEntryIterator returns it by value, so entries iteration copies each
+ * pair.
+ */
+class MapEntry<K, V> {
+  K key;
+  V value;
+
+  MapEntry() {}
+
+  MapEntry(K key, V value) {
+    this.key = key;
+    this.value = value;
+  }
+
+  MapEntry(const MapEntry<K, V>& other) {
+    this.key = other.key;
+    this.value = other.value;
+  }
+
+  void operator=(const MapEntry<K, V>& other) {
+    this.key = other.key;
+    this.value = other.value;
+  }
+
+  /* The dummy type parameter defers the body check until the operator is
+   * actually called (like List's collection helpers), so MapEntry<K, V>
+   * stays instantiable for V types without operator== (e.g. nested maps). */
+  bool operator==<T2>(const MapEntry<K, V>& other) {
+    return this.key == other.key && this.value == other.value;
+  }
+
+  bool operator!=<T2>(const MapEntry<K, V>& other) {
+    return !(*this == other);
+  }
+}
+
+/* A non-owning view over a Map's entries (holds a pointer to the map; no
+ * copy of the map or its entries). */
+class MapEntryIterator<K, V> {
+  Map<K, V>* _map;
+  int64 _prev;
+  int64 _next;
+
+  MapEntryIterator() {
+    this._map = null;
+    this._prev = 0;
+    this._next = 0;
+  }
+
+  MapEntryIterator(Map<K, V>* map) {
+    this._map = map;
+    this._prev = 0;
+    this._next = map._entryPtr(0)[0].next;
+  }
+
+  @inline
+  bool moveNext() {
+    if (this._next == 0) return false;
+    this._prev = this._next;
+    this._next = this._map._entryPtr(this._next)[0].next;
+    return true;
+  }
+
+  /* The current pair, copied from the live entry. */
+  @inline
+  MapEntry<K, V> current() {
+    return MapEntry<K, V>(this._map._entryPtr(this._prev)[0].key,
+                          this._map._entryPtr(this._prev)[0].value);
+  }
+}
+
+class MapEntryView<K, V> {
+  Map<K, V>* _map;
+
+  MapEntryView() {
+    this._map = null;
+  }
+
+  MapEntryView(Map<K, V>* map) {
+    this._map = map;
+  }
+
+  @inline
+  MapEntryIterator<K, V> iterator() {
+    return MapEntryIterator<K, V>(this._map);
+  }
+}
+
+/* The for-in cursor of MapEntryView, walking the insertion-order list. */
+
+
+
 class Map<K, V> {
   RawMemory _entries; /* _LinkedMapEntry<K,V>[]; index 0 = list sentinel */
   int64 _entryCount;  /* live entries, excluding the sentinel */
@@ -437,6 +568,26 @@ class Map<K, V> {
       e = this._entryPtr(e)[0].next;
     }
     return result;
+  }
+
+  /* for-in support: a zero-cost cursor over the KEYS, in insertion order
+   * (Dart 2 semantics: 'for (var k in map)'). Iterate map.entries() to get
+   * key/value pairs. The cursor is a tiny value type (map pointer + two
+   * entry indices) and moveNext()/current() are @inline, so the whole loop
+   * collapses to a linked-list walk with no Iterable hierarchy, no vtables
+   * and no allocation. Inserting entries that grow the table invalidates
+   * the cursor. */
+  @inline
+  MapKeyIterator<K, V> iterator() {
+    return MapKeyIterator<K, V>(this);
+  }
+
+  /* A lightweight, non-owning view over the map's entries ('for (var e in
+   * map.entries())'). It holds a pointer to the map — no copy. Iterating
+   * yields MapEntry<K, V> values (key/value copies) in insertion order. */
+  @inline
+  MapEntryView<K, V> entries() {
+    return MapEntryView<K, V>(this);
   }
 }
 

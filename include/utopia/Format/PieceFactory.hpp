@@ -92,6 +92,7 @@ public:
   Piece *visit(const BlockNode *node);
   Piece *visit(const IfNode *node);
   Piece *visit(const ForNode *node);
+  Piece *visit(const ForInNode *node);
   Piece *visit(const WhileNode *node);
   Piece *visit(const SwitchNode *node);
   Piece *visit(const CaseNode *node);

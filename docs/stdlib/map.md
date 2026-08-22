@@ -115,3 +115,34 @@ int main() {
   return 0;
 }
 ```
+
+## for-in
+
+All three maps support Dart-style for-in loops through the structural
+iterator protocol — no `Iterable` inheritance, no vtables:
+
+```utp
+for (var k in counters) {            // iterating a map yields its KEYS
+  print("%s = %d\n", k.c_str(), counters[k]);
+}
+for (var e in counters.entries()) {  // key/value pairs (MapEntry<K, V>)
+  print("%s -> %d\n", e.key.c_str(), e.value);
+}
+for (var& k in leaderboard) {        // reference binding: no copies
+  k = ...;
+}
+```
+
+- `Map` iterates in insertion order, `SplayTreeMap` in ascending key order
+  and `HashMap` in table order (unspecified).
+- The cursors (`MapKeyIterator`, `MapEntryIterator`, ...) are tiny value
+  types (map pointer + entry indices) whose `moveNext()`/`current()` are
+  `@inline`: the optimized loop is a plain linked-list walk for `Map`, a
+  bucket scan for `HashMap` and a parent-pointer tree walk for
+  `SplayTreeMap`.
+- Keys iteration yields `K&` (zero copies). `entries()` yields
+  `MapEntry<K, V>` by value, so each pair is copied; use `map[k]` for
+  zero-copy value access while iterating keys.
+- `map.entries()` returns a non-owning view (a pointer to the map — no
+  copy). Mutating a map while iterating invalidates the cursor.
+```

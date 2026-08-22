@@ -58,6 +58,29 @@ int main() {
 - `ListLiteralView<T>` is a lightweight view (`const T* data; usize length;`) that enables `[1, 2, 3]` initialization without copying the literal twice.
 - Like all records, `List` has a destructor and copy semantics; the compiler enforces proper copy/move construction.
 
+## for-in
+
+`List` (and `ListLiteralView`) support Dart-style for-in loops through the
+structural iterator protocol — no `Iterable` inheritance, no vtables:
+
+```utp
+for (var v in scores) {      // copies each element (Dart semantics)
+  print("%d ", v);
+}
+for (var& v in scores) {     // reference binding: no copy, writes through
+  v = v * 2;
+}
+for (var x in [1, 2, 3]) {   // array literals iterate directly
+  print("%d ", x);
+}
+```
+
+`ListIterator<T>` is a value type holding the element base pointer, an
+offset and the length; `moveNext()`/`current()` are `@inline`, so the
+optimized loop is a raw pointer walk identical to a manual index loop.
+Mutating the list while iterating invalidates the cursor (reallocations
+move the elements).
+
 ## With smart pointers
 
 `List` composes with generic smart pointers:

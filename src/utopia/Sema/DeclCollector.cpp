@@ -320,6 +320,15 @@ void DeclCollectorPass::visit(const ForNode *node) {
   dispatch(node->body);
 }
 
+void DeclCollectorPass::visit(const ForInNode *node) {
+  /* The loop variable is a normal declaration; the iterable expression may
+   * contain declarations (lambdas). The lowered form is built later by
+   * TypeCheckPass, so the original children are walked here. */
+  dispatch(node->loopVar);
+  dispatch(node->iterable);
+  dispatch(node->body);
+}
+
 void DeclCollectorPass::visit(const WhileNode *node) {
   dispatch(node->condition);
   dispatch(node->body);

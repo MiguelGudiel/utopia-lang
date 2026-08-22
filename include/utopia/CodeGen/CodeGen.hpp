@@ -64,6 +64,7 @@ public:
   llvm::Value *visit(const FunctionCallNode *node);
   llvm::Value *visit(const IfNode *node);
   llvm::Value *visit(const ForNode *node);
+  llvm::Value *visit(const ForInNode *node);
   llvm::Value *visit(const WhileNode *node);
   llvm::Value *visit(const SwitchNode *node);
   llvm::Value *visit(const CaseNode *node) { return nullptr; }
