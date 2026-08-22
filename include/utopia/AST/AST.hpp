@@ -239,6 +239,32 @@ struct AnnotationNode : public ASTNode {
 
 struct FunctionDeclNode;
 
+/* Constraint bases for template parameters, mirroring Dart's
+ * 'T extends X' (see TemplateConstraint). */
+enum class TemplateConstraintKind : uint8_t {
+  None,
+  /* Pseudo-types (compile-time only): */
+  Object,          /* any type */
+  Record,          /* any struct/class/union */
+  Number,          /* any integer or floating-point type */
+  Integer,         /* any integer type */
+  FloatingPoint,   /* float32/float64 */
+  /* A real class or interface: the argument must extend/implement it. */
+  Class
+};
+
+/* One constraint per template parameter ('T extends X' with X a class or
+ * one of the pseudo-types above). None means unconstrained. */
+struct TemplateConstraint {
+  TemplateConstraintKind kind = TemplateConstraintKind::None;
+  const Type *classType = nullptr;
+
+  TemplateConstraint() = default;
+  explicit TemplateConstraint(TemplateConstraintKind k) : kind(k) {}
+  TemplateConstraint(const Type *cls)
+      : kind(TemplateConstraintKind::Class), classType(cls) {}
+};
+
 struct DeclNode : public ASTNode {
   llvm::ArrayRef<AnnotationNode *> annotations;
   bool hasPublicMod = false;
@@ -253,6 +279,19 @@ struct DeclNode : public ASTNode {
 
   bool isTemplate = false;
   llvm::ArrayRef<std::string_view> templateParams;
+  /* Constraints for 'T extends X', parallel to templateParams. */
+  llvm::ArrayRef<TemplateConstraint> templateConstraints;
+
+  /* Template specialization ('class List<int>', 'class Pair<T, int>').
+   * specializationArgs holds the pattern: concrete types for complete
+   * specializations, a mix of concrete types and TemplateParamType for
+   * partial ones. */
+  bool isTemplateSpecialization = false;
+  llvm::ArrayRef<const Type *> specializationArgs;
+  /* The primary template's fully qualified name ('NS.List'). */
+  std::string_view specializationBaseName;
+  /* Raw source of the '<...>' template list, for the formatter. */
+  std::string_view rawTemplateListStr;
 
   uint64_t alignment = 0;
   bool isPacked = false;

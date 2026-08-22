@@ -35,6 +35,8 @@ Utopia combines a C/C++-style memory and execution model with a modern, Dart-ins
 - **Inheritance** (`extends`), **interfaces** (`implements`), **abstract classes/methods**, `super` delegation and access, and polymorphic dispatch via an LLVM vtable
 - **Virtual dispatch** through `@virtual`/`@override` annotations and `const` methods
 - **Generics/templates** for classes, structs, unions, functions, and methods (e.g. `class Box<T>`, `T findMax<T>(T, T)`) with on-demand instantiation
+- **Template constraints** (`T extends X`, Dart syntax): class/interface bounds with member access through the bound, plus zero-cost pseudo-types `Object`, `Record`, `Number`, `Integer`, `FloatingPoint`
+- **Template specialization** (C++-style, no `template<>` keyword): complete (`class Storage<int32>`) and partial (`class Pair<A, int64>`) specializations with pattern deduction and ambiguity errors
 - **Operator overloading** (`operator+`, `operator==`, `operator[]`, `operator=`, unary and compound-assignment operators, etc.) including free-function operators
 - **Expression-bodied functions** (`=>`) and classic `if`/`else`, `while`, `for`, `switch`/`case`/`default`, `break`, `continue`, `return`, and ternary `?:`
 - **Dart-style `for-in` loops** (`for (var x in list)`) over any type with the structural `iterator()`/`moveNext()`/`current()` protocol — `List`, `Map` (keys), `map.entries()`, `HashMap`, `SplayTreeMap`, array literals and user-defined types. Zero-cost like C++: no `Iterable` hierarchy, no vtables, no allocation; `@inline` cursors collapse to plain index/pointer walks, and `var x` / `var& x` / `final& x` control copy vs. reference binding
@@ -136,6 +138,7 @@ The `examples/` directory contains small, self-contained programs demonstrating 
 - Dynamic memory allocation
 - Functions, named parameters, and default arguments
 - Generics/templates
+- Template constraints (`T extends Number`) and template specialization (complete and partial)
 - Custom annotations
 - Smart pointers with Rust-style auto-deref (`unique_ptr`, `shared_ptr`, `weak_ptr`)
 - Dart-style lambdas with inferred signatures (`() => 5`, `(x) => x * 2`)

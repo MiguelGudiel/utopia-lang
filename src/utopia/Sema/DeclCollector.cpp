@@ -439,6 +439,12 @@ static void resolveThisParamTypes(FunctionDeclNode *ctor,
 }
 
 void DeclCollectorPass::visit(const UnionDeclNode *node) {
+  if (node->isTemplateSpecialization && !node->isTemplate) {
+    /* Complete specialization: registered so resolveIfTemplate can find it
+     * (the record itself is already reachable under its canonical name). */
+    ctx->templateSpecializations[std::string(node->specializationBaseName)]
+        .push_back(node);
+  }
   if (node->isTemplate) {
     if (node->declFilePath.empty()) {
       const_cast<UnionDeclNode *>(node)->declFilePath = ctx->currentFile;
@@ -454,6 +460,14 @@ void DeclCollectorPass::visit(const UnionDeclNode *node) {
             ctx->currentFile;
       }
       collectMethodAnnotations(const_cast<FunctionDeclNode *>(method), ctx);
+    }
+    if (node->isTemplateSpecialization) {
+      /* Partial specialization: it has parameters but must not shadow the
+       * primary template in templateRegistry — it is only reachable through
+       * templateSpecializations. */
+      ctx->templateSpecializations[std::string(node->specializationBaseName)]
+          .push_back(node);
+      return;
     }
     ctx->templateRegistry[node->name] = node;
     ctx->templateRegistry[node->fqName] = node;
@@ -616,6 +630,14 @@ void DeclCollectorPass::visit(const StructDeclNode *node) {
       }
       collectMethodAnnotations(const_cast<FunctionDeclNode *>(method), ctx);
     }
+    if (node->isTemplateSpecialization) {
+      /* Partial specialization: it has parameters but must not shadow the
+       * primary template in templateRegistry — it is only reachable through
+       * templateSpecializations. */
+ctx->templateSpecializations[std::string(node->specializationBaseName)]
+          .push_back(node);
+      return;
+    }
     ctx->templateRegistry[node->name] = node;
     ctx->templateRegistry[node->fqName] = node;
     /* Template records are also visible as identifiers so that static
@@ -628,6 +650,13 @@ void DeclCollectorPass::visit(const StructDeclNode *node) {
 
   if (node->declFilePath.empty()) {
     const_cast<StructDeclNode *>(node)->declFilePath = ctx->currentFile;
+  }
+
+  if (node->isTemplateSpecialization) {
+    /* Complete specialization: registered so resolveIfTemplate can find it
+     * (the record itself is already reachable under its canonical name). */
+    ctx->templateSpecializations[std::string(node->specializationBaseName)]
+        .push_back(node);
   }
 
   ctx->addDecl(node->fqName, node);
@@ -776,6 +805,14 @@ void DeclCollectorPass::visit(const ClassDeclNode *node) {
       }
       collectMethodAnnotations(const_cast<FunctionDeclNode *>(method), ctx);
     }
+    if (node->isTemplateSpecialization) {
+      /* Partial specialization: it has parameters but must not shadow the
+       * primary template in templateRegistry — it is only reachable through
+       * templateSpecializations. */
+ctx->templateSpecializations[std::string(node->specializationBaseName)]
+          .push_back(node);
+      return;
+    }
     ctx->templateRegistry[node->name] = node;
     ctx->templateRegistry[node->fqName] = node;
     /* Template records are also visible as identifiers so that static
@@ -788,6 +825,13 @@ void DeclCollectorPass::visit(const ClassDeclNode *node) {
 
   if (node->declFilePath.empty()) {
     const_cast<ClassDeclNode *>(node)->declFilePath = ctx->currentFile;
+  }
+
+  if (node->isTemplateSpecialization) {
+    /* Complete specialization: registered so resolveIfTemplate can find it
+     * (the record itself is already reachable under its canonical name). */
+    ctx->templateSpecializations[std::string(node->specializationBaseName)]
+        .push_back(node);
   }
 
   ctx->addDecl(node->fqName, node);

@@ -20,6 +20,11 @@ public:
 
   const Type *cloneType(const Type *t);
 
+  /* Clones a template-constraint array, substituting template parameters in
+   * class constraints. */
+  llvm::ArrayRef<TemplateConstraint> cloneConstraints(
+      llvm::ArrayRef<TemplateConstraint> src);
+
   template <typename T>
   llvm::ArrayRef<T *> cloneArray(llvm::ArrayRef<T *> arr) {
     std::vector<T *> cloned;

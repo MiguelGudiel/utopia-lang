@@ -1350,6 +1350,9 @@ Piece *PieceFactory::visit(const ParamDeclNode *node) {
   return p;
 }
 
+/* The constraint as source text ('Number', 'Object', 'class name'). */
+static std::string templateConstraintText(const TemplateConstraint &tc);
+
 Piece *PieceFactory::visit(const FunctionDeclNode *node) {
   std::vector<const Piece *> sigParts;
 
@@ -1391,6 +1394,11 @@ Piece *PieceFactory::visit(const FunctionDeclNode *node) {
     pfx += "<";
     for (size_t i = 0; i < node->templateParams.size(); ++i) {
       pfx += std::string(node->templateParams[i]);
+      if (i < node->templateConstraints.size() &&
+          node->templateConstraints[i].kind != TemplateConstraintKind::None) {
+        pfx += " extends " +
+               templateConstraintText(node->templateConstraints[i]);
+      }
       if (i < node->templateParams.size() - 1) {
         pfx += ", ";
       }
@@ -1400,7 +1408,6 @@ Piece *PieceFactory::visit(const FunctionDeclNode *node) {
 
   std::vector<const Piece *> signature;
   signature.push_back(create<TextPiece>(pfx));
-
   std::vector<const Piece *> params;
   bool insideNamed = false;
   for (size_t i = 0; i < node->params.size(); ++i) {
@@ -1547,6 +1554,26 @@ Piece *PieceFactory::visit(const AnnotationNode *node) {
   }
   return create<ConcatPiece>(std::move(parts));
 }
+/* The constraint as source text ('Number', 'Object', 'class name'). */
+static std::string templateConstraintText(const TemplateConstraint &tc) {
+  switch (tc.kind) {
+  case TemplateConstraintKind::None:
+    return "Object";
+  case TemplateConstraintKind::Object:
+    return "Object";
+  case TemplateConstraintKind::Record:
+    return "Record";
+  case TemplateConstraintKind::Number:
+    return "Number";
+  case TemplateConstraintKind::Integer:
+    return "Integer";
+  case TemplateConstraintKind::FloatingPoint:
+    return "FloatingPoint";
+  case TemplateConstraintKind::Class:
+    return tc.classType ? tc.classType->toString() : "<class>";
+  }
+  return "Object";
+}
 
 template <typename T>
 Piece *createRecord(PieceFactory *factory, const T *node, const char *kw) {
@@ -1554,7 +1581,6 @@ Piece *createRecord(PieceFactory *factory, const T *node, const char *kw) {
   for (auto *ann : node->annotations) {
     parts.push_back(factory->dispatch(ann));
   }
-
   std::string pfx = "";
   if (auto *cls = llvm::dyn_cast<ClassDeclNode>(node)) {
     if (cls->isAbstract) {
@@ -1566,15 +1592,27 @@ Piece *createRecord(PieceFactory *factory, const T *node, const char *kw) {
   }
   pfx += std::string(kw) + " " + std::string(node->name);
 
-  if (node->isTemplate) {
-    pfx += "<";
-    for (size_t i = 0; i < node->templateParams.size(); ++i) {
-      pfx += std::string(node->templateParams[i]);
-      if (i < node->templateParams.size() - 1) {
-        pfx += ", ";
+  if (node->isTemplate || !node->rawTemplateListStr.empty()) {
+    /* The raw '<...>' source keeps specializations and constraints byte
+     * exact; fall back to the parameters when it is unavailable. */
+    if (!node->rawTemplateListStr.empty()) {
+      pfx += "<" + std::string(node->rawTemplateListStr) + ">";
+    } else {
+      pfx += "<";
+      for (size_t i = 0; i < node->templateParams.size(); ++i) {
+        pfx += std::string(node->templateParams[i]);
+        if (i < node->templateConstraints.size() &&
+            node->templateConstraints[i].kind !=
+                TemplateConstraintKind::None) {
+          pfx += " extends " +
+                 templateConstraintText(node->templateConstraints[i]);
+        }
+        if (i < node->templateParams.size() - 1) {
+          pfx += ", ";
+        }
       }
+      pfx += ">";
     }
-    pfx += ">";
   }
 
   if (auto *cls = llvm::dyn_cast<ClassDeclNode>(node)) {

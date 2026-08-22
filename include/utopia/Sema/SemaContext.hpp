@@ -19,6 +19,11 @@ public:
   std::string_view currentFile;
   const ModuleNode *currentModule = nullptr;
   std::unordered_map<std::string_view, const DeclNode *> templateRegistry;
+  /* Template specializations, keyed by the primary template's fully
+   * qualified name; each entry is a partial or complete specialization
+   * ('class List<int>', 'class Pair<T, int>'). */
+  std::unordered_map<std::string, std::vector<const DeclNode *>>
+      templateSpecializations;
   DiagnosticsEngine &diags;
   bool isAssignTarget = false;
   std::vector<std::string> namespaceStack;

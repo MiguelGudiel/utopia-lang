@@ -181,6 +181,23 @@ public:
   SemaResult visit(const WhileNode *node);
   SemaResult lowerForInArray(const ForInNode *node, const Type *arrayTy,
                              int line, int col, int len);
+
+  /* True when 'arg' satisfies the template constraint 'tc'. */
+  bool templateConstraintSatisfied(const TemplateConstraint &tc,
+                                   const Type *arg) const;
+
+  /* Verifies every constraint of the template declaration 'tmpl' against
+   * the instantiation arguments; reports the first failure (at 'at', or
+   * with no source location when null) and returns false. */
+  bool checkTemplateConstraints(const DeclNode *tmpl,
+                                llvm::ArrayRef<const Type *> args,
+                                const ASTNode *at);
+
+  /* The class constraint of the template parameter 'name' in the enclosing
+   * template (current record or current function), or null. Lets 'x.member'
+   * and 'x is T' resolve against the constraint bound while T is still a
+   * parameter (nested templates, e.g. makeNoise<U> inside process<U>). */
+  const ClassType *findClassTemplateConstraint(std::string_view name) const;
   SemaResult visit(const SwitchNode *node);
   SemaResult visit(const CaseNode *node) { return ctx->astCtx.VoidTy; }
   SemaResult visit(const BreakNode *node);

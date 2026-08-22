@@ -1,0 +1,143 @@
+/*
+ * Advanced templates: 'T extends X' constraints (Dart-style) and C++-style
+ * template specialization — 'class List<int>' (complete) and
+ * 'class Pair<T, int64>' (partial), declared without any 'template<>'
+ * keyword: a template list with concrete types is a specialization of an
+ * already-declared primary.
+ *
+ * Constraints are compile-time only (zero cost): 'T extends Number' admits
+ * any integer or floating-point type, 'T extends Object' anything,
+ * 'T extends Record' any struct/class/union, and 'T extends SomeClass'
+ * any class that extends/implements SomeClass. Member access on a
+ * constrained parameter resolves against the bound, and 'x is T' is erased
+ * to the bound like Dart.
+ */
+
+/* --- Constraint: numeric types --------------------------------------- */
+
+T maxOf<T extends Number>(T a, T b) {
+  return a > b ? a : b;
+}
+
+int64 totalOf<T extends Integer>(List<T> items) {
+  int64 total = 0;
+  for (var v in items) {
+    total += v as int64;
+  }
+  return total;
+}
+
+/* --- Constraint: class bound + member access through the bound -------- */
+
+class Animal {
+  String name;
+  @virtual
+  String sound() {
+    return "?";
+  }
+  Animal(String name) {
+    this.name = name;
+  }
+}
+
+class Dog extends Animal {
+  Dog(String name) : super(name) {}
+  @override
+  String sound() {
+    return "woof";
+  }
+}
+
+class Kennel<T extends Animal> {
+  T pet;
+  Kennel(T p) {
+    this.pet = p;
+  }
+
+  /* T is class-constrained: members resolve against the bound, and the
+   * virtual call still dispatches on the dynamic type. */
+  String greet() {
+    return this.pet.name + " says " + this.pet.sound();
+  }
+
+  bool hasName(String name) {
+    return this.pet.name == name;
+  }
+}
+
+/* --- Specialization: complete and partial ----------------------------- */
+
+class Storage<T> {
+  T value;
+  Storage(T v) {
+    this.value = v;
+  }
+  String describe() {
+    return "generic";
+  }
+}
+
+/* Complete specialization: Storage<int32> gets its own layout + behavior. */
+class Storage<int32> {
+  int32 value;
+  Storage(int32 v) {
+    this.value = v;
+  }
+  String describe() {
+    return "int32-packed";
+  }
+}
+
+class Pair<A, B> {
+  A first;
+  B second;
+  Pair(A f, B b) {
+    this.first = f;
+    this.second = b;
+  }
+  String describe() {
+    return "generic pair";
+  }
+}
+
+/* Partial specialization: matches any Pair whose second type is int64. */
+class Pair<A, int64> {
+  A first;
+  int64 second;
+  Pair(A f, int64 b) {
+    this.first = f;
+    this.second = b;
+  }
+  String describe() {
+    return "pair over int64";
+  }
+}
+
+int main() {
+  print("-- constraints: Number / Integer --\n");
+  print("  maxOf(3, 5)      = %lld\n", maxOf(3, 5));
+  print("  maxOf(2.5, 1.5)  = %f\n", maxOf(2.5, 1.5));
+  List<int32> nums = [1, 2, 3, 4];
+  print("  totalOf(nums)    = %lld\n", totalOf(nums));
+
+  print("-- constraint: class bound --\n");
+  Kennel<Dog> kennel = Kennel<Dog>(Dog("Rex"));
+  print("  %s\n", kennel.greet().c_str());
+  print("  hasName Rex = %d\n", kennel.hasName("Rex"));
+
+  print("-- specialization: complete --\n");
+  Storage<String> s1 = Storage<String>("hi");
+  Storage<int32> s2 = Storage<int32>(42);
+  print("  Storage<String> = %s\n", s1.describe().c_str());
+  print("  Storage<int32>  = %s\n", s2.describe().c_str());
+
+  print("-- specialization: partial --\n");
+  Pair<String, String> p1 = Pair<String, String>("a", "b");
+  Pair<String, int64> p2 = Pair<String, int64>("a", 1);
+  Pair<int32, int64> p3 = Pair<int32, int64>(7, 8);
+  print("  Pair<String, String> = %s\n", p1.describe().c_str());
+  print("  Pair<String, int64>  = %s\n", p2.describe().c_str());
+  print("  Pair<int32, int64>   = %s\n", p3.describe().c_str());
+
+  return 0;
+}

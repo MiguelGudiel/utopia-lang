@@ -141,5 +141,30 @@ run_case "for-in over an untyped literal" \
   "Cannot iterate an untyped (empty) array literal" \
   'int main() { for (var x in []) { print("%lld", x); } return 0; }'
 
+# templates: constraints ('T extends X')
+run_case "constraint violation on a record" \
+  "does not satisfy the constraint 'T extends Number'" \
+  'class Box<T extends Number> { T v; Box(T x) { this.v = x; } } int main() { Box<String> b = Box<String>("x"); return 0; }'
+run_case "class constraint with a non-class argument" \
+  "does not satisfy the constraint 'T extends Animal'" \
+  'class Animal {} class Box<T extends Animal> { T v; Box(T x) { this.v = x; } } int main() { Box<int32> b = Box<int32>(1); return 0; }'
+run_case "constraint violation on a function" \
+  "does not satisfy the constraint 'T extends Number'" \
+  'T maxOf<T extends Number>(T a, T b) { return a > b ? a : b; } int main() { print("%s", maxOf("a", "b").c_str()); return 0; }'
+run_case "member access on unconstrained template parameter" \
+  "Member access on non-record type" \
+  'class Box<T> { T v; Box(T x) { this.v = x; } void m() { this.v.speak(); } } int main() { Box<int32> b = Box<int32>(1); b.m(); return 0; }'
+
+# templates: specializations
+run_case "specialization before its primary" \
+  "its primary template has not been declared" \
+  'class Foo<int32> { int32 v; } int main() { return 0; }'
+run_case "specialization with wrong arity" \
+  "but the primary template has" \
+  'class Foo<T> { T v; } class Foo<int32, int64> { int32 v; } int main() { return 0; }'
+run_case "ambiguous partial specialization" \
+  "Ambiguous template specialization" \
+  'class X<A, B> { A f; B s; } class X<int32, B> { A f; B s; } class X<A, int64> { A f; B s; } int main() { X<int32, int64> x = X<int32, int64>(1, 2); return 0; }'
+
 printf 'PASS=%d FAIL=%d\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

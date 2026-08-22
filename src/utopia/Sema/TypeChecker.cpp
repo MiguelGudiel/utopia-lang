@@ -148,6 +148,101 @@ static const std::unordered_map<std::string_view, AssignCategory> assignCatMap =
      {"-", AssignCategory::Arithmetic},
      {"*", AssignCategory::Arithmetic},
      {"/", AssignCategory::Arithmetic}};
+
+/* True when 'sub' is 'super' or a subclass of it (including interfaces). */
+static bool isSubtypeClass(const ClassType *sub, const ClassType *super) {
+  if (!sub || !super)
+    return false;
+  if (sub == super)
+    return true;
+  if (sub->getBaseClass()) {
+    if (auto *pBase = llvm::dyn_cast<ClassType>(
+            sub->getBaseClass()->getUnqualifiedType())) {
+      if (isSubtypeClass(pBase, super))
+        return true;
+    }
+  }
+  for (const Type *iface : sub->getInterfaces()) {
+    if (auto *pIface =
+            llvm::dyn_cast<ClassType>(iface->getUnqualifiedType())) {
+      if (isSubtypeClass(pIface, super))
+        return true;
+    }
+  }
+  return false;
+}
+
+/* The declaration's simple name, for diagnostics. */
+static std::string_view templateDeclName(const DeclNode *d) {
+  if (auto *c = llvm::dyn_cast<ClassDeclNode>(d))
+    return c->name;
+  if (auto *s = llvm::dyn_cast<StructDeclNode>(d))
+    return s->name;
+  if (auto *u = llvm::dyn_cast<UnionDeclNode>(d))
+    return u->name;
+  if (auto *f = llvm::dyn_cast<FunctionDeclNode>(d))
+    return f->name;
+  return d->fqName;
+}
+
+/* The constraint as source text, for diagnostics. */
+static std::string templateConstraintToString(const TemplateConstraint &tc) {
+  switch (tc.kind) {
+  case TemplateConstraintKind::None:
+    return "Object";
+  case TemplateConstraintKind::Object:
+    return "Object";
+  case TemplateConstraintKind::Record:
+    return "Record";
+  case TemplateConstraintKind::Number:
+    return "Number";
+  case TemplateConstraintKind::Integer:
+    return "Integer";
+  case TemplateConstraintKind::FloatingPoint:
+    return "FloatingPoint";
+  case TemplateConstraintKind::Class:
+    return tc.classType ? tc.classType->toString() : "<class>";
+  }
+  return "Object";
+}
+
+/* Deduces the parameters of a partial specialization from its pattern
+ * against the requested arguments: a parameter position binds the argument
+ * (consistently across repeats), a concrete pattern type must equal the
+ * argument. Returns true and fills 'outMap' when the pattern matches. */
+static bool matchSpecializationPattern(
+    llvm::ArrayRef<const Type *> pattern, llvm::ArrayRef<const Type *> args,
+    std::unordered_map<std::string_view, const Type *> &outMap) {
+  if (pattern.size() != args.size())
+    return false;
+  for (size_t i = 0; i < pattern.size(); ++i) {
+    const Type *p = pattern[i]->getUnqualifiedType();
+    if (p->getKind() == TypeKind::TemplateParam) {
+      auto *pt = static_cast<const TemplateParamType *>(p);
+      auto it = outMap.find(pt->getName());
+      if (it != outMap.end()) {
+        if (it->second->toString() != args[i]->toString())
+          return false;
+      } else {
+        outMap[pt->getName()] = args[i];
+      }
+    } else {
+      if (p->toString() != args[i]->getUnqualifiedType()->toString())
+        return false;
+    }
+  }
+  return true;
+}
+
+static std::string templateArgsToString(llvm::ArrayRef<const Type *> args) {
+  std::string s;
+  for (size_t i = 0; i < args.size(); ++i) {
+    if (i)
+      s += ", ";
+    s += args[i]->toString();
+  }
+  return s;
+}
 } // namespace
 
 bool TypeCheckPass::run(const ModuleNode *module, SemaContext &context) {
@@ -428,9 +523,17 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
      * namespace-aware across the type, call, and reference paths. Template
      * arguments are resolved first so nested instantiations mangle
      * identically from every resolution site. */
+    std::vector<const Type *> resolvedArgs;
+    for (const auto *arg : instTy->getTemplateArgs())
+      resolvedArgs.push_back(resolveIfTemplate(arg));
+
+    /* The primary template's constraints ('T extends X') must hold for every
+     * instantiation, including those served by a specialization. */
+    if (!checkTemplateConstraints(tmplDecl, resolvedArgs, nullptr))
+      return ctx->astCtx.VoidTy;
+
     std::string mangledName = std::string(declIt->second->fqName);
-    for (const auto *arg : instTy->getTemplateArgs()) {
-      const Type *resArg = resolveIfTemplate(arg);
+    for (const auto *resArg : resolvedArgs) {
       std::string argStr = resArg->toString();
       for (char &c : argStr) {
         if (!isalnum(c))
@@ -440,18 +543,81 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
     }
     std::string_view mangledView = ctx->astCtx.copyString(mangledName);
 
-    if (llvm::isa<ClassDeclNode>(tmplDecl) ||
-        llvm::isa<StructDeclNode>(tmplDecl) ||
-        llvm::isa<UnionDeclNode>(tmplDecl)) {
+    /* Pick a specialization when one matches the arguments: complete
+     * specializations win over partial ones, and the primary template is the
+     * fallback. */
+    const DeclNode *effectiveDecl = tmplDecl;
+    std::unordered_map<std::string_view, const Type *> templateArgMap;
+    {
+      std::string specKey = std::string(instTy->getBaseName());
+      auto specIt = ctx->templateSpecializations.find(specKey);
+      if (specIt == ctx->templateSpecializations.end()) {
+        size_t dotPos = specKey.find_last_of('.');
+        if (dotPos != std::string::npos)
+          specIt =
+              ctx->templateSpecializations.find(specKey.substr(dotPos + 1));
+      }
+      if (specIt != ctx->templateSpecializations.end()) {
+        const DeclNode *bestSpec = nullptr;
+        std::unordered_map<std::string_view, const Type *> bestMap;
+        for (const auto *spec : specIt->second) {
+          std::unordered_map<std::string_view, const Type *> candMap;
+          if (!matchSpecializationPattern(spec->specializationArgs,
+                                          resolvedArgs, candMap))
+            continue;
+          if (bestSpec) {
+            (void)ctx->reportError(
+                0, 0, 0,
+                "Ambiguous template specialization of '" +
+                    std::string(specKey) + "' for arguments <" +
+                    templateArgsToString(resolvedArgs) +
+                    ">: multiple specializations match.");
+            return ctx->astCtx.VoidTy;
+          }
+          bestSpec = spec;
+          bestMap = std::move(candMap);
+        }
+        if (bestSpec) {
+          if (!checkTemplateConstraints(bestSpec, resolvedArgs, nullptr))
+            return ctx->astCtx.VoidTy;
+          if (bestSpec->isTemplate) {
+            /* Partial specialization: instantiate its declaration with the
+             * deduced parameters under the canonical mangled name. */
+            effectiveDecl = bestSpec;
+            templateArgMap = std::move(bestMap);
+          } else {
+            /* Complete specialization: its record already exists under the
+             * canonical instantiation name (created at parse time). */
+            if (auto *existing = ctx->astCtx.getRecordType(mangledView)) {
+              instTy->setResolvedType(existing);
+              return existing;
+            }
+            /* Declared after a matching primary instantiation: fall through
+             * and instantiate the specialization's declaration. */
+            effectiveDecl = bestSpec;
+            templateArgMap.clear();
+          }
+        }
+      }
+    }
+    if (templateArgMap.empty() && effectiveDecl == tmplDecl) {
+      for (size_t i = 0; i < tmplDecl->templateParams.size(); ++i) {
+        templateArgMap[tmplDecl->templateParams[i]] = resolvedArgs[i];
+      }
+    }
+
+    if (llvm::isa<ClassDeclNode>(effectiveDecl) ||
+        llvm::isa<StructDeclNode>(effectiveDecl) ||
+        llvm::isa<UnionDeclNode>(effectiveDecl)) {
       if (auto *existing = ctx->astCtx.getRecordType(mangledView)) {
         instTy->setResolvedType(existing);
         return existing;
       }
 
       TypeKind kind = TypeKind::Struct;
-      if (llvm::isa<ClassDeclNode>(tmplDecl))
+      if (llvm::isa<ClassDeclNode>(effectiveDecl))
         kind = TypeKind::Class;
-      else if (llvm::isa<UnionDeclNode>(tmplDecl))
+      else if (llvm::isa<UnionDeclNode>(effectiveDecl))
         kind = TypeKind::Union;
 
       ctx->astCtx.createRecordType(kind, mangledView);
@@ -460,10 +626,6 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
     /* Record the resolved template arguments on the instantiated record so
      * the value type can be recovered from e.g. Future<T> instances. */
     if (auto *recTy = ctx->astCtx.getRecordType(mangledView)) {
-      std::vector<const Type *> resolvedArgs;
-      for (const auto *arg : instTy->getTemplateArgs()) {
-        resolvedArgs.push_back(resolveIfTemplate(arg));
-      }
       std::string_view baseName = declIt->second->fqName;
       if (baseName.empty()) {
         if (auto *cls = llvm::dyn_cast<ClassDeclNode>(declIt->second))
@@ -478,23 +640,17 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
           ctx->astCtx.copyArray<const Type *>(resolvedArgs));
     }
 
-    std::unordered_map<std::string_view, const Type *> templateArgMap;
-    for (size_t i = 0; i < tmplDecl->templateParams.size(); ++i) {
-      templateArgMap[tmplDecl->templateParams[i]] =
-          instTy->getTemplateArgs()[i];
-    }
-
     ASTCloner cloner(ctx->astCtx, templateArgMap);
-    DeclNode *instDecl = llvm::cast<DeclNode>(cloner.dispatch(tmplDecl));
+    DeclNode *instDecl = llvm::cast<DeclNode>(cloner.dispatch(effectiveDecl));
 
     if (instDecl) {
-      instDecl->hasPublicMod = tmplDecl->hasPublicMod;
-      instDecl->hasPrivateMod = tmplDecl->hasPrivateMod;
-      instDecl->hasProtectedMod = tmplDecl->hasProtectedMod;
-      instDecl->annotations = tmplDecl->annotations;
-      instDecl->declFilePath = tmplDecl->declFilePath;
-      instDecl->alignment = tmplDecl->alignment;
-      instDecl->isPacked = tmplDecl->isPacked;
+      instDecl->hasPublicMod = effectiveDecl->hasPublicMod;
+      instDecl->hasPrivateMod = effectiveDecl->hasPrivateMod;
+      instDecl->hasProtectedMod = effectiveDecl->hasProtectedMod;
+      instDecl->annotations = effectiveDecl->annotations;
+      instDecl->declFilePath = effectiveDecl->declFilePath;
+      instDecl->alignment = effectiveDecl->alignment;
+      instDecl->isPacked = effectiveDecl->isPacked;
 
       /* The mangled name is built from the fully-qualified template name, so
        * it already carries any namespace qualification. */
@@ -590,7 +746,7 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
       /* Type-check the clone from the namespace where the template was
        * declared, otherwise generic method bodies cannot resolve
        * namespace-scoped symbols. */
-      std::string instNs = getDeclNamespace(tmplDecl);
+      std::string instNs = getDeclNamespace(effectiveDecl);
       size_t nsDepth = pushDeclNamespace(ctx, instNs);
 
       dcp.dispatch(instDecl);
@@ -609,9 +765,9 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
     }
 
     const Type *res = ctx->astCtx.VoidTy;
-    if (llvm::isa<ClassDeclNode>(tmplDecl) ||
-        llvm::isa<StructDeclNode>(tmplDecl) ||
-        llvm::isa<UnionDeclNode>(tmplDecl)) {
+    if (llvm::isa<ClassDeclNode>(effectiveDecl) ||
+        llvm::isa<StructDeclNode>(effectiveDecl) ||
+        llvm::isa<UnionDeclNode>(effectiveDecl)) {
       res = ctx->astCtx.getRecordType(mangledView);
     }
     instTy->setResolvedType(res);
@@ -636,6 +792,96 @@ const Type *TypeCheckPass::resolveIfTemplate(const Type *t) {
                                     a->getSize());
   }
   return t;
+}
+
+bool TypeCheckPass::templateConstraintSatisfied(const TemplateConstraint &tc,
+                                                const Type *arg) const {
+  const Type *unqual = arg->getUnqualifiedType();
+  switch (tc.kind) {
+  case TemplateConstraintKind::None:
+  case TemplateConstraintKind::Object:
+    return true;
+  case TemplateConstraintKind::Record:
+    return unqual->getKind() == TypeKind::Struct ||
+           unqual->getKind() == TypeKind::Class ||
+           unqual->getKind() == TypeKind::Union;
+  case TemplateConstraintKind::Number:
+    return unqual->isNumeric();
+  case TemplateConstraintKind::Integer:
+    return unqual->isInteger();
+  case TemplateConstraintKind::FloatingPoint:
+    return unqual->isFloat();
+  case TemplateConstraintKind::Class: {
+    if (unqual->getKind() != TypeKind::Class || !tc.classType)
+      return false;
+    const Type *cUnqual = tc.classType->getUnqualifiedType();
+    if (cUnqual->getKind() != TypeKind::Class)
+      return false;
+    return isSubtypeClass(static_cast<const ClassType *>(unqual),
+                          static_cast<const ClassType *>(cUnqual));
+  }
+  }
+  return false;
+}
+
+bool TypeCheckPass::checkTemplateConstraints(
+    const DeclNode *tmpl, llvm::ArrayRef<const Type *> args,
+    const ASTNode *at) {
+  if (tmpl->templateConstraints.empty() || tmpl->templateParams.empty())
+    return true;
+
+  int line = 0, col = 0, len = 0;
+  if (at) {
+    line = at->line;
+    col = at->column;
+    len = at->length;
+  }
+
+  for (size_t i = 0; i < tmpl->templateConstraints.size() && i < args.size();
+       ++i) {
+    const TemplateConstraint &tc = tmpl->templateConstraints[i];
+    if (tc.kind == TemplateConstraintKind::None)
+      continue;
+    if (templateConstraintSatisfied(tc, args[i]))
+      continue;
+    (void)ctx->reportError(
+        line, col, len,
+        "Template argument '" + args[i]->toString() + "' for '" +
+            std::string(tmpl->templateParams[i]) +
+            "' does not satisfy the constraint '" +
+            std::string(tmpl->templateParams[i]) + " extends " +
+            templateConstraintToString(tc) + "' on template '" +
+            std::string(templateDeclName(tmpl)) + "'.");
+    return false;
+  }
+  return true;
+}
+
+const ClassType *
+TypeCheckPass::findClassTemplateConstraint(std::string_view name) const {
+  auto findIn = [&](const DeclNode *decl) -> const ClassType * {
+    if (!decl)
+      return nullptr;
+    for (size_t i = 0; i < decl->templateParams.size() &&
+                       i < decl->templateConstraints.size();
+         ++i) {
+      if (decl->templateParams[i] != name)
+        continue;
+      const TemplateConstraint &tc = decl->templateConstraints[i];
+      if (tc.kind != TemplateConstraintKind::Class || !tc.classType)
+        return nullptr;
+      const Type *c = tc.classType->getUnqualifiedType();
+      return llvm::dyn_cast<ClassType>(c);
+    }
+    return nullptr;
+  };
+
+  const RecordType *rec = ctx->getCurrentRecordContext();
+  if (rec) {
+    if (auto *cls = findIn(rec->getDeclaration()))
+      return cls;
+  }
+  return findIn(ctx->getCurrentFunction());
 }
 
 bool TypeCheckPass::checkTypeVisibility(const Type *type, const ASTNode *node) {
@@ -1859,10 +2105,16 @@ SemaResult TypeCheckPass::visit(const VariableNode *node) {
       auto instDecls = ctx->lookup(mangledView);
       if (instDecls.empty()) {
         std::unordered_map<std::string_view, const Type *> templateArgMap;
+        std::vector<const Type *> fnArgs;
         for (size_t i = 0; i < tmplDecl->templateParams.size(); ++i) {
-          templateArgMap[tmplDecl->templateParams[i]] =
-              resolveIfTemplate(node->templateArgs[i]);
+          const Type *resArg = resolveIfTemplate(node->templateArgs[i]);
+          templateArgMap[tmplDecl->templateParams[i]] = resArg;
+          fnArgs.push_back(resArg);
         }
+        if (!checkTemplateConstraints(tmplDecl, fnArgs, node))
+          return std::unexpected(ErrorInfo{
+              node->line, node->column, node->length,
+              "Template constraints are not satisfied"});
 
         ASTCloner cloner(ctx->astCtx, templateArgMap);
         DeclNode *instDecl = llvm::cast<DeclNode>(cloner.dispatch(tmplDecl));
@@ -4464,6 +4716,25 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
 
     const Type *unqualBaseTy = baseTy->getUnqualifiedType();
 
+    /* A template parameter is only usable for member access when it is
+     * class-constrained ('T extends Animal'): the member resolves against
+     * the constraint bound, so the instantiated call dispatches on the
+     * bound's method/field (virtual calls still hit the vtable). */
+    if (unqualBaseTy->getKind() == TypeKind::TemplateParam) {
+      auto *paramTy = static_cast<const TemplateParamType *>(unqualBaseTy);
+      const ClassType *constraintClass =
+          findClassTemplateConstraint(paramTy->getName());
+      if (!constraintClass) {
+        return ctx->reportError(
+            node->line, node->column, node->length,
+            "Member access on template parameter '" +
+                std::string(paramTy->getName()) +
+                "': add a 'T extends Class' constraint to access members "
+                "of a template parameter.");
+      }
+      unqualBaseTy = constraintClass;
+    }
+
     if (!llvm::isa<RecordType>(unqualBaseTy)) {
       return ctx->reportError(node->line, node->column, node->length,
                               "Member access on non-record type");
@@ -4746,9 +5017,16 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
 
             if (!alreadyInstantiated) {
               std::unordered_map<std::string_view, const Type *> templateArgMap;
+              std::vector<const Type *> fnArgs;
               for (size_t i = 0; i < tmplDecl->templateParams.size(); ++i) {
-                templateArgMap[tmplDecl->templateParams[i]] =
-                    resolveIfTemplate(node->templateArgs[i]);
+                const Type *resArg = resolveIfTemplate(node->templateArgs[i]);
+                templateArgMap[tmplDecl->templateParams[i]] = resArg;
+                fnArgs.push_back(resArg);
+              }
+              if (!checkTemplateConstraints(tmplDecl, fnArgs, node)) {
+                return std::unexpected(ErrorInfo{
+                    node->line, node->column, node->length,
+                    "Template constraints are not satisfied"});
               }
 
               ASTCloner cloner(ctx->astCtx, templateArgMap);
@@ -5323,6 +5601,12 @@ const FunctionDeclNode *TypeCheckPass::instantiateMethodTemplate(
   std::unordered_map<std::string_view, const Type *> templateArgMap;
   for (size_t i = 0; i < tmplDecl->templateParams.size(); ++i) {
     templateArgMap[tmplDecl->templateParams[i]] = resolvedArgs[i];
+  }
+  if (!checkTemplateConstraints(tmplDecl, resolvedArgs, nullptr)) {
+    (void)ctx->reportError(0, 0, 0,
+                           "Template constraints are not satisfied for '" +
+                               std::string(tmplDecl->name) + "'.");
+    return nullptr;
   }
 
   ASTCloner cloner(ctx->astCtx, templateArgMap);
@@ -6288,6 +6572,11 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
              * exactly like 'sizeof<Future<int>>' would). */
             for (auto &dedArg : completeArgs)
               dedArg = resolveIfTemplate(dedArg);
+            if (!checkTemplateConstraints(tmpl, completeArgs, node)) {
+              return std::unexpected(ErrorInfo{
+                  node->line, node->column, node->length,
+                  "Template constraints are not satisfied"});
+            }
             const_cast<VariableNode *>(varTarget)->templateArgs =
                 ctx->astCtx.copyArray<const Type *>(completeArgs);
           } else {
@@ -6759,6 +7048,11 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
         std::string dedErr;
         if (deduceTemplateArguments(tfn, argTypes, node->argNames, {},
                                     deducedArgs, dedErr)) {
+          if (!checkTemplateConstraints(tfn, deducedArgs, node)) {
+            return std::unexpected(ErrorInfo{
+                node->line, node->column, node->length,
+                "Template constraints are not satisfied"});
+          }
           const_cast<MemberAccessNode *>(ma)->templateArgs =
               ctx->astCtx.copyArray<const Type *>(deducedArgs);
           auto reRes = dispatch(ma);
@@ -7373,11 +7667,20 @@ SemaResult TypeCheckPass::visit(const IsExprNode *node) {
       resolveIfTemplate(node->targetType);
 
   /* An unresolved target ('x is UndefinedType') would otherwise compile to
-   * a constant 'false' with no diagnostic: report it as a real error. */
+   * a constant 'false' with no diagnostic: report it as a real error. A
+   * class-constrained template parameter ('x is T' with 'T extends Animal')
+   * is erased to its constraint bound, like Dart. */
   if (node->targetType->getKind() == TypeKind::TemplateParam) {
-    return ctx->reportError(node->line, node->column, node->length,
-                            "Unknown type in 'is' expression: '" +
-                                node->targetType->toString() + "'");
+    auto *paramTy =
+        static_cast<const TemplateParamType *>(node->targetType);
+    const ClassType *constraintClass =
+        findClassTemplateConstraint(paramTy->getName());
+    if (!constraintClass) {
+      return ctx->reportError(node->line, node->column, node->length,
+                              "Unknown type in 'is' expression: '" +
+                                  node->targetType->toString() + "'");
+    }
+    const_cast<IsExprNode *>(node)->targetType = constraintClass;
   }
 
   auto srcRes = dispatch(node->expr);
@@ -7415,30 +7718,6 @@ SemaResult TypeCheckPass::visit(const IsExprNode *node) {
     promotedTy = ctx->astCtx.getRValueReferenceType(node->targetType);
   }
 
-  /* True when 'sub' is 'super' or a subclass of it (including interfaces). */
-  auto isSubtype = [](const ClassType *sub, const ClassType *super,
-                      auto &self) -> bool {
-    if (!sub || !super)
-      return false;
-    if (sub == super)
-      return true;
-    if (sub->getBaseClass()) {
-      if (auto *pBase = llvm::dyn_cast<ClassType>(
-              sub->getBaseClass()->getUnqualifiedType())) {
-        if (self(pBase, super, self))
-          return true;
-      }
-    }
-    for (const Type *iface : sub->getInterfaces()) {
-      if (auto *pIface =
-              llvm::dyn_cast<ClassType>(iface->getUnqualifiedType())) {
-        if (self(pIface, super, self))
-          return true;
-      }
-    }
-    return false;
-  };
-
   bool srcIsClass = operandBase->getKind() == TypeKind::Class;
   bool targetIsClass = target->getKind() == TypeKind::Class;
 
@@ -7446,10 +7725,10 @@ SemaResult TypeCheckPass::visit(const IsExprNode *node) {
   if (srcIsClass && targetIsClass) {
     const ClassType *srcClass = static_cast<const ClassType *>(operandBase);
     const ClassType *tgtClass = static_cast<const ClassType *>(target);
-    if (isSubtype(srcClass, tgtClass, isSubtype)) {
+    if (isSubtypeClass(srcClass, tgtClass)) {
       /* The static type is already compatible: always true. */
       result = 1;
-    } else if (isSubtype(tgtClass, srcClass, isSubtype)) {
+    } else if (isSubtypeClass(tgtClass, srcClass)) {
       /* The object's dynamic type may be a subclass: inspect it at runtime. */
       if (!isIndirect) {
         /* A by-value object's dynamic type is exactly its static type. */

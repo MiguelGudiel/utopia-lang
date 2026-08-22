@@ -61,6 +61,21 @@ const Type *ASTCloner::cloneType(const Type *t) {
   }
 }
 
+llvm::ArrayRef<TemplateConstraint>
+ASTCloner::cloneConstraints(llvm::ArrayRef<TemplateConstraint> src) {
+  if (src.empty())
+    return {};
+  std::vector<TemplateConstraint> out;
+  out.reserve(src.size());
+  for (const auto &tc : src) {
+    TemplateConstraint c = tc;
+    if (tc.classType)
+      c.classType = cloneType(tc.classType);
+    out.push_back(c);
+  }
+  return ctx.copyArray<TemplateConstraint>(out);
+}
+
 ASTNode *ASTCloner::visit(const NumberNode *n) {
   return ctx.create<NumberNode>(n->raw, n->isFloat, n->line, n->column,
                                 n->length);
@@ -429,6 +444,7 @@ ASTNode *ASTCloner::visit(const FunctionDeclNode *n) {
   node->declFilePath = n->declFilePath;
   node->length = n->length;
   node->templateParams = n->templateParams;
+  node->templateConstraints = cloneConstraints(n->templateConstraints);
   /* A method inside a template class keeps its own template parameters
    * (e.g. 'static Future<R> value<R>(R value)') when the class-level
    * parameters are substituted; it must stay a template so its body is not

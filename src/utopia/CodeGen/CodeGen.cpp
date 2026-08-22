@@ -7961,6 +7961,18 @@ void CodeGen::emitMemberWiseCopy(llvm::Value *dst, llvm::Value *src,
     llvm::Value *srcF = builder.CreateStructGEP(llTy, src, f.index, "cpy.src");
     emitMemberWiseCopy(dstF, srcF, f.type, isAssignment);
   }
+
+  /* Polymorphic classes carry an implicit vptr at struct index 0 (see
+   * getLLVMType) that is not part of getFields(); the field-wise copy above
+   * must preserve it, otherwise the copied object loses its dynamic type and
+   * any virtual call through it dereferences a null vtable. */
+  if (recTy->getKind() == TypeKind::Class &&
+      static_cast<const ClassType *>(recTy)->getIsPolymorphic()) {
+    llvm::Value *dstV = builder.CreateStructGEP(llTy, dst, 0, "cpy.vptr.dst");
+    llvm::Value *srcV = builder.CreateStructGEP(llTy, src, 0, "cpy.vptr.src");
+    llvm::Value *v = builder.CreateLoad(builder.getPtrTy(), srcV, "cpy.vptr");
+    builder.CreateStore(v, dstV);
+  }
 }
 
 /* Finds the copy or move constructor for a record type; 'preferMove' picks

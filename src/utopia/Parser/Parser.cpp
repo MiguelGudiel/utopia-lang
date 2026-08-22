@@ -124,6 +124,61 @@ std::string_view Parser::parseOperatorName() {
   return astCtx.copyString(name);
 }
 
+bool Parser::isKnownTypeName(std::string_view name) const {
+  return astCtx.getBuiltinTypeByName(name) || astCtx.getRecordType(name) ||
+         astCtx.getTypeAlias(name) || astCtx.getEnumTypeByName(name) ||
+         astCtx.getVectorTypeByName(name);
+}
+
+TemplateConstraint Parser::parseTemplateConstraint() {
+  /* 'extends' is current. A pseudo-type name wins unless a real type with
+   * that name exists (a user class named 'Number' is a class constraint). */
+  if (currentToken().type == TokenType::IDENTIFIER) {
+    std::string_view cn = currentToken().value;
+    if (!isKnownTypeName(cn)) {
+      if (cn == "Object") {
+        advance();
+        return TemplateConstraint(TemplateConstraintKind::Object);
+      }
+      if (cn == "Record") {
+        advance();
+        return TemplateConstraint(TemplateConstraintKind::Record);
+      }
+      if (cn == "Number") {
+        advance();
+        return TemplateConstraint(TemplateConstraintKind::Number);
+      }
+      if (cn == "Integer") {
+        advance();
+        return TemplateConstraint(TemplateConstraintKind::Integer);
+      }
+      if (cn == "FloatingPoint") {
+        advance();
+        return TemplateConstraint(TemplateConstraintKind::FloatingPoint);
+      }
+      if (cn == "String") {
+        /* 'T extends String' — a plain class constraint, just like any
+         * other prelude class. */
+      }
+    }
+  }
+  return TemplateConstraint(parseType());
+}
+
+std::string Parser::mangleTemplateName(const std::string &baseFqName,
+                                       llvm::ArrayRef<const Type *> args) const {
+  std::string mangled = baseFqName;
+  for (const auto *arg : args) {
+    std::string argStr = arg->toString();
+    for (char &c : argStr) {
+      if (!isalnum((unsigned char)c))
+        c = '_';
+    }
+    mangled += "_" + argStr;
+  }
+  return mangled;
+}
+
 bool Parser::isDeclaration() {
   if (currentToken().type == TokenType::CONST_KW ||
       currentToken().type == TokenType::VAR_KW ||
@@ -2501,22 +2556,47 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind, bool isAbstract,
   expect(TokenType::IDENTIFIER, "Expected record name");
 
   std::vector<std::string_view> tParams;
-  if (match(TokenType::LT)) {
-    astCtx.registerTemplateName(name);
+  std::vector<TemplateConstraint> tConstraints;
+  std::vector<const Type *> specArgs;
+  bool sawConcreteArg = false;
+  bool isTemplateDecl = false;
+  bool isSpec = false;
+  std::string_view rawTplStr;
+  std::string specMangledName;
+
+  if (currentToken().type == TokenType::LT) {
+    size_t ltTok = cursor;
+    advance();
     if (currentToken().type != TokenType::GT) {
       do {
-        for (auto tp : tParams) {
-          if (tp == currentToken().value) {
-            reportError(currentToken().line, currentToken().column,
-                        currentToken().value.length(),
-                        "Redefinition of template parameter '" +
-                            std::string(tp) + "'.");
-            throw ParseException();
+        /* An unknown identifier is a template parameter; a known type (or a
+         * nested template instantiation like 'List<String>') is a concrete
+         * argument — which makes this declaration a specialization. */
+        if (currentToken().type == TokenType::IDENTIFIER &&
+            !isKnownTypeName(currentToken().value) &&
+            !isTemplateParam(currentToken().value)) {
+          for (auto tp : tParams) {
+            if (tp == currentToken().value) {
+              reportError(currentToken().line, currentToken().column,
+                          currentToken().value.length(),
+                          "Redefinition of template parameter '" +
+                              std::string(tp) + "'.");
+              throw ParseException();
+            }
           }
+          tParams.push_back(currentToken().value);
+          pushTemplateParam(tParams.back());
+          expect(TokenType::IDENTIFIER, "Expected template parameter name");
+          TemplateConstraint tc;
+          if (match(TokenType::EXTENDS_KW)) {
+            tc = parseTemplateConstraint();
+          }
+          tConstraints.push_back(tc);
+          specArgs.push_back(astCtx.getTemplateParamType(tParams.back()));
+        } else {
+          sawConcreteArg = true;
+          specArgs.push_back(parseType());
         }
-        tParams.push_back(currentToken().value);
-        pushTemplateParam(tParams.back());
-        expect(TokenType::IDENTIFIER, "Expected template parameter name");
       } while (match(TokenType::COMMA));
     }
     if (currentToken().type == TokenType::RSHIFT) {
@@ -2525,6 +2605,39 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind, bool isAbstract,
        * strings computed from this token still cover the full '>>'. */
     } else {
       expect(TokenType::GT, "Expected '>'");
+    }
+    const char *rawStart = tokens[ltTok].value.data() + 1;
+    const char *rawEnd = tokens[cursor - 1].value.data();
+    rawTplStr = astCtx.copyString(std::string_view(rawStart, rawEnd - rawStart));
+
+    int existingArity = astCtx.getRegisteredTemplateArity(name);
+    if (sawConcreteArg) {
+      /* Complete or partial specialization. */
+      if (existingArity == -1) {
+        reportError(
+            line, col, currentToken().column - col,
+            "Cannot specialize '" + std::string(name) +
+                "': its primary template has not been declared. Declare "
+                "'class " + std::string(name) + "<...>' first.");
+        throw ParseException();
+      }
+      if (existingArity != (int)specArgs.size()) {
+        reportError(line, col, currentToken().column - col,
+                    "Specialization of '" + std::string(name) + "' has " +
+                        std::to_string(specArgs.size()) +
+                        " arguments, but the primary template has " +
+                        std::to_string(existingArity) + ".");
+        throw ParseException();
+      }
+      isSpec = true;
+      isTemplateDecl = !tParams.empty();
+    } else if (!specArgs.empty()) {
+      /* All parameters: the primary template. (Modules are parsed more than
+       * once in some pipelines, so a re-registration is silently accepted —
+       * the arity map is idempotent.) */
+      isTemplateDecl = true;
+      astCtx.registerTemplateName(name);
+      astCtx.registerTemplateArity(name, tParams.size());
     }
   }
 
@@ -2556,7 +2669,15 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind, bool isAbstract,
 
   std::string fqNameStr = getFQName(name);
   std::string_view fqName = astCtx.copyString(fqNameStr);
-  RecordType *recordTy = astCtx.createRecordType(kind, fqName);
+  std::string_view recordNameSv = fqName;
+  if (isSpec) {
+    /* Complete specializations get the canonical instantiation name
+     * ('List_int32'), so resolveIfTemplate finds the record by the same
+     * mangled lookup it uses for instantiated primaries. */
+    specMangledName = mangleTemplateName(fqNameStr, specArgs);
+    recordNameSv = astCtx.copyString(specMangledName);
+  }
+  RecordType *recordTy = astCtx.createRecordType(kind, recordNameSv);
 
   if (match(TokenType::SEMICOLON)) {
     DeclNode *node = nullptr;
@@ -2937,6 +3058,7 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind, bool isAbstract,
     }
 
     std::vector<std::string_view> methodTParams;
+    std::vector<TemplateConstraint> methodTConstraints;
     if (match(TokenType::LT)) {
       astCtx.registerTemplateName(memName);
       if (currentToken().type != TokenType::GT) {
@@ -2953,6 +3075,11 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind, bool isAbstract,
           methodTParams.push_back(currentToken().value);
           pushTemplateParam(methodTParams.back());
           expect(TokenType::IDENTIFIER, "Expected template parameter name");
+          TemplateConstraint tc;
+          if (match(TokenType::EXTENDS_KW)) {
+            tc = parseTemplateConstraint();
+          }
+          methodTConstraints.push_back(tc);
         } while (match(TokenType::COMMA));
       }
       if (currentToken().type == TokenType::RSHIFT) {
@@ -3030,6 +3157,8 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind, bool isAbstract,
         method->isTemplate = true;
         method->templateParams =
             astCtx.copyArray<std::string_view>(methodTParams);
+        method->templateConstraints =
+            astCtx.copyArray<TemplateConstraint>(methodTConstraints);
         popTemplateParams(methodTParams.size());
       }
 
@@ -3148,6 +3277,16 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind, bool isAbstract,
       cNode->isTemplate = true;
       cNode->templateParams = astCtx.copyArray<std::string_view>(tParams);
     }
+    cNode->isTemplate = isTemplateDecl;
+    cNode->templateConstraints =
+        astCtx.copyArray<TemplateConstraint>(tConstraints);
+    if (isSpec) {
+      cNode->isTemplateSpecialization = true;
+      cNode->specializationArgs = astCtx.copyArray<const Type *>(specArgs);
+      cNode->specializationBaseName = fqName;
+      cNode->fqName = recordNameSv;
+    }
+    cNode->rawTemplateListStr = rawTplStr;
     node = cNode;
   } else if (kind == TypeKind::Struct) {
     auto sNode = astCtx.create<StructDeclNode>(name, line, col, len);
@@ -3162,6 +3301,16 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind, bool isAbstract,
       sNode->isTemplate = true;
       sNode->templateParams = astCtx.copyArray<std::string_view>(tParams);
     }
+    sNode->isTemplate = isTemplateDecl;
+    sNode->templateConstraints =
+        astCtx.copyArray<TemplateConstraint>(tConstraints);
+    if (isSpec) {
+      sNode->isTemplateSpecialization = true;
+      sNode->specializationArgs = astCtx.copyArray<const Type *>(specArgs);
+      sNode->specializationBaseName = fqName;
+      sNode->fqName = recordNameSv;
+    }
+    sNode->rawTemplateListStr = rawTplStr;
     node = sNode;
   } else {
     auto uNode = astCtx.create<UnionDeclNode>(name, line, col, len);
@@ -3176,6 +3325,16 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind, bool isAbstract,
       uNode->isTemplate = true;
       uNode->templateParams = astCtx.copyArray<std::string_view>(tParams);
     }
+    uNode->isTemplate = isTemplateDecl;
+    uNode->templateConstraints =
+        astCtx.copyArray<TemplateConstraint>(tConstraints);
+    if (isSpec) {
+      uNode->isTemplateSpecialization = true;
+      uNode->specializationArgs = astCtx.copyArray<const Type *>(specArgs);
+      uNode->specializationBaseName = fqName;
+      uNode->fqName = recordNameSv;
+    }
+    uNode->rawTemplateListStr = rawTplStr;
     node = uNode;
   }
 
@@ -3415,6 +3574,7 @@ DeclNode *Parser::parseDeclarationOrFunction(
   }
 
   std::vector<std::string_view> tParams;
+  std::vector<TemplateConstraint> tConstraints;
   if (match(TokenType::LT)) {
     astCtx.registerTemplateName(id);
     if (currentToken().type != TokenType::GT) {
@@ -3431,6 +3591,11 @@ DeclNode *Parser::parseDeclarationOrFunction(
         tParams.push_back(currentToken().value);
         pushTemplateParam(tParams.back());
         expect(TokenType::IDENTIFIER, "Expected template parameter name");
+        TemplateConstraint tc;
+        if (match(TokenType::EXTENDS_KW)) {
+          tc = parseTemplateConstraint();
+        }
+        tConstraints.push_back(tc);
       } while (match(TokenType::COMMA));
     }
     if (currentToken().type == TokenType::RSHIFT) {
@@ -3601,6 +3766,8 @@ DeclNode *Parser::parseDeclarationOrFunction(
     if (!tParams.empty()) {
       funcDecl->isTemplate = true;
       funcDecl->templateParams = astCtx.copyArray<std::string_view>(tParams);
+      funcDecl->templateConstraints =
+          astCtx.copyArray<TemplateConstraint>(tConstraints);
     }
     return funcDecl;
   }

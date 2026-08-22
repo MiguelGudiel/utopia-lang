@@ -1,0 +1,9 @@
+project:
+  name: "templates_advanced"
+
+build:
+  target: executable
+  source_dirs:
+    - src/
+  sources:
+    - "main.utp"

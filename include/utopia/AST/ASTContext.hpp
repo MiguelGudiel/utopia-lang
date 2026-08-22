@@ -73,6 +73,19 @@ public:
     return registeredTemplates.contains(name);
   }
 
+  /* Arity of the primary record templates declared so far (used to tell
+   * 'class List<T>' — the primary — from 'class List<int>' — a
+   * specialization: a specialization is only valid for an already-declared
+   * primary with the same number of arguments). */
+  void registerTemplateArity(std::string_view name, size_t arity) {
+    registeredTemplateArity[name] = (uint8_t)arity;
+  }
+
+  int getRegisteredTemplateArity(std::string_view name) const {
+    auto it = registeredTemplateArity.find(name);
+    return it == registeredTemplateArity.end() ? -1 : (int)it->second;
+  }
+
   template <typename T> llvm::ArrayRef<T> copyArray(llvm::ArrayRef<T> src) {
     if (src.empty())
       return llvm::ArrayRef<T>();
@@ -459,6 +472,7 @@ private:
   std::unordered_map<std::string_view, const EnumType *> enumTypes;
 
   std::unordered_set<std::string_view> registeredTemplates;
+  std::unordered_map<std::string_view, uint8_t> registeredTemplateArity;
 
   std::unordered_map<std::string_view, NamespaceDeclNode *> namespaces;
 };

@@ -89,6 +89,23 @@ private:
 
   std::string_view parseOperatorName();
 
+  /* True when 'name' resolves to an already-known type (builtin, record,
+   * alias, enum, SIMD vector). Used to tell template parameters from
+   * concrete type arguments in a template list: an unknown identifier is a
+   * parameter, a known type is a concrete argument. */
+  bool isKnownTypeName(std::string_view name) const;
+
+  /* Parses 'extends X' after a template parameter, where X is either a
+   * pseudo-type (Object/Record/Number/Integer/FloatingPoint) or a class or
+   * interface. Assumes the EXTENDS_KW token is current. */
+  TemplateConstraint parseTemplateConstraint();
+
+  /* The canonical instantiation name: '<base>_<sanitized arg>...', identical
+   * to the mangling Sema uses in resolveIfTemplate so specialization records
+   * are found by the same lookup. */
+  std::string mangleTemplateName(const std::string &baseFqName,
+                                 llvm::ArrayRef<const Type *> args) const;
+
   const Type *parseType(bool inNewExpr = false,
                         bool allowRValueRef = true);
   const Type *applyArrayDeclarator(const Type *baseType);

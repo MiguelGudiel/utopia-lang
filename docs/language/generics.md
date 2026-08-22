@@ -74,6 +74,103 @@ class Stack<T> {
 - The compiler maintains a per-module cache of instantiated templates, so repeated uses share a single instantiation.
 - Instantiated names are mangled deterministically (e.g. `Box_int`, `Memory.unique_ptr_Widget`), including namespace qualification.
 
+## Constraints: `T extends X`
+
+A template parameter can declare a bound with the Dart syntax `T extends X`.
+The bound is checked at instantiation time (compile-time only — zero runtime
+cost) and enables two things inside the template body:
+
+- **Class bounds** (`T extends Animal`) resolve member access on `T` against
+  the bound (`x.speak()` works on `T extends Animal`), and `x is T` is erased
+  to the bound, like Dart.
+- **Pseudo-types** constrain the argument kind without any class hierarchy:
+
+| Bound            | Admits                                              |
+|------------------|-----------------------------------------------------|
+| `T extends Object`  | any type (the default when no bound is written)   |
+| `T extends Record`  | any `struct` / `class` / `union`                  |
+| `T extends Number`  | any integer or floating-point type                |
+| `T extends Integer` | any integer type                                  |
+| `T extends FloatingPoint` | `float32` / `float64`                     |
+| `T extends SomeClass` | any class that extends or implements `SomeClass` |
+
+```utp
+T maxOf<T extends Number>(T a, T b) {
+  return a > b ? a : b;
+}
+
+class Animal {
+  @virtual String sound() { return "?"; }
+}
+class Dog extends Animal {
+  @override String sound() { return "woof"; }
+}
+
+class Kennel<T extends Animal> {
+  T pet;
+  Kennel(T p) { this.pet = p; }
+  String greet() { return this.pet.sound(); }  // member access via the bound
+}
+
+int main() {
+  print("%lld\n", maxOf(3, 5));          // 5
+  Kennel<Dog> k = Kennel<Dog>(Dog());
+  print("%s\n", k.greet().c_str());      // woof (virtual dispatch)
+  return 0;
+}
+```
+
+A constraint violation is a compile-time error:
+
+```
+Template argument 'String' for 'T' does not satisfy the constraint
+'T extends Number' on template 'NumberBox'.
+```
+
+## Template specialization
+
+Like C++, a template can be specialized for specific argument lists. No
+`template<>` keyword is needed: a template list containing concrete types
+declares a specialization of an already-declared primary template with the
+same arity.
+
+```utp
+class Storage<T> {           // primary template
+  T value;
+  String describe() { return "generic"; }
+}
+
+class Storage<int32> {       // complete specialization
+  int32 value;
+  String describe() { return "int32-packed"; }
+}
+
+class Pair<A, B> {           // primary template
+  A first; B second;
+  String describe() { return "generic pair"; }
+}
+
+class Pair<A, int64> {       // partial specialization: any Pair with int64
+  A first; int64 second;     // as its second type argument
+  String describe() { return "pair over int64"; }
+}
+```
+
+Resolution rules (mirroring C++):
+
+- `Storage<String>` uses the primary; `Storage<int32>` uses the complete
+  specialization. Complete specializations are preferred over partial ones.
+- A partial specialization is chosen by deducing its parameters from the
+  pattern: `Pair<String, int64>` matches `Pair<A, int64>` with `A = String`,
+  while `Pair<String, String>` falls back to the primary.
+- If more than one specialization matches, the use is ambiguous and the
+  compiler reports an error.
+- A specialization must follow its primary template and match its arity;
+  specializations of non-templates are rejected.
+- Specialized records keep their own layout, constructors and methods, so a
+  complete specialization can store a different representation (e.g. a
+  packed `int32` instead of a generic `T`).
+
 ## Smart pointer generics
 
 The standard library's smart pointers are generic, and their `operator*` participates in Rust-style auto-deref:
