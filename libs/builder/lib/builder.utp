@@ -25,6 +25,12 @@ bool isDefined(const uint8* name);
 @extern("UtopiaBuild_addCacheDefine")
 void addCacheDefine({const uint8* name, bool defaultValue = false, bool isPublic = true});
 
+@extern("UtopiaBuild_setWarningEnabled")
+void setWarningEnabled(const uint8* name, bool enabled);
+
+@extern("UtopiaBuild_isWarningEnabled")
+bool isWarningEnabled(const uint8* name);
+
 @extern("UtopiaBuild_getMainProjectRoot")
 const uint8* _getMainProjectRoot();
 

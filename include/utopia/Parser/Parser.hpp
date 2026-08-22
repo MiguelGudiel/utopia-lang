@@ -5,6 +5,7 @@
 #include "utopia/Common/Types.hpp"
 #include "utopia/Lexer/Token.hpp"
 #include <exception>
+#include <vector>
 
 namespace utopia {
 
@@ -95,6 +96,13 @@ private:
                                  bool allowRValueRef = true);
 
   std::string consumeComments();
+
+  /* Module-level variant of consumeComments(): '#...' preprocessor
+   * directive lines are recorded in 'items' (file order) instead of the doc
+   * string, so the formatter never moves code across conditional
+   * branches. */
+  std::string consumeModuleComments(
+      std::vector<ModuleNode::TopLevelItem> &items);
   ExprNode *parseArrayLiteral();
   ExprNode *parseMapLiteral();
   NamespaceDeclNode *parseNamespaceDecl(bool &isFileScoped);

@@ -13,6 +13,7 @@ Utopia ships a language server (`utopia_lsp`) speaking the Language Server Proto
 | **Diagnostics** | Parser and semantic errors streamed as `textDocument/publishDiagnostics` |
 | **Semantic tokens** | Full token classification: class, struct, enum, type, function, method, property, variable, parameter, enumMember, macro, keyword, namespace; modifiers: declaration, static, readonly |
 | **Formatting** | Document formatting through the built-in formatter |
+| **Quick fixes** | Code actions for every fixable warning: fix one, fix all of a kind, fix all fixable, disable on the line / in the file / in the project (see the [warnings guide](../language/warnings.md)) |
 
 ## Configuration
 

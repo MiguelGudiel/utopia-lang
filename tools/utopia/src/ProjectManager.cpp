@@ -68,6 +68,26 @@ ProjectConfig parseBuildManifest(const fs::path &manifestPath) {
         config.asyncEnabled = b["async"].as<bool>();
       }
 
+      /* Warning configuration: either a map of name -> bool
+       * ('warnings: { unused_import: false }') or a list of names to
+       * disable ('warnings: [unused_import, unused_function]'). */
+      if (b["warnings"]) {
+        YAML::Node warnings = b["warnings"];
+        if (warnings.IsMap()) {
+          for (const auto &entry : warnings) {
+            std::string name = entry.first.as<std::string>();
+            bool enabled = entry.second.as<bool>(true);
+            if (!enabled) {
+              config.disabledWarnings.push_back(name);
+            }
+          }
+        } else if (warnings.IsSequence()) {
+          for (const auto &entry : warnings) {
+            config.disabledWarnings.push_back(entry.as<std::string>());
+          }
+        }
+      }
+
       if (b["linker_flags"] && b["linker_flags"].IsSequence()) {
         for (const auto &flag : b["linker_flags"]) {
           config.linkerFlags.push_back(flag.as<std::string>());

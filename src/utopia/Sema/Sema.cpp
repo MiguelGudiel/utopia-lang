@@ -1,5 +1,6 @@
 #include "utopia/Sema/Sema.hpp"
 #include "utopia/Common/Logger.hpp"
+#include "utopia/Sema/UnusedCode.hpp"
 #include <iostream>
 
 namespace utopia {
@@ -8,6 +9,7 @@ SemaPipeline::SemaPipeline() {
   passes.push_back(std::make_unique<DeclCollectorPass>());
   passes.push_back(std::make_unique<TypeCheckPass>());
   passes.push_back(std::make_unique<ControlFlowPass>());
+  passes.push_back(std::make_unique<UnusedCodePass>());
 }
 
 bool SemaPipeline::run(const ModuleNode *module, SemaContext &ctx) {

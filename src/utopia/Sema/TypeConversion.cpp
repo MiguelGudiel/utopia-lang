@@ -611,20 +611,21 @@ void TypeCheckPass::checkImplicitCastWarning(const Type *from, const Type *to,
 
       if (!isLiteralFit) {
         if (loss) {
-          ctx->diags.report({DiagLevel::Warning, node->line, node->column,
-                             node->length,
+          ctx->reportWarning(WarningKind::ImplicitCast, node->line,
+                             node->column, node->length,
                              "Implicit conversion from '" + from->toString() +
                                  "' to '" + to->toString() +
                                  "' may lose precision. Use an explicit cast "
                                  "to suppress this warning.",
-                             std::string(ctx->currentFile), node->endLine});
+                             node->endLine);
         } else if (signMismatch) {
-          ctx->diags.report(
-              {DiagLevel::Warning, node->line, node->column, node->length,
-               "Implicit conversion changes signedness from '" +
-                   from->toString() + "' to '" + to->toString() +
-                   "'. Use an explicit cast to suppress this warning.",
-               std::string(ctx->currentFile), node->endLine});
+          ctx->reportWarning(WarningKind::ImplicitCast, node->line,
+                             node->column, node->length,
+                             "Implicit conversion changes signedness from '" +
+                                 from->toString() + "' to '" + to->toString() +
+                                 "'. Use an explicit cast to suppress this "
+                                 "warning.",
+                             node->endLine);
         }
       }
     }

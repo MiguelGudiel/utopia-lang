@@ -291,27 +291,27 @@ public:
      * Indices correspond directly to BuiltinKind integral definitions:
      * 0: Int8, 1: Int16, 2: Int32, 3: Int64
      * 4: UInt8, 5: UInt16, 6: UInt32, 7: UInt64
-     */
+ */
     static constexpr BuiltinKind promotionMatrix[8][8] = {
         /*            Int8               Int16                Int32 Int64
                       UInt8              UInt16               UInt32 UInt64 */
-        /* Int8   */
+        /* Int8 */
         {BuiltinKind::Int8, BuiltinKind::Int16, BuiltinKind::Int32,
          BuiltinKind::Int64, BuiltinKind::Int16, BuiltinKind::Int32,
          BuiltinKind::Int64, BuiltinKind::UInt64},
-        /* Int16  */
+        /* Int16 */
         {BuiltinKind::Int16, BuiltinKind::Int16, BuiltinKind::Int32,
          BuiltinKind::Int64, BuiltinKind::Int16, BuiltinKind::Int32,
          BuiltinKind::Int64, BuiltinKind::UInt64},
-        /* Int32  */
+        /* Int32 */
         {BuiltinKind::Int32, BuiltinKind::Int32, BuiltinKind::Int32,
          BuiltinKind::Int64, BuiltinKind::Int32, BuiltinKind::Int32,
          BuiltinKind::Int64, BuiltinKind::UInt64},
-        /* Int64  */
+        /* Int64 */
         {BuiltinKind::Int64, BuiltinKind::Int64, BuiltinKind::Int64,
          BuiltinKind::Int64, BuiltinKind::Int64, BuiltinKind::Int64,
          BuiltinKind::Int64, BuiltinKind::UInt64},
-        /* UInt8  */
+        /* UInt8 */
         {BuiltinKind::Int16, BuiltinKind::Int16, BuiltinKind::Int32,
          BuiltinKind::Int64, BuiltinKind::UInt8, BuiltinKind::UInt16,
          BuiltinKind::UInt32, BuiltinKind::UInt64},
@@ -420,7 +420,7 @@ public:
 
     /* Extract the simple name from the fully qualified name to ensure
      * IDE completions and hover tooltips only display the relevant component.
-     */
+ */
     size_t dot = fqName.find_last_of('.');
     std::string_view simpleName =
         (dot == std::string_view::npos) ? fqName : fqName.substr(dot + 1);
@@ -431,7 +431,7 @@ public:
     return ns;
   }
 
-  /* ---- Dart-style const objects (shared across modules) ----
+  /* Dart-style const objects (shared across modules)
    *
    * 'constObjectCreations' maps a canonicalization key to the typed AST
    * node that creates the object, so code generation in any module can

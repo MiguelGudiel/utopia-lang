@@ -1,4 +1,5 @@
 #pragma once
+#include "utopia/Common/Warnings.hpp"
 #include <algorithm>
 #include <iostream>
 #include <nlohmann/json.hpp>
@@ -17,6 +18,12 @@ struct Diagnostic {
   std::string message;
   std::string filePath;
   int endLine = 0;
+  /* Machine-identifiable warning family; None for errors/notes. Lets editors
+   * attach per-warning code actions and users disable warnings one by one. */
+  WarningKind warningKind = WarningKind::None;
+  /* Whether an automatic fix exists for this diagnostic (editors show the
+   * light-bulb only for these). */
+  bool hasFix = false;
 };
 
 class DiagnosticsEngine {
@@ -79,6 +86,13 @@ public:
         diagObj["severity"] = 4; // Hint level in LSP
         diagObj["tags"] = {
             1}; // 1 = DiagnosticTag::Unnecessary (Greys out code in IDE)
+      }
+
+      if (d.warningKind != WarningKind::None) {
+        diagObj["code"] = std::string(warningName(d.warningKind));
+      }
+      if (d.hasFix) {
+        diagObj["data"] = {{"hasFix", true}};
       }
 
       j.push_back(diagObj);

@@ -29,9 +29,7 @@ namespace utopia::lsp {
 
 using json = nlohmann::json;
 
-/* ------------------------------------------------------------------------- */
-/* Protocol helpers                                                          */
-/* ------------------------------------------------------------------------- */
+/* Protocol helpers */
 
 /* Returns the request id when present, null otherwise. Handlers must never
  * touch req["id"] directly: a malformed request would otherwise abort the
@@ -45,9 +43,7 @@ void sendResponse(const json &res);
 std::string pathToUri(std::string_view path);
 std::string uriToPath(const std::string &uri);
 
-/* ------------------------------------------------------------------------- */
-/* Document state and per-project configuration                              */
-/* ------------------------------------------------------------------------- */
+/* Document state and per-project configuration */
 
 struct DocumentState {
   std::string text;
@@ -82,6 +78,27 @@ public:
   ModuleLoaderConfig configFor(const std::string &uri,
                                const std::filesystem::path &filePath);
 
+  /* The editor applied an edit to a build.yaml document (didOpen/didChange):
+   * the in-memory text overrides the file on disk until the document is
+   * closed, and every open document of the affected project is re-analyzed
+   * so the warning configuration takes effect immediately. */
+  void onBuildManifestChanged(const std::string &uri, const std::string &text);
+
+  /* A build.yaml changed on disk (workspace/didChangeWatchedFiles or
+   * didClose): drop caches and re-analyze the affected project. */
+  void onBuildManifestSaved(const std::string &uri);
+
+  /* The editor closed a build.yaml document: revert to the on-disk
+   * manifest for the project. */
+  void onBuildManifestClosed(const std::string &uri);
+
+  /* Called periodically by the analysis worker: stats the build.yaml of
+   * every project known to the server and refreshes those whose manifest
+   * changed on disk. This keeps the project configuration (warnings,
+   * packages, dependencies) in sync even when the client sends no
+   * notifications at all. */
+  void pollManifests();
+
 private:
   std::filesystem::path projectRootFor(const std::string &uri,
                                        const std::filesystem::path &filePath);
@@ -93,12 +110,28 @@ private:
                         const std::filesystem::path &projRoot);
   std::filesystem::path findProjectRoot(const std::filesystem::path &current) const;
 
+  /* Text of a project's build.yaml: the editor's in-memory version when the
+   * manifest is open, the file on disk otherwise. */
+  std::string manifestTextFor(const std::filesystem::path &projRoot) const;
+
+  /* Invalidates the cached configuration of a project and re-analyzes every
+   * open document that belongs to it. */
+  void refreshProject(const std::string &projRoot);
+
+  /* Re-analyzes every open document whose project root matches. */
+  void reanalyzeProject(const std::string &projRoot);
+
   mutable std::shared_mutex docMutex;
   std::map<std::string, DocumentState> documents;
 
   mutable std::mutex cacheMutex;
   std::map<std::string, ModuleLoaderConfig> projectConfigCache;
+  std::map<std::string, std::filesystem::file_time_type> configMtimes;
   std::map<std::string, std::filesystem::path> uriToProjectRoot;
+  /* Project root -> in-memory text of open build.yaml documents. */
+  std::map<std::string, std::string> manifestTexts;
+  /* Project root -> last seen on-disk mtime of build.yaml (pollManifests). */
+  std::map<std::string, std::filesystem::file_time_type> manifestDiskMtimes;
 };
 
 /* The analysis worker and its synchronization (defined in Server.cpp). */
@@ -113,9 +146,7 @@ void runServer();
 /* Single server-wide document store (defined in Server.cpp). */
 extern DocumentManager documents;
 
-/* ------------------------------------------------------------------------- */
-/* Local variable collection for a cursor position                          */
-/* ------------------------------------------------------------------------- */
+/* Local variable collection for a cursor position */
 
 /* Walks the module from the top, collecting every declaration whose line is
  * at or before the target line. Functions enclosing the line are descended
@@ -184,9 +215,7 @@ public:
   void visit(const AnnotationNode *) {}
 };
 
-/* ------------------------------------------------------------------------- */
-/* Shared AST helpers                                                        */
-/* ------------------------------------------------------------------------- */
+/* Shared AST helpers */
 
 struct SourceLocation {
   int line;
@@ -229,9 +258,7 @@ std::string buildFunctionHover(const FunctionDeclNode *targetFunc);
  * record (mirrors the compiler's auto-deref member resolution). */
 const DeclNode *getAutoDerefTarget(const DeclNode *recDecl);
 
-/* ------------------------------------------------------------------------- */
-/* Module-wide symbol index (for completion, symbols, references)            */
-/* ------------------------------------------------------------------------- */
+/* Module-wide symbol index (for completion, symbols, references) */
 
 struct GlobalSymbols {
   std::unordered_map<std::string, std::vector<const DeclNode *>>
@@ -243,9 +270,7 @@ struct GlobalSymbols {
  * exports included), indexed by namespace. */
 GlobalSymbols collectGlobals(const ModuleNode *root);
 
-/* ------------------------------------------------------------------------- */
-/* Access control                                                            */
-/* ------------------------------------------------------------------------- */
+/* Access control */
 
 /* Whether 'member' (a field/method of 'memberRecord') may be referenced from
  * code inside 'accessContext' (the record of the enclosing function, or null
@@ -255,9 +280,7 @@ GlobalSymbols collectGlobals(const ModuleNode *root);
 bool isMemberVisible(const DeclNode *member, const RecordType *memberRecord,
                      const RecordType *accessContext);
 
-/* ------------------------------------------------------------------------- */
-/* Feature handlers                                                          */
-/* ------------------------------------------------------------------------- */
+/* Feature handlers */
 
 void handleHover(const json &req);
 void handleDefinition(const json &req);
@@ -273,5 +296,6 @@ void handleReferences(const json &req);
 void handleDocumentHighlight(const json &req);
 void handleFoldingRange(const json &req);
 void handleDocumentLinks(const json &req);
+void handleCodeAction(const json &req);
 
 } // namespace utopia::lsp

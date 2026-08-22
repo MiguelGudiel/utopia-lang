@@ -2,6 +2,7 @@
 #include "utopia/CodeGen/BackendContext.hpp"
 #include "utopia/Common/Logger.hpp"
 #include "utopia/Common/Timer.hpp"
+#include "utopia/Common/Warnings.hpp"
 #include "utopia/Driver/Backend.hpp"
 #include "utopia/Driver/Compiler.hpp"
 #include "utopia/Driver/Linker.hpp"
@@ -17,7 +18,9 @@
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/TargetParser/Host.h>
 #include <llvm/TargetParser/Triple.h>
+#include <mutex>
 #include <regex>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace utopia {
@@ -260,6 +263,34 @@ bool CompilerDriver::run() {
     semaCtx.ndebugEnabled =
         options.publicMacros.contains("NDEBUG") ||
         options.privateMacros.contains("NDEBUG");
+
+    /* Warning kinds disabled by the project manifest. */
+    for (const auto &name : options.disabledWarnings) {
+      semaCtx.warningConfig.disable(name);
+    }
+
+    /* In-source suppression directives ('// @ignore-warning ...'): the
+     * driver reads each analyzed file once and caches the directives. */
+    std::mutex suppressionMutex;
+    std::unordered_map<std::string, WarningSuppressions> suppressionCache;
+    semaCtx.warningFilter = [&](WarningKind kind, std::string_view filePath,
+                                int line) {
+      std::string key(filePath);
+      {
+        std::lock_guard<std::mutex> lock(suppressionMutex);
+        auto it = suppressionCache.find(key);
+        if (it == suppressionCache.end()) {
+          std::ifstream file(key);
+          std::stringstream buffer;
+          if (file)
+            buffer << file.rdbuf();
+          WarningSuppressions supp =
+              collectWarningSuppressions(buffer.str());
+          it = suppressionCache.emplace(key, std::move(supp)).first;
+        }
+        return !it->second.suppresses(kind, line);
+      }
+    };
 
     for (const ModuleNode *rootMod : roots) {
       if (!pipeline.run(rootMod, semaCtx) || diagEngine.hasErrors()) {

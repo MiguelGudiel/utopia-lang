@@ -741,11 +741,11 @@ void TypeCheckPass::checkNodiscard(const ASTNode *node) {
   }
 
   if (isNodiscardFunc) {
-    (void)ctx->diags.report({DiagLevel::Warning, node->line, node->column,
-                             node->length,
-                             "Ignoring return value of function '" + funcName +
-                                 "', declared with '@nodiscard' annotation.",
-                             std::string(ctx->currentFile), node->endLine});
+    ctx->reportWarning(WarningKind::NodiscardIgnored, node->line,
+                       node->column, node->length,
+                       "Ignoring return value of function '" + funcName +
+                           "', declared with '@nodiscard' annotation.",
+                       node->endLine);
     return;
   }
 
@@ -773,11 +773,12 @@ void TypeCheckPass::checkNodiscard(const ASTNode *node) {
         if (typeDecl) {
           for (const auto *ann : typeDecl->annotations) {
             if (ann->name == "nodiscard") {
-              (void)ctx->diags.report(
-                  {DiagLevel::Warning, node->line, node->column, node->length,
-                   "Ignoring return value of type '" + typeName +
-                       "', declared with '@nodiscard' annotation.",
-                   std::string(ctx->currentFile), node->endLine});
+              ctx->reportWarning(
+                  WarningKind::NodiscardIgnored, node->line, node->column,
+                  node->length,
+                  "Ignoring return value of type '" + typeName +
+                      "', declared with '@nodiscard' annotation.",
+                  node->endLine);
               return;
             }
           }
@@ -834,9 +835,8 @@ void TypeCheckPass::checkDeprecated(const DeclNode *decl, const ASTNode *node) {
         }
       }
 
-      (void)ctx->diags.report({DiagLevel::Warning, node->line, node->column,
-                               node->length, msg, std::string(ctx->currentFile),
-                               node->endLine});
+      ctx->reportWarning(WarningKind::Deprecated, node->line, node->column,
+                         node->length, msg, node->endLine);
     }
   }
 }
@@ -3419,12 +3419,12 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
         const Type *pointee =
             static_cast<const ReferenceType *>(declType)->getPointeeType();
         if (!pointee->isConstQualified()) {
-          (void)ctx->diags.report(
-              {DiagLevel::Warning, node->initializer->line,
-               node->initializer->column, node->initializer->length,
-               "Binding an r-value to a non-const reference will implicitly "
-               "create a stack-allocated temporary.",
-               std::string(ctx->currentFile), node->initializer->endLine});
+          ctx->reportWarning(
+              WarningKind::ImplicitCast, node->initializer->line,
+              node->initializer->column, node->initializer->length,
+              "Binding an r-value to a non-const reference will implicitly "
+              "create a stack-allocated temporary.",
+              node->initializer->endLine);
         }
       }
     } else if (declType->getKind() == TypeKind::RValueReference) {
@@ -4663,7 +4663,7 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
      * resulting pointee type. Each implicit wrap adds one '*' node to the
      * object chain, so the walk below also bounds the recursion depth of
      * nested smart pointers.
-     */
+ */
     int derefCount = 0;
     ExprNode *curr = node->object;
     while (curr && curr->kind == NodeKind::UnaryOp) {
@@ -4818,7 +4818,7 @@ static bool guaranteesReturn(const ASTNode *node) {
         }
       }
       /* If any case drops through without a guaranteed return, the switch fails
-       */
+ */
       if (!caseReturns)
         return false;
     }
@@ -4833,7 +4833,7 @@ static bool guaranteesReturn(const ASTNode *node) {
           static_cast<const BoolNode *>(whileStmt->condition);
       /* An infinite loop guarantees that control flow will not fall through
          the end of the function, provided it has no escaping break statements
-       */
+ */
       if (boolCond->value) {
         if (!hasEscapingBreak(whileStmt->body)) {
           return true;
@@ -5520,13 +5520,13 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
             const Type *pointee =
                 static_cast<const ReferenceType *>(paramType)->getPointeeType();
             if (!pointee->isConstQualified()) {
-              (void)ctx->diags.report(
-                  {DiagLevel::Warning, resolvedArgs[p]->line,
-                   resolvedArgs[p]->column, resolvedArgs[p]->length,
-                   "Binding an r-value to non-const reference parameter '" +
-                       std::string(func->params[p]->name) +
-                       "' will implicitly create a stack-allocated temporary.",
-                   std::string(ctx->currentFile), resolvedArgs[p]->endLine});
+              ctx->reportWarning(
+                  WarningKind::ImplicitCast, resolvedArgs[p]->line,
+                  resolvedArgs[p]->column, resolvedArgs[p]->length,
+                  "Binding an r-value to non-const reference parameter '" +
+                      std::string(func->params[p]->name) +
+                      "' will implicitly create a stack-allocated temporary.",
+                  resolvedArgs[p]->endLine);
             }
           }
         }
@@ -8176,14 +8176,13 @@ SemaResult TypeCheckPass::visit(const NewExprNode *node) {
             const Type *pointee =
                 static_cast<const ReferenceType *>(paramType)->getPointeeType();
             if (!pointee->isConstQualified()) {
-              (void)ctx->diags.report(
-                  {DiagLevel::Warning, bestResolvedArgs[p]->line,
-                   bestResolvedArgs[p]->column, bestResolvedArgs[p]->length,
-                   "Binding an r-value to non-const reference parameter '" +
-                       std::string(bestMatch->params[p]->name) +
-                       "' will implicitly create a stack-allocated temporary.",
-                   std::string(ctx->currentFile),
-                   bestResolvedArgs[p]->endLine});
+              ctx->reportWarning(
+                  WarningKind::ImplicitCast, bestResolvedArgs[p]->line,
+                  bestResolvedArgs[p]->column, bestResolvedArgs[p]->length,
+                  "Binding an r-value to non-const reference parameter '" +
+                      std::string(bestMatch->params[p]->name) +
+                      "' will implicitly create a stack-allocated temporary.",
+                  bestResolvedArgs[p]->endLine);
             }
           }
 
@@ -8313,7 +8312,7 @@ SemaResult TypeCheckPass::visit(const DestructorCallNode *node) {
   return node->exprType;
 }
 
-/* ==================== Dart-style const expressions ==================== */
+/* Dart-style const expressions */
 
 namespace {
 /* Returns the resolved constructor behind an object creation expression, or

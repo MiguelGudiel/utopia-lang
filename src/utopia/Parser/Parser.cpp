@@ -399,10 +399,78 @@ std::string Parser::consumeComments() {
   return doc;
 }
 
+/* Whether a comment token is a preprocessor directive line ('#...'). */
+static bool isDirectiveComment(std::string_view c) {
+  return !c.empty() && c[0] == '#';
+}
+
+std::string Parser::consumeModuleComments(
+    std::vector<ModuleNode::TopLevelItem> &items) {
+  std::string doc;
+
+  for (size_t i = 0; i < currentToken().leadingComments.size(); ++i) {
+    auto c = currentToken().leadingComments[i];
+
+    if (isDirectiveComment(c)) {
+      ModuleNode::TopLevelItem item;
+      item.kind = ModuleNode::TopLevelItem::Kind::Directive;
+      std::string_view text = c.substr(1);
+      while (!text.empty() &&
+             (text.back() == '\r' || text.back() == '\n')) {
+        text.remove_suffix(1);
+      }
+      item.text = astCtx.copyString(text);
+      items.push_back(item);
+      continue;
+    }
+
+    if (i > 0) {
+      auto prev = currentToken().leadingComments[i - 1];
+      const char *gapStart = prev.data() + prev.length();
+      const char *gapEnd = c.data();
+      if (gapEnd != nullptr && gapStart <= gapEnd) {
+        int newlines = 0;
+        for (const char *p = gapStart; p < gapEnd; ++p) {
+          if (*p == '\n')
+            newlines++;
+        }
+        if (newlines == 0)
+          newlines = 1;
+        doc += std::string(newlines, '\n');
+      } else {
+        doc += "\n";
+      }
+    }
+    doc += c;
+  }
+
+  if (!currentToken().leadingComments.empty()) {
+    auto last = currentToken().leadingComments.back();
+    const char *gapStart = last.data() + last.length();
+    const char *gapEnd = currentToken().value.data();
+    if (gapEnd != nullptr && gapStart <= gapEnd) {
+      int newlines = 0;
+      for (const char *p = gapStart; p < gapEnd; ++p) {
+        if (*p == '\n')
+          newlines++;
+      }
+      doc += std::string(newlines, '\n');
+    } else {
+      doc += "\n";
+    }
+  }
+
+  const_cast<Token &>(currentToken()).leadingComments.clear();
+  return doc;
+}
+
 ModuleNode *Parser::parseModule(std::string_view filePath) {
   auto module = astCtx.create<ModuleNode>(filePath);
   std::vector<std::string_view> imports;
   std::vector<std::string_view> exports;
+  std::vector<ModuleNode::DirectiveInfo> importInfo;
+  std::vector<ModuleNode::DirectiveInfo> exportInfo;
+  std::vector<ModuleNode::TopLevelItem> topLevelItems;
   std::vector<ASTNode *> statements;
   std::string moduleDoc;
 
@@ -414,7 +482,7 @@ ModuleNode *Parser::parseModule(std::string_view filePath) {
           (currentToken().value == "import" ||
            currentToken().value == "export")) {
 
-        std::string importDoc = consumeComments();
+        std::string importDoc = consumeModuleComments(topLevelItems);
         if (!importDoc.empty()) {
           if (moduleDoc.empty()) {
             moduleDoc = importDoc;
@@ -424,6 +492,8 @@ ModuleNode *Parser::parseModule(std::string_view filePath) {
         }
 
         bool isExport = (currentToken().value == "export");
+        int kwLine = currentToken().line;
+        int kwCol = currentToken().column;
         advance();
 
         if (currentToken().type != TokenType::STRING_LITERAL) {
@@ -442,13 +512,33 @@ ModuleNode *Parser::parseModule(std::string_view filePath) {
         int pathLen = path.length();
 
         advance();
-        expect(TokenType::SEMICOLON, "Expected ';' after statement");
+        if (currentToken().type != TokenType::SEMICOLON) {
+          expect(TokenType::SEMICOLON, "Expected ';' after statement");
+        }
+        int semiLine = currentToken().line;
+        int semiCol = currentToken().column;
+        advance();
+
+        ModuleNode::DirectiveInfo info;
+        info.path = path;
+        info.line = kwLine;
+        info.column = kwCol;
+        info.endLine = semiLine;
+        info.endColumn = semiCol + 1;
 
         if (isExport) {
           exports.push_back(path);
+          exportInfo.push_back(info);
         } else {
           imports.push_back(path);
+          importInfo.push_back(info);
         }
+
+        ModuleNode::TopLevelItem item;
+        item.kind = isExport ? ModuleNode::TopLevelItem::Kind::Export
+                             : ModuleNode::TopLevelItem::Kind::Import;
+        item.text = path;
+        topLevelItems.push_back(item);
 
         /* Synchronously invoke the module loader upon evaluating an
          * import/export directive. This pre-populates the ASTContext with
@@ -458,12 +548,20 @@ ModuleNode *Parser::parseModule(std::string_view filePath) {
         if (moduleLoader) {
           std::filesystem::path currentDir =
               std::filesystem::path(filePath).parent_path();
-          moduleLoader->loadModule(std::string(path), currentDir, pathLine,
-                                   pathCol, pathLen, filePath);
+          ModuleNode *loaded =
+              moduleLoader->loadModule(std::string(path), currentDir, pathLine,
+                                       pathCol, pathLen, filePath);
+          if (loaded) {
+            if (isExport) {
+              exportInfo.back().resolvedModule = loaded;
+            } else {
+              importInfo.back().resolvedModule = loaded;
+            }
+          }
         }
 
       } else if (currentToken().type == TokenType::NAMESPACE_KW) {
-        std::string doc = consumeComments();
+        std::string doc = consumeModuleComments(topLevelItems);
         bool isFileScoped = false;
         auto ns = parseNamespaceDecl(isFileScoped);
         if (!doc.empty()) {
@@ -481,13 +579,17 @@ ModuleNode *Parser::parseModule(std::string_view filePath) {
         } else {
           statements.push_back(ns);
         }
+        topLevelItems.push_back(
+            {ModuleNode::TopLevelItem::Kind::Statement, {}, ns});
       } else if (currentToken().type == TokenType::USING_KW) {
-        std::string doc = consumeComments();
+        std::string doc = consumeModuleComments(topLevelItems);
         auto u = parseUsing();
         if (!doc.empty()) {
           u->docString = astCtx.copyString(doc);
         }
         statements.push_back(u);
+        topLevelItems.push_back(
+            {ModuleNode::TopLevelItem::Kind::Statement, {}, u});
       } else if (currentToken().type != TokenType::EOF_TOK) {
         if (currentToken().type == TokenType::RBRACE) {
           reportError(currentToken().line, currentToken().column, 1,
@@ -495,16 +597,23 @@ ModuleNode *Parser::parseModule(std::string_view filePath) {
           advance();
           continue;
         }
+        std::string doc = consumeModuleComments(topLevelItems);
         auto stmt = parseStatement();
-        if (stmt)
+        if (stmt) {
+          if (!doc.empty() && stmt->docString.empty()) {
+            stmt->docString = astCtx.copyString(doc);
+          }
           statements.push_back(stmt);
+          topLevelItems.push_back(
+              {ModuleNode::TopLevelItem::Kind::Statement, {}, stmt});
+        }
       }
     } catch (const ParseException &) {
       synchronize();
     }
   }
 
-  std::string eofDoc = consumeComments();
+  std::string eofDoc = consumeModuleComments(topLevelItems);
   if (!eofDoc.empty()) {
     if (!statements.empty()) {
       ASTNode *lastStmt = statements.back();
@@ -540,6 +649,10 @@ ModuleNode *Parser::parseModule(std::string_view filePath) {
 
   module->rawImports = astCtx.copyArray<std::string_view>(imports);
   module->rawExports = astCtx.copyArray<std::string_view>(exports);
+  module->importInfo = astCtx.copyArray<ModuleNode::DirectiveInfo>(importInfo);
+  module->exportInfo = astCtx.copyArray<ModuleNode::DirectiveInfo>(exportInfo);
+  module->topLevelItems =
+      astCtx.copyArray<ModuleNode::TopLevelItem>(topLevelItems);
   module->statements = astCtx.copyArray<ASTNode *>(statements);
   return module;
 }
@@ -2282,14 +2395,26 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind, bool isAbstract,
 
   const Type *baseClass = nullptr;
   std::vector<const Type *> interfaces;
+  std::string_view rawBaseClassStr;
+  std::vector<std::string_view> rawInterfaces;
 
   if (kind == TypeKind::Class) {
     if (match(TokenType::EXTENDS_KW)) {
+      const char *typeStart = currentToken().value.data();
       baseClass = parseType();
+      const char *typeEnd =
+          tokens[cursor - 1].value.data() + tokens[cursor - 1].value.length();
+      rawBaseClassStr = astCtx.copyString(
+          std::string_view(typeStart, typeEnd - typeStart));
     }
     if (match(TokenType::IMPLEMENTS_KW)) {
       do {
+        const char *typeStart = currentToken().value.data();
         interfaces.push_back(parseType());
+        const char *typeEnd =
+            tokens[cursor - 1].value.data() + tokens[cursor - 1].value.length();
+        rawInterfaces.push_back(
+            astCtx.copyString(std::string_view(typeStart, typeEnd - typeStart)));
       } while (match(TokenType::COMMA));
     }
   }
@@ -2311,6 +2436,8 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind, bool isAbstract,
       cNode->recordType = recordTy;
       cNode->baseClass = baseClass;
       cNode->interfaces = astCtx.copyArray<const Type *>(interfaces);
+      cNode->rawBaseClassStr = rawBaseClassStr;
+      cNode->rawInterfaces = astCtx.copyArray<std::string_view>(rawInterfaces);
       node = cNode;
     } else if (kind == TypeKind::Struct) {
       auto sNode = astCtx.create<StructDeclNode>(name, line, col, len);
@@ -2876,6 +3003,8 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind, bool isAbstract,
     cNode->destructor = destructor;
     cNode->baseClass = baseClass;
     cNode->interfaces = astCtx.copyArray<const Type *>(interfaces);
+      cNode->rawBaseClassStr = rawBaseClassStr;
+      cNode->rawInterfaces = astCtx.copyArray<std::string_view>(rawInterfaces);
     cNode->endLine = endLine;
     cNode->recordType = recordTy;
     cNode->isAbstract = isAbstract;

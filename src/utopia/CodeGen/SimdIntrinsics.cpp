@@ -11,8 +11,7 @@
 
 namespace utopia {
 
-/* ========================================================================
- * Portable SIMD intrinsics.
+/* Portable SIMD intrinsics.
  *
  * Every operation is implemented once and driven by the vector types that
  * appear at the call site. Utopia declares the ops with concrete signatures
@@ -21,7 +20,7 @@ namespace utopia {
  * fixed-length vector IR ('<4 x float>', '<16 x i8>', ...), which every
  * backend (SSE/AVX/AVX-512, NEON, SVE, RVV, ...) lowers to its native SIMD
  * instructions.
- * ======================================================================== */
+ */
 
 namespace {
 
@@ -129,7 +128,7 @@ bool isOnesCmp(SimdOp op) {
 class SimdOpIntrinsic : public Intrinsic {
   SimdOp op;
 
-  /* ---------- helpers (members so the protected CodeGen proxies work) */
+  /* helpers (members so the protected CodeGen proxies work) */
 
   SimdInfo getSimdInfo(CodeGen &cg, const Type *t) const {
     SimdInfo out;
@@ -237,7 +236,7 @@ class SimdOpIntrinsic : public Intrinsic {
     };
 
     switch (op) {
-    /* ---------------- arithmetic ---------------- */
+    /* arithmetic */
     case SimdOp::Add:
     case SimdOp::Sub:
     case SimdOp::Mul:
@@ -366,7 +365,7 @@ class SimdOpIntrinsic : public Intrinsic {
       return info.isFloat ? bld.CreateFAdd(x, y) : bld.CreateAdd(x, y);
     }
 
-    /* ---------------- bitwise ---------------- */
+    /* bitwise */
     case SimdOp::And:
     case SimdOp::Or:
     case SimdOp::Xor:
@@ -436,7 +435,7 @@ class SimdOpIntrinsic : public Intrinsic {
       return bld.CreateLShr(a, b);
     }
 
-    /* ---------------- comparisons ---------------- */
+    /* comparisons */
     case SimdOp::CmpEq:
     case SimdOp::CmpNe:
     case SimdOp::CmpLt:
@@ -469,7 +468,7 @@ class SimdOpIntrinsic : public Intrinsic {
       return emitCompare(cg, bld, op, a, rhs, info);
     }
 
-    /* ---------------- selection ---------------- */
+    /* selection */
     case SimdOp::Select: {
       llvm::Value *mask = dispatchArg(0);
       llvm::Value *a = dispatchArg(1);
@@ -509,7 +508,7 @@ class SimdOpIntrinsic : public Intrinsic {
       return bld.CreateSelect(sel, a, b);
     }
 
-    /* ---------------- layout ---------------- */
+    /* layout */
     case SimdOp::Shuffle: {
       llvm::Value *a = dispatchArg(0);
       llvm::Value *b = dispatchArg(1);
@@ -683,7 +682,7 @@ class SimdOpIntrinsic : public Intrinsic {
       return bld.CreateShuffleVector(a, b, mask, "simd.shuffle");
     }
 
-    /* ---------------- memory ---------------- */
+    /* memory */
     case SimdOp::Load:
     case SimdOp::LoadU:
     case SimdOp::BroadcastLoad: {
@@ -733,7 +732,7 @@ class SimdOpIntrinsic : public Intrinsic {
       return nullptr;
     }
 
-    /* ---------------- reinterpretation ---------------- */
+    /* reinterpretation */
     case SimdOp::Convert: {
       llvm::Value *v = dispatchArg(0);
       if (!v)
@@ -784,7 +783,7 @@ class SimdOpIntrinsic : public Intrinsic {
       return bld.CreateBitCast(v, retInfo.llVec);
     }
 
-    /* ---------------- reductions ---------------- */
+    /* reductions */
     case SimdOp::ReduceAdd:
     case SimdOp::ReduceMin:
     case SimdOp::ReduceMax:

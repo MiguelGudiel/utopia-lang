@@ -30,6 +30,8 @@ struct BuildScriptDelta {
   bool asyncEnabled = true;
   bool touchedSysroot = false;
   std::string sysroot;
+  /* Warning kinds disabled from build.utp ('setWarningEnabled(name, false)'). */
+  std::vector<std::string> disabledWarnings;
 };
 
 std::unordered_map<std::string, BuildScriptDelta> g_buildScriptSession;
@@ -54,6 +56,13 @@ void applyScriptDelta(CompileOptions &options, const BuildScriptDelta &delta) {
   if (delta.touchedSysroot) {
     options.sysroot = delta.sysroot;
   }
+  for (const auto &name : delta.disabledWarnings) {
+    if (std::find(options.disabledWarnings.begin(),
+                  options.disabledWarnings.end(),
+                  name) == options.disabledWarnings.end()) {
+      options.disabledWarnings.push_back(name);
+    }
+  }
 }
 
 bool runBuildScriptOnce(const fs::path &buildUtpPath, CompileOptions &options,
@@ -76,6 +85,7 @@ bool runBuildScriptOnce(const fs::path &buildUtpPath, CompileOptions &options,
   int optBefore = options.optLevel;
   bool asyncBefore = options.asyncEnabled;
   std::string sysrootBefore = options.sysroot;
+  std::vector<std::string> warningsBefore = options.disabledWarnings;
 
   if (!BuildScriptRunner::run(buildUtpPath, options, projRoot)) {
     std::cerr << "Fatal: Failed to execute build.utp successfully.\n";
@@ -103,6 +113,12 @@ bool runBuildScriptOnce(const fs::path &buildUtpPath, CompileOptions &options,
   delta.asyncEnabled = options.asyncEnabled;
   delta.touchedSysroot = options.sysroot != sysrootBefore;
   delta.sysroot = options.sysroot;
+  for (const auto &name : options.disabledWarnings) {
+    if (std::find(warningsBefore.begin(), warningsBefore.end(), name) ==
+        warningsBefore.end()) {
+      delta.disabledWarnings.push_back(name);
+    }
+  }
 
   g_buildScriptSession[sessionKey] = std::move(delta);
   return true;
@@ -207,6 +223,10 @@ bool buildProjectRecursive(const fs::path &projRoot,
 
   if (config.asyncEnabled.has_value()) {
     options.asyncEnabled = config.asyncEnabled.value();
+  }
+
+  for (const auto &name : config.disabledWarnings) {
+    options.disabledWarnings.push_back(name);
   }
 
   if (config.optLevel.has_value()) {

@@ -291,11 +291,10 @@ void ControlFlowPass::visit(const VariableNode *node) {
         } else {
           auto it = initStates.find(varDecl);
           if (it != initStates.end() && !it->second) {
-            ctx->diags.report({DiagLevel::Warning, node->line, node->column,
-                               node->length,
+            ctx->reportWarning(WarningKind::UninitializedVariable,
+                               node->line, node->column, node->length,
                                "Use of uninitialized variable '" +
-                                   std::string(node->name) + "'",
-                               std::string(ctx->currentFile)});
+                                   std::string(node->name) + "'");
             initStates[varDecl] = true;
           }
         }

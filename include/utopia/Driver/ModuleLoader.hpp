@@ -22,6 +22,9 @@ struct ModuleLoaderConfig {
   bool isBuildScript = false;
   bool isFormatting = false;
   bool asyncEnabled = true;
+
+  /* Warning kinds disabled by the project manifest ('build.warnings'). */
+  std::vector<std::string> disabledWarnings;
 };
 
 class ModuleLoader {

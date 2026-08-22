@@ -234,13 +234,13 @@ TypeCheckPass::resolveOverloadedOperator(const Type *lhsType,
         const Type *pointee =
             static_cast<const ReferenceType *>(paramType)->getPointeeType();
         if (!pointee->isConstQualified()) {
-          (void)ctx->diags.report(
-              {DiagLevel::Warning, args[i]->line, args[i]->column,
-               args[i]->length,
-               "Binding an r-value to non-const reference parameter '" +
-                   std::string(bestMatch->params[argsStartIdx + i]->name) +
-                   "' will implicitly create a stack-allocated temporary.",
-               std::string(ctx->currentFile), args[i]->endLine});
+          ctx->reportWarning(
+              WarningKind::ImplicitCast, args[i]->line, args[i]->column,
+              args[i]->length,
+              "Binding an r-value to non-const reference parameter '" +
+                  std::string(bestMatch->params[argsStartIdx + i]->name) +
+                  "' will implicitly create a stack-allocated temporary.",
+              args[i]->endLine);
         }
       }
     }

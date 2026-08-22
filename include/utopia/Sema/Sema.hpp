@@ -204,7 +204,7 @@ public:
   SemaResult visit(const ConstExprNode *node);
   SemaResult visit(const DestructorCallNode *node);
 
-  /* ---- Dart-style const expressions ---- */
+  /* Dart-style const expressions */
 
   /* Validates 'expr' as a compile-time constant expression and computes its
    * canonicalization key. 'inConstContext' enables implicit const (a

@@ -2,8 +2,10 @@
 #include "utopia/AST/ASTContext.hpp"
 #include "utopia/Common/Diagnostics.hpp"
 #include "utopia/Common/Types.hpp"
+#include "utopia/Common/Warnings.hpp"
 #include "utopia/Sema/SymbolTable.hpp"
 #include <algorithm>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -21,6 +23,15 @@ public:
   bool isAssignTarget = false;
   std::vector<std::string> namespaceStack;
   const FunctionDeclNode *currentFunction = nullptr;
+
+  /* Per-project warning enable/disable state, populated by the caller from
+   * build.yaml / build.utp. */
+  WarningConfig warningConfig;
+
+  /* Optional caller-provided suppression hook (in-source '// @ignore-warning'
+   * directives, live editor text, ...). Signature: (kind, filePath, line) ->
+   * allow. When unset only warningConfig filters warnings. */
+  std::function<bool(WarningKind, std::string_view, int)> warningFilter;
 
   /* Nesting depth of Dart-style const contexts (const expressions and
    * initializers of const variables). While non-zero, constructor calls
@@ -257,6 +268,31 @@ public:
     errors.push_back(ErrorInfo{line, col, len, msg});
 
     return std::unexpected(ErrorInfo{line, col, len, msg});
+  }
+
+  /* Whether a warning of 'kind' may be emitted for 'line' of 'file': the
+   * per-project configuration is consulted first, then the caller-provided
+   * suppression hook (in-source directives). */
+  bool warningEnabled(WarningKind kind, int line,
+                      std::string_view file = "") const {
+    if (!warningConfig.enabled(kind))
+      return false;
+    if (warningFilter) {
+      return warningFilter(kind, file.empty() ? currentFile : file, line);
+    }
+    return true;
+  }
+
+  /* Reports a warning through the diagnostics engine unless the kind is
+   * disabled by configuration or by an in-source suppression directive.
+   * 'hasFix' advertises an editor quick-fix for the diagnostic. */
+  void reportWarning(WarningKind kind, int line, int col, int len,
+                     const std::string &msg, int endLine = 0,
+                     bool hasFix = false) {
+    if (!warningEnabled(kind, line))
+      return;
+    diags.report({DiagLevel::Warning, line, col, len, msg,
+                  std::string(currentFile), endLine, kind, hasFix});
   }
 
   bool hasErrors() const { return !errors.empty(); }

@@ -254,7 +254,7 @@ private:
   llvm::Function *getOrCreateFunction(const FunctionDeclNode *node);
   llvm::Function *getOrCreateGlobalInitFunc();
 
-  /* ---- Dart-style const objects ---- */
+  /* Dart-style const objects */
 
   /* Canonical const objects: one read-only global per (class, ctor, args)
    * key. 'linkonce_odr' + a deterministic name make identical constructions

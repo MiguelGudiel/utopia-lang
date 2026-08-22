@@ -92,11 +92,11 @@ void handleCompletion(const json &req) {
 
   auto addBuiltInAnnotations = [&]() {
     std::vector<std::string> builtInAnnotations = {
-        "extern",          "export",       "align",     "packed",
-        "nodiscard",       "deprecated",   "inline",    "forceInline",
-        "readnone",        "readonly",     "nosync",    "nofree",
-        "willreturn",      "mustprogress", "nocapture", "nonnull",
-        "dereferenceable", "weak"};
+        "extern",          "export",       "intrinsic", "align",
+        "packed",          "nodiscard",    "deprecated", "inline",
+        "forceInline",     "readnone",     "readonly",  "nosync",
+        "nofree",          "willreturn",   "mustprogress", "nocapture",
+        "nonnull",         "dereferenceable", "weak"};
     for (const auto &ann : builtInAnnotations) {
       addCompletion(ann, 8, "Built-in Annotation");
     }
@@ -198,7 +198,8 @@ void handleCompletion(const json &req) {
 
     std::vector<std::string> macros = {
         "_WIN32", "__APPLE__", "__linux__", "__gnu_linux__", "__ANDROID__",
-        "x64",    "x86_64",    "x86",       "arm64",         "arm"};
+        "x64",    "x86_64",    "x86",       "arm64",         "arm",
+        "__FILE__", "__LINE__"};
 
     for (const auto &mc : macros) {
       addCompletion(mc, 21, "Preprocessor Macro");

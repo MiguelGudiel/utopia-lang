@@ -83,6 +83,24 @@ void UtopiaBuild_setSysroot(const char *sysroot) {
   }
 }
 
+void UtopiaBuild_setWarningEnabled(const char *name, int enabled) {
+  if (!g_CurrentBuildOptions || !name || enabled)
+    return;
+  std::string warningName(name);
+  auto &list = g_CurrentBuildOptions->disabledWarnings;
+  if (std::find(list.begin(), list.end(), warningName) == list.end()) {
+    list.push_back(warningName);
+  }
+}
+
+bool UtopiaBuild_isWarningEnabled(const char *name) {
+  if (!g_CurrentBuildOptions || !name)
+    return true;
+  std::string warningName(name);
+  const auto &list = g_CurrentBuildOptions->disabledWarnings;
+  return std::find(list.begin(), list.end(), warningName) == list.end();
+}
+
 const char *UtopiaBuild_getMainProjectRoot() {
   return g_CurrentBuildOptions ? g_CurrentBuildOptions->mainProjectRoot.c_str()
                                : "";
@@ -285,6 +303,10 @@ bool BuildScriptRunner::run(const std::filesystem::path &scriptPath,
   addSym("UtopiaBuild_isDefined", (void *)UtopiaBuild_isDefined);
   addSym("UtopiaBuild_addCacheDefine", (void *)UtopiaBuild_addCacheDefine);
   addSym("UtopiaBuild_setSysroot", (void *)UtopiaBuild_setSysroot);
+  addSym("UtopiaBuild_setWarningEnabled",
+         (void *)UtopiaBuild_setWarningEnabled);
+  addSym("UtopiaBuild_isWarningEnabled",
+         (void *)UtopiaBuild_isWarningEnabled);
 
   addSym("UtopiaBuild_getMainProjectRoot",
          (void *)UtopiaBuild_getMainProjectRoot);

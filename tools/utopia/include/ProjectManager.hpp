@@ -32,6 +32,8 @@ struct ProjectConfig {
   std::vector<std::string> linkerFlags;
   std::optional<int> optLevel;
   std::optional<bool> asyncEnabled;
+  /* Warning kinds disabled by 'build.warnings' in the manifest. */
+  std::vector<std::string> disabledWarnings;
   std::vector<SubprojectConfig> dependencies;
 };
 

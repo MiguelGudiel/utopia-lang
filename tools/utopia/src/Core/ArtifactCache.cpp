@@ -10,9 +10,7 @@ namespace utopia {
 
 namespace {
 
-/* ------------------------------------------------------------------ */
-/* Compact SHA-256 (FIPS 180-4) implementation.                        */
-/* ------------------------------------------------------------------ */
+/* Compact SHA-256 (FIPS 180-4) implementation. */
 
 struct Sha256 {
   uint32_t state[8];

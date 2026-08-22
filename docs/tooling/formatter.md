@@ -15,6 +15,7 @@ utopia fmt path/to/project       # format all project sources
 - Consistent indentation, spacing, and line breaking for declarations, expressions, and call arguments.
 - Preserves **comments**, including trailing comments and doc comments.
 - Line-breaks are solved optimally across the whole line (dynamic programming over the piece tree), so formatting is deterministic and stable.
+- **Preprocessor directives** (`#if`, `#else`, `#endif`, `#define`, ...) are kept in place: when a file contains directives, nothing is moved across a conditional branch, so imports and `using` directives stay inside the section they belong to.
 
 ## Example
 

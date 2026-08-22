@@ -21,27 +21,42 @@ std::atomic<bool> isRunning{true};
 void workerThread() {
   while (isRunning) {
     std::string uri, text;
+    bool pollManifests = false;
     {
       std::unique_lock<std::mutex> lock(workerMutex);
-      workerCV.wait(
-          lock, [] { return hasPendingChange || forceProcess || !isRunning; });
+      /* Wake periodically even when idle so the manifest poller runs: the
+       * project configuration must refresh when build.yaml changes on disk
+       * even if the client sends no notification at all. */
+      workerCV.wait_for(lock, std::chrono::seconds(1), [] {
+        return hasPendingChange || forceProcess || !isRunning;
+      });
       if (!isRunning)
         break;
 
-      bool interrupted = true;
-      /* Only wait the 200ms debounce interval if processing isn't forced. */
-      while (interrupted && !forceProcess) {
-        auto status = workerCV.wait_for(lock, std::chrono::milliseconds(200));
-        if (status == std::cv_status::timeout) {
-          interrupted = false;
+      if (!hasPendingChange && !forceProcess) {
+        /* Idle tick: look for build.yaml changes. */
+        pollManifests = true;
+      } else {
+        bool interrupted = true;
+        /* Only wait the 200ms debounce interval if processing isn't forced. */
+        while (interrupted && !forceProcess) {
+          auto status = workerCV.wait_for(lock, std::chrono::milliseconds(200));
+          if (status == std::cv_status::timeout) {
+            interrupted = false;
+          }
         }
-      }
 
-      forceProcess = false;
-      hasPendingChange = false;
-      uri = pendingUri;
-      text = std::move(pendingText);
-      isProcessing = true;
+        forceProcess = false;
+        hasPendingChange = false;
+        uri = pendingUri;
+        text = std::move(pendingText);
+        isProcessing = true;
+      }
+    }
+
+    if (pollManifests) {
+      documents.pollManifests();
+      continue;
     }
 
     if (!uri.empty()) {
@@ -66,7 +81,8 @@ bool dispatchRequest(const json &req) {
          {"id", requestId(req)},
          {"result",
           {{"capabilities",
-            {{"textDocumentSync", 1},
+            {{"textDocumentSync",
+              {{"openClose", true}, {"change", 1}, {"save", true}}},
              {"hoverProvider", true},
              {"definitionProvider", true},
              {"typeDefinitionProvider", true},
@@ -76,12 +92,14 @@ bool dispatchRequest(const json &req) {
              {"documentSymbolProvider", true},
              {"workspaceSymbolProvider", true},
              {"foldingRangeProvider", true},
-             {"documentLinkProvider", {"resolveProvider", false}},
+              {"documentLinkProvider", {{"resolveProvider", false}}},
              {"completionProvider",
               {{"triggerCharacters", {".", "@"}}}},
              {"signatureHelpProvider",
               {{"triggerCharacters", {"(", ","}}}},
              {"documentFormattingProvider", true},
+             {"codeActionProvider",
+              {{"codeActionKinds", {"quickfix"}}}},
              {"semanticTokensProvider",
               {{"legend",
                 {{"tokenTypes",
@@ -120,6 +138,8 @@ bool dispatchRequest(const json &req) {
     handleFormatting(req);
   } else if (method == "textDocument/semanticTokens/full") {
     handleSemanticTokens(req);
+  } else if (method == "textDocument/codeAction") {
+    handleCodeAction(req);
   } else if (method == "textDocument/didOpen" ||
              method == "textDocument/didChange") {
     std::string uri = req["params"]["textDocument"]["uri"];
@@ -127,7 +147,32 @@ bool dispatchRequest(const json &req) {
         (method == "textDocument/didOpen")
             ? req["params"]["textDocument"]["text"].get<std::string>()
             : req["params"]["contentChanges"][0]["text"].get<std::string>();
-    requestBackgroundAnalysis(uri, std::move(text));
+
+    /* build.yaml is not Utopia source: an edit to the manifest re-reads the
+     * project configuration and re-analyzes its open documents instead of
+     * parsing YAML as a module. */
+    if (uri.ends_with("build.yaml")) {
+      documents.onBuildManifestChanged(uri, std::move(text));
+    } else {
+      requestBackgroundAnalysis(uri, std::move(text));
+    }
+  } else if (method == "textDocument/didClose") {
+    std::string uri = req["params"]["textDocument"]["uri"];
+    if (uri.ends_with("build.yaml")) {
+      documents.onBuildManifestClosed(uri);
+    }
+  } else if (method == "textDocument/didSave") {
+    std::string uri = req["params"]["textDocument"]["uri"];
+    if (uri.ends_with("build.yaml")) {
+      documents.onBuildManifestSaved(uri);
+    }
+  } else if (method == "workspace/didChangeWatchedFiles") {
+    for (const auto &change : req["params"]["changes"]) {
+      std::string uri = change["uri"].get<std::string>();
+      if (uri.ends_with("build.yaml")) {
+        documents.onBuildManifestSaved(uri);
+      }
+    }
   } else if (method == "shutdown") {
     sendResponse({{"jsonrpc", "2.0"},
                   {"id", requestId(req)},

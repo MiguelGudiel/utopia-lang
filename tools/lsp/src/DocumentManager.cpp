@@ -1,6 +1,8 @@
 #include "LspCore.hpp"
+#include "utopia/Common/Warnings.hpp"
 #include <cstdlib>
 #include <fstream>
+#include <mutex>
 #include <sstream>
 #include <yaml-cpp/yaml.h>
 
@@ -152,26 +154,182 @@ DocumentManager::projectRootFor(const std::string &uri,
   return root;
 }
 
+std::string
+DocumentManager::manifestTextFor(const std::filesystem::path &projRoot) const {
+  {
+    std::lock_guard<std::mutex> lock(cacheMutex);
+    auto it = manifestTexts.find(projRoot.string());
+    if (it != manifestTexts.end())
+      return it->second;
+  }
+  std::filesystem::path manifest = projRoot / "build.yaml";
+  if (std::filesystem::exists(manifest)) {
+    std::ifstream in(manifest);
+    std::stringstream buffer;
+    buffer << in.rdbuf();
+    return buffer.str();
+  }
+  return "";
+}
+
 void DocumentManager::applyAsyncConfig(ModuleLoaderConfig &modConfig,
                                        const std::filesystem::path &projRoot) {
   /* Async support is enabled by default; build.yaml may disable it with
    * 'async: false'. The prelude's Future class is guarded by the
    * UTOPIA_ASYNC macro, so it must be defined exactly like the driver. */
   if (!projRoot.empty()) {
-    std::filesystem::path manifest = projRoot / "build.yaml";
-    if (std::filesystem::exists(manifest)) {
+    std::string manifestText = manifestTextFor(projRoot);
+    if (!manifestText.empty()) {
       try {
-        YAML::Node root = YAML::LoadFile(manifest.string());
+        YAML::Node root = YAML::Load(manifestText);
         if (root["build"] && root["build"]["async"]) {
           modConfig.asyncEnabled = root["build"]["async"].as<bool>();
         }
+
+        /* 'build.warnings' disables warning kinds for this project:
+         * either a map of name -> bool or a list of names. */
+        if (root["build"] && root["build"]["warnings"]) {
+          YAML::Node warnings = root["build"]["warnings"];
+          if (warnings.IsMap()) {
+            for (const auto &entry : warnings) {
+              std::string name = entry.first.as<std::string>();
+              if (!entry.second.as<bool>(true)) {
+                modConfig.disabledWarnings.push_back(name);
+              }
+            }
+          } else if (warnings.IsSequence()) {
+            for (const auto &entry : warnings) {
+              modConfig.disabledWarnings.push_back(
+                  entry.as<std::string>());
+            }
+          }
+        }
       } catch (...) {
-        /* Malformed build.yaml: keep the default. */
+        /* Malformed build.yaml: keep the defaults. */
       }
     }
   }
   if (modConfig.asyncEnabled) {
     modConfig.definedMacros.insert("UTOPIA_ASYNC");
+  }
+}
+
+void DocumentManager::reanalyzeProject(const std::string &projRoot) {
+  std::vector<std::pair<std::string, std::string>> toAnalyze;
+  {
+    std::shared_lock<std::shared_mutex> lock(docMutex);
+    for (const auto &[uri, state] : documents) {
+      std::string path = uriToPath(uri);
+      if (!path.empty() && findProjectRoot(path).string() == projRoot) {
+        toAnalyze.emplace_back(uri, state.text);
+      }
+    }
+  }
+  for (const auto &[uri, text] : toAnalyze) {
+    requestBackgroundAnalysis(uri, text);
+  }
+}
+
+void DocumentManager::refreshProject(const std::string &projRoot) {
+  {
+    std::lock_guard<std::mutex> lock(cacheMutex);
+    projectConfigCache.erase(projRoot);
+    configMtimes.erase(projRoot);
+  }
+  reanalyzeProject(projRoot);
+}
+
+void DocumentManager::onBuildManifestChanged(const std::string &uri,
+                                             const std::string &text) {
+  std::string projRoot = findProjectRoot(uriToPath(uri)).string();
+  {
+    std::lock_guard<std::mutex> lock(cacheMutex);
+    manifestTexts[projRoot] = text;
+  }
+  refreshProject(projRoot);
+}
+
+void DocumentManager::onBuildManifestSaved(const std::string &uri) {
+  std::filesystem::path manifestPath = uriToPath(uri);
+  /* When the manifest no longer exists, the upward search could land on an
+   * unrelated parent project; the manifest's own directory is the root. */
+  std::filesystem::path root = manifestPath.parent_path();
+  if (std::filesystem::exists(manifestPath))
+    root = findProjectRoot(manifestPath);
+  refreshProject(root.string());
+}
+
+void DocumentManager::onBuildManifestClosed(const std::string &uri) {
+  std::filesystem::path manifestPath = uriToPath(uri);
+  std::filesystem::path root = manifestPath.parent_path();
+  if (std::filesystem::exists(manifestPath))
+    root = findProjectRoot(manifestPath);
+  std::string projRoot = root.string();
+  {
+    std::lock_guard<std::mutex> lock(cacheMutex);
+    manifestTexts.erase(projRoot);
+    /* The disk mtime is re-seeded by the next poll, so an out-of-date
+     * entry cannot suppress the refresh the close triggers. */
+    manifestDiskMtimes.erase(projRoot);
+  }
+  refreshProject(projRoot);
+}
+
+void DocumentManager::pollManifests() {
+  /* Every project the server knows about: open manifests, cached configs
+   * and analyzed documents. */
+  std::vector<std::string> roots;
+  {
+    std::lock_guard<std::mutex> lock(cacheMutex);
+    for (const auto &[root, _] : manifestTexts)
+      roots.push_back(root);
+    for (const auto &[root, _] : projectConfigCache)
+      roots.push_back(root);
+    for (const auto &[_, root] : uriToProjectRoot)
+      roots.push_back(root.string());
+  }
+  std::sort(roots.begin(), roots.end());
+  roots.erase(std::unique(roots.begin(), roots.end()), roots.end());
+
+  for (const auto &root : roots) {
+    {
+      /* An open editor copy takes precedence; disk changes only matter once
+       * the document is closed (or was never opened). */
+      std::lock_guard<std::mutex> lock(cacheMutex);
+      if (manifestTexts.contains(root))
+        continue;
+    }
+
+    std::filesystem::path manifest = std::filesystem::path(root) / "build.yaml";
+    auto mtime = std::filesystem::exists(manifest)
+                     ? std::filesystem::last_write_time(manifest)
+                     : std::filesystem::file_time_type::min();
+
+    bool changed = false;
+    {
+      std::lock_guard<std::mutex> lock(cacheMutex);
+      auto it = manifestDiskMtimes.find(root);
+      if (it == manifestDiskMtimes.end()) {
+        /* First sight: seed the baseline from the mtime the current
+         * configuration was derived from, not from the file right now: the
+         * manifest may have changed before the first poll ran, and that
+         * change must still be detected. */
+        auto cfgIt = configMtimes.find(root);
+        it = manifestDiskMtimes
+                 .emplace(root, cfgIt != configMtimes.end()
+                                    ? cfgIt->second
+                                    : mtime)
+                 .first;
+      }
+      if (it->second != mtime) {
+        it->second = mtime;
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      refreshProject(root);
+    }
   }
 }
 
@@ -181,11 +339,23 @@ DocumentManager::configFor(const std::string &uri,
   std::filesystem::path projRoot = projectRootFor(uri, filePath);
   std::string projRootStr = projRoot.string();
 
+  /* The cached config must be discarded when build.yaml changes (e.g. after
+   * the 'disable in project' quick fix edits the manifest). */
   {
     std::lock_guard<std::mutex> lock(cacheMutex);
     auto it = projectConfigCache.find(projRootStr);
-    if (it != projectConfigCache.end())
-      return it->second;
+    if (it != projectConfigCache.end()) {
+      std::filesystem::path manifest = projRoot / "build.yaml";
+      auto mtime = std::filesystem::exists(manifest)
+                       ? std::filesystem::last_write_time(manifest)
+                       : std::filesystem::file_time_type::min();
+      auto cached = it->second;
+      auto cachedIt = configMtimes.find(projRootStr);
+      if (cachedIt != configMtimes.end() && cachedIt->second == mtime) {
+        return cached;
+      }
+      projectConfigCache.erase(it);
+    }
   }
 
   ModuleLoaderConfig modConfig;
@@ -241,6 +411,10 @@ DocumentManager::configFor(const std::string &uri,
 
   std::lock_guard<std::mutex> lock(cacheMutex);
   projectConfigCache[projRootStr] = modConfig;
+  configMtimes[projRootStr] = std::filesystem::exists(projRoot / "build.yaml")
+                                  ? std::filesystem::last_write_time(
+                                        projRoot / "build.yaml")
+                                  : std::filesystem::file_time_type::min();
   return modConfig;
 }
 
@@ -269,6 +443,38 @@ void DocumentManager::processFile(const std::string &uri, std::string text) {
     if (newState.ast) {
       newState.sema = std::make_shared<SemaContext>(*newState.astCtx,
                                                     *newState.diags, filePath);
+
+      /* Warning kinds disabled by the project manifest. */
+      for (const auto &name : modConfig.disabledWarnings) {
+        newState.sema->warningConfig.disable(name);
+      }
+
+      /* In-source suppression directives. The text being analyzed is
+       * authoritative for this document; other files (imports) are read on
+       * demand and cached. textFor() returns the previously stored version
+       * (the new state is committed at the end of processFile), so the
+       * current document must be seeded explicitly, otherwise the
+       * suppression scan would always lag one edit behind. */
+      auto suppressionCache =
+          std::make_shared<std::unordered_map<std::string, WarningSuppressions>>();
+      (*suppressionCache)[filePath] = collectWarningSuppressions(newState.text);
+      std::mutex suppressionMutex;
+      newState.sema->warningFilter =
+          [this, suppressionCache, &suppressionMutex](
+              WarningKind kind, std::string_view filePath, int line) {
+            std::string key(filePath);
+            {
+              std::lock_guard<std::mutex> lock(suppressionMutex);
+              auto it = suppressionCache->find(key);
+              if (it == suppressionCache->end()) {
+                WarningSuppressions supp =
+                    collectWarningSuppressions(textFor(pathToUri(key)));
+                it = suppressionCache->emplace(key, std::move(supp)).first;
+              }
+              return !it->second.suppresses(kind, line);
+            }
+          };
+
       SemaPipeline pipeline;
       pipeline.run(newState.ast, *newState.sema);
     }

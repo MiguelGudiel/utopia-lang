@@ -34,6 +34,10 @@ struct CompileOptions {
   std::unordered_set<std::string> publicMacros;
   std::unordered_set<std::string> privateMacros;
 
+  /* Warning kinds disabled by the project manifest ('build.warnings' in
+   * build.yaml or the build.utp API). */
+  std::vector<std::string> disabledWarnings;
+
   std::unordered_map<std::string, std::string> packages;
 
   bool emitLLVM = false;

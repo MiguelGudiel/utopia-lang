@@ -4969,7 +4969,7 @@ llvm::Value *CodeGen::visit(const IsExprNode *node) {
   return result;
 }
 
-/* ---- Exception handling: try / catch / throw ---- */
+/* Exception handling: try / catch / throw */
 
 llvm::Value *CodeGen::visit(const TryStmtNode *node) {
   llvm::Function *fn = builder.GetInsertBlock()->getParent();
@@ -5613,7 +5613,7 @@ llvm::Value *CodeGen::visit(const ModuleNode *node) {
 
   /* Recursively traverses the full module hierarchy to establish external
    * linkages for global functions and variables, respecting export visibility
-   */
+ */
   auto declareGlobals = [&](const ModuleNode *m, auto &self) -> void {
     if (!m || visitedDeps.contains(m))
       return;
@@ -5875,7 +5875,7 @@ llvm::Value *CodeGen::visit(const ArraySubscriptNode *node) {
   return createTBAALoad(getLLVMType(loadTy), lval, loadTy);
 }
 
-/* ==================== Dart-style const objects ==================== */
+/* Dart-style const objects */
 
 namespace {
 /* Mirrors Sema's resolver: the constructor behind an object creation. */
@@ -5979,7 +5979,7 @@ llvm::Constant *CodeGen::buildConstArray(const ExprNode *node,
   snprintf(buf, sizeof(buf), "_%016llx", (unsigned long long)fnv1a64(key));
   name += buf;
 
-  auto *gv = new llvm::GlobalVariable(mod, arrLL, /*isConstant*/ true,
+  auto *gv = new llvm::GlobalVariable(mod, arrLL, /*isConstant */ true,
                                       llvm::GlobalValue::LinkOnceODRLinkage,
                                       init, name);
   gv->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
@@ -6024,7 +6024,7 @@ llvm::Constant *CodeGen::buildConstStringGlobal(llvm::StringRef value) {
   snprintf(buf, sizeof(buf), "%016llx", (unsigned long long)fnv1a64(value));
   name.append(buf);
   auto *gv = new llvm::GlobalVariable(mod, strConst->getType(),
-                                      /*isConstant*/ true,
+                                      /*isConstant */ true,
                                       llvm::GlobalValue::LinkOnceODRLinkage,
                                       strConst, name.str());
   gv->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
@@ -6046,7 +6046,7 @@ llvm::Constant *CodeGen::buildConstString(llvm::StringRef value) {
   return llvm::ConstantStruct::get(
       llvm::StructType::get(ctx, {builder.getPtrTy(), builder.getInt64Ty(),
                                   builder.getInt64Ty()},
-                            /*isPacked*/ false),
+                            /*isPacked */ false),
       elems);
 }
 
@@ -6173,7 +6173,7 @@ void CodeGen::emitConstRegistry() {
   llvm::ArrayType *tblTy = llvm::ArrayType::get(entryTy, entries.size());
   std::string modHash = std::to_string(fnv1a64(currentFilePath));
   auto *tblGV = new llvm::GlobalVariable(
-      mod, tblTy, /*isConstant*/ true,
+      mod, tblTy, /*isConstant */ true,
       llvm::GlobalValue::LinkOnceODRLinkage,
       llvm::ConstantArray::get(tblTy, entries),
       "__utopia_const_tbl_" + modHash);
@@ -6183,7 +6183,7 @@ void CodeGen::emitConstRegistry() {
   llvm::Constant *nullPtr = llvm::ConstantPointerNull::get(
       llvm::cast<llvm::PointerType>(ptrTy));
   auto *nodeGV = new llvm::GlobalVariable(
-      mod, nodeTy, /*isConstant*/ false,
+      mod, nodeTy, /*isConstant */ false,
       llvm::GlobalValue::LinkOnceODRLinkage,
       llvm::ConstantStruct::get(
           nodeTy, {tblGV,
@@ -6193,7 +6193,7 @@ void CodeGen::emitConstRegistry() {
   /* Shared list head (linkonce_odr folds all modules into one). */
   llvm::GlobalVariable *headGV = mod.getGlobalVariable("__utopia_const_head");
   if (!headGV) {
-    headGV = new llvm::GlobalVariable(mod, ptrTy, /*isConstant*/ false,
+    headGV = new llvm::GlobalVariable(mod, ptrTy, /*isConstant */ false,
                                       llvm::GlobalValue::LinkOnceODRLinkage,
                                       nullPtr, "__utopia_const_head");
   }
@@ -6346,7 +6346,7 @@ llvm::GlobalVariable *CodeGen::getOrCreateCanonicalConst(const ExprNode *node) {
   llvm::StructType *structTy =
       llvm::cast<llvm::StructType>(getLLVMType(ctor->parentRecord));
   auto *gv = new llvm::GlobalVariable(mod, structTy,
-                                      /*isConstant*/ true,
+                                      /*isConstant */ true,
                                       llvm::GlobalValue::LinkOnceODRLinkage,
                                       init, name);
   gv->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);

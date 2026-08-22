@@ -850,6 +850,36 @@ struct ModuleNode : public ASTNode {
   llvm::ArrayRef<std::string_view> rawExports;
   llvm::ArrayRef<ModuleNode *> exportedModules;
 
+  /* Source spans of the import/export directives, parallel to rawImports and
+   * rawExports: from the 'import'/'export' keyword to the terminating
+   * semicolon. Used by LSP tooling and warning reporting. */
+  struct DirectiveInfo {
+    std::string_view path;
+    int line;
+    int column;
+    int endLine;
+    int endColumn;
+    /* The module loaded for this directive (null when resolution failed).
+     * Filled by the parser from the module loader. */
+    const ModuleNode *resolvedModule = nullptr;
+  };
+  llvm::ArrayRef<DirectiveInfo> importInfo;
+  llvm::ArrayRef<DirectiveInfo> exportInfo;
+
+  /* One top-level source item of a module, in file order. The formatter
+   * switches to this order when preprocessor directives are present, since
+   * reordering (import hoisting, member sorting) would move code across
+   * conditional branches. */
+  struct TopLevelItem {
+    enum class Kind : uint8_t { Import, Export, Directive, Statement };
+    Kind kind;
+    /* Import/export path or the raw directive line ('#if X'), without the
+     * leading '#'. */
+    std::string_view text;
+    ASTNode *node = nullptr; /* Statement items */
+  };
+  llvm::ArrayRef<TopLevelItem> topLevelItems;
+
   llvm::ArrayRef<ASTNode *> statements;
   std::vector<ASTNode *> instantiatedTemplates;
 
@@ -931,6 +961,12 @@ struct ClassDeclNode : public DeclNode {
 
   const Type *baseClass = nullptr;
   llvm::ArrayRef<const Type *> interfaces;
+
+  /* Raw source text of the base class and interfaces (parallel to
+   * 'interfaces'): the resolved types carry fully qualified names, which
+   * must not leak into reformatted output. */
+  std::string_view rawBaseClassStr;
+  llvm::ArrayRef<std::string_view> rawInterfaces;
 
   mutable const RecordType *recordType = nullptr;
   bool isOpaque = false;

@@ -15,6 +15,7 @@ set(LSP_SOURCES
     src/References.cpp
     src/Folding.cpp
     src/Links.cpp
+    src/CodeActions.cpp
 )
 
 add_executable(utopia_lsp ${LSP_SOURCES})

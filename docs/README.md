@@ -32,6 +32,7 @@ This book is organized like the documentation of other systems languages, so you
 | [Modules](language/modules.md) | `import`/`export`, namespaces, `using`, the prelude |
 | [Preprocessor](language/preprocessor.md) | `#if`, `#define`, and platform macros |
 | [Annotations](language/annotations.md) | Built-in and user-defined annotations |
+| [Warnings](language/warnings.md) | Warning kinds, disabling them, and quick fixes |
 
 ### Standard Library
 

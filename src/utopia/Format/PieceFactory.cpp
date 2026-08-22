@@ -5,7 +5,7 @@
 
 namespace utopia {
 
-/* ---------- Helpers ---------- */
+/* Helpers */
 
 static bool isExpressionStatement(NodeKind kind) {
   return kind == NodeKind::FunctionCall || kind == NodeKind::Assign ||
@@ -198,7 +198,7 @@ struct ExpressionContents {
     stack.pop_back();
 
     /* Transitively include this operation's contents in the surrounding one.
-     */
+ */
     Contents &parent = stack.back();
     parent.collections += contents.collections;
     parent.nestedNamedArguments +=
@@ -317,7 +317,7 @@ public:
   }
 };
 
-/* ---------- Statement dispatch ---------- */
+/* Statement dispatch */
 
 Piece *PieceFactory::statementPiece(const ASTNode *node) {
   Piece *p = dispatchStmt(node);
@@ -384,7 +384,7 @@ Piece *PieceFactory::dispatchStmt(const ASTNode *node) {
   return p;
 }
 
-/* ---------- Expressions ---------- */
+/* Expressions */
 
 Piece *PieceFactory::buildChain(const ExprNode *node) {
   /* Dispatches an expression without attempting chain extraction. Used for
@@ -580,7 +580,7 @@ Piece *PieceFactory::buildChain(const ExprNode *node) {
     return nullptr;
 
   /* Count the number of contiguous properties at the beginning of the chain.
-   */
+ */
   int leadingProperties = 0;
   while (leadingProperties < (int)calls.size() &&
          calls[leadingProperties].type == ChainCallType::Property) {
@@ -987,7 +987,7 @@ Piece *PieceFactory::visit(const StringNode *node) {
   }
   escaped += "\"";
   /* String literals are "soft": they don't force surrounding pieces to split.
-   */
+ */
   return create<TextPiece>(escaped, /*soft=*/true);
 }
 
@@ -1285,7 +1285,7 @@ Piece *PieceFactory::visit(const AssertStmtNode *node) {
       create<TextPiece>(");")});
 }
 
-/* ---------- Declarations ---------- */
+/* Declarations */
 
 Piece *PieceFactory::visit(const VarDeclNode *node) {
   std::vector<const Piece *> parts;
@@ -1375,8 +1375,14 @@ Piece *PieceFactory::visit(const FunctionDeclNode *node) {
     pfx += std::string(node->rawReturnTypeStr) + " ";
   }
 
+  /* The record type name is fully qualified; the destructor must print the
+   * simple name so the output parses back ('~' + record name). */
   if (node->name == "~" && node->parentRecord) {
-    pfx += "~" + std::string(node->parentRecord->getName());
+    std::string recName = std::string(node->parentRecord->getName());
+    size_t dot = recName.find_last_of('.');
+    if (dot != std::string::npos)
+      recName = recName.substr(dot + 1);
+    pfx += "~" + recName;
   } else {
     pfx += std::string(node->name);
   }
@@ -1572,13 +1578,22 @@ Piece *createRecord(PieceFactory *factory, const T *node, const char *kw) {
   }
 
   if (auto *cls = llvm::dyn_cast<ClassDeclNode>(node)) {
+    /* The resolved types carry fully qualified names; the raw source text
+     * keeps the original spelling so the output parses back unchanged. */
     if (cls->baseClass) {
-      pfx += " extends " + cls->baseClass->toString();
+      pfx += " extends " +
+             (cls->rawBaseClassStr.empty()
+                  ? cls->baseClass->toString()
+                  : std::string(cls->rawBaseClassStr));
     }
     if (!cls->interfaces.empty()) {
       pfx += " implements ";
       for (size_t i = 0; i < cls->interfaces.size(); ++i) {
-        pfx += cls->interfaces[i]->toString();
+        if (i < cls->rawInterfaces.size() && !cls->rawInterfaces[i].empty()) {
+          pfx += std::string(cls->rawInterfaces[i]);
+        } else {
+          pfx += cls->interfaces[i]->toString();
+        }
         if (i < cls->interfaces.size() - 1)
           pfx += ", ";
       }
@@ -1693,7 +1708,7 @@ Piece *PieceFactory::visit(const TypedefDeclNode *node) {
   return prependAnnotations(this, parts, mainTd);
 }
 
-/* ---------- Statements and control flow ---------- */
+/* Statements and control flow */
 
 Piece *PieceFactory::visit(const BlockNode *node) {
   if (node->hasBraces) {
@@ -1879,7 +1894,7 @@ Piece *PieceFactory::visit(const CaseNode *node) {
   return labelPiece;
 }
 
-/* ---------- Modules ---------- */
+/* Modules */
 
 Piece *PieceFactory::visit(const NamespaceDeclNode *node) {
   std::vector<const Piece *> parts;
@@ -1948,6 +1963,63 @@ Piece *PieceFactory::visit(const ModuleNode *node) {
       seq.add(create<CommentPiece>(doc, trailing), Indent::None,
               /*allowBlankAfter=*/false);
     }
+  }
+
+  /* With preprocessor directives present, the module is emitted in source
+   * order: hoisting imports or sorting members would move code across
+   * conditional branches and change what compiles. */
+  bool hasDirectives = false;
+  for (const auto &item : node->topLevelItems) {
+    if (item.kind == ModuleNode::TopLevelItem::Kind::Directive) {
+      hasDirectives = true;
+      break;
+    }
+  }
+
+  /* A file-scoped namespace absorbs the following top-level statements at
+   * parse time, which would make the ordered path print them twice. */
+  bool fileScoped =
+      node->statements.size() == 1 &&
+      llvm::isa_and_nonnull<NamespaceDeclNode>(node->statements[0]) &&
+      static_cast<const NamespaceDeclNode *>(node->statements[0])
+          ->isFileScoped;
+
+  if (hasDirectives && !fileScoped && !node->topLevelItems.empty()) {
+    const ASTNode *lastStmt = nullptr;
+    int interveningItems = 0;
+    for (const auto &item : node->topLevelItems) {
+      if (item.kind == ModuleNode::TopLevelItem::Kind::Statement) {
+        bool blankBefore = false;
+        if (lastStmt) {
+          if (hasNonEmptyBody(lastStmt)) {
+            blankBefore = true;
+          } else {
+            /* Blank lines are preserved, discounting the lines occupied by
+             * the imports/directives sitting between the statements. */
+            int gap = getActualStartLine(item.node) -
+                      getActualEndLine(lastStmt) - 1 - interveningItems;
+            blankBefore = gap > 0;
+          }
+        }
+        if (blankBefore)
+          seq.addBlank();
+        seq.add(statementPiece(item.node), Indent::None);
+        lastStmt = item.node;
+        interveningItems = 0;
+      } else {
+        std::string text;
+        if (item.kind == ModuleNode::TopLevelItem::Kind::Import) {
+          text = "import \"" + std::string(item.text) + "\";";
+        } else if (item.kind == ModuleNode::TopLevelItem::Kind::Export) {
+          text = "export \"" + std::string(item.text) + "\";";
+        } else {
+          text = "#" + std::string(item.text);
+        }
+        seq.add(create<TextPiece>(text), Indent::None, /*allowBlankAfter=*/true);
+        interveningItems++;
+      }
+    }
+    return seq.build();
   }
 
   for (auto imp : node->rawImports) {

@@ -9,6 +9,7 @@ set(CORE_SOURCES
     utopia/CodeGen/Intrinsics.cpp
     utopia/CodeGen/SimdIntrinsics.cpp
     utopia/Common/Logger.cpp
+    utopia/Common/Warnings.cpp
     utopia/Driver/Backend.cpp
     utopia/Driver/CompilerDriver.cpp
     utopia/Driver/ModuleLoader.cpp
@@ -29,6 +30,7 @@ set(CORE_SOURCES
     utopia/Sema/OverloadResolution.cpp
     utopia/Sema/EffectAnalyzer.cpp
     utopia/Sema/ControlFlowAnalyzer.cpp
+    utopia/Sema/UnusedCode.cpp
 )
 
 add_library(utopia_core STATIC ${CORE_SOURCES})
