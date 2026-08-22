@@ -6,11 +6,16 @@ namespace utopia::lsp {
 class SearchVisitor : public ASTVisitor<SearchVisitor, const ASTNode *> {
   int targetLine;
   int targetCol;
+  /* Document text, used to reject synthetic nodes (e.g. Sema's implicit
+   * 'this' receiver of receiverless calls) whose position does not
+   * literally contain the identifier. */
+  const std::string *docText;
 
 public:
   const FunctionCallNode *innermostCall = nullptr;
 
-  SearchVisitor(int line, int col) : targetLine(line), targetCol(col) {}
+  SearchVisitor(int line, int col, const std::string *text = nullptr)
+      : targetLine(line), targetCol(col), docText(text) {}
 
   const ASTNode *find(const ASTNode *root) {
     if (!root)
@@ -21,6 +26,30 @@ public:
   bool isHit(const ASTNode *n) const {
     if (!n)
       return false;
+
+    /* Sema rewrites receiverless method calls into 'this.<member>': the
+     * synthetic 'this' variable carries the call's position, and hovering
+     * or jumping there must resolve the member, not the 'this' parameter. */
+    if (docText && n->kind == NodeKind::Variable) {
+      auto *vn = static_cast<const VariableNode *>(n);
+      if (vn->name == "this") {
+        if (n->line <= 0 || n->column <= 0)
+          return false;
+        int currentLine = 1;
+        size_t idx = 0;
+        for (size_t i = 0; i < docText->length(); ++i) {
+          if (currentLine == n->line) {
+            idx = i + (n->column > 0 ? n->column - 1 : 0);
+            break;
+          }
+          if ((*docText)[i] == '\n')
+            currentLine++;
+        }
+        if (idx + 4 > docText->length() ||
+            docText->compare(idx, 4, "this") != 0)
+          return false;
+      }
+    }
 
     if (n->endLine > n->line) {
       /* Multiline node: column resolution is unreliable at the boundary,

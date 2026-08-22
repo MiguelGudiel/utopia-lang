@@ -1,0 +1,216 @@
+#include "LspCore.hpp"
+#include <chrono>
+#include <iostream>
+
+namespace utopia::lsp {
+
+DocumentManager documents;
+
+namespace {
+
+std::mutex workerMutex;
+std::condition_variable workerCV;
+std::condition_variable doneCV;
+std::string pendingUri;
+std::string pendingText;
+bool hasPendingChange = false;
+bool isProcessing = false;
+bool forceProcess = false;
+std::atomic<bool> isRunning{true};
+
+void workerThread() {
+  while (isRunning) {
+    std::string uri, text;
+    {
+      std::unique_lock<std::mutex> lock(workerMutex);
+      workerCV.wait(
+          lock, [] { return hasPendingChange || forceProcess || !isRunning; });
+      if (!isRunning)
+        break;
+
+      bool interrupted = true;
+      /* Only wait the 200ms debounce interval if processing isn't forced. */
+      while (interrupted && !forceProcess) {
+        auto status = workerCV.wait_for(lock, std::chrono::milliseconds(200));
+        if (status == std::cv_status::timeout) {
+          interrupted = false;
+        }
+      }
+
+      forceProcess = false;
+      hasPendingChange = false;
+      uri = pendingUri;
+      text = std::move(pendingText);
+      isProcessing = true;
+    }
+
+    if (!uri.empty()) {
+      documents.processFile(uri, text);
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(workerMutex);
+      isProcessing = false;
+      doneCV.notify_all();
+    }
+  }
+}
+
+/* The request dispatcher; returns false only for 'exit'. */
+bool dispatchRequest(const json &req) {
+  std::string method = req["method"];
+
+  if (method == "initialize") {
+    sendResponse(
+        {{"jsonrpc", "2.0"},
+         {"id", requestId(req)},
+         {"result",
+          {{"capabilities",
+            {{"textDocumentSync", 1},
+             {"hoverProvider", true},
+             {"definitionProvider", true},
+             {"typeDefinitionProvider", true},
+             {"implementationProvider", true},
+             {"referencesProvider", true},
+             {"documentHighlightProvider", true},
+             {"documentSymbolProvider", true},
+             {"workspaceSymbolProvider", true},
+             {"foldingRangeProvider", true},
+             {"documentLinkProvider", {"resolveProvider", false}},
+             {"completionProvider",
+              {{"triggerCharacters", {".", "@"}}}},
+             {"signatureHelpProvider",
+              {{"triggerCharacters", {"(", ","}}}},
+             {"documentFormattingProvider", true},
+             {"semanticTokensProvider",
+              {{"legend",
+                {{"tokenTypes",
+                  {"class", "struct", "enum", "type", "function", "method",
+                   "property", "variable", "parameter", "enumMember",
+                   "macro", "keyword", "namespace"}},
+                 {"tokenModifiers",
+                  {"declaration", "static", "readonly"}}}},
+               {"range", false},
+               {"full", true}}}}}}}});
+  } else if (method == "textDocument/hover") {
+    handleHover(req);
+  } else if (method == "textDocument/definition") {
+    handleDefinition(req);
+  } else if (method == "textDocument/typeDefinition") {
+    handleTypeDefinition(req);
+  } else if (method == "textDocument/implementation") {
+    handleImplementation(req);
+  } else if (method == "textDocument/references") {
+    handleReferences(req);
+  } else if (method == "textDocument/documentHighlight") {
+    handleDocumentHighlight(req);
+  } else if (method == "textDocument/documentSymbol") {
+    handleDocumentSymbols(req);
+  } else if (method == "workspace/symbol") {
+    handleWorkspaceSymbols(req);
+  } else if (method == "textDocument/foldingRange") {
+    handleFoldingRange(req);
+  } else if (method == "textDocument/documentLink") {
+    handleDocumentLinks(req);
+  } else if (method == "textDocument/completion") {
+    handleCompletion(req);
+  } else if (method == "textDocument/signatureHelp") {
+    handleSignatureHelp(req);
+  } else if (method == "textDocument/formatting") {
+    handleFormatting(req);
+  } else if (method == "textDocument/semanticTokens/full") {
+    handleSemanticTokens(req);
+  } else if (method == "textDocument/didOpen" ||
+             method == "textDocument/didChange") {
+    std::string uri = req["params"]["textDocument"]["uri"];
+    std::string text =
+        (method == "textDocument/didOpen")
+            ? req["params"]["textDocument"]["text"].get<std::string>()
+            : req["params"]["contentChanges"][0]["text"].get<std::string>();
+    requestBackgroundAnalysis(uri, std::move(text));
+  } else if (method == "shutdown") {
+    sendResponse({{"jsonrpc", "2.0"},
+                  {"id", requestId(req)},
+                  {"result", nullptr}});
+  } else if (method == "exit") {
+    return false;
+  }
+  return true;
+}
+
+} // namespace
+
+void requestBackgroundAnalysis(const std::string &uri, std::string text) {
+  {
+    std::lock_guard<std::mutex> lock(workerMutex);
+    pendingUri = uri;
+    pendingText = std::move(text);
+    hasPendingChange = true;
+  }
+  workerCV.notify_one();
+}
+
+void syncWorker() {
+  std::unique_lock<std::mutex> lock(workerMutex);
+  if (hasPendingChange) {
+    forceProcess = true;
+    workerCV.notify_one();
+  }
+  if (hasPendingChange || isProcessing) {
+    doneCV.wait(lock, [] { return !hasPendingChange && !isProcessing; });
+  }
+}
+
+void stopWorker() {
+  isRunning = false;
+  workerCV.notify_one();
+}
+
+void runServer() {
+  std::thread worker(workerThread);
+
+  std::string line;
+  while (std::getline(std::cin, line)) {
+    if (line.find("Content-Length:") != 0)
+      continue;
+
+    int len = 0;
+    try {
+      len = std::stoi(line.substr(15));
+    } catch (...) {
+      std::cerr << "[LSP] Invalid Content-Length header; skipping message.\n";
+      continue;
+    }
+    if (len <= 0 || len > (1 << 26)) {
+      /* Malformed or absurd lengths must not block or crash the server. */
+      std::cerr << "[LSP] Bogus Content-Length (" << len
+                << "); skipping message.\n";
+      continue;
+    }
+    while (std::getline(std::cin, line) && (line != "\r" && !line.empty()))
+      ;
+
+    std::vector<char> buf(len);
+    std::cin.read(buf.data(), len);
+
+    try {
+      auto req = json::parse(std::string(buf.begin(), buf.end()));
+      if (!dispatchRequest(req)) {
+        stopWorker();
+        worker.join();
+        return;
+      }
+    } catch (const std::exception &e) {
+      /* A malformed or unexpected request must never take the server
+       * down: log a clear error and keep serving. */
+      std::cerr << "[LSP] Failed to process request: " << e.what() << "\n";
+    } catch (...) {
+      std::cerr << "[LSP] Failed to process request (unknown error).\n";
+    }
+  }
+
+  stopWorker();
+  worker.join();
+}
+
+} // namespace utopia::lsp

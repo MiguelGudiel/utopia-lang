@@ -1,5 +1,20 @@
 set(LSP_SOURCES
     src/main.cpp
+    src/Server.cpp
+    src/Protocol.cpp
+    src/DocumentManager.cpp
+    src/LocalVarCollector.cpp
+    src/AstUtils.cpp
+    src/Hover.cpp
+    src/Definition.cpp
+    src/Completion.cpp
+    src/SignatureHelp.cpp
+    src/Formatting.cpp
+    src/SemanticTokens.cpp
+    src/Symbols.cpp
+    src/References.cpp
+    src/Folding.cpp
+    src/Links.cpp
 )
 
 add_executable(utopia_lsp ${LSP_SOURCES})
