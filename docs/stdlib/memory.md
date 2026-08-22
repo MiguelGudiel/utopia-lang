@@ -62,6 +62,26 @@ struct RawMemory {
 }
 ```
 
+### `Memory.isConst(ptr) -> bool`
+
+Returns whether `ptr` points at a **canonical const object** — an instance
+built at compile time in static read-only storage by a `const` expression
+(see [Const & Canonicalization](../language/const.md)). Such objects are
+immortal: their destructors never run and they must never be freed.
+Frameworks that receive objects by pointer can query this before deleting:
+if `isConst(ptr)` is true, skip the `delete`; otherwise free normally. The
+check is O(N) over the program's const objects, which is negligible for
+real-world counts.
+
+```utp
+Point* p = const Point(1, 2);     // canonical const object
+print("%d\n", Memory.isConst(p)); // 1
+
+Point* heap = new Point(9, 9);
+print("%d\n", Memory.isConst(heap)); // 0
+delete heap;                         // heap objects free normally
+```
+
 ## Type reflection
 
 Utopia provides compile-time `sizeof` and `typeof` intrinsics that produce **constants**.

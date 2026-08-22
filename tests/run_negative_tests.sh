@@ -166,5 +166,22 @@ run_case "ambiguous partial specialization" \
   "Ambiguous template specialization" \
   'class X<A, B> { A f; B s; } class X<int32, B> { A f; B s; } class X<A, int64> { A f; B s; } int main() { X<int32, int64> x = X<int32, int64>(1, 2); return 0; }'
 
+# const expressions: rules for const constructors and const contexts
+run_case "const constructor with a body" \
+  "A const constructor must have an empty body" \
+  'class A { final int32 x; const A(this.x) { print("hi"); } } int main() { return 0; }'
+run_case "const constructor with a non-final field" \
+  "all instance fields must be 'final'" \
+  'class A { int32 x; const A(this.x) {} } int main() { return 0; }'
+run_case "const variable with a non-constant initializer" \
+  "must be a constant expression" \
+  'int32 compute() { return 42; } int main() { const int32 x = compute(); return 0; }'
+run_case "final variable is not a constant expression" \
+  "must be a constant expression" \
+  'class A { final int32 x; const A(this.x) {} } int main() { final A a = const A(1); const int32 y = a.x; return 0; }'
+run_case "const expression over a non-const variable" \
+  "Not a constant expression" \
+  'int main() { int32 x = 5; const int32 y = const (x + 1); return 0; }'
+
 printf 'PASS=%d FAIL=%d\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

@@ -40,6 +40,7 @@ Utopia combines a C/C++-style memory and execution model with a modern, Dart-ins
 - **Operator overloading** (`operator+`, `operator==`, `operator[]`, `operator=`, unary and compound-assignment operators, etc.) including free-function operators
 - **Expression-bodied functions** (`=>`) and classic `if`/`else`, `while`, `for`, `switch`/`case`/`default`, `break`, `continue`, `return`, and ternary `?:`
 - **Dart-style `for-in` loops** (`for (var x in list)`) over any type with the structural `iterator()`/`moveNext()`/`current()` protocol — `List`, `Map` (keys), `map.entries()`, `HashMap`, `SplayTreeMap`, array literals and user-defined types. Zero-cost like C++: no `Iterable` hierarchy, no vtables, no allocation; `@inline` cursors collapse to plain index/pointer walks, and `var x` / `var& x` / `final& x` control copy vs. reference binding
+- **Dart-style `const` expressions and canonicalization**: `const` constructor calls, const variables, `const [...]` literals and constant arithmetic/string expressions evaluate at compile time into static read-only storage; identical constant expressions canonicalize to a single instance (pointer equality), with implicit const inside const contexts (Dart rule), const-constructor rules (empty body, all fields `final`) and the `Memory.isConst` runtime check
 - **C++-style exceptions**: `try`/`catch`/`throw` with multiple catch clauses, `catch (...)`, references (`catch (T& e)`), bare `throw;` rethrows that preserve the dynamic type, derived-to-base and interface catch matching, and deterministic destructor unwinding through scopes. Any type can be thrown; records with custom destructors must be copyable
 - **`assert(expr)`** with source location reporting (no-op under `NDEBUG`) and the **`__FILE__` / `__LINE__`** source-location intrinsics
 
@@ -151,6 +152,7 @@ The `examples/` directory contains small, self-contained programs demonstrating 
 - Multiple interfaces via `implements`
 - Polymorphism and virtual dispatch through base and interface pointers
 - Dart-style `for-in` loops over `List`, `Map` (keys), `map.entries()`, `HashMap`, `SplayTreeMap`, array literals, and user-defined types with the structural iterator protocol
+- Dart-style `const` expressions and canonicalization: canonical const objects (pointer equality), implicit const, const constructors and `Memory.isConst`
 
 Each example is a standalone project with its own `build.yaml` manifest.
 

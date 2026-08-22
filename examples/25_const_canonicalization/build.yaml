@@ -1,0 +1,9 @@
+project:
+  name: "const_canonicalization"
+
+build:
+  target: executable
+  source_dirs:
+    - src/
+  sources:
+    - "main.utp"

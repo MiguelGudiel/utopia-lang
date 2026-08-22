@@ -1,0 +1,71 @@
+/*
+ * Dart-style const expressions and canonicalization:
+ *
+ * - 'const expr' evaluates the expression at compile time and stores the
+ *   result in static read-only storage; identical constant expressions are
+ *   canonicalized to the SAME instance (pointer equality).
+ * - Inside a const context, nested constructor calls are implicitly const
+ *   (Dart rule): 'const Line(Point(1, 2), ...)' needs no inner 'const'.
+ * - Const constructors have an empty body and require every instance field
+ *   to be 'final'; named const constructors and ': this.x = expr'
+ *   initializer lists are supported.
+ * - Canonical objects are immortal (their destructors never run) and must
+ *   never be freed; Memory.isConst() tells them apart from heap objects.
+ * - 'final' variables are NOT constant expressions (Dart rule).
+ */
+
+import "utopia:memory";
+using Memory;
+
+class Point {
+  final int32 x;
+  final int32 y;
+  const Point(this.x, this.y) {}
+  const Point.origin() : this.x = 0, this.y = 0 {}
+}
+
+class Line {
+  final Point* a;
+  final Point* b;
+  const Line(this.a, this.b) {}
+}
+
+int main() {
+  print("-- canonical objects share one static instance --\n");
+  const Point* const p1 = const Point(1, 2);
+  const Point* const p2 = const Point(1, 2);
+  const Point* const p3 = const Point(3, 4);
+  print("  const Point(1, 2) == const Point(1, 2): %d\n", p1 == p2);
+  print("  const Point(1, 2) == const Point(3, 4): %d\n", p1 == p3);
+
+  print("-- implicit const inside const contexts (Dart rule) --\n");
+  const Line* const l1 = const Line(Point(1, 2), Point(3, 4));
+  const Line* const l2 = const Line(Point(1, 2), Point(3, 4));
+  print("  nested Lines canonicalize: %d\n", l1 == l2);
+  print("  l1.a == l2.a (shared nested point): %d\n", l1.a == l2.a);
+
+  print("-- named const constructor + initializer list --\n");
+  const Point* const origin = const Point.origin();
+  print("  origin: %d,%d\n", origin.x, origin.y);
+
+  print("-- const arithmetic / string expressions --\n");
+  const int32 five = 2 + 3;
+  const String greeting = "hello " + "world";
+  print("  five=%d greeting=%s\n", five, greeting.c_str());
+
+  print("-- field access on canonical objects is a constant expression --\n");
+  const int32 x = p1.x;
+  print("  p1.x = %d\n", x);
+
+  print("-- const array literals --\n");
+  const int32[3] arr = const [1, 2, 3];
+  print("  %d %d %d\n", arr[0], arr[1], arr[2]);
+
+  print("-- Memory.isConst: canonical vs heap objects --\n");
+  print("  isConst(canonical): %d\n", Memory.isConst(p1));
+  Point* heap = new Point(9, 9);
+  print("  isConst(heap):      %d\n", Memory.isConst(heap));
+  delete heap;
+
+  return 0;
+}

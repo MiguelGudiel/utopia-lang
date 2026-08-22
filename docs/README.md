@@ -20,6 +20,7 @@ This book is organized like the documentation of other systems languages, so you
 | --- | --- |
 | [Types](language/types.md) | Primitive types, literals, and compound types |
 | [Variables](language/variables.md) | Declarations, `var`/`const` inference, and scope |
+| [Const & Canonicalization](language/const.md) | Constant expressions, const constructors, canonical objects |
 | [Functions](language/functions.md) | Parameters, defaults, named/required parameters, variadics, overloading |
 | [Control Flow](language/control-flow.md) | `if`, `while`, `for`, `switch`, `break`, `continue`, `return` |
 | [Records](language/records.md) | `struct`, `class`, and `union` declarations |

@@ -23,6 +23,13 @@ const y = 42;
 // y = 43;          // error: cannot assign to a constant variable
 ```
 
+`const` goes beyond immutability: a `const` variable's initializer must be
+a **constant expression**, evaluated at compile time. `const` also appears
+in expression position (`const Point(1, 2)`) and on constructors to build
+**canonical objects** — compile-time instances in static read-only storage
+where equal values share a single address. See
+[Const & Canonicalization](const.md) for the full rules.
+
 ## Fields and statics
 
 Records declare fields with optional `public`/`private`/`protected` modifiers and `static` members:
