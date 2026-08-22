@@ -85,17 +85,40 @@ void CodeWriter::writeComment(const std::string &text) {
                             ? text.substr(start, nextNewline - start)
                             : text.substr(start);
 
+    if (chunk.empty()) {
+      /* A blank line between joined comments. It must be written verbatim:
+       * the pending-whitespace collapse would merge consecutive blanks into
+       * a single one, and an empty chunk never flushes on its own. The raw
+       * newline both closes the previous line (already flushed above) and
+       * terminates this blank line, so the trailing newline() below is
+       * skipped. */
+      flushWhitespace();
+      code += '\n';
+      column = 0;
+      softCharacters = 0;
+      /* The flush above only queues indentation when there was pending
+       * whitespace; without it the next comment line would start at
+       * column 1. */
+      pendingIndentToWrite = pendingIndent;
+      start = nextNewline + 1;
+      continue;
+    }
+
     write(chunk, /*soft=*/true);
 
     if (nextNewline == std::string::npos)
       break;
 
     /* Determine if the next line is an independent comment joined by the
-     * parser rather than an internal line of a block comment. Joined comments
-     * start exactly with '//' or '/*' without leading spaces. */
+     * parser rather than an internal line of a block comment. Joined
+     * comments start exactly with '//' or '/*' without leading spaces;
+     * blank lines in between do not break the join. */
     bool isJoinedComment = false;
-    if (nextNewline + 1 < text.length() && text[nextNewline + 1] == '/' &&
-        (text[nextNewline + 2] == '/' || text[nextNewline + 2] == '*')) {
+    size_t look = nextNewline + 1;
+    while (look < text.length() && text[look] == '\n')
+      look++;
+    if (look + 1 < text.length() && text[look] == '/' &&
+        (text[look + 1] == '/' || text[look + 1] == '*')) {
       isJoinedComment = true;
     }
 
@@ -198,6 +221,14 @@ void CodeWriter::formatSeparate(const Piece *piece) {
 
   solution.mergeSubtree(subtreeSolution);
   writePreformatted(subtreeSolution.getCode());
+
+  /* Pick up whitespace the subtree queued but never wrote (a trailing blank
+   * line): it must collapse with the parent's pending whitespace instead of
+   * being dropped. */
+  Whitespace trailing = subtreeSolution.getTrailingWhitespace();
+  if (trailing != Whitespace::None) {
+    whitespace(trailing);
+  }
 }
 
 void CodeWriter::formatInline(const Piece *piece) {

@@ -127,6 +127,10 @@ public:
    * written. */
   int getCurrentIndent() const { return indentStack.empty() ? 0 : indentStack.back().spaces; }
 
+  /* The whitespace queued but not yet written (used by formatSeparate to
+   * carry a subtree's trailing whitespace into the parent writer). */
+  Whitespace pendingWhitespaceValue() const { return pendingWhitespace; }
+
 private:
   int pageWidth;
 

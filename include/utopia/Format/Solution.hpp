@@ -56,6 +56,11 @@ public:
   /* The formatted code. */
   std::string code;
 
+  /* Pending whitespace the writer had queued when the solution finished. The
+   * parent writer must pick it up: a subtree's trailing blank line (e.g. the
+   * one after a module header comment) would otherwise be dropped. */
+  Whitespace trailingWhitespace = Whitespace::None;
+
   /* The unsolved pieces in this solution that should be expanded next to
    * produce new more refined solutions. */
   std::vector<const Piece *> expandPieces;
@@ -153,6 +158,9 @@ public:
 
   /* Returns the formatted code. */
   const std::string &getCode() const { return code; }
+
+  /* Pending whitespace queued by the writer when the solution finished. */
+  Whitespace getTrailingWhitespace() const { return trailingWhitespace; }
 
   /* Compares two solutions where a more desirable solution comes first.
    *

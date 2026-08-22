@@ -32,6 +32,7 @@ void Solution::format(SolutionCache &cache, int pageWidth, int leadingIndent,
   auto [codeStr, pieces] = writer.finish();
   code = std::move(codeStr);
   expandPieces = std::move(pieces);
+  trailingWhitespace = writer.pendingWhitespaceValue();
 }
 
 std::vector<Solution> Solution::expand(SolutionCache &cache, int pageWidth,
