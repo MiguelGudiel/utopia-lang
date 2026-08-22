@@ -4,7 +4,7 @@ Utopia ships two layers of standard library:
 
 ## The prelude
 
-`libs/prelude/lib/` — loaded **automatically** into every module. Prelude symbols have **no namespace**; they are available globally without `using`. It re-exports:
+`libs/prelude/lib/`: loaded **automatically** into every module. Prelude symbols have **no namespace**; they are available globally without `using`. It re-exports:
 
 | Module | Contents |
 | --- | --- |
@@ -20,7 +20,7 @@ Utopia ships two layers of standard library:
 
 ## The standard library
 
-`libs/stdlib/lib/` — imported explicitly with `import "utopia:...";`. Each module declares its own domain namespace, so members are reached as `IO.Path`, `Memory.unique_ptr`, etc. (or brought in with `using IO;`):
+`libs/stdlib/lib/`: imported explicitly with `import "utopia:...";`. Each module declares its own domain namespace, so members are reached as `IO.Path`, `Memory.unique_ptr`, etc. (or brought in with `using IO;`):
 
 | Module | Import | Namespace | Contents |
 | --- | --- | --- | --- |
@@ -30,7 +30,7 @@ Utopia ships two layers of standard library:
 
 ## The builder library
 
-`libs/builder/lib/builder.utp` — available **only inside `build.utp`** scripts (imported implicitly), providing the build configuration API:
+`libs/builder/lib/builder.utp`: available **only inside `build.utp`** scripts (imported implicitly), providing the build configuration API:
 
 ```utp
 addLinkerFlag("-lm");
@@ -47,5 +47,5 @@ All library sources are plain Utopia code under `libs/` and serve as reference i
 
 - `libs/prelude/lib/String.utp`
 - `libs/prelude/lib/Core/List.utp`
-- `libs/stdlib/lib/memory.utp` — smart pointers
-- `libs/stdlib/lib/io.utp` — filesystem API
+- `libs/stdlib/lib/memory.utp`: smart pointers
+- `libs/stdlib/lib/io.utp`: filesystem API

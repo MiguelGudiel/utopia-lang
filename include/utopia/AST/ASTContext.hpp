@@ -74,9 +74,9 @@ public:
   }
 
   /* Arity of the primary record templates declared so far (used to tell
-   * 'class List<T>' — the primary — from 'class List<int>' — a
-   * specialization: a specialization is only valid for an already-declared
-   * primary with the same number of arguments). */
+   * the primary 'class List<T>' from a specialization such as
+   * 'class List<int>': a specialization is only valid for an
+   * already-declared primary with the same number of arguments). */
   void registerTemplateArity(std::string_view name, size_t arity) {
     registeredTemplateArity[name] = (uint8_t)arity;
   }

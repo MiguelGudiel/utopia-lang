@@ -48,7 +48,7 @@ dependencies:
 
 ## Build scripts (`build.utp`)
 
-A project may include a `build.utp` script — Utopia code executed through the JIT before compilation. It customizes the build with the `utopia:builder` API:
+A project may include a `build.utp` script: Utopia code executed through the JIT before compilation. It customizes the build with the `utopia:builder` API:
 
 ```utp
 addLinkerFlag("-lm");

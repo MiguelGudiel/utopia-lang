@@ -127,7 +127,7 @@ void ControlFlowPass::visit(const ForNode *node) {
 }
 
 /* For-in runs after TypeCheckPass, which lowered the loop into a plain
- * while loop whose loop variable has an initializer — so the definite
+ * while loop whose loop variable has an initializer, so the definite
  * initialization analysis runs on the lowered form. */
 void ControlFlowPass::visit(const ForInNode *node) {
   if (node->desugared) {

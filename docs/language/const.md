@@ -1,14 +1,14 @@
 # Const expressions and canonicalization
 
 Utopia has Dart-style `const` expressions: values computed at compile time,
-stored in static read-only storage, and **canonicalized** — every use of the
+stored in static read-only storage, and **canonicalized**: every use of the
 same constant expression refers to the *same* instance. There is no runtime
 allocation and no constructor call at runtime for `const` values.
 
 A `const` value is never constructed at runtime: the compiler evaluates the
 expression during compilation, serializes it into a canonical key, and
 emits a single static object. Two `const` expressions with identical
-values are the same object — `==` on their pointers is `true` — which is
+values are the same object (`==` on their pointers is `true`), which is
 what Dart calls canonicalization.
 
 ## Two meanings of `const`
@@ -22,7 +22,7 @@ what Dart calls canonicalization.
 | `const Type(...)` (constructor) | Declares a **const constructor**: callable in const contexts; its calls produce canonical instances |
 
 A `const` variable is a constant expression; a `final` variable is **not**
-(Dart rule) — only `const` names can be referenced inside other constant
+(Dart rule): only `const` names can be referenced inside other constant
 expressions.
 
 ## Canonical objects
@@ -39,8 +39,8 @@ int main() {
   const Point* b = const Point(1, 2);
   const Point* c = const Point(3, 4);
 
-  print("%d\n", a == b);   // 1 — same canonical instance
-  print("%d\n", a == c);   // 0 — different value, different instance
+  print("%d\n", a == b);   // 1: same canonical instance
+  print("%d\n", a == c);   // 0: different value, different instance
   return 0;
 }
 ```
@@ -51,7 +51,7 @@ int main() {
   must never be `delete`d.
 - The canonical key is built from the class name (template arguments
   included), the constructor name, the parameter signature and the
-  evaluated argument values — so two calls through **different named
+  evaluated argument values, so two calls through **different named
   constructors** stay distinct even with identical arguments, and two calls
   with the same arguments through the same constructor are one instance.
 - The static globals use deterministic names with `linkonce_odr` linkage, so
@@ -60,7 +60,7 @@ int main() {
 
 ### Implicit const (Dart rule)
 
-Inside a const context, nested constructor calls are implicitly const — no
+Inside a const context, nested constructor calls are implicitly const, no
 `const` keyword needed:
 
 ```utp
@@ -72,7 +72,7 @@ class Line {
 
 const Line* l1 = const Line(Point(1, 2), Point(3, 4));
 const Line* l2 = const Line(Point(1, 2), Point(3, 4));
-// l1 == l2  — the nested Points are canonical instances, so the Lines
+// l1 == l2, the nested Points are canonical instances, so the Lines
 // canonicalize to one object.
 ```
 

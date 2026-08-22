@@ -17,8 +17,8 @@ class SolutionCache;
  * pieces whose states are not bound are treated as having a default unsplit
  * state.)
  *
- * Given that set of states, we can create a CodeWriter and give that to all of
- * the pieces in the tree so they can format themselves. That in turn yields a
+ * Given that set of states, a single CodeWriter is handed to all the pieces
+ * in the tree so they can format themselves. That in turn yields a
  * total number of overflow characters, cost, and formatted output, which are
  * all stored here. */
 class Solution {
@@ -164,11 +164,10 @@ public:
 
   /* Compares two solutions where a more desirable solution comes first.
    *
-   * For performance, we want to stop checking solutions as soon as we find the
-   * best one. Best means the fewest overflow characters and the lowest cost.
-   * Even though overflow is "worse" than cost, we order in terms of cost
-   * because a solution with overflow may lead to a low-cost solution without
-   * overflow, so we want to explore in cost order. */
+   * Checking stops as soon as the best solution is found: the fewest overflow
+   * characters and the lowest cost. Even though overflow is "worse" than
+   * cost, ordering by cost keeps exploration moving toward a low-cost
+   * solution without overflow. */
   bool isWorseThan(const Solution &other) const {
     if (totalCost() != other.totalCost())
       return totalCost() > other.totalCost();

@@ -26,7 +26,7 @@ const y = 42;
 `const` goes beyond immutability: a `const` variable's initializer must be
 a **constant expression**, evaluated at compile time. `const` also appears
 in expression position (`const Point(1, 2)`) and on constructors to build
-**canonical objects** — compile-time instances in static read-only storage
+**canonical objects**: compile-time instances in static read-only storage
 where equal values share a single address. See
 [Const & Canonicalization](const.md) for the full rules.
 

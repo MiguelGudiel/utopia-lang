@@ -34,7 +34,7 @@ for (int j = 0; j < 10; j++) {
 ## For-in (Dart-style)
 
 `for (var x in expr)` iterates any value whose type provides the structural
-iteration protocol — there is no `Iterable` hierarchy and no virtual
+iteration protocol: there is no `Iterable` hierarchy and no virtual
 dispatch:
 
 ```utp
@@ -67,7 +67,7 @@ Iterating a `Map`/`HashMap`/`SplayTreeMap` yields the keys; use
 `map.entries()` for key/value pairs.
 
 The protocol is purely structural (duck typing): a type is iterable exactly
-when it declares `iterator()` — nothing is inherited, no vtable is involved,
+when it declares `iterator()`; nothing is inherited, no vtable is involved,
 and the cursors are tiny value types returned by value. All of the prelude's
 cursors and their `moveNext()`/`current()` methods are `@inline`, so the
 optimizer reduces every loop to the same machine code as a manual walk
@@ -94,7 +94,7 @@ for (var& n in nums) {   // zero-cost in-place mutation
 ### Array literals and fixed-size arrays
 
 `T[N]` iterables (including `[...]` literals) lower to a plain index loop
-over the array itself — no view object is created:
+over the array itself, with no view object created:
 
 ```utp
 for (var x in [1, 2, 3, 4]) {

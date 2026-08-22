@@ -157,7 +157,7 @@ TemplateConstraint Parser::parseTemplateConstraint() {
         return TemplateConstraint(TemplateConstraintKind::FloatingPoint);
       }
       if (cn == "String") {
-        /* 'T extends String' — a plain class constraint, just like any
+        /* 'T extends String' is a plain class constraint, just like any
          * other prelude class. */
       }
     }
@@ -1844,7 +1844,7 @@ StmtNode *Parser::parseForStatement() {
  * identifier is followed by the contextual keyword 'in' before any ';', '='
  * or '(' appears. 'in' is not a reserved word, so it stays an IDENTIFIER and
  * is only recognized here. No valid C-style for can contain the adjacent
- * pair 'name in' before ';'/'='/(' — 'in' is not an operator — so the scan
+ * pair 'name in' before ';'/'='/('; 'in' is not an operator, so the scan
  * never misclassifies a classic for loop. */
 bool Parser::isForInHeader() {
   size_t i = 0;
@@ -2571,7 +2571,7 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind, bool isAbstract,
       do {
         /* An unknown identifier is a template parameter; a known type (or a
          * nested template instantiation like 'List<String>') is a concrete
-         * argument — which makes this declaration a specialization. */
+         * argument, which makes this declaration a specialization. */
         if (currentToken().type == TokenType::IDENTIFIER &&
             !isKnownTypeName(currentToken().value) &&
             !isTemplateParam(currentToken().value)) {
@@ -2633,8 +2633,8 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind, bool isAbstract,
       isTemplateDecl = !tParams.empty();
     } else if (!specArgs.empty()) {
       /* All parameters: the primary template. (Modules are parsed more than
-       * once in some pipelines, so a re-registration is silently accepted —
-       * the arity map is idempotent.) */
+       * once in some pipelines, so a re-registration is silently accepted.
+       * The arity map is idempotent.) */
       isTemplateDecl = true;
       astCtx.registerTemplateName(name);
       astCtx.registerTemplateArity(name, tParams.size());

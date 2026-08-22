@@ -64,7 +64,7 @@ struct RawMemory {
 
 ### `Memory.isConst(ptr) -> bool`
 
-Returns whether `ptr` points at a **canonical const object** — an instance
+Returns whether `ptr` points at a **canonical const object**: an instance
 built at compile time in static read-only storage by a `const` expression
 (see [Const & Canonicalization](../language/const.md)). Such objects are
 immortal: their destructors never run and they must never be freed.

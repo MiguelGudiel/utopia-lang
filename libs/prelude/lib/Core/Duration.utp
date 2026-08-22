@@ -1,7 +1,7 @@
 import "../String.utp";
 
 /*
- * Duration — a span of time with microsecond precision, mirroring Dart's
+ * Duration: a span of time with microsecond precision, mirroring Dart's
  * dart:core Duration API.
  *
  * A Duration is stored as a signed 64-bit count of microseconds; the same
@@ -12,7 +12,7 @@ class Duration {
   int64 _us;
 
   /* Dart's const Duration({days, hours, minutes, seconds, milliseconds,
-   * microseconds}) — all parts are optional and default to zero. */
+   * microseconds}); all parts are optional and default to zero. */
   Duration(
     {int64 days = 0,
     int64 hours = 0,

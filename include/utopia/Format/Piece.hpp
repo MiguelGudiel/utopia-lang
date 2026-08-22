@@ -727,9 +727,9 @@ public:
       if (isConditional)
         writer.pushIndent(Indent::Block);
 
-      /* We can format each operand separately if the operand is on its own
-       * line. This happens when the operator is split and we aren't the first
-       * or last operand. */
+      /* Each operand can be formatted separately when it is on its own line,
+       * which happens when the operator is split and the operand is not the
+       * first or last one. */
       writer.format(operands[i],
                     /*separate=*/state == State::Split &&
                         i < operands.size() - 1);
@@ -1171,9 +1171,9 @@ public:
         writer.pushIndent(Indent::Expression);
       }
 
-      /* We can format each list item separately if the item is on its own
-       * line. This happens when the list is split and there is something
-       * before and after the item, either brackets or other items. */
+      /* Each list item can be formatted separately when it is on its own
+       * line, which happens when the list is split and something precedes
+       * and follows the item, either brackets or other items. */
       bool separate = state == State::Split && (i > 0 || before != nullptr) &&
                       (i < elements.size() - 1 || after != nullptr);
       writer.format(element, separate);

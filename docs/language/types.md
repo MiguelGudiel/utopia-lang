@@ -19,7 +19,7 @@ Utopia is statically typed with an explicit-width integer family, IEEE-754 float
 | `float64` | `double` | 64 bits | |
 | `bool` | | 1 bit | `true` / `false` |
 | `rune` | | 32 bits | Unicode code point, `U'A'`, `U'\u732b'` |
-| `void` | | — | no value |
+| `void` | | n/a | no value |
 
 ### Integer suffixes
 

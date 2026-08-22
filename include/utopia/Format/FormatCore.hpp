@@ -143,7 +143,7 @@ constexpr int indentSpaces(Indent indent) {
 
 /* Different kinds of pending whitespace that have been requested.
  *
- * Note that the order of values in the enum is significant: later ones have
+ * The order of values in the enum is significant: later ones have
  * more whitespace than previous ones. */
 struct Whitespace {
   enum Value : uint8_t {

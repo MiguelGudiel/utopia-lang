@@ -2580,7 +2580,7 @@ SemaResult TypeCheckPass::visit(const ForNode *node) {
  *           <body>
  *         }
  *     The array is evaluated once (it is the subscript base), and element
- *     access is a raw GEP — the maximum-zero-cost path.
+ *     access is a raw GEP, the maximum-zero-cost path.
  *
  * The header variable semantics follow the declaration form:
  *   'var x'    copy of the element each iteration (rebindable, Dart-like)
@@ -2620,8 +2620,8 @@ SemaResult TypeCheckPass::visit(const ForInNode *node) {
 
   /* The iterable is evaluated exactly once, as the initializer of the
    * hidden range binding below (Sema already checked it; CodeGen lowers the
-   * binding into a reference — direct bind for lvalues, stack temporary for
-   * rvalues — so no copy happens either way). */
+   * binding into a reference (direct bind for lvalues, stack temporary for
+   * rvalues), so no copy happens either way). */
   std::string rangeName = "__forin_range_" + std::to_string(forInTempCounter++);
   std::string itName = "__forin_it_" + std::to_string(forInTempCounter++);
   std::string_view rangeNameSv = ac.copyString(rangeName);
@@ -2695,7 +2695,7 @@ SemaResult TypeCheckPass::visit(const ForInNode *node) {
   loopVar->isInitialized = true;
 
   /* bool moveNext() loop condition (checked on a node that is then stored
-   * in the desugared tree; it is dispatched only once here — CodeGen runs
+   * in the desugared tree; it is dispatched only once here. CodeGen runs
    * a separate visitor). */
   auto *mnItRef = ac.create<VariableNode>(itNameSv, line, col, 1);
   auto *mnMa = ac.create<MemberAccessNode>(
@@ -2780,7 +2780,7 @@ SemaResult TypeCheckPass::lowerForInArray(const ForInNode *node,
   auto *incNode =
       ac.create<UnaryOpNode>("++", incRef, line, col, /*postfix=*/true);
 
-  /* <loopVar> = <expr>[__i]; — the original iterable expression is the
+  /* <loopVar> = <expr>[__i]; the original iterable expression is the
    * subscript base and is evaluated once. */
   auto *subIdx = ac.create<VariableNode>(idxNameSv, line, col, 1);
   auto *subscript = ac.create<ArraySubscriptNode>(node->iterable, subIdx, line,
@@ -7303,7 +7303,7 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
             }
           }
         }
-        /* Dart-style named constructor: 'Foo.named(args)' — constructors
+        /* Dart-style named constructor: 'Foo.named(args)'. Constructors
          * live outside the method tables, so resolve them explicitly when
          * the receiver is a class reference. */
         if (recDecl && recDecl->kind == NodeKind::ClassDecl) {

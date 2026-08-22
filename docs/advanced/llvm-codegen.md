@@ -43,7 +43,7 @@ LLVM attributes are emitted per function:
 
 ### Vtables
 
-Polymorphic classes emit a per-class vtable global (`_ZTV<Name>`) — an array of function pointers. Constructors write the vtable address into the object's first field (`vptr`); virtual calls load `vptr[index]`.
+Polymorphic classes emit a per-class vtable global (`_ZTV<Name>`), an array of function pointers. Constructors write the vtable address into the object's first field (`vptr`); virtual calls load `vptr[index]`.
 
 ### Global initialization
 

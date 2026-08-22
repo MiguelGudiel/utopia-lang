@@ -2,8 +2,8 @@
  * Dart-style 'for (var x in ...)' loops over List, Map (keys), map.entries(),
  * HashMap, SplayTreeMap, array literals and user-defined types.
  *
- * Iteration is a structural protocol — 'iterator()' must return a value
- * with 'bool moveNext()' and 'T& current()' — with no Iterable hierarchy
+ * Iteration is a structural protocol: 'iterator()' must return a value
+ * with 'bool moveNext()' and 'T& current()', with no Iterable hierarchy
  * and no vtables. The compiler lowers each loop to a plain while loop and
  * @inline'd cursors collapse to the same machine code as a manual index
  * walk (or a raw pointer walk). 'var x' copies each element (rebindable,

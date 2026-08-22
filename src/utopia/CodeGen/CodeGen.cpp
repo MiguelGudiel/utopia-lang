@@ -184,8 +184,8 @@ llvm::Type *CodeGen::getLLVMType(const Type *type) {
     llvm::StructType *structTy =
         llvm::StructType::getTypeByName(ctx, rec->getName());
 
-    /* Register the opaque type first to support self-referential structures
-     * and recursive pointers gracefully without infinite loops. */
+    /* Register the opaque type first so self-referential structures and
+     * recursive pointers do not loop forever. */
     if (!structTy) {
       structTy = llvm::StructType::create(ctx, rec->getName());
     }
@@ -1743,8 +1743,8 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
 
   if (node->kind == NodeKind::ArrayLiteral) {
     /* Array literal evaluation intrinsically constructs a local temporary
-     * allocation and yields the decayed pointer. Opaque pointers map this
-     * gracefully as a valid l-value. */
+     * allocation and yields the decayed pointer, which opaque pointers map
+     * as a valid l-value. */
     return dispatch(node);
   }
 
@@ -1898,7 +1898,7 @@ llvm::Value *CodeGen::getLValue(const ExprNode *node) {
     }
 
     /* Cast results are not naturally addressable: the cast visit builds
-     * an owned temporary (tracked via lastTemporaryAlloca) — return its
+     * an owned temporary (tracked via lastTemporaryAlloca). Return its
      * address (e.g. for ternary lvalues or reference arguments). */
     lastTemporaryAlloca = nullptr;
     llvm::Value *val = dispatch(node);
@@ -2349,7 +2349,7 @@ llvm::Value *CodeGen::visit(const ForNode *node) {
 /* Dart-style for-in: Sema lowered the loop to plain code (a reference
  * binding for the iterable + an iterator()/moveNext()/current() while loop,
  * or a plain index loop over fixed-size arrays). The lowered tree is fully
- * type-checked, so code generation is a plain dispatch — iterator calls are
+ * type-checked, so code generation is a plain dispatch. Iterator calls are
  * regular, statically-resolved, @inline-able calls; there is no Iterable
  * hierarchy, no vtable, and no allocation. */
 llvm::Value *CodeGen::visit(const ForInNode *node) {
@@ -2789,7 +2789,7 @@ llvm::Value *CodeGen::visit(const BinaryOpNode *node) {
      * into freshly created blocks (e.g. the continuation of an invoke for
      * a call that can unwind, or a nested short-circuit). The branch to
      * merge lands in that final block, which is therefore the PHI's real
-     * predecessor — recording 'rhsBB' instead would leave a PHI whose
+     * predecessor. Recording 'rhsBB' instead would leave a PHI whose
      * predecessors do not match (LLVM IR verification failure). */
     llvm::BasicBlock *rhsExitBB = builder.GetInsertBlock();
     /* Temporaries created while evaluating the right operand (e.g. the
@@ -2818,7 +2818,7 @@ llvm::Value *CodeGen::visit(const BinaryOpNode *node) {
     return nullptr;
   }
 
-  /* Pointer arithmetic: 'p + n', 'n + p', 'p - n' — the GEP element type is
+  /* Pointer arithmetic: 'p + n', 'n + p', 'p - n'. The GEP element type is
    * the pointee type, so typed pointers scale by element size while byte
    * pointers (RawMemory.ptr) step by byte. */
   if (node->exprType && node->exprType->isPointerType() &&
@@ -3149,8 +3149,8 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
       /* The constant still does not fit the global's type: the initializer
        * requires runtime construction (e.g. 'const String s = "..."', where
        * the literal decays to a pointer but the global is a record). Falling
-       * back to dynamic initialization keeps the module verifier happy —
-       * previously this produced an invalid 'bitcast ptr to %String'. */
+       * back to dynamic initialization keeps the module verifier happy.
+       * Previously this produced an invalid 'bitcast ptr to %String'. */
       if (initConst && initConst->getType() != ty) {
         initConst = nullptr;
       }
@@ -7532,7 +7532,7 @@ void CodeGen::emitCleanupCall(llvm::Value *ptr, const FunctionDeclNode *dtor,
 
 /* Destroys and unregisters the cleanups registered since 'cleanupCount'
  * (used by the ternary: branch temporaries must die at the end of their
- * branch, not unconditionally at scope exit — only one branch runs).
+ * branch, not unconditionally at scope exit (only one branch runs).
  * Guarded cleanups (owned copies of nested ternaries) are left in the
  * scope: they own their object until scope end. */
 void CodeGen::emitBranchCleanups(size_t cleanupCount) {
@@ -8061,7 +8061,7 @@ CodeGen::getOrCreateFutureValueDtor(const Type *valueType) {
   return fn;
 }
 
-/* 'void thunk(ptr valuePtr, ptr cb, ptr resultState)' — used by
+/* 'void thunk(ptr valuePtr, ptr cb, ptr resultState)', used by
  * Future.then. When 'asyncCb' is set, the callback returns a Future<void>
  * which is chained into resultState; otherwise the callback returns void
  * and resultState is completed immediately after the call. */
@@ -8151,7 +8151,7 @@ llvm::Function *CodeGen::getOrCreateThenThunk(const Type *valueType,
   return fn;
 }
 
-/* 'void thunk(ptr state, ptr fn)' — worker-thread entry used by
+/* 'void thunk(ptr state, ptr fn)', the worker-thread entry used by
  * Future.runOnThread: calls fn, stores the result into the state and
  * completes it. */
 llvm::Function *CodeGen::getOrCreateThreadThunk(const Type *valueType) {
@@ -8202,7 +8202,7 @@ llvm::Function *CodeGen::getOrCreateThreadThunk(const Type *valueType) {
   return fn;
 }
 
-/* 'void thunk(ptr state, ptr fn)' — worker-thread entry for an async
+/* 'void thunk(ptr state, ptr fn)', the worker-thread entry for an async
  * function passed to Future.runOnThread. The worker calls fn (which runs
  * the async function's coroutine up to its first await), then pumps its own
  * event loop until the returned future completes and stores the resulting

@@ -27,7 +27,7 @@ void checkI(int64 got, int64 want, String what) {
 }
 
 void main() {
-  /* ---- splat / add / mul / sub / div / neg / abs ---- */
+  /* splat / add / mul / sub / div / neg / abs */
   float32x4 a = simd_splat_f32x4(3.0);
   float32x4 b = simd_splat_f32x4(2.0);
   checkF(simd_extract(simd_add(a, b), 0), 5.0, "add");
@@ -40,7 +40,7 @@ void main() {
   checkF(simd_extract(simd_max(a, b), 0), 3.0, "max");
   checkF(simd_extract(simd_fma(a, b, simd_splat_f32x4(1.0)), 0), 7.0, "fma");
 
-  /* ---- make / zero / extract / insert ---- */
+  /* make / zero / extract / insert */
   float32x4 m = simd_make_f32x4(1.0, 2.0, 3.0, 4.0);
   checkF(simd_extract(m, 2), 3.0, "make/extract");
   float32x4 ins = simd_insert(m, 1, 9.0);
@@ -48,7 +48,7 @@ void main() {
   float32x4 z = simd_zero_f32x4();
   checkF(simd_extract(z, 0), 0.0, "zero");
 
-  /* ---- comparisons / select / blendv ---- */
+  /* comparisons / select / blendv */
   float32x4 cmpA = simd_make_f32x4(1.0, 5.0, 2.0, 6.0);
   float32x4 cmpB = simd_make_f32x4(3.0, 3.0, 3.0, 3.0);
   boolx4 mask = simd_cmp_lt(cmpA, cmpB);
@@ -65,7 +65,7 @@ void main() {
   checkF(simd_extract(simd_cmp_eq_ones(a, a), 1), -1.0, "cmp_ones");
   checkF(simd_extract(simd_cmp_ge_ones(b, a), 0), 0.0, "cmp_ones2");
 
-  /* ---- bitwise ---- */
+  /* bitwise */
   int32x4 x = simd_splat_i32x4(0x0F0F0F0F);
   int32x4 y = simd_splat_i32x4(0x00FF00FF);
   checkI(simd_extract(simd_and(x, y), 0), 0x000F000F, "and");
@@ -79,7 +79,7 @@ void main() {
   checkI(simd_extract(simd_ushr(posv, simd_splat_u32x4(1)), 0), 0x40000000,
          "ushr");
 
-  /* ---- integer arithmetic ---- */
+  /* integer arithmetic */
   int32x4 ia = simd_splat_i32x4(17);
   int32x4 ib = simd_splat_i32x4(5);
   checkI(simd_extract(simd_sdiv(ia, ib), 0), 3, "sdiv");
@@ -93,7 +93,7 @@ void main() {
   checkI(simd_extract(simd_umin(ua, ub), 0), 5, "umin");
   checkI(simd_extract(simd_umax(ua, ub), 0), 17, "umax");
 
-  /* ---- shuffle / splat_lane / hadd / unpack ---- */
+  /* shuffle / splat_lane / hadd / unpack */
   float32x4 p = simd_make_f32x4(1.0, 2.0, 3.0, 4.0);
   float32x4 q = simd_make_f32x4(5.0, 6.0, 7.0, 8.0);
   float32x4 sh = simd_shuffle(p, q, 3, 2, 5, 4);
@@ -114,7 +114,7 @@ void main() {
   checkF(simd_extract(un, 2), 2.0, "unpacklo2");
   checkF(simd_extract(un, 3), 6.0, "unpacklo3");
 
-  /* ---- memory: load/store (aligned and unaligned) ---- */
+  /* memory: load/store (aligned and unaligned) */
   /* Aligned loads/stores require the address to be aligned to the vector
    * size (as in C, misaligned use is UB). 'alloc' provides aligned memory;
    * 'new' arrays are 8-byte aligned (length prefix), enough for the
@@ -140,7 +140,7 @@ void main() {
   simd_storeu_f32x4(sum, &buf[12]);
   checkF(buf[13], 3.0, "storeu1");
 
-  /* ---- reductions ---- */
+  /* reductions */
   checkF(simd_reduce_add(p), 10.0, "reduce_add");
   checkF(simd_reduce_min(p), 1.0, "reduce_min");
   checkF(simd_reduce_max(p), 4.0, "reduce_max");
@@ -151,7 +151,7 @@ void main() {
   checkI(simd_reduce_and(r8), 3, "reduce_and");
   checkI(simd_reduce_xor(r8), 0, "reduce_xor");
 
-  /* ---- conversions ---- */
+  /* conversions */
   int32x4 ci = simd_make_i32x4(1, 2, 3, 4);
   float32x4 cf = simd_convert_f32x4(ci);
   checkF(simd_extract(cf, 3), 4.0, "itof");
@@ -163,20 +163,20 @@ void main() {
   checkF(simd_extract(cw, 0) as float32, 1.5, "f32tof64");
   float32x4 cn = simd_convert_f32x4(cw);
   checkF(simd_extract(cn, 3), 4.5, "f64tof32");
-  /* ---- bitcasts ---- */
+  /* bitcasts */
   float32x4 bf = simd_make_f32x4(1.0, 2.0, 3.0, 4.0);
   int32x4 bi = simd_bitcast_i32x4(bf);
   checkF(simd_extract(simd_bitcast_f32x4(bi), 2), 3.0, "bitcast_roundtrip");
   int64x2 b64 = simd_bitcast_i64x2(bf);
   checkF(simd_extract(simd_bitcast_f32x4(b64), 1), 2.0, "bitcast_64");
 
-  /* ---- masks: bitmask ---- */
+  /* masks: bitmask */
   boolx4 bm = simd_cmp_lt(p, simd_splat_f32x4(2.5));
   checkI(simd_bitmask(bm) as int64, 0x3, "bitmask");
   checkI(simd_signmask(simd_cmp_lt_ones(p, simd_splat_f32x4(2.5))), 0x3,
          "signmask");
 
-  /* ---- 256-bit and 512-bit vectors ---- */
+  /* 256-bit and 512-bit vectors */
   float32x8 a8 = simd_splat_f32x8(1.0);
   float32x8 b8 = simd_splat_f32x8(2.0);
   checkF(simd_extract(simd_add(a8, b8), 7), 3.0, "add8");
@@ -189,7 +189,7 @@ void main() {
   checkI(simd_extract(simd_shl(u64v, simd_splat_u64x2(2)), 1) as int64, 0x400000000,
          "u64_shl");
 
-  /* ---- x86 layer (SSE/AVX) ---- */
+  /* x86 layer (SSE/AVX) */
   float32x4 xa = _mm_set_ps(4.0, 3.0, 2.0, 1.0);
   float32x4 xb = _mm_set_ps(8.0, 7.0, 6.0, 5.0);
   checkF(simd_extract(_mm_add_ps(xa, xb), 0), 6.0, "mm_add_ps");
@@ -272,7 +272,7 @@ void main() {
                                          simd_splat_f32x16(20.0));
   checkF(simd_extract(msel, 7), 20.0, "mm512_blend");
 
-  /* ---- NEON layer ---- */
+  /* NEON layer */
   float32x4 na = vdupq_n_f32(2.0);
   float32x4 nb = vdupq_n_f32(3.0);
   checkF(simd_extract(vaddq_f32(na, nb), 0), 5.0, "neon_add");

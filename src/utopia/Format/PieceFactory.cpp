@@ -594,15 +594,13 @@ Piece *PieceFactory::buildChain(const ExprNode *node) {
     leadingUnsplittable++;
   }
 
-  /* See if we can block format the chain on one of its calls. We allow the
-   * last call in a chain to block format, but we only allow it to do so if
-   * either the preceding calls can't split or the last call is actually a
-   * block formatted argument list and not just a split argument list.
+  /* The last call in a chain can block-format, but only when the preceding
+   * calls cannot split or the last call is a block-formatted argument list
+   * rather than a split argument list.
    *
-   * Further, we allow the second-to-last call in the chain to be the block
-   * formatted call if the last call is a property or unsplittable call and the
-   * preceding call can block format. This allows for common hanging operations
-   * like `toList()`. */
+   * The second-to-last call may be the block-formatted one when the last
+   * call is a property or unsplittable call and the preceding call can block
+   * format, covering common hanging operations like `toList()`. */
   int lastCallIndex = (int)calls.size() - 1;
   if (!calls[lastCallIndex].canSplit() && calls.size() > 1 &&
       calls[lastCallIndex - 1].type == ChainCallType::BlockFormatCall) {

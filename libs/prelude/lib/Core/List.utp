@@ -10,7 +10,7 @@ export "ListLiteralView.utp";
  * pointer steal with no per-element allocation.
  */
 /*
- * ListIterator<T> — the for-in cursor of List<T>: a tiny value type holding
+ * ListIterator<T>: the for-in cursor of List<T>, a tiny value type holding
  * the element base pointer, the next offset and the length. It is returned
  * by value; with @inline the iteration is a raw pointer walk. Inserting
  * into the list while iterating invalidates the cursor (reallocation moves
@@ -388,8 +388,8 @@ class List<T> {
 
   /* for-in support ('for (var x in list)'): a zero-cost cursor over the raw
    * element storage, in order. moveNext()/current() are @inline, so the
-   * whole loop compiles to the same machine code as a manual index walk —
-   * no Iterable hierarchy, no vtables, no allocation. */
+   * whole loop compiles to the same machine code as a manual index walk,
+   * with no Iterable hierarchy, no vtables and no allocation. */
   @inline
   ListIterator<T> iterator() {
     return ListIterator<T>(this);

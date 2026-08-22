@@ -32,7 +32,7 @@ struct _HashMapBucket<K, V> {
  * that grow the table.
  */
 /*
- * HashMapKeyIterator<K, V> — the for-in cursor of HashMap<K, V>, scanning
+ * HashMapKeyIterator<K, V>: the for-in cursor of HashMap<K, V>, scanning
  * the bucket table for occupied slots (state == 1).
  */
 class HashMapKeyIterator<K, V> {
@@ -444,7 +444,7 @@ class HashMap<K, V> {
   }
 
   /* A lightweight, non-owning view over the map's entries (holds a pointer
-   * to the map — no copy). Iterating yields MapEntry<K, V> values. */
+   * to the map, no copy). Iterating yields MapEntry<K, V> values. */
   @inline
   HashMapEntryView<K, V> entries() {
     return HashMapEntryView<K, V>(this);

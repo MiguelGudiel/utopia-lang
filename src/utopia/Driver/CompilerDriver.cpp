@@ -252,9 +252,10 @@ bool CompilerDriver::run() {
     /* A single SemaContext and pipeline are shared across all roots: the
      * passes track visited modules internally, so each module is type-checked
      * exactly once even when roots share imports. (Running a fresh pipeline
-     * per root is not idempotent: the first run mutates the AST — e.g. it
-     * reorders call arguments and clears named-argument bookkeeping — which
-     * breaks overload resolution on a second pass over the same module.) */
+     * per root is not idempotent: the first run mutates the AST. For
+     * example, it reorders call arguments and clears named-argument
+     * bookkeeping, which breaks overload resolution on a second pass over
+     * the same module.) */
     SemaContext semaCtx(astCtx, diagEngine, roots.front()->filePath);
     SemaPipeline pipeline;
 

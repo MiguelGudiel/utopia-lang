@@ -860,7 +860,7 @@ void handleCodeAction(const json &req) {
 
   for (const auto &[code, codeDiags] : byCode) {
     for (const Diagnostic *d : codeDiags) {
-      /* --- Fix this warning --- */
+      /* Fix this warning */
       json edits;
       if (computeFix(doc, *d, code, edits)) {
         edits = applyDeletionPolicy(doc.text, edits);
@@ -869,18 +869,18 @@ void handleCodeAction(const json &req) {
             {d}, uri));
       }
 
-      /* --- Disable on this line --- */
+      /* Disable on this line */
       res.push_back(codeAction(
           "Utopia: Disable '" + code + "' on this line",
           json::array({suppressLineEdit(code, d->line)}), {d}, uri));
 
-      /* --- Disable in this file --- */
+      /* Disable in this file */
       json fileEdit = suppressFileEdit(doc.text, code);
       res.push_back(codeAction(
           "Utopia: Disable '" + code + "' in this file",
           json::array({fileEdit}), {d}, uri));
 
-      /* --- Disable in this project (build.yaml) --- */
+      /* Disable in this project (build.yaml) */
       if (manifestExists) {
         std::string manifestText;
         {
@@ -906,7 +906,7 @@ void handleCodeAction(const json &req) {
       }
     }
 
-    /* --- Fix all similar warnings in this document --- */
+    /* Fix all similar warnings in this document */
     json allEdits = json::array();
     bool anyFix = false;
     for (const Diagnostic *d : codeDiags) {
@@ -926,7 +926,7 @@ void handleCodeAction(const json &req) {
     }
   }
 
-  /* --- Fix all fixable warnings in this document --- */
+  /* Fix all fixable warnings in this document */
   json allFixEdits = json::array();
   bool anyFixable = false;
   for (const Diagnostic *d : allDiags) {

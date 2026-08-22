@@ -43,7 +43,7 @@ int main() {
 ## How it works
 
 - Storage is a `RawMemory` block allocated with `Memory.alloc(size, align)`;
-  **elements are constructed lazily** — an empty `List` performs zero
+  **elements are constructed lazily**: an empty `List` performs zero
   allocations and no element is ever default-constructed unless it is
   actually stored.
 - `push`, `insert` and `removeAt` construct/destruct only the affected
@@ -51,8 +51,8 @@ int main() {
   are destructed, and shifts are moves.
 - Reallocation (`push` when full) moves the live elements into a new
   `Memory.alloc` block with `Memory.construct` + `Memory.destruct`, so
-  types with move constructors (e.g. `String`) are **moved — no copy and
-  no per-element allocation**. Without a move constructor the copy
+  types with move constructors (e.g. `String`) are **moved**, with no
+  copy and no per-element allocation. Without a move constructor the copy
   constructor is used; trivially copyable records are bitwise-copied.
 - `clear()` destructs the live elements and keeps the capacity.
 - `ListLiteralView<T>` is a lightweight view (`const T* data; usize length;`) that enables `[1, 2, 3]` initialization without copying the literal twice.
@@ -61,7 +61,7 @@ int main() {
 ## for-in
 
 `List` (and `ListLiteralView`) support Dart-style for-in loops through the
-structural iterator protocol — no `Iterable` inheritance, no vtables:
+structural iterator protocol, with no `Iterable` inheritance and no vtables:
 
 ```utp
 for (var v in scores) {      // copies each element (Dart semantics)

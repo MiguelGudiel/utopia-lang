@@ -463,7 +463,7 @@ void DeclCollectorPass::visit(const UnionDeclNode *node) {
     }
     if (node->isTemplateSpecialization) {
       /* Partial specialization: it has parameters but must not shadow the
-       * primary template in templateRegistry — it is only reachable through
+       * primary template in templateRegistry; it is only reachable through
        * templateSpecializations. */
       ctx->templateSpecializations[std::string(node->specializationBaseName)]
           .push_back(node);
@@ -632,9 +632,9 @@ void DeclCollectorPass::visit(const StructDeclNode *node) {
     }
     if (node->isTemplateSpecialization) {
       /* Partial specialization: it has parameters but must not shadow the
-       * primary template in templateRegistry — it is only reachable through
+       * primary template in templateRegistry; it is only reachable through
        * templateSpecializations. */
-ctx->templateSpecializations[std::string(node->specializationBaseName)]
+      ctx->templateSpecializations[std::string(node->specializationBaseName)]
           .push_back(node);
       return;
     }
@@ -807,9 +807,9 @@ void DeclCollectorPass::visit(const ClassDeclNode *node) {
     }
     if (node->isTemplateSpecialization) {
       /* Partial specialization: it has parameters but must not shadow the
-       * primary template in templateRegistry — it is only reachable through
+       * primary template in templateRegistry; it is only reachable through
        * templateSpecializations. */
-ctx->templateSpecializations[std::string(node->specializationBaseName)]
+      ctx->templateSpecializations[std::string(node->specializationBaseName)]
           .push_back(node);
       return;
     }

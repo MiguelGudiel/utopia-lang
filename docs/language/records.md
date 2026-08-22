@@ -2,9 +2,9 @@
 
 Records bundle data and behavior. Utopia provides three record kinds:
 
-- **`struct`** — a value-like aggregate with optional methods and constructors.
-- **`class`** — an object-oriented type supporting inheritance, interfaces, and polymorphism.
-- **`union`** — an aggregate whose fields overlap in memory (like C unions).
+- **`struct`**: a value-like aggregate with optional methods and constructors.
+- **`class`**: an object-oriented type supporting inheritance, interfaces, and polymorphism.
+- **`union`**: an aggregate whose fields overlap in memory (like C unions).
 
 All three support fields, multiple constructors, destructors, methods, static members, access modifiers, and templates.
 

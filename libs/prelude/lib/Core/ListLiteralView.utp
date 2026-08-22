@@ -9,7 +9,7 @@
  * zero indirection: iteration is a raw pointer walk over the literal.
  */
 /*
- * ListLiteralViewIterator<T> — the for-in cursor of ListLiteralView.
+ * ListLiteralViewIterator<T>: the for-in cursor of ListLiteralView.
  */
 class ListLiteralViewIterator<T> {
   const T* _base;

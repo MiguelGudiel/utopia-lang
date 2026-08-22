@@ -38,8 +38,7 @@ void Solution::format(SolutionCache &cache, int pageWidth, int leadingIndent,
 std::vector<Solution> Solution::expand(SolutionCache &cache, int pageWidth,
                                        int leadingIndent,
                                        int subsequentIndent) {
-  /* If there is no piece that we can expand on this solution, it's a dead end
-   * (or a winner). */
+  /* A solution with no expandable piece is a dead end (or a winner). */
   if (expandPieces.empty())
     return {};
 

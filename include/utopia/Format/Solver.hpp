@@ -9,32 +9,30 @@ namespace utopia {
  *
  * This problem is combinatorial over the number of pieces and each of their
  * possible states, so it isn't feasible to brute force. There are a few
- * techniques we use to avoid that:
+ * techniques used to avoid that:
  *
  * -   The initial state for each piece has no line splits or only mandatory
  *     ones. Thus, it tries solutions with a minimum number of line splits
  *     first.
  *
- * -   Solutions are explored in priority order. We explore solutions with the
- *     lowest cost first. This way, as soon as we find a solution with no
- *     overflow characters, we know it will be the best solution and can stop.
+ * -   Solutions are explored in priority order, lowest cost first. The first
+ *     solution with no overflow characters is the best one, so exploration
+ *     stops there.
  *
- * -   When selecting states for pieces to expand solutions, we only look at
- *     pieces in the first line containing overflow characters or invalid
- *     newlines.
+ * -   When selecting states to expand, only pieces in the first line
+ *     containing overflow characters or invalid newlines are considered.
  *
  * -   If a subtree Piece is sufficiently isolated from surrounding content
- *     (usually this means it is on its own line), then we hoist that entire
- *     subtree out, format it with a separate Solver, and then insert the
- *     result into the Solution. We also memoize the result of doing this and
- *     use it across different Solutions. This enables us to both divide and
- *     conquer the Piece tree and solve portions separately, while also
- *     reusing work across different solutions. */
+ *     (usually this means it is on its own line), the subtree is hoisted
+ *     out, formatted with a separate Solver, and the result inserted into
+ *     the Solution. The result is memoized and reused across different
+ *     Solutions, so the Piece tree is divided and solved in parts while
+ *     work is shared between solutions. */
 class Solver {
 public:
-  /* To ensure the solver doesn't go totally pathological on giant code, we cap
-   * it at a fixed number of attempts. If the optimal solution isn't found
-   * after this many tries, it just uses the best it found so far. */
+  /* The solver is capped at a fixed number of attempts so it cannot go
+   * pathological on giant code; if the optimal solution is not found in
+   * time, the best one so far is used. */
   static constexpr int MaxAttempts = 10000;
 
   Solver(SolutionCache &cache, int pageWidth, int leadingIndent = 0,

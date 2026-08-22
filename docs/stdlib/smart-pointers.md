@@ -82,7 +82,7 @@ if (!w.expired()) {
   locked.describe();
 }
 s.reset();
-print("%d\n", w.expired());   // 1 — the object is gone
+print("%d\n", w.expired());   // 1, the object is gone
 ```
 
 ## Factories
@@ -104,7 +104,7 @@ unique_ptr<Widget> makeWidget() {
 
 Member access resolution works like this:
 
-1. Look up the member on the smart pointer itself (its own methods win — `get`, `reset`, ...).
+1. Look up the member on the smart pointer itself (its own methods win: `get`, `reset`, ...).
 2. If not found, check whether the type overloads `operator*`; if so, dereference implicitly and retry.
 3. Repeat up to 64 levels, so nested smart pointers work: `unique_ptr<shared_ptr<T>>`.
 
@@ -114,4 +114,4 @@ This mirrors Rust's auto-deref and is why `ptr.field`, `ptr.method()`, and even 
 
 - Smart pointers are value types with destructors; the compiler enforces copy/move correctness (no implicit copies of destructor-bearing records).
 - `shared_ptr` allocates the control block separately (single-owner objects like `unique_ptr` are allocation-free beyond the owned object).
-- The implementation is plain Utopia in `libs/stdlib/lib/memory.utp` — read it to see the full reference-counting logic.
+- The implementation is plain Utopia in `libs/stdlib/lib/memory.utp`; read it to see the full reference-counting logic.

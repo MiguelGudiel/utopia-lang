@@ -30,7 +30,7 @@ struct _SplayNode<K, V> {
  * the ordering.
  */
 /*
- * SplayTreeKeyIterator<K, V> — the for-in cursor of SplayTreeMap<K, V>,
+ * SplayTreeKeyIterator<K, V>: the for-in cursor of SplayTreeMap<K, V>,
  * walking the tree in-order via the nodes' parent pointers.
  */
 class SplayTreeKeyIterator<K, V> {
@@ -197,7 +197,7 @@ class SplayTreeMap<K, V> {
     this._copyFrom(other);
   }
 
-  /* ---- internal helpers ------------------------------------------------ */
+  /* internal helpers */
 
   /* Allocates a node with the key constructed in place (the value is left
    * for the caller to construct, so operator[] can default-construct it). */
@@ -397,7 +397,7 @@ class SplayTreeMap<K, V> {
     }
   }
 
-  /* ---- public API ------------------------------------------------------ */
+  /* public API */
 
   @inline
   usize length() {
@@ -572,7 +572,8 @@ class SplayTreeMap<K, V> {
   /* for-in support: a zero-cost cursor over the KEYS, in ascending order.
    * The cursor walks the tree with the nodes' parent pointers (no stack, no
    * allocation); moveNext()/current() are @inline, so the loop lowers to a
-   * plain tree walk — no Iterable hierarchy, no vtables. Use map.entries()
+   * plain tree walk with no Iterable hierarchy and no vtables. Use
+   * map.entries()
    * for key/value pairs. Mutating the tree while iterating invalidates the
    * cursor. */
   @inline
@@ -581,7 +582,7 @@ class SplayTreeMap<K, V> {
   }
 
   /* A lightweight, non-owning view over the map's entries (holds a pointer
-   * to the map — no copy). Iterating yields MapEntry<K, V> values in
+   * to the map, no copy). Iterating yields MapEntry<K, V> values in
    * ascending key order. */
   @inline
   SplayTreeEntryView<K, V> entries() {

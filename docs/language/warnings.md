@@ -7,7 +7,7 @@ family (a *warning kind*). This lets you:
 - disable individual warning kinds for a project from `build.yaml` (or a
   `build.utp` script),
 - suppress a single occurrence in source with a comment directive,
-- and — inside the VS Code extension — get quick fixes that remove the
+- and, inside the VS Code extension, get quick fixes that remove the
   offending code or add the suppression comments for you.
 
 ## Warning kinds
@@ -22,10 +22,10 @@ family (a *warning kind*). This lets you:
 | `unused_field` | A private field that is never referenced | removes the field when safe |
 | `unused_parameter` | A parameter that is never used in the body (names starting with `_`, `this` parameters and override/operator parameters are exempt) | renames to `_name` (positional parameters only) |
 | `unused_using` | A `using` directive that never resolves a referenced symbol | removes the directive |
-| `nodiscard_ignored` | The return value of an `@nodiscard` function or type is ignored | — |
-| `deprecated` | Use of a declaration marked `@deprecated` | — |
-| `implicit_cast` | Binding an r-value to a non-const reference creates a temporary; implicit conversions that lose precision or change signedness | — |
-| `uninitialized_variable` | Use of a variable before it is initialized | — |
+| `nodiscard_ignored` | The return value of an `@nodiscard` function or type is ignored | n/a |
+| `deprecated` | Use of a declaration marked `@deprecated` | n/a |
+| `implicit_cast` | Binding an r-value to a non-const reference creates a temporary; implicit conversions that lose precision or change signedness | n/a |
+| `uninitialized_variable` | Use of a variable before it is initialized | n/a |
 
 The *unused* analyses only flag declarations that live in the analyzed
 module tree and can never be referenced from outside it (private symbols,
@@ -81,7 +81,7 @@ configuration:
 import "utopia:memory";
 
 // @ignore-warnings unused_variable, unused_function
-// (above: file scope — must appear at the very top of the file)
+// (above: file scope; must appear at the very top of the file)
 
 int main() {
   int unused = 1; // @ignore-warning unused_variable
@@ -99,17 +99,17 @@ int main() {
 The VS Code extension surfaces every warning with its kind code and a
 light-bulb with quick fixes for warnings that have one. Available actions:
 
-1. **Fix this warning** — applies the automatic fix for the warning under
+1. **Fix this warning**: applies the automatic fix for the warning under
    the cursor.
-2. **Fix all `<kind>` warnings in this document** — applies the same fix to
+2. **Fix all `<kind>` warnings in this document**: applies the same fix to
    every warning of that kind.
-3. **Fix all warnings with fixes in this document** — applies every
+3. **Fix all warnings with fixes in this document**: applies every
    available fix in one go.
-4. **Disable `<kind>` on this line** — inserts
+4. **Disable `<kind>` on this line**: inserts
    `// @ignore-warning <kind>` above the line.
-5. **Disable `<kind>` in this file** — inserts
+5. **Disable `<kind>` in this file**: inserts
    `// @ignore-warnings <kind>` at the top of the file (or extends the
    existing directive).
-6. **Disable `<kind>` in this project** — edits the current project's
+6. **Disable `<kind>` in this project**: edits the current project's
    `build.yaml` (`warnings: { <kind>: false }`) so the kind stays enabled
    for subprojects.

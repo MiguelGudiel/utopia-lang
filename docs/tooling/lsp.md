@@ -6,9 +6,9 @@ Utopia ships a language server (`utopia_lsp`) speaking the Language Server Proto
 
 | Feature | Details |
 | --- | --- |
-| **Completion** | Keywords, primitive types, preprocessor macros, built-in annotations, user-defined annotations, global symbols, namespace members, and record members — including **auto-deref through smart pointers** (`up.` suggests both `get()` and the pointee's members) |
+| **Completion** | Keywords, primitive types, preprocessor macros, built-in annotations, user-defined annotations, global symbols, namespace members, and record members, including **auto-deref through smart pointers** (`up.` suggests both `get()` and the pointee's members) |
 | **Hover** | Signatures (return type, parameters, named/`required` info, `const`), doc comments, and type information |
-| **Go to definition** | Variables, functions, methods, members, enums, types, and namespaces — including members reached through smart pointers |
+| **Go to definition** | Variables, functions, methods, members, enums, types, and namespaces, including members reached through smart pointers |
 | **Signature help** | Parameter list with the active parameter highlighted (triggers on `(` and `,`) |
 | **Diagnostics** | Parser and semantic errors streamed as `textDocument/publishDiagnostics` |
 | **Semantic tokens** | Full token classification: class, struct, enum, type, function, method, property, variable, parameter, enumMember, macro, keyword, namespace; modifiers: declaration, static, readonly |

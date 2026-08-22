@@ -106,14 +106,14 @@ int u = await Future.runOnThread<int>(() async {
 
 ## The standard library
 
-- `Future.value<T>(v)` — a future already completed with `v`
-- `Future.sync<T>(fn)` — runs `fn` immediately, completes with its result
-- `Future.delayed<T>(ms, fn)` — completes with `fn()`'s result after `ms` ms
-- `Future.runOnThread<T>(fn)` — runs `fn` on a worker thread
-- `Future.wait<T>(List<Future<T>>)` — completes with the values, in order
-- `f.then(cb)` — runs `cb` when the future completes (sync or async callbacks)
-- `f.whenComplete(cb)` — runs `cb` when the future completes
-- `f.isCompleted()` — true once the future has settled
+- `Future.value<T>(v)`: a future already completed with `v`
+- `Future.sync<T>(fn)`: runs `fn` immediately, completes with its result
+- `Future.delayed<T>(ms, fn)`: completes with `fn()`'s result after `ms` ms
+- `Future.runOnThread<T>(fn)`: runs `fn` on a worker thread
+- `Future.wait<T>(List<Future<T>>)`: completes with the values, in order
+- `f.then(cb)`: runs `cb` when the future completes (sync or async callbacks)
+- `f.whenComplete(cb)`: runs `cb` when the future completes
+- `f.isCompleted()`: true once the future has settled
 
 ## Enabling and disabling the runtime
 

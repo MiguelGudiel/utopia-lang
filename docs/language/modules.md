@@ -77,7 +77,7 @@ int main() {
 }
 ```
 
-`using` is lexical — it applies to the enclosing scope/block.
+`using` is lexical: it applies to the enclosing scope/block.
 
 ## Visibility between modules
 

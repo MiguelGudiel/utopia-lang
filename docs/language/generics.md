@@ -77,7 +77,7 @@ class Stack<T> {
 ## Constraints: `T extends X`
 
 A template parameter can declare a bound with the Dart syntax `T extends X`.
-The bound is checked at instantiation time (compile-time only — zero runtime
+The bound is checked at instantiation time (compile-time only, zero runtime
 cost) and enables two things inside the template body:
 
 - **Class bounds** (`T extends Animal`) resolve member access on `T` against

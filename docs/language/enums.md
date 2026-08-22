@@ -49,7 +49,7 @@ int main() {
 - Members are addressed with the enum type as qualifier: `Color.Red`.
 - Enums convert to their underlying integer type and participate in integer arithmetic.
 - `switch` over enums is fully supported with `case`/`default`.
-- Enum values are constants — they are evaluated at compile time and usable in constant expressions.
+- Enum values are constants: they are evaluated at compile time and usable in constant expressions.
 
 ## `typedef` aliases
 

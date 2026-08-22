@@ -1,5 +1,5 @@
 /*
- * Math — mathematical constants and functions, mirroring the useful parts
+ * Math: mathematical constants and functions, mirroring the useful parts
  * of dart:math and <cmath>.
  */
 

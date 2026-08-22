@@ -57,7 +57,7 @@ expr as Type
 
 ### Type tests: `is` and `is!`
 
-`is` evaluates whether an expression can be treated as a given class type — the
+`is` evaluates whether an expression can be treated as a given class type; the
 object's dynamic type is `Type` or a subtype of it. `is!` is the negated test:
 
 ```utp
@@ -74,7 +74,7 @@ Semantics:
 
 - **Compile-time results**: when the static type already decides the answer
   (`Derived*` with `is Base`, exact type matches, or unrelated types), no
-  runtime code is emitted — the result is constant.
+  runtime code is emitted, and the result is constant.
 - **Runtime checks**: when the static type is a polymorphic base of the tested
   type (or the tested type is an interface the static type may implement), the
   check walks the object's vtable-based type descriptor chain.
@@ -85,7 +85,7 @@ Semantics:
 #### Type promotion
 
 Like Dart, `is` inside an `if` condition narrows the variable's type for the
-rest of the block — no new variable is needed:
+rest of the block, with no new variable needed:
 
 ```utp
 void describe(Animal* a) {

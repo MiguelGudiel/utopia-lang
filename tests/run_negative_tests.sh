@@ -32,7 +32,7 @@ run_case() {
     PASS=$((PASS + 1))
   else
     FAIL=$((FAIL + 1))
-    printf '[FAIL] %s — expected: %s\n' "$name" "$expect"
+    printf '[FAIL] %s, expected: %s\n' "$name" "$expect"
     printf '       got: %s\n' "$(printf '%s' "$out" | grep -m1 error)"
   fi
 }

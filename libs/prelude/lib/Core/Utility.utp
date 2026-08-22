@@ -5,7 +5,7 @@
  */
 
 /*
- * optional<T> — a value of type T that may be absent, mirroring
+ * optional<T>: a value of type T that may be absent, mirroring
  * std::optional. The engaged state is tracked explicitly, so T only needs
  * to be default-constructible.
  */
@@ -82,7 +82,7 @@ class optional<T> {
 }
 
 /*
- * pair<T, U> — a heterogeneous pair of values, mirroring std::pair.
+ * pair<T, U>: a heterogeneous pair of values, mirroring std::pair.
  */
 class pair<T, U> {
   T first;

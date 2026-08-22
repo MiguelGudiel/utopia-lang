@@ -37,9 +37,9 @@ cmake --build build --parallel
 
 This produces:
 
-- `libutopia_core.a` — the compiler library (lexer, parser, semantic analysis, LLVM codegen)
-- `tools/utopia/utopia` — the `utopia` CLI
-- `tools/lsp/utopia_lsp` — the language server
+- `libutopia_core.a`: the compiler library (lexer, parser, semantic analysis, LLVM codegen)
+- `tools/utopia/utopia`: the `utopia` CLI
+- `tools/lsp/utopia_lsp`: the language server
 
 ### CMake options
 

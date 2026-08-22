@@ -39,7 +39,7 @@ Utopia combines a C/C++-style memory and execution model with a modern, Dart-ins
 - **Template specialization** (C++-style, no `template<>` keyword): complete (`class Storage<int32>`) and partial (`class Pair<A, int64>`) specializations with pattern deduction and ambiguity errors
 - **Operator overloading** (`operator+`, `operator==`, `operator[]`, `operator=`, unary and compound-assignment operators, etc.) including free-function operators
 - **Expression-bodied functions** (`=>`) and classic `if`/`else`, `while`, `for`, `switch`/`case`/`default`, `break`, `continue`, `return`, and ternary `?:`
-- **Dart-style `for-in` loops** (`for (var x in list)`) over any type with the structural `iterator()`/`moveNext()`/`current()` protocol — `List`, `Map` (keys), `map.entries()`, `HashMap`, `SplayTreeMap`, array literals and user-defined types. Zero-cost like C++: no `Iterable` hierarchy, no vtables, no allocation; `@inline` cursors collapse to plain index/pointer walks, and `var x` / `var& x` / `final& x` control copy vs. reference binding
+- **Dart-style `for-in` loops** (`for (var x in list)`) over any type with the structural `iterator()`/`moveNext()`/`current()` protocol, covering `List`, `Map` (keys), `map.entries()`, `HashMap`, `SplayTreeMap`, array literals and user-defined types. Zero-cost like C++: no `Iterable` hierarchy, no vtables, no allocation; `@inline` cursors collapse to plain index/pointer walks, and `var x` / `var& x` / `final& x` control copy vs. reference binding
 - **Dart-style `const` expressions and canonicalization**: `const` constructor calls, const variables, `const [...]` literals and constant arithmetic/string expressions evaluate at compile time into static read-only storage; identical constant expressions canonicalize to a single instance (pointer equality), with implicit const inside const contexts (Dart rule), const-constructor rules (empty body, all fields `final`) and the `Memory.isConst` runtime check
 - **C++-style exceptions**: `try`/`catch`/`throw` with multiple catch clauses, `catch (...)`, references (`catch (T& e)`), bare `throw;` rethrows that preserve the dynamic type, derived-to-base and interface catch matching, and deterministic destructor unwinding through scopes. Any type can be thrown; records with custom destructors must be copyable
 - **`assert(expr)`** with source location reporting (no-op under `NDEBUG`) and the **`__FILE__` / `__LINE__`** source-location intrinsics
@@ -48,7 +48,7 @@ Utopia combines a C/C++-style memory and execution model with a modern, Dart-ins
 
 - **Manual memory management** via `new`/`delete` and `new[]`/`delete[]` (with array length prefix)
 - **RAII**: destructors run deterministically on scope exit, early returns, and loop exits; copy/move constructors and `operator=` enforce correct ownership semantics for records with custom destructors
-- **Smart pointers** in the standard library: `unique_ptr<T>`, `shared_ptr<T>`, `weak_ptr<T>` with reference counting, plus `make_unique<T>`/`make_shared<T>` factories — mirroring the C++ API
+- **Smart pointers** in the standard library: `unique_ptr<T>`, `shared_ptr<T>`, `weak_ptr<T>` with reference counting, plus `make_unique<T>`/`make_shared<T>` factories, mirroring the C++ API
 - **Rust-style auto-deref**: member access with `.` resolves through overloaded `operator*` automatically, so `ptr.field` and `ptr.method()` work directly on smart pointers (no `->` syntax needed)
 - **Pointers, references, and r-value references** with automatic dereference on member access, plus `null`
 
@@ -87,7 +87,7 @@ Utopia combines a C/C++-style memory and execution model with a modern, Dart-ins
 
 - **`String`**: construction from any primitive, `+`/`==`/`!=` operators, indexing, `length()`, `c_str()`, `toInt()`/`toFloat()`, `clear()`, `push_back()`
 - **`List<T>`**: dynamic generic list with `push()`, indexing, copy semantics, array-literal initialization, and Dart-style `for-in` iteration (`for (var x in list)`, `for (var& x in list)`)
-- **`Map<K, V>` / `HashMap<K, V>` / `SplayTreeMap<K, V>`**: Dart-style maps with map-literal initialization (`{"key": value}`) — `Map` preserves insertion order (LinkedHashMap, O(1) average lookups), `HashMap` is an unordered open-addressing table, and `SplayTreeMap` keeps keys sorted (O(log n) amortized); all deep-copy on assignment and accept the same literal. All three support `for-in` over keys and `entries()` for key/value pairs
+- **`Map<K, V>` / `HashMap<K, V>` / `SplayTreeMap<K, V>`**: Dart-style maps with map-literal initialization (`{"key": value}`); `Map` preserves insertion order (LinkedHashMap, O(1) average lookups), `HashMap` is an unordered open-addressing table, and `SplayTreeMap` keeps keys sorted (O(log n) amortized); all deep-copy on assignment and accept the same literal. All three support `for-in` over keys and `entries()` for key/value pairs
 - **`Console`**: `print`, `printLine`, `readLine`, `clear`; global `print(format, ...)` with `printf`-style formatting
 - **`Math`**: numeric limits constants (`INT32_MAX`, `FLOAT64_MIN`, ...)
 - **`Memory`**: `malloc`/`free` bindings and type reflection (`Type`, `MethodInfo`)
@@ -160,11 +160,11 @@ Each example is a standalone project with its own `build.yaml` manifest.
 
 The `docs/` directory contains the full language documentation, organized like the books of other systems languages:
 
-- **Getting Started** — installation, your first program, and project layout
-- **Language Guide** — types, variables, functions, control flow, records, OOP, generics, operators, memory management and smart pointers, modules, preprocessor, and annotations
-- **Standard Library** — `String`, `List`, `Console`, `Math`, `Memory`, `System`, I/O, FFI, and smart pointers
-- **Tooling** — compiler CLI, build system, JIT, LSP, formatter, and cross-compilation targets
-- **Advanced Topics** — LLVM code generation, TBAA, DWARF debug info, and intrinsics
+- **Getting Started**: installation, your first program, and project layout
+- **Language Guide**: types, variables, functions, control flow, records, OOP, generics, operators, memory management and smart pointers, modules, preprocessor, and annotations
+- **Standard Library**: `String`, `List`, `Console`, `Math`, `Memory`, `System`, I/O, FFI, and smart pointers
+- **Tooling**: compiler CLI, build system, JIT, LSP, formatter, and cross-compilation targets
+- **Advanced Topics**: LLVM code generation, TBAA, DWARF debug info, and intrinsics
 
 Start at [docs/README.md](docs/README.md). The `examples/` directory also provides runnable, self-contained sample programs.
 
@@ -191,12 +191,12 @@ This builds `utopia_core` (the compiler library) and the `utopia` CLI tool under
 
 Repository layout:
 
-- `src/`, `include/` — compiler library (lexer, parser, semantic analysis, LLVM codegen)
-- `tools/utopia/` — command-line driver
-- `libs/` — prelude, standard library, and build-script library shipped with the toolchain
-- `examples/` — sample programs (including `11_smart_pointers`)
-- `tests/` — test suite
-- `docs/` — full language documentation
+- `src/`, `include/`: compiler library (lexer, parser, semantic analysis, LLVM codegen)
+- `tools/utopia/`: command-line driver
+- `libs/`: prelude, standard library, and build-script library shipped with the toolchain
+- `examples/`: sample programs (including `11_smart_pointers`)
+- `tests/`: test suite
+- `docs/`: full language documentation
 
 ## Project Status
 

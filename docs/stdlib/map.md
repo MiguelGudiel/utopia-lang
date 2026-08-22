@@ -49,11 +49,11 @@ All three maps share this API:
 int main() {
   Map<String, int> insertion = {"z": 1, "a": 2, "m": 3};
   List<String> keys = insertion.keys();
-  // keys == ["z", "a", "m"] — insertion order
+  // keys == ["z", "a", "m"], insertion order
 
   SplayTreeMap<String, int> sorted = {"z": 1, "a": 2, "m": 3};
   List<String> sortedKeys = sorted.keys();
-  // sortedKeys == ["a", "m", "z"] — ascending
+  // sortedKeys == ["a", "m", "z"], ascending
   return 0;
 }
 ```
@@ -73,8 +73,8 @@ int main() {
 
 - `Map` stores entries in one flat array (no per-entry allocation) plus a
   power-of-two bucket table; removals reuse slots through a free list.
-  Insertions that grow the table move the entries, so — like C++'s
-  `std::unordered_map` — references into the map are invalidated by
+  Insertions that grow the table move the entries, so, like C++'s
+  `std::unordered_map`, references into the map are invalidated by
   inserting elements.
 - `HashMap` probes a contiguous run of buckets and is the fastest of the
   three for lookups.
@@ -119,7 +119,7 @@ int main() {
 ## for-in
 
 All three maps support Dart-style for-in loops through the structural
-iterator protocol — no `Iterable` inheritance, no vtables:
+iterator protocol, with no `Iterable` inheritance and no vtables:
 
 ```utp
 for (var k in counters) {            // iterating a map yields its KEYS
@@ -143,6 +143,6 @@ for (var& k in leaderboard) {        // reference binding: no copies
 - Keys iteration yields `K&` (zero copies). `entries()` yields
   `MapEntry<K, V>` by value, so each pair is copied; use `map[k]` for
   zero-copy value access while iterating keys.
-- `map.entries()` returns a non-owning view (a pointer to the map — no
+- `map.entries()` returns a non-owning view (a pointer to the map, no
   copy). Mutating a map while iterating invalidates the cursor.
 ```

@@ -7,7 +7,7 @@
  * The compiler recognizes instantiations of this name ('MapLiteralView_...')
  * and lowers map literals directly into the view, so every map type that
  * declares a constructor taking MapLiteralView<K, V> accepts the same
- * literal syntax — including user-defined map-like types.
+ * literal syntax, including user-defined map-like types.
  */
 struct MapLiteralView<K, V> {
   const K* keys;

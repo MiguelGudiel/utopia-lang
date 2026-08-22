@@ -120,7 +120,7 @@ class Point {
 
 ## Member access on pointers
 
-Member access works directly on pointers, references, and smart pointers — the compiler inserts the dereference automatically:
+Member access works directly on pointers, references, and smart pointers; the compiler inserts the dereference automatically:
 
 ```utp
 Point* p = new Point(10, 20);

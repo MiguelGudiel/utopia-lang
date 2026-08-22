@@ -6,7 +6,7 @@
  * vector IR.
  */
 
-/* ---------------- float ---------------- */
+/* float */
 @intrinsic("simd_add") public float32x4 vaddq_f32(float32x4 a, float32x4 b);
 @intrinsic("simd_sub") public float32x4 vsubq_f32(float32x4 a, float32x4 b);
 @intrinsic("simd_mul") public float32x4 vmulq_f32(float32x4 a, float32x4 b);
@@ -46,7 +46,7 @@
 @intrinsic("simd_cmp_gt") public boolx2 vcgtq_f64(float64x2 a, float64x2 b);
 @intrinsic("simd_cmp_ge") public boolx2 vcgeq_f64(float64x2 a, float64x2 b);
 
-/* ---------------- int/uint ---------------- */
+/* int/uint */
 @intrinsic("simd_add") public int8x16 vaddq_s8(int8x16 a, int8x16 b);
 @intrinsic("simd_sub") public int8x16 vsubq_s8(int8x16 a, int8x16 b);
 @intrinsic("simd_min") public int8x16 vminq_s8(int8x16 a, int8x16 b);
@@ -162,7 +162,7 @@
 @intrinsic("simd_shl") public uint64x2 vshlq_u64(uint64x2 a, uint64x2 b);
 @intrinsic("simd_shr") public uint64x2 vshrq_u64(uint64x2 a, uint64x2 b);
 
-/* ---------------- construction / memory ---------------- */
+/* construction / memory */
 @intrinsic("simd_splat") public float32x4 vdupq_n_f32(float32 x);
 @intrinsic("simd_zero") public float32x4 vdupq_n_f32();
 @intrinsic("simd_load") public float32x4 vld1q_f32(const float32* p);
@@ -224,7 +224,7 @@
 @intrinsic("simd_extract") public uint64 vgetq_lane_u64(uint64x2 a, usize i);
 @intrinsic("simd_insert") public uint64x2 vsetq_lane_u64(uint64x2 a, usize i, uint64 x);
 
-/* ---------------- converts / bitcasts ---------------- */
+/* converts / bitcasts */
 @intrinsic("simd_convert") public float32x4 vcvtq_f32_s32(int32x4 a);
 @intrinsic("simd_convert") public float32x4 vcvtq_f32_u32(uint32x4 a);
 @intrinsic("simd_convert") public int32x4 vcvtq_s32_f32(float32x4 a);
@@ -241,7 +241,7 @@
 @intrinsic("simd_bitcast") public float64x2 vreinterpretq_f64_s64(int64x2 a);
 @intrinsic("simd_bitcast") public int64x2 vreinterpretq_s64_s32(int32x4 a);
 
-/* ---------------- reductions ---------------- */
+/* reductions */
 @intrinsic("simd_reduce_add") public float32 vaddvq_f32(float32x4 a);
 @intrinsic("simd_reduce_min") public float32 vminvq_f32(float32x4 a);
 @intrinsic("simd_reduce_max") public float32 vmaxvq_f32(float32x4 a);

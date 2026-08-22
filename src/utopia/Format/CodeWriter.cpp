@@ -235,10 +235,9 @@ void CodeWriter::formatInline(const Piece *piece) {
   bool isUnsolved =
       !solution.isBound(piece) && !piece->additionalStates().empty();
 
-  /* See if we can immediately bind it based on the page width and the piece's
-   * contents. If so, do that now. Doing it here lets us take leading
-   * indentation into account which may vary based on the surrounding pieces
-   * when we get here. */
+  /* Bind the piece immediately when the page width and its contents allow
+   * it. Doing it here accounts for the leading indentation, which varies
+   * with the surrounding pieces at this point. */
   if (isUnsolved) {
     isUnsolved = !solution.tryBindByPageWidth(piece,
                                               pageWidth - leadingIndent);

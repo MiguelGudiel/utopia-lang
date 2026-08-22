@@ -1,6 +1,6 @@
 /*
  * Advanced templates: 'T extends X' constraints (Dart-style) and C++-style
- * template specialization — 'class List<int>' (complete) and
+ * template specialization, from 'class List<int>' (complete) to
  * 'class Pair<T, int64>' (partial), declared without any 'template<>'
  * keyword: a template list with concrete types is a specialization of an
  * already-declared primary.
@@ -13,7 +13,7 @@
  * to the bound like Dart.
  */
 
-/* --- Constraint: numeric types --------------------------------------- */
+/* Constraint: numeric types */
 
 T maxOf<T extends Number>(T a, T b) {
   return a > b ? a : b;
@@ -27,7 +27,7 @@ int64 totalOf<T extends Integer>(List<T> items) {
   return total;
 }
 
-/* --- Constraint: class bound + member access through the bound -------- */
+/* Constraint: class bound + member access through the bound */
 
 class Animal {
   String name;
@@ -65,7 +65,7 @@ class Kennel<T extends Animal> {
   }
 }
 
-/* --- Specialization: complete and partial ----------------------------- */
+/* Specialization: complete and partial */
 
 class Storage<T> {
   T value;

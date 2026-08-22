@@ -11,13 +11,13 @@ class Solver;
  *
  * If a given Piece has newlines before and after it, then (in most cases,
  * assuming there are no other constraints) the way it is formatted only depends
- * on its leading indentation. In that case, we can format that piece using a
- * separate Solver and insert the results in any Solution that has that piece
- * at that leading indentation.
+ * on its leading indentation. In that case, the piece can be formatted with
+ * a separate Solver and the result inserted into any Solution that has that
+ * piece at that leading indentation.
  *
  * This cache stores those previously formatted subtree pieces so that
- * CodeWriter can reuse them across Solutions. Note that this cache is shared
- * across all Solvers and Solutions for an entire format operation. */
+ * CodeWriter can reuse them across Solutions. The cache is shared across all
+ * Solvers and Solutions for an entire format operation. */
 class SolutionCache {
 public:
   /* The key used to uniquely identify a previously formatted Piece.

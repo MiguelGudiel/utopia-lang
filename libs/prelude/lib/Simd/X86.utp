@@ -7,7 +7,7 @@
  * correctly.
  */
 
-/* ---------------- float arithmetic (ps/pd) ---------------- */
+/* float arithmetic (ps/pd) */
 @intrinsic("simd_add") public float32x4 _mm_add_ps(float32x4 a, float32x4 b);
 @intrinsic("simd_add") public float32x8 _mm256_add_ps(float32x8 a, float32x8 b);
 @intrinsic("simd_add") public float32x16 _mm512_add_ps(float32x16 a, float32x16 b);
@@ -55,7 +55,7 @@
 @intrinsic("simd_hadd") public float64x2 _mm_hadd_pd(float64x2 a, float64x2 b);
 @intrinsic("simd_hadd") public float64x4 _mm256_hadd_pd(float64x4 a, float64x4 b);
 
-/* ---------------- float/int bitwise ---------------- */
+/* float/int bitwise */
 @intrinsic("simd_and") public float32x4 _mm_and_ps(float32x4 a, float32x4 b);
 @intrinsic("simd_and") public float32x8 _mm256_and_ps(float32x8 a, float32x8 b);
 @intrinsic("simd_and") public float32x16 _mm512_and_ps(float32x16 a, float32x16 b);
@@ -84,7 +84,7 @@
 @intrinsic("simd_xor") public int32x8 _mm256_xor_si128(int32x8 a, int32x8 b);
 @intrinsic("simd_xor") public int32x16 _mm512_xor_si128(int32x16 a, int32x16 b);
 
-/* ---------------- integer arithmetic ---------------- */
+/* integer arithmetic */
 @intrinsic("simd_add") public int8x16 _mm_add_epi8(int8x16 a, int8x16 b);
 @intrinsic("simd_sub") public int8x16 _mm_sub_epi8(int8x16 a, int8x16 b);
 @intrinsic("simd_max") public int8x16 _mm_max_epi8(int8x16 a, int8x16 b);
@@ -170,13 +170,13 @@
 @intrinsic("simd_shl_scalar") public int64x8 _mm512_slli_epi64(int64x8 a, int32 imm);
 @intrinsic("simd_ushr_scalar") public int64x8 _mm512_srli_epi64(int64x8 a, int32 imm);
 
-/* ---------------- unsigned integer min/max ---------------- */
+/* unsigned integer min/max */
 @intrinsic("simd_max") public uint32x4 _mm_max_epu32(uint32x4 a, uint32x4 b);
 @intrinsic("simd_min") public uint32x4 _mm_min_epu32(uint32x4 a, uint32x4 b);
 @intrinsic("simd_max") public uint32x8 _mm256_max_epu32(uint32x8 a, uint32x8 b);
 @intrinsic("simd_min") public uint32x8 _mm256_min_epu32(uint32x8 a, uint32x8 b);
 
-/* ---------------- comparisons (all-ones results) ---------------- */
+/* comparisons (all-ones results) */
 @intrinsic("simd_cmp_eq_ones") public float32x4 _mm_cmpeq_ps(float32x4 a, float32x4 b);
 @intrinsic("simd_cmp_lt_ones") public float32x4 _mm_cmplt_ps(float32x4 a, float32x4 b);
 @intrinsic("simd_cmp_le_ones") public float32x4 _mm_cmple_ps(float32x4 a, float32x4 b);
@@ -247,7 +247,7 @@
 @intrinsic("simd_cmp_ult_ones") public uint32x16 _mm512_cmplt_epu32(uint32x16 a, uint32x16 b);
 @intrinsic("simd_cmp_ugt_ones") public uint32x16 _mm512_cmpgt_epu32(uint32x16 a, uint32x16 b);
 
-/* ---------------- AVX-512 mask comparisons ---------------- */
+/* AVX-512 mask comparisons */
 @intrinsic("simd_cmp_eq") public boolx16 _mm512_cmpeq_ps_mask(float32x16 a, float32x16 b);
 @intrinsic("simd_cmp_lt") public boolx16 _mm512_cmplt_ps_mask(float32x16 a, float32x16 b);
 @intrinsic("simd_cmp_le") public boolx16 _mm512_cmple_ps_mask(float32x16 a, float32x16 b);
@@ -269,7 +269,7 @@
 @intrinsic("simd_cmp_gt") public boolx8 _mm512_cmpgt_epi64_mask(int64x8 a, int64x8 b);
 @intrinsic("simd_cmp_ge") public boolx8 _mm512_cmpge_epi64_mask(int64x8 a, int64x8 b);
 
-/* ---------------- select / blend ---------------- */
+/* select / blend */
 @intrinsic("simd_select_swap") public float32x4 _mm_mask_blend_ps(boolx4 k, float32x4 a, float32x4 b);
 @intrinsic("simd_select_swap") public float32x8 _mm256_mask_blend_ps(boolx8 k, float32x8 a, float32x8 b);
 @intrinsic("simd_select_swap") public float64x2 _mm_mask_blend_pd(boolx2 k, float64x2 a, float64x2 b);
@@ -287,7 +287,7 @@
 @intrinsic("simd_blendv") public int8x16 _mm_blendv_epi8(int8x16 m, int8x16 a, int8x16 b);
 @intrinsic("simd_blendv") public int8x32 _mm256_blendv_epi8(int8x32 m, int8x32 a, int8x32 b);
 
-/* ---------------- shuffle (movelh/movehl/unpack) ---------------- */
+/* shuffle (movelh/movehl/unpack) */
 @intrinsic("simd_movelh") public float32x4 _mm_movelh_ps(float32x4 a, float32x4 b);
 @intrinsic("simd_movehl") public float32x4 _mm_movehl_ps(float32x4 a, float32x4 b);
 @intrinsic("simd_movelh") public float32x8 _mm256_movelh_ps(float32x8 a, float32x8 b);
@@ -323,7 +323,7 @@
 @intrinsic("simd_unpacklo") public int64x8 _mm512_unpacklo_epi64(int64x8 a, int64x8 b);
 @intrinsic("simd_unpackhi") public int64x8 _mm512_unpackhi_epi64(int64x8 a, int64x8 b);
 
-/* ---------------- construction ---------------- */
+/* construction */
 @intrinsic("simd_zero") public float32x4 _mm_setzero_ps();
 @intrinsic("simd_splat") public float32x4 _mm_set1_ps(float32 x);
 @intrinsic("simd_make_rev") public float32x4 _mm_set_ps(float32 x0, float32 x1, float32 x2, float32 x3);
@@ -361,7 +361,7 @@
 @intrinsic("simd_splat_lane") public float32x8 _mm256_broadcastss_ps(float32x8 a, usize i);
 @intrinsic("simd_splat_lane") public float32x16 _mm512_broadcastss_ps(float32x16 a, usize i);
 
-/* ---------------- memory ---------------- */
+/* memory */
 @intrinsic("simd_load") public float32x4 _mm_load_ps(const float32* p);
 @intrinsic("simd_loadu") public float32x4 _mm_loadu_ps(const float32* p);
 @intrinsic("simd_store") public float32x4 _mm_store_ps(float32* p, float32x4 a);
@@ -402,7 +402,7 @@
 @intrinsic("simd_broadcast") public float32x8 _mm256_broadcast_ps(const float32* p);
 @intrinsic("simd_broadcast") public float32x16 _mm512_broadcast_ps(const float32* p);
 
-/* ---------------- fused multiply-add ---------------- */
+/* fused multiply-add */
 @intrinsic("simd_fma") public float32x4 _mm_fmadd_ps(float32x4 a, float32x4 b, float32x4 c);
 @intrinsic("simd_fma") public float32x8 _mm256_fmadd_ps(float32x8 a, float32x8 b, float32x8 c);
 @intrinsic("simd_fma") public float32x16 _mm512_fmadd_ps(float32x16 a, float32x16 b, float32x16 c);
@@ -410,7 +410,7 @@
 @intrinsic("simd_fma") public float64x4 _mm256_fmadd_pd(float64x4 a, float64x4 b, float64x4 c);
 @intrinsic("simd_fma") public float64x8 _mm512_fmadd_pd(float64x8 a, float64x8 b, float64x8 c);
 
-/* ---------------- converts ---------------- */
+/* converts */
 @intrinsic("simd_convert") public float32x4 _mm_cvtepi32_ps(int32x4 v);
 @intrinsic("simd_convert") public int32x16 _mm512_cvtps_epi32(float32x4 v);
 @intrinsic("simd_convert") public float32x8 _mm256_cvtepi32_ps(int32x8 v);
@@ -426,7 +426,7 @@
 @intrinsic("simd_convert") public int64x4 _mm256_cvtpd_epi64(float64x4 v);
 @intrinsic("simd_convert") public int64x8 _mm512_cvtpd_epi64(float64x8 v);
 
-/* ---------------- bitcasts ---------------- */
+/* bitcasts */
 @intrinsic("simd_bitcast") public int32x4 _mm_castps_si128(float32x4 a);
 @intrinsic("simd_bitcast") public int32x8 _mm256_castps_si128(float32x8 a);
 @intrinsic("simd_bitcast") public int32x16 _mm512_castps_si128(float32x16 a);
@@ -446,7 +446,7 @@
 @intrinsic("simd_bitcast") public float64x4 _mm256_castsi128_pd(int64x4 a);
 @intrinsic("simd_bitcast") public float64x8 _mm512_castsi128_pd(int64x8 a);
 
-/* ---------------- extract / movemask ---------------- */
+/* extract / movemask */
 @intrinsic("simd_extract") public float32 _mm_extract_ps(float32x4 a, usize i);
 @intrinsic("simd_signmask") public int32 _mm_movemask_ps(float32x4 a);
 @intrinsic("simd_extract") public float32 _mm256_extract_ps(float32x8 a, usize i);
@@ -469,7 +469,7 @@
 @intrinsic("simd_extract") public int64 _mm256_extract_epi64(int64x4 a, usize i);
 @intrinsic("simd_extract") public int64 _mm512_extract_epi64(int64x8 a, usize i);
 
-/* ---------------- absolute value ---------------- */
+/* absolute value */
 @intrinsic("simd_abs") public int8x16 _mm_abs_epi8(int8x16 a);
 @intrinsic("simd_abs") public int8x32 _mm256_abs_epi8(int8x32 a);
 @intrinsic("simd_abs") public int8x64 _mm512_abs_epi8(int8x64 a);

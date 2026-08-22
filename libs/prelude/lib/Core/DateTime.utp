@@ -2,7 +2,7 @@ import "../String.utp";
 import "Duration.utp";
 
 /*
- * DateTime — a point in time with microsecond precision, mirroring the most
+ * DateTime: a point in time with microsecond precision, mirroring the most
  * useful parts of Dart's dart:core DateTime API.
  *
  * Values before the epoch (negative microsecondsSinceEpoch) and UTC/local

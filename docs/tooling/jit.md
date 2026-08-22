@@ -1,6 +1,6 @@
 # JIT Mode
 
-`utopia run` compiles the project and executes it in-process through LLVM's ORC JIT — no linker invocation, no executable file required.
+`utopia run` compiles the project and executes it in-process through LLVM's ORC JIT, with no linker invocation and no executable file required.
 
 ```sh
 utopia run path/to/project
@@ -16,7 +16,7 @@ utopia run path/to/project
 ## Behavior notes
 
 - Object files are still emitted to `build/obj/` even in JIT mode (useful for debugging).
-- Cross-compilation is rejected in JIT mode — the JIT can only run code for the host machine.
+- Cross-compilation is rejected in JIT mode; the JIT can only run code for the host machine.
 - Global initialization and deinitialization are wired to the JITDylib lifecycle.
 
 ## Use cases

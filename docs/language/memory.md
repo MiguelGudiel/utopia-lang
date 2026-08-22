@@ -43,7 +43,7 @@ The compiler emits cleanups for:
 - function parameters passed by value (with proper copy/move materialization),
 - early returns.
 
-Records with custom destructors cannot be implicitly copied — a copy constructor or move constructor must be provided, preventing accidental double frees at compile time.
+Records with custom destructors cannot be implicitly copied; a copy constructor or move constructor must be provided, preventing accidental double frees at compile time.
 
 ## Copy and move semantics
 
@@ -192,7 +192,7 @@ unique_ptr<shared_ptr<Widget>> nested = ...;
 nested.describe();   // *(*nested).describe()
 ```
 
-This is what makes smart pointers feel transparent: **there is no `->` operator in Utopia** — `.` always works.
+This is what makes smart pointers feel transparent: **there is no `->` operator in Utopia**, so `.` always works.
 
 ## References
 

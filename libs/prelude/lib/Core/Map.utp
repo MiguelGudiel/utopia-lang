@@ -36,7 +36,7 @@ struct _LinkedMapEntry<K, V> {
  * growing).
  */
 /*
- * MapKeyIterator<K, V> — the for-in cursor of Map<K, V>, walking the
+ * MapKeyIterator<K, V>: the for-in cursor of Map<K, V>, walking the
  * insertion-order list of entries (index 0 is the list sentinel). It is
  * returned by value and iterates the keys with no copies.
  */
@@ -73,7 +73,7 @@ class MapKeyIterator<K, V> {
 }
 
 /*
- * MapEntry<K, V> — a key/value pair (Dart's MapEntry). current() of
+ * MapEntry<K, V>: a key/value pair (Dart's MapEntry). current() of
  * MapEntryIterator returns it by value, so entries iteration copies each
  * pair.
  */
@@ -583,7 +583,7 @@ class Map<K, V> {
   }
 
   /* A lightweight, non-owning view over the map's entries ('for (var e in
-   * map.entries())'). It holds a pointer to the map — no copy. Iterating
+   * map.entries())'). It holds a pointer to the map, no copy. Iterating
    * yields MapEntry<K, V> values (key/value copies) in insertion order. */
   @inline
   MapEntryView<K, V> entries() {

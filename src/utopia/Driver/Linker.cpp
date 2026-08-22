@@ -66,8 +66,8 @@ bool Linker::link(const std::vector<std::string> &objPaths,
    * On POSIX-compliant systems, pclose() returns the full termination status
    * as defined by wait4() rather than a raw exit code. Direct comparison
    * against zero is unreliable as it may fail to detect abnormal termination
-   * or signal interference. We use WEXITSTATUS to guarantee we are evaluating
-   * the actual return code from the linker process.
+   * or signal interference. WEXITSTATUS extracts the actual return code from
+   * the linker process.
    */
 #ifdef _WIN32
   int exitCode = status;

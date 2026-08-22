@@ -1,5 +1,5 @@
 /*
- * Random — a deterministic pseudo-random number generator, mirroring Dart's
+ * Random: a deterministic pseudo-random number generator, mirroring Dart's
  * dart:math Random API. It uses xorshift64* with a time-derived seed by
  * default; the seed can be supplied explicitly for reproducible sequences.
  */

@@ -28,5 +28,5 @@ Unions are treated as scalar nodes (their overlapping fields cannot be disambigu
 
 ## References
 
-- `src/utopia/CodeGen/TBAAManager.cpp` — tree construction and tag generation.
+- `src/utopia/CodeGen/TBAAManager.cpp`: tree construction and tag generation.
 - LLVM's `TypeBasedAliasAnalysis` pass consumes the metadata emitted by codegen.
