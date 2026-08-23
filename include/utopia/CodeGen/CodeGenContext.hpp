@@ -12,6 +12,10 @@ namespace utopia {
 struct SymbolInfo {
   llvm::Value *value = nullptr;
   bool isDirectAddress = true;
+  /* True when the value is a closure environment pointer (a capturing
+   * lambda assigned to this variable): calls through it route through
+   * env->fn(env, ...). */
+  bool isClosure = false;
 };
 
 /* Pending destructor invocation for an object instance. */
@@ -63,9 +67,10 @@ public:
   void pushScope() { scopes.emplace_back(); }
   void popScope() { scopes.pop_back(); }
 
-  void bind(std::string_view name, llvm::Value *val, bool isDirect = true) {
+  void bind(std::string_view name, llvm::Value *val, bool isDirect = true,
+            bool isClosure = false) {
     if (!scopes.empty()) {
-      scopes.back().symbols[std::string(name)] = {val, isDirect};
+      scopes.back().symbols[std::string(name)] = {val, isDirect, isClosure};
     }
   }
 

@@ -168,6 +168,25 @@ extern "C" void utopia_throw(void *valuePtr, void *typeInfo,
                              void (*dtor)(void *));
 
 /* ------------------------------------------------------------------ */
+/* Closure environments                                               */
+/*                                                                     */
+/* A capturing lambda's value is a heap block with the fixed header     */
+/* {i32 refcount, fn pointer, dtor pointer} followed by the captured   */
+/* values. The creator's scope holds one reference (released at scope  */
+/* exit); the async callback intrinsics retain before registering a     */
+/* callback and the generated thunks release after running it, so a     */
+/* closure outlives its creating frame for as long as a callback is     */
+/* pending. The dtor (compiler-generated per capture set) destroys the  */
+/* captured values and frees the block.                                 */
+/* ------------------------------------------------------------------ */
+
+struct UtopiaClosureHeader {
+  std::atomic<int32_t> refs;
+  void *fn;
+  void (*dtor)(void *);
+};
+
+/* ------------------------------------------------------------------ */
 /* Loop registry                                                       */
 /*                                                                     */
 /* Kept so the blocking drivers can tell whether any loop still has    */
@@ -356,6 +375,29 @@ static void driverIdle(UtopiaEventLoop *loop) {
 }
 
 extern "C" {
+
+/* Retains a closure environment (a capturing lambda's value); the
+ * reference is held by a registered callback and released by the
+ * generated thunk after it runs (or on its error path). */
+void utopia_closure_retain(void *env) {
+  auto *h = static_cast<UtopiaClosureHeader *>(env);
+  h->refs.fetch_add(1);
+}
+
+/* Releases a closure environment; the last reference runs the
+ * compiler-generated destructor (which destroys the captured values and
+ * frees the block) or frees the block directly when it has none. */
+void utopia_closure_release(void *env) {
+  if (!env)
+    return;
+  auto *h = static_cast<UtopiaClosureHeader *>(env);
+  if (h->refs.fetch_sub(1) == 1) {
+    if (h->dtor)
+      h->dtor(env);
+    else
+      std::free(env);
+  }
+}
 
 /* ------------------------------------------------------------------ */
 /* Event loop drain (inversion of control)                             */

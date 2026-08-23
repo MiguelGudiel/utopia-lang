@@ -1,0 +1,9 @@
+project:
+  name: "closures"
+
+build:
+  target: executable
+  source_dirs:
+    - src/
+  sources:
+    - "main.utp"

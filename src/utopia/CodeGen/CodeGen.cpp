@@ -435,6 +435,12 @@ llvm::Function *CodeGen::getOrCreateFunction(const FunctionDeclNode *node) {
 
   std::vector<llvm::Type *> paramTypes;
 
+  /* A capturing lambda's synthesized function takes the closure
+   * environment as its first parameter. */
+  if (node->hasCaptureEnv) {
+    paramTypes.push_back(builder.getPtrTy());
+  }
+
   if (node->isMethod && !node->isExtern && !node->isStatic &&
       node->parentRecord) {
     paramTypes.push_back(builder.getPtrTy());
@@ -3422,7 +3428,7 @@ llvm::Value *CodeGen::visit(const VarDeclNode *node) {
 
   diEmitter.emitLocalVariable(*this, builder, alloca, node);
 
-  cgCtx.bind(node->varName, alloca, true);
+  cgCtx.bind(node->varName, alloca, true, node->mayHoldClosure);
 
   uint64_t allocSize = mod.getDataLayout().getTypeAllocSize(ty);
   emitLifetimeStart(alloca, allocSize);
@@ -3959,7 +3965,180 @@ llvm::Value *CodeGen::visit(const LambdaNode *node) {
     builder.restoreIP(savedIP);
     builder.SetCurrentDebugLocation(savedDebugLoc);
   }
+
+  /* A capturing lambda's value is its environment: the synthesized
+   * function is reached through env->fn, and the creator's scope owns one
+   * reference (the async intrinsics retain/release around callbacks). */
+  if (node->hasCaptures())
+    return createClosureEnvironment(node);
   return func;
+}
+
+/* True when the callback argument of an async intrinsic is a closure: a
+ * capturing lambda, or a variable known to hold one. Its value is then an
+ * environment pointer instead of a function address. */
+bool CodeGen::argIsClosure(const ExprNode *arg) {
+  if (!arg)
+    return false;
+  if (arg->kind == NodeKind::Lambda)
+    return static_cast<const LambdaNode *>(arg)->hasCaptures();
+  if (arg->kind == NodeKind::Variable) {
+    const auto *v = static_cast<const VariableNode *>(arg);
+    return v->resolvedDecl && v->resolvedDecl->kind == NodeKind::VarDecl &&
+           static_cast<const VarDeclNode *>(v->resolvedDecl)->mayHoldClosure;
+  }
+  return false;
+}
+
+/* Copies a captured value into the closure environment slot: trivially
+ * copyable types are loaded/stored, records with a custom destructor are
+ * copy-constructed so ownership (buffers, refcounts) is transferred. */
+void CodeGen::emitCaptureCopy(llvm::Value *dst, llvm::Value *src,
+                              const Type *type) {
+  const Type *u = type->getUnqualifiedType();
+  bool isRecord = u->getKind() == TypeKind::Struct ||
+                  u->getKind() == TypeKind::Class ||
+                  u->getKind() == TypeKind::Union;
+  llvm::Type *llTy = getLLVMType(type);
+  if (isRecord && getCustomDestructor(type)) {
+    emitDefaultInitialization(dst, type);
+    const FunctionDeclNode *ctor =
+        findCopyOrMoveCtor(type, /*preferMove=*/false);
+    if (ctor) {
+      llvm::Function *ctorFunc = getOrCreateFunction(ctor);
+      builder.CreateCall(ctorFunc, {dst, src});
+    } else {
+      llvm::Align align = mod.getDataLayout().getABITypeAlign(llTy);
+      uint64_t size = mod.getDataLayout().getTypeAllocSize(llTy);
+      builder.CreateMemCpy(dst, align, src, align, size);
+    }
+    return;
+  }
+  llvm::Value *v = builder.CreateLoad(llTy, src, "capture.load");
+  builder.CreateStore(v, dst);
+}
+
+/* The full environment type of a capturing lambda: the fixed header
+ * {i32 refcount, fn pointer, dtor pointer} followed by one slot per
+ * capture, in capture order. */
+llvm::StructType *CodeGen::getClosureEnvType(const LambdaNode *node) {
+  std::vector<llvm::Type *> fields;
+  fields.push_back(builder.getInt32Ty());
+  fields.push_back(builder.getPtrTy());
+  fields.push_back(builder.getPtrTy());
+  for (const auto &cap : node->captures)
+    fields.push_back(getLLVMType(cap.type));
+  return llvm::StructType::get(ctx, fields, false);
+}
+
+/* 'void dtor(ptr env)': destroys the captured values and frees the
+ * environment block. Registered in the environment header and invoked by
+ * utopia_closure_release when the last reference drops. */
+llvm::Function *CodeGen::getOrCreateClosureEnvDtor(const LambdaNode *node) {
+  std::string key = "closure_env_dtor_";
+  for (const auto &cap : node->captures)
+    key += std::string(cap.name) + "_" + cap.type->toString() + "_";
+  auto it = asyncHelpers.find(key);
+  if (it != asyncHelpers.end())
+    return it->second;
+
+  llvm::FunctionType *ty = llvm::FunctionType::get(
+      builder.getVoidTy(), {builder.getPtrTy()}, false);
+  auto *fn = llvm::Function::Create(ty, llvm::Function::InternalLinkage, key,
+                                    &mod);
+
+  auto savedIP = builder.saveIP();
+  auto savedLoc = builder.getCurrentDebugLocation();
+  llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", fn);
+  builder.SetInsertPoint(entry);
+
+  llvm::StructType *envTy = getClosureEnvType(node);
+  llvm::Value *env = builder.CreateBitCast(
+      fn->getArg(0), llvm::PointerType::getUnqual(envTy));
+  for (size_t i = 0; i < node->captures.size(); ++i) {
+    const Type *ty = node->captures[i].type;
+    const FunctionDeclNode *dtor = getCustomDestructor(ty);
+    if (!dtor)
+      continue;
+    llvm::Value *slot = builder.CreateStructGEP(envTy, env, 3 + i,
+                                                "env.cap.dtor");
+    emitCleanupCall(slot, dtor, ty);
+  }
+  llvm::Function *freeFn = mod.getFunction("free");
+  if (!freeFn) {
+    llvm::FunctionType *freeTy = llvm::FunctionType::get(
+        builder.getVoidTy(), {builder.getPtrTy()}, false);
+    freeFn = llvm::Function::Create(
+        freeTy, llvm::Function::ExternalLinkage, "free", mod);
+  }
+  builder.CreateCall(freeFn, {fn->getArg(0)});
+  builder.CreateRetVoid();
+
+  builder.restoreIP(savedIP);
+  builder.SetCurrentDebugLocation(savedLoc);
+
+  asyncHelpers[key] = fn;
+  return fn;
+}
+
+/* Allocates the environment of a capturing lambda and copies the captured
+ * values into it. The environment starts with one reference owned by the
+ * creating scope: the scope's exit releases it, and the async callback
+ * intrinsics retain/release around each registration so a closure outlives
+ * its creating frame while a callback is pending. */
+llvm::Value *CodeGen::createClosureEnvironment(const LambdaNode *node) {
+  llvm::StructType *envTy = getClosureEnvType(node);
+  uint64_t size = mod.getDataLayout().getTypeAllocSize(envTy);
+
+  llvm::Function *mallocFn = mod.getFunction("malloc");
+  if (!mallocFn) {
+    llvm::FunctionType *mallocTy = llvm::FunctionType::get(
+        builder.getPtrTy(), {builder.getInt64Ty()}, false);
+    mallocFn = llvm::Function::Create(
+        mallocTy, llvm::Function::ExternalLinkage, "malloc", mod);
+  }
+  llvm::Value *mem = builder.CreateCall(mallocFn, {builder.getInt64(size)});
+  llvm::Value *env = builder.CreateBitCast(
+      mem, llvm::PointerType::getUnqual(envTy), "closure.env");
+
+  /* Zero the block first: the header fields below are then the only writes
+   * and any padding never carries garbage. */
+  llvm::Align align = mod.getDataLayout().getABITypeAlign(envTy);
+  builder.CreateMemSet(env, builder.getInt8(0), size, align);
+
+  builder.CreateStore(builder.getInt32(1),
+                      builder.CreateStructGEP(envTy, env, 0, "env.refs"));
+  llvm::Function *func = getOrCreateFunction(node->synthesizedFunc);
+  builder.CreateStore(func,
+                      builder.CreateStructGEP(envTy, env, 1, "env.fn"));
+  llvm::Function *dtorFn = getOrCreateClosureEnvDtor(node);
+  llvm::Value *dtorVal = dtorFn
+                             ? static_cast<llvm::Value *>(dtorFn)
+                             : static_cast<llvm::Value *>(
+                                   llvm::ConstantPointerNull::get(
+                                       builder.getPtrTy()));
+  builder.CreateStore(dtorVal,
+                      builder.CreateStructGEP(envTy, env, 2, "env.dtor"));
+
+  for (size_t i = 0; i < node->captures.size(); ++i) {
+    const auto &cap = node->captures[i];
+    SymbolInfo sym = cgCtx.lookupDetailed(cap.name);
+    if (!sym.value)
+      continue;
+    llvm::Value *src = sym.value;
+    if (!sym.isDirectAddress)
+      src = builder.CreateLoad(builder.getPtrTy(), src, "capture.indirect");
+    llvm::Value *dst = builder.CreateStructGEP(envTy, env, 3 + i, "env.cap");
+    emitCaptureCopy(dst, src, cap.type);
+  }
+
+  /* The creating scope owns the initial reference. */
+  llvm::Function *releaseFn = getOrCreateRuntimeFunction(
+      "utopia_closure_release",
+      llvm::FunctionType::get(builder.getVoidTy(), {builder.getPtrTy()},
+                              false));
+  cgCtx.addCleanup(env, nullptr, nullptr, nullptr, releaseFn);
+  return env;
 }
 
 llvm::Value *CodeGen::visit(const ParamDeclNode *node) { return nullptr; }
@@ -4019,6 +4198,29 @@ llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
 
   unsigned astParamIdx = 0;
   auto argIt = func->arg_begin();
+
+  /* A capturing lambda's synthesized function receives the closure
+   * environment as its first parameter; each captured name is bound to its
+   * slot so the body reads/writes the environment copy. */
+  if (node->hasCaptureEnv) {
+    argIt->setName("env");
+    llvm::Value *env = &*argIt;
+    ++argIt;
+    std::vector<llvm::Type *> fields = {builder.getInt32Ty(),
+                                        builder.getPtrTy(),
+                                        builder.getPtrTy()};
+    for (const auto *cap : node->captureParams)
+      fields.push_back(getLLVMType(cap->type));
+    llvm::StructType *envTy = llvm::StructType::get(ctx, fields, false);
+    llvm::Value *envPtr = builder.CreateBitCast(
+        env, llvm::PointerType::getUnqual(envTy), "closure.env");
+    for (size_t i = 0; i < node->captureParams.size(); ++i) {
+      const auto *cap = node->captureParams[i];
+      llvm::Value *slot = builder.CreateStructGEP(envTy, envPtr, 3 + i,
+                                                  "env.binding");
+      cgCtx.bind(cap->varName, slot, true);
+    }
+  }
 
   if (node->isMethod && !node->isExtern && !node->isStatic &&
       node->parentRecord) {
@@ -4714,17 +4916,50 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
     if (!dynamicFuncPtr)
       return nullptr;
 
+    /* A closure target (a capturing lambda expression or a variable known
+     * to hold one) yields an environment pointer: the callee is env->fn
+     * and the environment is passed as the first argument. */
+    bool closureCall = false;
+    llvm::Value *closureCallEnv = nullptr;
+    if (node->target->kind == NodeKind::Lambda)
+      closureCall =
+          static_cast<const LambdaNode *>(node->target)->hasCaptures();
+    else if (node->target->kind == NodeKind::Variable)
+      closureCall = cgCtx.lookupDetailed(
+                        static_cast<const VariableNode *>(node->target)->name)
+                        .isClosure;
+
     const Type *targetTy = node->target->exprType->getUnqualifiedType();
     const FunctionType *fTy = static_cast<const FunctionType *>(
         static_cast<const PointerType *>(targetTy)->getPointeeType());
     llvm::FunctionType *llvmFTy =
         static_cast<llvm::FunctionType *>(getLLVMType(fTy));
 
+    if (closureCall) {
+      llvm::StructType *headerTy = getClosureEnvHeaderTy();
+      llvm::Value *envPtr = builder.CreateBitCast(
+          dynamicFuncPtr, llvm::PointerType::getUnqual(headerTy),
+          "closure.env");
+      llvm::Value *closureEnv = dynamicFuncPtr;
+      dynamicFuncPtr = builder.CreateLoad(
+          builder.getPtrTy(),
+          builder.CreateStructGEP(headerTy, envPtr, 1, "closure.fn.gep"),
+          "closure.fn");
+      std::vector<llvm::Type *> closureParams;
+      closureParams.push_back(builder.getPtrTy());
+      for (auto *p : llvmFTy->params())
+        closureParams.push_back(p);
+      llvmFTy = llvm::FunctionType::get(llvmFTy->getReturnType(),
+                                        closureParams, false);
+      closureCallEnv = closureEnv;
+    }
+
     unsigned argIdx = 0;
+    unsigned argOffset = closureCall ? 1 : 0;
     for (const auto &arg : node->args) {
       llvm::Value *argVal = nullptr;
 
-      if (argIdx < llvmFTy->getNumParams()) {
+      if (argIdx < llvmFTy->getNumParams() - argOffset) {
         const Type *paramDeclTy = fTy->getParamTypes()[argIdx];
         bool isRefParam = paramDeclTy->isReferenceType() ||
                           paramDeclTy->getKind() == TypeKind::RValueReference;
@@ -4759,15 +4994,18 @@ llvm::Value *CodeGen::visit(const FunctionCallNode *node) {
         argVal = dispatch(arg);
       }
 
-      if (argIdx < llvmFTy->getNumParams()) {
-        argVal = createImplicitCast(argVal, llvmFTy->getParamType(argIdx),
-                                    arg->exprType);
+      if (argIdx < llvmFTy->getNumParams() - argOffset) {
+        argVal = createImplicitCast(
+            argVal, llvmFTy->getParamType(argIdx + argOffset), arg->exprType);
       } else if (llvmFTy->isVarArg()) {
         argVal = lowerVariadicArg(arg, argVal);
       }
       argsArgs.push_back(argVal);
       argIdx++;
     }
+
+    if (closureCall)
+      argsArgs.insert(argsArgs.begin(), closureCallEnv);
 
     llvm::Value *dynRes =
         emitCallOrInvoke(llvmFTy, dynamicFuncPtr, argsArgs);
@@ -8224,9 +8462,10 @@ CodeGen::getOrCreateFutureValueDtor(const Type *valueType) {
  * and resultState is completed immediately after the call. */
 llvm::Function *CodeGen::getOrCreateThenThunk(const Type *valueType,
                                               bool asyncCb,
-                                              bool cbTakesValue) {
+                                              bool cbTakesValue,
+                                              bool cbIsClosure) {
   std::string key = std::string("then_thunk_") + (asyncCb ? "a_" : "s_") +
-                    (cbTakesValue ? "v_" : "n_") +
+                    (cbTakesValue ? "v_" : "n_") + (cbIsClosure ? "c_" : "p_") +
                     std::string(valueType ? valueType->toString() : "void");
   auto it = asyncHelpers.find(key);
   if (it != asyncHelpers.end())
@@ -8257,6 +8496,7 @@ llvm::Function *CodeGen::getOrCreateThenThunk(const Type *valueType,
   llvm::Value *valuePtr = fn->getArg(0);
   llvm::Value *cb = fn->getArg(1);
   llvm::Value *resultState = fn->getArg(2);
+  llvm::Value *closureEnv = nullptr;
 
   bool isVoidValue = !valueType || valueType->isVoid();
   std::vector<llvm::Type *> cbParamTys;
@@ -8294,17 +8534,11 @@ llvm::Function *CodeGen::getOrCreateThenThunk(const Type *valueType,
                             : builder.getVoidTy();
   llvm::FunctionType *cbFnTy =
       llvm::FunctionType::get(cbRetTy, cbParamTys, false);
-  llvm::Value *cbPtr = builder.CreateBitCast(
-      cb, llvm::PointerType::getUnqual(cbFnTy));
-
-  llvm::Value *ret = nullptr;
-  if (cbParamTys.empty()) {
-    emitThunkCallbackCall(cbFnTy, cbPtr, {}, resultState);
-    ret = nullptr;
-  } else {
-    emitThunkCallbackCall(cbFnTy, cbPtr, {val}, resultState);
-    ret = nullptr;
-  }
+  llvm::Value *ret = emitThunkClosureCall(
+      cb, cbIsClosure, cbFnTy,
+      cbParamTys.empty() ? llvm::ArrayRef<llvm::Value *>()
+                         : llvm::ArrayRef<llvm::Value *>({val}),
+      resultState, closureEnv);
   if (asyncCb) {
     /* The callback's future is a state pointer; forward its completion
      * (value or error) into resultState. */
@@ -8314,6 +8548,9 @@ llvm::Function *CodeGen::getOrCreateThenThunk(const Type *valueType,
     emitRuntimeCall("utopia_future_complete", builder.getVoidTy(),
                     {resultState});
   }
+  if (closureEnv)
+    emitRuntimeCall("utopia_closure_release", builder.getVoidTy(),
+                    {closureEnv});
   emitScopeCleanups();
   builder.CreateRetVoid();
 
@@ -8331,6 +8568,48 @@ llvm::Function *CodeGen::getOrCreateThenThunk(const Type *valueType,
   return fn;
 }
 
+/* The closure environment layout, shared by createClosureEnvironment and
+ * the thunk call lowering: {i32 refcount, fn pointer, dtor pointer}. */
+llvm::StructType *CodeGen::getClosureEnvHeaderTy() {
+  return llvm::StructType::get(ctx, {builder.getInt32Ty(), builder.getPtrTy(),
+                                     builder.getPtrTy()});
+}
+
+/* Lowers a callback invocation inside a generated thunk: for a closure
+ * 'cb' is the environment pointer, so the callee becomes env->fn and the
+ * environment is passed as the first argument ('closureEnv' is set for
+ * the caller to release afterwards). Returns the invoke result. */
+llvm::Value *CodeGen::emitThunkClosureCall(
+    llvm::Value *cb, bool cbIsClosure, llvm::FunctionType *plainFnTy,
+    llvm::ArrayRef<llvm::Value *> args, llvm::Value *stateOnError,
+    llvm::Value *&closureEnv) {
+  closureEnv = nullptr;
+  llvm::FunctionType *fty = plainFnTy;
+  llvm::Value *callee = builder.CreateBitCast(
+      cb, llvm::PointerType::getUnqual(fty));
+
+  std::vector<llvm::Value *> callArgs(args.begin(), args.end());
+  if (cbIsClosure) {
+    closureEnv = cb;
+    llvm::StructType *headerTy = getClosureEnvHeaderTy();
+    llvm::Value *envPtr = builder.CreateBitCast(
+        cb, llvm::PointerType::getUnqual(headerTy), "closure.env");
+    llvm::Value *fnPtr = builder.CreateLoad(
+        builder.getPtrTy(),
+        builder.CreateStructGEP(headerTy, envPtr, 1, "closure.fn.gep"),
+        "closure.fn");
+    std::vector<llvm::Type *> params;
+    params.push_back(builder.getPtrTy());
+    for (auto *p : fty->params())
+      params.push_back(p);
+    fty = llvm::FunctionType::get(fty->getReturnType(), params, false);
+    callee = builder.CreateBitCast(fnPtr, llvm::PointerType::getUnqual(fty));
+    callArgs.insert(callArgs.begin(), cb);
+  }
+  return emitThunkCallbackCall(fty, callee, callArgs, stateOnError,
+                               closureEnv);
+}
+
 /* Invokes a user callback inside a compiler-generated helper thunk. The
  * call is an invoke whose landing pad completes 'stateOnError' with the
  * raised exception and returns, so a throwing callback fails the future
@@ -8341,7 +8620,8 @@ llvm::Function *CodeGen::getOrCreateThenThunk(const Type *valueType,
 llvm::Value *CodeGen::emitThunkCallbackCall(llvm::FunctionType *fty,
                                             llvm::Value *callee,
                                             llvm::ArrayRef<llvm::Value *> args,
-                                            llvm::Value *stateOnError) {
+                                            llvm::Value *stateOnError,
+                                            llvm::Value *closureEnv) {
   llvm::Function *fn = builder.GetInsertBlock()->getParent();
   fn->setPersonalityFn(getOrCreatePersonalityFunction());
 
@@ -8381,6 +8661,9 @@ llvm::Value *CodeGen::emitThunkCallbackCall(llvm::FunctionType *fty,
                                            "thunk.handler.exn");
   emitRuntimeCall("utopia_future_complete_error_exn", builder.getVoidTy(),
                   {stateOnError, exnVal});
+  if (closureEnv)
+    emitRuntimeCall("utopia_closure_release", builder.getVoidTy(),
+                    {closureEnv});
   emitScopeCleanups();
   builder.CreateRetVoid();
 
@@ -8403,8 +8686,10 @@ llvm::Value *CodeGen::emitThunkCallbackCall(llvm::FunctionType *fty,
  * chains the handler's future into resultState. A throwing handler fails
  * resultState. */
 llvm::Function *CodeGen::getOrCreateErrorThunk(const Type *valueType,
-                                               bool asyncCb) {
+                                               bool asyncCb,
+                                               bool cbIsClosure) {
   std::string key = std::string("error_thunk_") + (asyncCb ? "a_" : "s_") +
+                    (cbIsClosure ? "c_" : "p_") +
                     std::string(valueType ? valueType->toString() : "void");
   auto it = asyncHelpers.find(key);
   if (it != asyncHelpers.end())
@@ -8434,10 +8719,10 @@ llvm::Function *CodeGen::getOrCreateErrorThunk(const Type *valueType,
                                          builder.getVoidTy())
                                    : getLLVMType(valueType));
   llvm::FunctionType *cbFnTy = llvm::FunctionType::get(cbRetTy, {}, false);
-  llvm::Value *cbPtr =
-      builder.CreateBitCast(cb, llvm::PointerType::getUnqual(cbFnTy));
-
-  llvm::Value *ret = emitThunkCallbackCall(cbFnTy, cbPtr, {}, resultState);
+  llvm::Value *closureEnv = nullptr;
+  llvm::Value *ret =
+      emitThunkClosureCall(cb, cbIsClosure, cbFnTy, {}, resultState,
+                           closureEnv);
   if (asyncCb) {
     emitRuntimeCall("utopia_future_forward", builder.getVoidTy(),
                     {resultState, ret});
@@ -8449,6 +8734,9 @@ llvm::Function *CodeGen::getOrCreateErrorThunk(const Type *valueType,
     emitRuntimeCall("utopia_future_complete", builder.getVoidTy(),
                     {resultState});
   }
+  if (closureEnv)
+    emitRuntimeCall("utopia_closure_release", builder.getVoidTy(),
+                    {closureEnv});
   emitScopeCleanups();
   builder.CreateRetVoid();
 
@@ -8464,8 +8752,10 @@ llvm::Function *CodeGen::getOrCreateErrorThunk(const Type *valueType,
  * callback of Future.timeout and completes resultState with its result
  * (or forwards the callback's future in the async variant). */
 llvm::Function *CodeGen::getOrCreateTimeoutThunk(const Type *valueType,
-                                                 bool asyncCb) {
+                                                 bool asyncCb,
+                                                 bool cbIsClosure) {
   std::string key = std::string("timeout_thunk_") + (asyncCb ? "a_" : "s_") +
+                    (cbIsClosure ? "c_" : "p_") +
                     std::string(valueType ? valueType->toString() : "void");
   auto it = asyncHelpers.find(key);
   if (it != asyncHelpers.end())
@@ -8494,10 +8784,10 @@ llvm::Function *CodeGen::getOrCreateTimeoutThunk(const Type *valueType,
                                          builder.getVoidTy())
                                    : getLLVMType(valueType));
   llvm::FunctionType *cbFnTy = llvm::FunctionType::get(cbRetTy, {}, false);
-  llvm::Value *cbPtr =
-      builder.CreateBitCast(cb, llvm::PointerType::getUnqual(cbFnTy));
-
-  llvm::Value *ret = emitThunkCallbackCall(cbFnTy, cbPtr, {}, resultState);
+  llvm::Value *closureEnv = nullptr;
+  llvm::Value *ret =
+      emitThunkClosureCall(cb, cbIsClosure, cbFnTy, {}, resultState,
+                           closureEnv);
   if (asyncCb) {
     emitRuntimeCall("utopia_future_forward", builder.getVoidTy(),
                     {resultState, ret});
@@ -8509,6 +8799,9 @@ llvm::Function *CodeGen::getOrCreateTimeoutThunk(const Type *valueType,
     emitRuntimeCall("utopia_future_complete", builder.getVoidTy(),
                     {resultState});
   }
+  if (closureEnv)
+    emitRuntimeCall("utopia_closure_release", builder.getVoidTy(),
+                    {closureEnv});
   emitScopeCleanups();
   builder.CreateRetVoid();
 
@@ -8581,10 +8874,11 @@ llvm::Function *CodeGen::getOrCreateTimeoutExceptionThunk() {
  * Future.runOnThread: calls fn, stores the result into the state and
  * completes it. A fn that throws completes the state with the raised
  * exception instead of terminating the worker thread. */
-llvm::Function *CodeGen::getOrCreateThreadThunk(const Type *valueType) {
-  std::string key =
-      "thread_thunk_" +
-      std::string(valueType ? valueType->toString() : "void");
+llvm::Function *CodeGen::getOrCreateThreadThunk(const Type *valueType,
+                                                 bool cbIsClosure) {
+  std::string key = std::string("thread_thunk_") +
+                    (cbIsClosure ? "c_" : "p_") +
+                    std::string(valueType ? valueType->toString() : "void");
   auto it = asyncHelpers.find(key);
   if (it != asyncHelpers.end())
     return it->second;
@@ -8606,20 +8900,21 @@ llvm::Function *CodeGen::getOrCreateThreadThunk(const Type *valueType) {
 
   bool isVoidValue = !valueType || valueType->isVoid();
   llvm::Value *retVal = nullptr;
+  llvm::Value *closureEnv = nullptr;
   if (!isVoidValue) {
     llvm::Type *retTy = getLLVMType(valueType);
     llvm::FunctionType *fnTy = llvm::FunctionType::get(retTy, {}, false);
-    llvm::Value *callee = builder.CreateBitCast(
-        fnPtr, llvm::PointerType::getUnqual(fnTy));
-    retVal = emitThunkCallbackCall(fnTy, callee, {}, state);
+    retVal = emitThunkClosureCall(fnPtr, cbIsClosure, fnTy, {}, state,
+                                  closureEnv);
     writeFutureValueInto(state, retVal, valueType, false);
   } else {
     llvm::FunctionType *fnTy =
         llvm::FunctionType::get(builder.getVoidTy(), {}, false);
-    llvm::Value *callee = builder.CreateBitCast(
-        fnPtr, llvm::PointerType::getUnqual(fnTy));
-    emitThunkCallbackCall(fnTy, callee, {}, state);
+    emitThunkClosureCall(fnPtr, cbIsClosure, fnTy, {}, state, closureEnv);
   }
+  if (closureEnv)
+    emitRuntimeCall("utopia_closure_release", builder.getVoidTy(),
+                    {closureEnv});
 
   emitRuntimeCall("utopia_future_complete", builder.getVoidTy(), {state});
   emitScopeCleanups();
@@ -8639,10 +8934,11 @@ llvm::Function *CodeGen::getOrCreateThreadThunk(const Type *valueType) {
  * event loop until the returned future completes and stores the resulting
  * value into the outer state. This gives every worker thread its own
  * runtime copy, so awaits keep working off the main thread. */
-llvm::Function *CodeGen::getOrCreateAsyncThreadThunk(const Type *valueType) {
-  std::string key =
-      "async_thread_thunk_" +
-      std::string(valueType ? valueType->toString() : "void");
+llvm::Function *CodeGen::getOrCreateAsyncThreadThunk(const Type *valueType,
+                                                      bool cbIsClosure) {
+  std::string key = std::string("async_thread_thunk_") +
+                    (cbIsClosure ? "c_" : "p_") +
+                    std::string(valueType ? valueType->toString() : "void");
   auto it = asyncHelpers.find(key);
   if (it != asyncHelpers.end())
     return it->second;
@@ -8667,9 +8963,9 @@ llvm::Function *CodeGen::getOrCreateAsyncThreadThunk(const Type *valueType) {
   llvm::Type *llFutTy = llvm::StructType::get(
       ctx, {builder.getPtrTy()}, /*isPacked=*/false);
   llvm::FunctionType *fnTy = llvm::FunctionType::get(llFutTy, {}, false);
-  llvm::Value *callee = builder.CreateBitCast(
-      fnPtr, llvm::PointerType::getUnqual(fnTy));
-  llvm::Value *fut = emitThunkCallbackCall(fnTy, callee, {}, state);
+  llvm::Value *closureEnv = nullptr;
+  llvm::Value *fut = emitThunkClosureCall(fnPtr, cbIsClosure, fnTy, {}, state,
+                                          closureEnv);
   llvm::Value *innerState =
       builder.CreateExtractValue(fut, 0, "async.fn.state");
 
@@ -8726,6 +9022,9 @@ llvm::Function *CodeGen::getOrCreateAsyncThreadThunk(const Type *valueType) {
      * below, so the failed path must drop it too. */
     emitRuntimeCall("utopia_future_release", builder.getVoidTy(),
                     {innerState});
+    if (closureEnv)
+      emitRuntimeCall("utopia_closure_release", builder.getVoidTy(),
+                      {closureEnv});
     emitScopeCleanups();
     builder.CreateRetVoid();
 
@@ -8761,6 +9060,9 @@ llvm::Function *CodeGen::getOrCreateAsyncThreadThunk(const Type *valueType) {
   /* The by-value future returned from the call does not run a destructor;
    * release the reference it carried now that the value was copied out. */
   emitRuntimeCall("utopia_future_release", builder.getVoidTy(), {innerState});
+  if (closureEnv)
+    emitRuntimeCall("utopia_closure_release", builder.getVoidTy(),
+                    {closureEnv});
 
   emitScopeCleanups();
   builder.CreateRetVoid();

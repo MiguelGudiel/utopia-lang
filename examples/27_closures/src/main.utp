@@ -1,0 +1,69 @@
+/*
+ * Closures: lambdas can capture enclosing locals and parameters.
+ *
+ * A capturing lambda's value is a reference-counted environment holding a
+ * snapshot (by value) of the captured variables. The environment is
+ * created on the heap and owned by the creating scope; the async callback
+ * APIs (then, catchError, timeout, sync, delayed, microtask, whenComplete,
+ * runOnThread) retain it for the duration of a registration, so a closure
+ * safely outlives its creating frame while a callback is pending.
+ *
+ * Captures are copies: writes inside the closure do not propagate back to
+ * the outer variable (there is no GC to share storage).
+ */
+
+int main() async {
+  /* A timer callback capturing an outer local: the environment outlives
+   * the creating frame. */
+  int base = 100;
+  int t = await Future.delayed<int>(10, () => base + 50);
+  print("timer capture: %d\n", t);
+
+  /* then with a capturing callback. */
+  int offset = 5;
+  await Future.value<int>(7).then((v) { print("then capture: %d\n", v + offset); });
+
+  /* runOnThread with a capturing lambda. */
+  int factor = 3;
+  int u = await Future.runOnThread<int>(() => factor * 30);
+  print("thread capture: %d\n", u);
+
+  /* Closures stored in variables and called directly. */
+  int n = 4;
+  int Function(int) mul = (x) => x * n;
+  print("direct: %d %d\n", mul(2), mul(3));
+
+  /* The same variable can be invoked repeatedly. */
+  int acc = 0;
+  void Function() inc = () { acc = acc + 10; };
+  inc();
+  inc();
+  inc();
+  print("acc (closure-local copy): %d\n", acc);
+
+  /* Future.sync runs the closure immediately. */
+  int s = await Future.sync<int>(() => n * 100);
+  print("sync capture: %d\n", s);
+
+  /* whenComplete with a capturing callback. */
+  int w = 0;
+  await Future.value<int>(1).whenComplete(() { w = 42; });
+  print("whenComplete: %d\n", w);
+
+  /* An async lambda can capture too; its coroutine keeps the environment
+   * alive for as long as it runs. */
+  int extra = 9;
+  Future<int> Function() lazy = () async {
+    await Future.delayed<void>(5, () {});
+    return extra * 10;
+  };
+  print("async capture: %d\n", await lazy());
+
+  /* A String capture: the environment's copy is destroyed properly when
+   * the last reference drops. */
+  String tag = "tag-";
+  int len = await Future.runOnThread<int>(() => tag.length() as int32 + 1000);
+  print("string capture: %d\n", len);
+
+  return 0;
+}

@@ -132,11 +132,12 @@ class Future<T> {
   @intrinsic("future_timeout")
   Future<T> timeout(int64 timeLimitMs, Future<T> Function() onTimeout);
 
-  /* Runs 'cb' when this future completes (value or not). */
-  Future<void> whenComplete(void Function() cb) async {
-    await this;
-    cb();
-  }
+  /* Runs 'cb' when this future completes (value or not); the returned
+   * future completes with this future's value or error afterwards. An
+   * intrinsic so capturing lambdas (closures) can flow through the
+   * callback. */
+  @intrinsic("future_whenComplete")
+  Future<void> whenComplete(void Function() cb);
 
   /* A future that is already completed with 'value'. */
   @intrinsic("future_value")
@@ -147,27 +148,21 @@ class Future<T> {
   static Future<R> sync<R>(R Function() fn);
 
   /* A future that completes with the result of 'fn' after 'ms'
-   * milliseconds. */
-  static Future<R> delayed<R>(int64 ms, R Function() fn) async {
-    await _delay(ms);
-    return fn();
-  }
+   * milliseconds. An intrinsic so capturing lambdas (closures) can flow
+   * through the callback. */
+  @intrinsic("future_delayed")
+  static Future<R> delayed<R>(int64 ms, R Function() fn);
 
-  /* A future that completes with the result of 'fn' after 'duration', with
-   * Dart semantics: Duration.zero (or any non-positive duration) schedules
-   * the computation asynchronously on the event loop instead of running it
-   * synchronously. */
-  static Future<R> delayed<R>(Duration duration, R Function() fn) async {
-    await _delayUs(duration.inMicroseconds());
-    return fn();
-  }
+  /* The Duration overload, with Dart semantics: Duration.zero (or any
+   * non-positive duration) schedules the computation asynchronously on the
+   * event loop instead of running it synchronously. */
+  @intrinsic("future_delayed")
+  static Future<R> delayed<R>(Duration duration, R Function() fn);
 
   /* Schedules 'fn' on the event loop, like Dart's Future.microtask: the
    * computation runs asynchronously, after the current synchronous code. */
-  static Future<R> microtask<R>(R Function() fn) async {
-    await _delayUs(0 as int64);
-    return fn();
-  }
+  @intrinsic("future_microtask")
+  static Future<R> microtask<R>(R Function() fn);
 
   /* A Future<void> that completes when this future completes, ignoring its
    * value (Dart's Future.ignore). */

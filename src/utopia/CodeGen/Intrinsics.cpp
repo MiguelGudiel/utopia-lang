@@ -493,15 +493,27 @@ public:
     if (!state)
       return nullptr;
 
+    bool cbIsClosure = CodeGen::argIsClosure(node->args[0]);
     llvm::Value *resultState = cg.createFutureState(nullptr);
     llvm::Function *thunk =
-        cg.getOrCreateThenThunk(valueTy, asyncCb, cbTakesValue);
+        cg.getOrCreateThenThunk(valueTy, asyncCb, cbTakesValue, cbIsClosure);
+
+    /* A closure's environment is retained for the whole registration and
+     * released by the thunk after the callback ran (or on the error path). */
+    if (cbIsClosure)
+      cg.emitRuntimeCall("utopia_closure_retain", getBuilder(cg).getVoidTy(),
+                         {cb});
 
     if (node->args.size() == 2) {
       llvm::Value *errCb = cg.dispatch(node->args[1]);
       if (!errCb)
         return nullptr;
-      llvm::Function *errThunk = cg.getOrCreateErrorThunk(nullptr, false);
+      bool errIsClosure = CodeGen::argIsClosure(node->args[1]);
+      if (errIsClosure)
+        cg.emitRuntimeCall("utopia_closure_retain",
+                           getBuilder(cg).getVoidTy(), {errCb});
+      llvm::Function *errThunk =
+          cg.getOrCreateErrorThunk(nullptr, false, errIsClosure);
       cg.emitRuntimeCall("utopia_future_then_cb_err", getBuilder(cg).getVoidTy(),
                          {state, cb, thunk, errCb, errThunk, resultState});
     } else {
@@ -565,8 +577,13 @@ public:
     if (!state)
       return nullptr;
 
+    bool cbIsClosure = CodeGen::argIsClosure(node->args[0]);
     llvm::Value *resultState = cg.createFutureState(valueTy);
-    llvm::Function *errThunk = cg.getOrCreateErrorThunk(valueTy, asyncCb);
+    llvm::Function *errThunk =
+        cg.getOrCreateErrorThunk(valueTy, asyncCb, cbIsClosure);
+    if (cbIsClosure)
+      cg.emitRuntimeCall("utopia_closure_retain", getBuilder(cg).getVoidTy(),
+                         {cb});
     cg.emitRuntimeCall("utopia_future_then_cb_err", getBuilder(cg).getVoidTy(),
                        {state, llvm::ConstantPointerNull::get(
                                   getBuilder(cg).getPtrTy()),
@@ -670,9 +687,13 @@ public:
       }
     }
 
-    llvm::Function *thunk = onTimeout
-                                ? cg.getOrCreateTimeoutThunk(valueTy, asyncCb)
-                                : cg.getOrCreateTimeoutExceptionThunk();
+    bool cbIsClosure = onTimeout && CodeGen::argIsClosure(node->args[1]);
+    if (cbIsClosure)
+      cg.emitRuntimeCall("utopia_closure_retain", getBuilder(cg).getVoidTy(),
+                         {onTimeout});
+    llvm::Function *thunk =
+        onTimeout ? cg.getOrCreateTimeoutThunk(valueTy, asyncCb, cbIsClosure)
+                  : cg.getOrCreateTimeoutExceptionThunk();
     cg.emitRuntimeCall("utopia_future_timer_cb", getBuilder(cg).getVoidTy(),
                        {deadlineUs,
                         onTimeout
@@ -726,10 +747,16 @@ public:
     if (!fn)
       return nullptr;
 
+    bool cbIsClosure = CodeGen::argIsClosure(node->args[0]);
     llvm::Value *state = cg.createFutureState(valueTy);
-    llvm::Function *thunk = isAsyncFn
-                                ? cg.getOrCreateAsyncThreadThunk(valueTy)
-                                : cg.getOrCreateThreadThunk(valueTy);
+    llvm::Function *thunk =
+        isAsyncFn ? cg.getOrCreateAsyncThreadThunk(valueTy, cbIsClosure)
+                  : cg.getOrCreateThreadThunk(valueTy, cbIsClosure);
+    /* The worker runs on another thread: the environment must stay alive
+     * until the thunk runs and releases it. */
+    if (cbIsClosure)
+      cg.emitRuntimeCall("utopia_closure_retain", getBuilder(cg).getVoidTy(),
+                         {fn});
     cg.emitRuntimeCall("utopia_thread_spawn", getBuilder(cg).getVoidTy(),
                        {state, fn, thunk});
 
@@ -774,21 +801,52 @@ public:
 
     llvm::Value *state = cg.createFutureState(valueTy);
 
+    /* A closure's value is the environment pointer: call env->fn(env).
+     * The call happens synchronously inside the creating scope, so the
+     * scope's own reference keeps the environment alive. */
+    bool cbIsClosure = CodeGen::argIsClosure(node->args[0]);
+    llvm::Value *callEnv = nullptr;
+    llvm::Value *callee = fn;
+    if (cbIsClosure) {
+      callEnv = fn;
+      llvm::StructType *headerTy = cg.getClosureEnvHeaderTy();
+      llvm::Value *envPtr = getBuilder(cg).CreateBitCast(
+          fn, llvm::PointerType::getUnqual(headerTy));
+      callee = getBuilder(cg).CreateLoad(
+          getBuilder(cg).getPtrTy(),
+          getBuilder(cg).CreateStructGEP(headerTy, envPtr, 1),
+          "closure.fn");
+    }
+
     bool isVoidValue = !valueTy || valueTy->isVoid();
     llvm::Value *retVal = nullptr;
     if (!isVoidValue) {
       llvm::Type *retTy = getLLVMType(cg, valueTy);
-      llvm::FunctionType *fnTy = llvm::FunctionType::get(retTy, {}, false);
-      llvm::Value *callee = getBuilder(cg).CreateBitCast(
-          fn, llvm::PointerType::getUnqual(fnTy));
-      retVal = getBuilder(cg).CreateCall(fnTy, callee, {});
+      llvm::FunctionType *fnTy = llvm::FunctionType::get(
+          retTy, cbIsClosure ? llvm::ArrayRef<llvm::Type *>(
+                                   {getBuilder(cg).getPtrTy()})
+                             : llvm::ArrayRef<llvm::Type *>(),
+          false);
+      llvm::Value *calleePtr = getBuilder(cg).CreateBitCast(
+          callee, llvm::PointerType::getUnqual(fnTy));
+      retVal = getBuilder(cg).CreateCall(
+          fnTy, calleePtr,
+          cbIsClosure ? llvm::ArrayRef<llvm::Value *>({callEnv})
+                      : llvm::ArrayRef<llvm::Value *>());
       cg.writeFutureValueInto(state, retVal, valueTy, false);
     } else {
-      llvm::FunctionType *fnTy =
-          llvm::FunctionType::get(getBuilder(cg).getVoidTy(), {}, false);
-      llvm::Value *callee = getBuilder(cg).CreateBitCast(
-          fn, llvm::PointerType::getUnqual(fnTy));
-      getBuilder(cg).CreateCall(fnTy, callee, {});
+      llvm::FunctionType *fnTy = llvm::FunctionType::get(
+          getBuilder(cg).getVoidTy(),
+          cbIsClosure ? llvm::ArrayRef<llvm::Type *>(
+                            {getBuilder(cg).getPtrTy()})
+                      : llvm::ArrayRef<llvm::Type *>(),
+          false);
+      llvm::Value *calleePtr = getBuilder(cg).CreateBitCast(
+          callee, llvm::PointerType::getUnqual(fnTy));
+      getBuilder(cg).CreateCall(
+          fnTy, calleePtr,
+          cbIsClosure ? llvm::ArrayRef<llvm::Value *>({callEnv})
+                      : llvm::ArrayRef<llvm::Value *>());
     }
 
     cg.emitRuntimeCall("utopia_future_complete", getBuilder(cg).getVoidTy(),
@@ -850,6 +908,156 @@ public:
 
     const Type *resultTy = node->resolvedFunc->returnType;
     llvm::Value *obj = cg.createFutureObject(resultTy, delayState);
+    return cg.materializeFutureValue(resultTy, obj);
+  }
+
+  llvm::Constant *
+  evaluateConstant(CodeGen &cg, const FunctionCallNode *node) const override {
+    return nullptr;
+  }
+};
+
+/* Future.whenComplete(cb): runs the callback when the source completes
+ * (with a value or an error) and forwards the source's completion to the
+ * returned future. An intrinsic so capturing lambdas (closures) can flow
+ * through the callback. */
+class FutureWhenCompleteIntrinsic : public Intrinsic {
+public:
+  llvm::Value *evaluateRuntime(CodeGen &cg,
+                               const FunctionCallNode *node) const override {
+    auto *ma = llvm::dyn_cast<MemberAccessNode>(node->target);
+    if (!ma || node->args.size() != 1 || !node->resolvedFunc)
+      return nullptr;
+
+    llvm::Value *cb = cg.dispatch(node->args[0]);
+    if (!cb)
+      return nullptr;
+    bool cbIsClosure = CodeGen::argIsClosure(node->args[0]);
+    if (cbIsClosure)
+      cg.emitRuntimeCall("utopia_closure_retain", getBuilder(cg).getVoidTy(),
+                         {cb});
+
+    llvm::Value *futObj = cg.getFutureObjectPointer(ma->object);
+    if (!futObj)
+      return nullptr;
+    llvm::Value *state = cg.getFutureState(futObj, ma->object->exprType);
+    if (!state)
+      return nullptr;
+
+    llvm::Value *resultState = cg.createFutureState(nullptr);
+    llvm::Function *thunk =
+        cg.getOrCreateThenThunk(nullptr, false, false, cbIsClosure);
+    cg.emitRuntimeCall("utopia_future_then_cb_when", getBuilder(cg).getVoidTy(),
+                       {state, cb, thunk, resultState});
+
+    const Type *resultTy = node->resolvedFunc->returnType;
+    llvm::Value *obj = cg.createFutureObject(resultTy, resultState);
+    return cg.materializeFutureValue(resultTy, obj);
+  }
+
+  llvm::Constant *
+  evaluateConstant(CodeGen &cg, const FunctionCallNode *node) const override {
+    return nullptr;
+  }
+};
+
+/* Future.delayed(ms|duration, fn): schedules a timer that runs the
+ * callback and completes the returned future with its result. An intrinsic
+ * so capturing lambdas (closures) can flow through the callback. */
+class FutureDelayedIntrinsic : public Intrinsic {
+public:
+  llvm::Value *evaluateRuntime(CodeGen &cg,
+                               const FunctionCallNode *node) const override {
+    if (node->args.size() != 2 || !node->resolvedFunc)
+      return nullptr;
+
+    const Type *valueTy = nullptr;
+    if (!CodeGen::unwrapFutureType(node->resolvedFunc->returnType, &valueTy))
+      return nullptr;
+
+    /* Deadline: int64 milliseconds or a Duration record (its microseconds
+     * are read from the _us field). */
+    const Type *limitTy = node->args[0]->exprType->getUnqualifiedType();
+    llvm::Value *deadlineUs = nullptr;
+    if (limitTy->getKind() == TypeKind::Class) {
+      llvm::Value *durVal = cg.dispatch(node->args[0]);
+      if (!durVal)
+        return nullptr;
+      const Type *unqual = node->args[0]->exprType->getUnqualifiedType();
+      const FieldInfo *usField = nullptr;
+      if (auto *rec = llvm::dyn_cast<RecordType>(unqual))
+        usField = rec->getField("_us");
+      llvm::Type *llDurTy = getLLVMType(cg, unqual);
+      llvm::AllocaInst *tmp =
+          createEntryBlockAlloca(cg, llDurTy, "delayed.dur.tmp");
+      getBuilder(cg).CreateStore(durVal, tmp);
+      llvm::Value *gep = getBuilder(cg).CreateStructGEP(
+          llDurTy, tmp, usField ? usField->index : 0, "dur.us");
+      deadlineUs = getBuilder(cg).CreateLoad(getBuilder(cg).getInt64Ty(),
+                                             gep, "dur.us.val");
+    } else {
+      llvm::Value *ms = cg.dispatch(node->args[0]);
+      if (!ms)
+        return nullptr;
+      deadlineUs = getBuilder(cg).CreateMul(
+          cg.createImplicitCast(ms, getBuilder(cg).getInt64Ty()),
+          getBuilder(cg).getInt64(1000), "delayed.us");
+    }
+
+    llvm::Value *cb = cg.dispatch(node->args[1]);
+    if (!cb)
+      return nullptr;
+    bool cbIsClosure = CodeGen::argIsClosure(node->args[1]);
+    if (cbIsClosure)
+      cg.emitRuntimeCall("utopia_closure_retain", getBuilder(cg).getVoidTy(),
+                         {cb});
+
+    llvm::Value *state = cg.createFutureState(valueTy);
+    llvm::Function *thunk =
+        cg.getOrCreateTimeoutThunk(valueTy, false, cbIsClosure);
+    cg.emitRuntimeCall("utopia_future_timer_cb", getBuilder(cg).getVoidTy(),
+                       {deadlineUs, cb, thunk, state});
+
+    const Type *resultTy = node->resolvedFunc->returnType;
+    llvm::Value *obj = cg.createFutureObject(resultTy, state);
+    return cg.materializeFutureValue(resultTy, obj);
+  }
+
+  llvm::Constant *
+  evaluateConstant(CodeGen &cg, const FunctionCallNode *node) const override {
+    return nullptr;
+  }
+};
+
+/* Future.microtask(fn): schedules the callback on the event loop (a zero
+ * delay) and completes the returned future with its result. */
+class FutureMicrotaskIntrinsic : public Intrinsic {
+public:
+  llvm::Value *evaluateRuntime(CodeGen &cg,
+                               const FunctionCallNode *node) const override {
+    if (node->args.size() != 1 || !node->resolvedFunc)
+      return nullptr;
+
+    const Type *valueTy = nullptr;
+    if (!CodeGen::unwrapFutureType(node->resolvedFunc->returnType, &valueTy))
+      return nullptr;
+
+    llvm::Value *cb = cg.dispatch(node->args[0]);
+    if (!cb)
+      return nullptr;
+    bool cbIsClosure = CodeGen::argIsClosure(node->args[0]);
+    if (cbIsClosure)
+      cg.emitRuntimeCall("utopia_closure_retain", getBuilder(cg).getVoidTy(),
+                         {cb});
+
+    llvm::Value *state = cg.createFutureState(valueTy);
+    llvm::Function *thunk =
+        cg.getOrCreateTimeoutThunk(valueTy, false, cbIsClosure);
+    cg.emitRuntimeCall("utopia_future_timer_cb", getBuilder(cg).getVoidTy(),
+                       {getBuilder(cg).getInt64(0), cb, thunk, state});
+
+    const Type *resultTy = node->resolvedFunc->returnType;
+    llvm::Value *obj = cg.createFutureObject(resultTy, state);
     return cg.materializeFutureValue(resultTy, obj);
   }
 
@@ -1022,6 +1230,12 @@ IntrinsicRegistry::IntrinsicRegistry() {
   registerIntrinsic("future_delay", std::make_unique<FutureDelayIntrinsic>());
   registerIntrinsic("future_delay_us",
                     std::make_unique<FutureDelayUsIntrinsic>());
+  registerIntrinsic("future_whenComplete",
+                    std::make_unique<FutureWhenCompleteIntrinsic>());
+  registerIntrinsic("future_delayed",
+                    std::make_unique<FutureDelayedIntrinsic>());
+  registerIntrinsic("future_microtask",
+                    std::make_unique<FutureMicrotaskIntrinsic>());
   registerSimdIntrinsics(*this);
 }
 

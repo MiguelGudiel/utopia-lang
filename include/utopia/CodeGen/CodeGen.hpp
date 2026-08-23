@@ -190,9 +190,28 @@ public:
   /* Cached compiler-generated helpers for the async runtime. */
   llvm::Function *getOrCreateFutureValueDtor(const Type *valueType);
   llvm::Function *getOrCreateThenThunk(const Type *valueType, bool asyncCb,
-                                        bool cbTakesValue);
-  llvm::Function *getOrCreateThreadThunk(const Type *valueType);
-  llvm::Function *getOrCreateAsyncThreadThunk(const Type *valueType);
+                                        bool cbTakesValue, bool cbIsClosure);
+  llvm::Function *getOrCreateThreadThunk(const Type *valueType,
+                                         bool cbIsClosure);
+  llvm::Function *getOrCreateAsyncThreadThunk(const Type *valueType,
+                                              bool cbIsClosure);
+
+  /* Closures: allocates the environment of a capturing lambda (a
+   * reference-counted heap block holding {refcount, fn, dtor, captures})
+   * and returns its pointer; the creating scope's exit releases it. */
+  llvm::Value *createClosureEnvironment(const LambdaNode *node);
+  llvm::Function *getOrCreateClosureEnvDtor(const LambdaNode *node);
+  llvm::StructType *getClosureEnvType(const LambdaNode *node);
+  void emitCaptureCopy(llvm::Value *dst, llvm::Value *src, const Type *type);
+
+  /* The closure environment layout: {i32 refcount, fn pointer, dtor
+   * pointer} followed by the captured values. */
+  llvm::StructType *getClosureEnvHeaderTy();
+
+  /* True when the callback argument of an async intrinsic is a closure
+   * (a capturing lambda or a variable holding one), so its value is an
+   * environment pointer instead of a function address. */
+  static bool argIsClosure(const ExprNode *arg);
 
   /* Resolves the record type of a class declared in the prelude by its
    * simple name (used by the timeout helper to type its TimeoutException).
@@ -202,14 +221,15 @@ public:
   /* 'void errThunk(ptr errValuePtr, ptr cb, ptr resultState)': runs an
    * error handler (Future.catchError, the onError parameter of then) and
    * completes resultState with its result, or chains it when the handler
-   * is async. */
-  llvm::Function *getOrCreateErrorThunk(const Type *valueType, bool asyncCb);
+   * is async. 'cbIsClosure' selects the closure invocation convention. */
+  llvm::Function *getOrCreateErrorThunk(const Type *valueType, bool asyncCb,
+                                        bool cbIsClosure);
 
   /* 'void timeoutThunk(ptr cb, ptr resultState)': runs the onTimeout
    * callback of Future.timeout (sync or async) and completes resultState
    * with its result. */
   llvm::Function *getOrCreateTimeoutThunk(const Type *valueType,
-                                          bool asyncCb);
+                                          bool asyncCb, bool cbIsClosure);
 
   /* 'void timeoutThunk(ptr cb, ptr resultState)': completes resultState
    * with a freshly constructed TimeoutException (the no-onTimeout case of
@@ -219,11 +239,25 @@ public:
   /* Invokes a user callback inside a compiler-generated helper thunk,
    * routing an exception raised by the callback into a completed-with-
    * error future instead of unwinding into the event loop. Returns the
-   * callback's result. */
+   * callback's result. When 'closureEnv' is non-null the callback is a
+   * closure: its environment reference is released both on the normal path
+   * and when the callback throws (the intrinsic retained it before
+   * registering). */
   llvm::Value *emitThunkCallbackCall(llvm::FunctionType *fty,
                                      llvm::Value *callee,
                                      llvm::ArrayRef<llvm::Value *> args,
-                                     llvm::Value *stateOnError);
+                                     llvm::Value *stateOnError,
+                                     llvm::Value *closureEnv = nullptr);
+
+  /* Lowers a callback invocation inside a generated thunk: for a closure
+   * 'cb' is the environment pointer, so the callee becomes env->fn and the
+   * environment is passed as the first argument ('closureEnv' is set for
+   * the caller to release afterwards). Returns the invoke result. */
+  llvm::Value *emitThunkClosureCall(llvm::Value *cb, bool cbIsClosure,
+                                    llvm::FunctionType *plainFnTy,
+                                    llvm::ArrayRef<llvm::Value *> args,
+                                    llvm::Value *stateOnError,
+                                    llvm::Value *&closureEnv);
 
   /* Creates a pending future state sized for 'valueType'. */
   llvm::Value *createFutureState(const Type *valueType);

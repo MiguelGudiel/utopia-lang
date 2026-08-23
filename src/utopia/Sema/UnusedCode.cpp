@@ -631,6 +631,11 @@ void UnusedCodePass::visit(const LambdaNode *node) {
       dispatch(p->defaultValue);
     addParamCandidate(p);
   }
+  /* Captured enclosing variables are read when the closure runs, so they
+   * are used regardless of the lambda body's own walk (the body resolves
+   * them to the environment slots, not the outer declarations). */
+  for (const auto &cap : node->captures)
+    markUsed(cap.decl);
   if (node->body)
     dispatch(node->body);
   if (node->exprBody)

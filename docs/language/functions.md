@@ -154,10 +154,19 @@ int main() {
   void Function() greet = () { print("Hello!\n"); };
   greet();
 
-  /* Lambdas are plain function pointers: they may reference their own
-   * parameters and globals, but cannot capture enclosing function locals. */
+  /* Lambdas are closures: they can capture enclosing locals and
+   * parameters. The captured values are copied (by value) into a
+   * reference-counted environment at creation; writes inside the closure
+   * do not propagate back to the outer variable. */
   int factor = 3;
-  // int Function(int) f = (x) => x * factor;  // error: capture of 'factor'
+  int Function(int) f = (x) => x * factor;
+  print("%d\n", f(21));                    // 63
+
+  /* The async callback APIs (then, catchError, timeout, sync, delayed,
+   * microtask, whenComplete, runOnThread) retain the environment while a
+   * callback is registered, so a closure outlives its creating frame. */
+  int base = 100;
+  int t = await Future.delayed<int>(10, () => base + 1);
   return 0;
 }
 ```
@@ -168,6 +177,11 @@ against the parameter's function pointer signature:
 ```utp
 print("%d\n", apply((y) => y * 10, 4));   // 40
 ```
+
+A capturing lambda (or a variable holding one) can only be passed to the
+closure-aware async callback APIs above: a plain function-pointer parameter
+would receive the environment pointer and call it as a function address, so
+Sema rejects that combination.
 
 Lambda parameters support everything regular function parameters do: default
 values, named parameters inside braces, and the `required` modifier.

@@ -183,5 +183,16 @@ run_case "const expression over a non-const variable" \
   "Not a constant expression" \
   'int main() { int32 x = 5; const int32 y = const (x + 1); return 0; }'
 
+# closures: capturing lambdas only flow through the closure-aware async APIs
+run_case "capturing lambda passed to a plain function-pointer parameter" \
+  "cannot be passed to a plain function-pointer parameter" \
+  'int apply(int Function(int) fn, int v) => fn(v); int main() { int32 f = 3; return apply((x) => x * f, 5); }'
+run_case "closure variable passed to a plain function-pointer parameter" \
+  "cannot be passed to a plain function-pointer parameter" \
+  'int apply(int Function(int) fn, int v) => fn(v); int main() { int32 f = 3; int Function(int) c = (x) => x * f; return apply(c, 5); }'
+run_case "plain function assigned to a closure variable" \
+  "Cannot assign a plain function to a variable that holds a capturing lambda" \
+  'int add1(int32 x) { return x + 1; } int main() { int32 f = 3; int Function(int32) c = (x) => x * f; c = add1; return 0; }'
+
 printf 'PASS=%d FAIL=%d\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

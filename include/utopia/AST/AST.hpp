@@ -188,6 +188,23 @@ struct LambdaNode : public ExprNode {
   /* 'async' lambdas compile to a coroutine returning a Future. */
   bool isAsync = false;
 
+  /* A captured enclosing local or parameter, copied by value into the
+   * closure's environment at creation (the closure value is a pointer to
+   * the environment; its first slot holds the synthesized function). */
+  struct Capture {
+    std::string_view name;
+    const DeclNode *decl;
+    const Type *type;
+  };
+
+  /* Enclosing locals/params referenced by the body, populated during
+   * semantic analysis. A non-empty list makes this a closure: the lambda
+   * value becomes the environment pointer and calls route through
+   * env->fn(env, ...). */
+  llvm::ArrayRef<Capture> captures;
+
+  bool hasCaptures() const { return !captures.empty(); }
+
   static bool classof(const ASTNode *node) {
     return node->kind == NodeKind::Lambda;
   }
@@ -558,6 +575,13 @@ struct VarDeclNode : public DeclNode {
   mutable const FunctionDeclNode *copyCtor = nullptr;
   mutable bool isInitialized = false;
 
+  /* Closure support: true when a capturing lambda was assigned to this
+   * variable, so its value is a closure environment pointer instead of a
+   * plain function address. Calls through such a variable route through
+   * env->fn(env, ...), and assigning a plain function to it (or passing it
+   * to a plain function-pointer parameter) is rejected by Sema. */
+  mutable bool mayHoldClosure = false;
+
   VarDeclNode(const Type *t, std::string_view n, ExprNode *init, int l, int c,
               int len)
       : DeclNode(NodeKind::VarDecl, l, c, len), type(t), varName(n),
@@ -691,13 +715,13 @@ struct FunctionDeclNode : public DeclNode {
   mutable bool isWillReturn = false;
   mutable bool isMustProgress = false;
 
-  /* Exception handling state, computed during semantic analysis:
-   *   hasEH      - the body (transitively through its try/catch clauses)
-   *                contains a 'throw' or a 'try' statement.
-   *   mayUnwind  - fixed-point: hasEH, or the body calls a function that
-   *                may unwind, or performs an indirect/virtual call. Such
-   *                functions must not be marked 'nounwind' and need EH
-   *                landing pads for their scopes. */
+  /* Closure support: when true, this synthesized function is the body of a
+   * capturing lambda. Its first parameter is the closure environment
+   * (a pointer to {refcount, fn, dtor, captures...}) and 'captureParams'
+   * holds one hidden variable per captured name, bound to the matching
+   * environment slot while the body is dispatched. */
+  bool hasCaptureEnv = false;
+  llvm::ArrayRef<VarDeclNode *> captureParams;
   mutable bool hasEH = false;
   mutable bool mayUnwind = false;
 

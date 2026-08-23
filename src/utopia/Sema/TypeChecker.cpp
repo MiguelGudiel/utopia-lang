@@ -3666,6 +3666,12 @@ SemaResult TypeCheckPass::visit(const VarDeclNode *node) {
       if (pushedExpected)
         ctx->popExpectedFunctionType();
 
+      /* A variable initialized with a capturing lambda (or from another
+       * closure variable) holds a closure environment pointer: calls
+       * through it and its destinations are checked accordingly. */
+      if (exprIsClosure(node->initializer))
+        const_cast<VarDeclNode *>(node)->mayHoldClosure = true;
+
       if (!initRes) {
         if (ctx->getScopeDepth() > 1) {
           ctx->addDecl(node->varName, node);
@@ -4170,6 +4176,31 @@ SemaResult TypeCheckPass::visit(const AssignNode *node) {
   if (!lhsType || !rhsType)
     return std::unexpected(ErrorInfo{node->line, node->column, node->length,
                                      "Cascading error in assignment"});
+
+  /* Closure taint: assigning a capturing lambda to a variable marks it as
+   * holding a closure (its value is an environment pointer, not a function
+   * address). Assigning a plain function to such a variable would break
+   * the call convention at both ends, so it is rejected. */
+  if (node->op == "=") {
+    if (auto *targetVar = llvm::dyn_cast<VariableNode>(node->target)) {
+      const DeclNode *decl = targetVar->resolvedDecl;
+      if (decl && decl->kind == NodeKind::VarDecl) {
+        auto *vd = const_cast<VarDeclNode *>(
+            static_cast<const VarDeclNode *>(decl));
+        bool rhsClosure = exprIsClosure(node->value);
+        if (rhsClosure) {
+          vd->mayHoldClosure = true;
+        } else if (vd->mayHoldClosure &&
+                   exprIsPlainFunction(node->value)) {
+          return ctx->reportError(
+              node->line, node->column, node->length,
+              "Cannot assign a plain function to a variable that holds a "
+              "capturing lambda (closure values call through their "
+              "environment).");
+        }
+      }
+    }
+  }
 
   /* Raw pointers are assigned with built-in pointer semantics; do not let
    * operator= overloads of the pointee hijack the assignment (e.g.
@@ -5933,6 +5964,13 @@ SemaResult TypeCheckPass::visit(const FunctionDeclNode *node) {
     ctx->addDecl(param->name, param);
   }
 
+  /* A capturing lambda's synthesized function binds each captured name to
+   * its environment slot (see visit(LambdaNode)); the binding shadows the
+   * enclosing declaration so the body sees the capture, not the outer
+   * variable. */
+  for (const auto *cap : node->captureParams)
+    ctx->addDecl(cap->varName, cap);
+
   /* Dart rule: the initializer list (super call + ': this.x = expr'
    * entries) of a const constructor is a constant context, so constructor
    * calls there are implicitly const. */
@@ -6068,6 +6106,19 @@ SemaResult TypeCheckPass::visit(const TypedefDeclNode *node) {
     }
   }
   return ctx->astCtx.VoidTy;
+}
+
+/* The async callback intrinsics receive the callback as an opaque pointer
+ * and invoke it through a per-call-site thunk, so they are the only
+ * destinations that can receive a closure value (the environment pointer). */
+static bool isClosureAwareIntrinsic(const FunctionDeclNode *fDecl) {
+  if (!fDecl->isIntrinsic)
+    return false;
+  std::string_view n = fDecl->intrinsicName;
+  return n == "future_then" || n == "future_catchError" ||
+         n == "future_timeout" || n == "future_sync" ||
+         n == "future_runOnThread" || n == "future_whenComplete" ||
+         n == "future_delayed" || n == "future_microtask";
 }
 
 SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
@@ -6317,6 +6368,23 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
             }
           }
         }
+      }
+
+      /* A closure value (the environment pointer of a capturing lambda, or
+       * a variable holding one) can only reach a closure-aware destination
+       * (the async callback intrinsics): a plain function-pointer
+       * parameter would be invoked with the environment address as its
+       * function pointer. */
+      if (resolvedArgs[p] && isFunctionPointerType(paramType) &&
+          exprIsClosure(resolvedArgs[p]) && !isClosureAwareIntrinsic(fDecl)) {
+        errors.push_back(
+            "A capturing lambda (closure) cannot be passed to a plain "
+            "function-pointer parameter '" +
+            std::string(fDecl->params[p]->name) +
+            "'; only the async callback APIs (then, catchError, timeout, "
+            "sync, delayed, microtask, whenComplete, runOnThread) accept "
+            "closures.");
+        continue;
       }
 
       if (!canImplicitlyCast(argTypeForCast, paramType)) {
@@ -9943,20 +10011,23 @@ struct ExpectedFnGuard {
   }
 };
 
-/* Lambdas lower to plain function pointers, so they cannot capture variables
- * from an enclosing function's stack. This checker walks a lambda body (not
- * descending into nested lambdas, which are validated on their own) and flags
- * every reference to an enclosing local or parameter. */
-struct LambdaCaptureChecker {
+/* Collects the enclosing locals and parameters a lambda body references.
+ * Captures are copied by value into the closure's environment at creation,
+ * so the collector records the declaration and its type for each captured
+ * name. The walk does not descend into nested lambdas (they capture on
+ * their own), ignores the lambda's own parameters, globals and
+ * type/namespace references, and skips 'this'. */
+struct LambdaCaptureCollector {
   SemaContext &ctx;
   const LambdaNode *lambda;
   std::vector<std::vector<std::string_view>> frames;
-  std::vector<const VariableNode *> violations;
+  std::vector<LambdaNode::Capture> captures;
+  std::unordered_map<std::string, const DeclNode *> seen;
 
-  explicit LambdaCaptureChecker(SemaContext &c, const LambdaNode *l)
+  explicit LambdaCaptureCollector(SemaContext &c, const LambdaNode *l)
       : ctx(c), lambda(l) {}
 
-  void check(const ASTNode *node) { walk(node); }
+  void collect(const ASTNode *node) { walk(node); }
 
   void walk(const ASTNode *node) {
     if (!node)
@@ -9979,8 +10050,25 @@ struct LambdaCaptureChecker {
       walk(t->falseExpr);
       break;
     }
-    case NodeKind::Lambda:
-      break; /* nested lambdas are validated by their own visit */
+    case NodeKind::Await:
+      walk(static_cast<const AwaitExprNode *>(node)->expr);
+      break;
+    case NodeKind::Lambda: {
+      /* A nested lambda's body may reference the enclosing variables too,
+       * and those references become captures of this lambda as well: the
+       * nested lambda's environment is created inside this function's
+       * frame, so the names must be bound here. The nested lambda's own
+       * parameters are shadowed. */
+      const auto *nested = static_cast<const LambdaNode *>(node);
+      frames.emplace_back();
+      for (const auto *p : nested->params)
+        frames.back().push_back(p->name);
+      walk(nested->isExpressionBody
+               ? static_cast<const ASTNode *>(nested->exprBody)
+               : static_cast<const ASTNode *>(nested->body));
+      frames.pop_back();
+      break;
+    }
     case NodeKind::Assign:
       walk(static_cast<const AssignNode *>(node)->target);
       walk(static_cast<const AssignNode *>(node)->value);
@@ -10092,6 +10180,8 @@ struct LambdaCaptureChecker {
 
 private:
   void checkVar(const VariableNode *node) {
+    if (node->name == "this")
+      return; /* the receiver is bound by the enclosing method */
     for (const auto &frame : frames) {
       for (auto name : frame) {
         if (name == node->name)
@@ -10116,12 +10206,85 @@ private:
           d->kind == NodeKind::NamespaceDecl ||
           d->kind == NodeKind::AnnotationDecl)
         return; /* type/namespace references */
+
+      /* An enclosing local or parameter: captured by value. */
+      const Type *ty = nullptr;
+      if (d->kind == NodeKind::VarDecl)
+        ty = static_cast<const VarDeclNode *>(d)->type;
+      else if (d->kind == NodeKind::ParamDecl)
+        ty = static_cast<const ParamDeclNode *>(d)->type;
+      if (ty) {
+        if (!seen.count(std::string(node->name))) {
+          seen[std::string(node->name)] = d;
+          captures.push_back(
+              LambdaNode::Capture{node->name, d, ty});
+        }
+        return;
+      }
     }
-    if (!decls.empty())
-      violations.push_back(node);
   }
 };
 } // namespace
+
+/* Walks the lambda body and merges the enclosing locals/params it
+ * references into node->captures. Repeated visits (the unresolved first
+ * pass, then the full pass with an expected signature) must not duplicate
+ * entries, so existing names are kept. */
+void TypeCheckPass::collectLambdaCaptures(const LambdaNode *node) {
+  LambdaCaptureCollector collector(*ctx, node);
+  collector.collect(node->isExpressionBody
+                        ? static_cast<const ASTNode *>(node->exprBody)
+                        : static_cast<const ASTNode *>(node->body));
+  if (collector.captures.empty())
+    return;
+
+  std::vector<LambdaNode::Capture> merged;
+  merged.reserve(node->captures.size() + collector.captures.size());
+  std::unordered_map<std::string, bool> existing;
+  for (const auto &cap : node->captures) {
+    merged.push_back(cap);
+    existing[std::string(cap.name)] = true;
+  }
+  for (const auto &cap : collector.captures) {
+    if (!existing.count(std::string(cap.name))) {
+      merged.push_back(cap);
+      existing[std::string(cap.name)] = true;
+    }
+  }
+  const_cast<LambdaNode *>(node)->captures =
+      ctx->astCtx.copyArray<LambdaNode::Capture>(merged);
+}
+
+bool TypeCheckPass::exprIsClosure(const ExprNode *expr) const {
+  if (!expr)
+    return false;
+  if (expr->kind == NodeKind::Lambda)
+    return static_cast<const LambdaNode *>(expr)->hasCaptures();
+  if (expr->kind == NodeKind::Variable) {
+    const auto *v = static_cast<const VariableNode *>(expr);
+    return v->resolvedDecl && v->resolvedDecl->kind == NodeKind::VarDecl &&
+           static_cast<const VarDeclNode *>(v->resolvedDecl)->mayHoldClosure;
+  }
+  return false;
+}
+
+bool TypeCheckPass::exprIsPlainFunction(const ExprNode *expr) const {
+  if (!expr)
+    return false;
+  if (expr->kind == NodeKind::Lambda)
+    return !static_cast<const LambdaNode *>(expr)->hasCaptures();
+  if (expr->kind == NodeKind::Variable) {
+    const auto *v = static_cast<const VariableNode *>(expr);
+    if (!v->resolvedDecl)
+      return false;
+    if (v->resolvedDecl->kind == NodeKind::FunctionDecl)
+      return true;
+    if (v->resolvedDecl->kind == NodeKind::VarDecl)
+      return !static_cast<const VarDeclNode *>(v->resolvedDecl)
+                  ->mayHoldClosure;
+  }
+  return false;
+}
 
 SemaResult
 TypeCheckPass::resolveLambdaArgs(const FunctionDeclNode *fn,
@@ -10243,19 +10406,10 @@ SemaResult TypeCheckPass::visit(const LambdaNode *node) {
     node->exprType = ctx->astCtx.getPointerType(fnTy);
     node->isLValue = false;
 
-    /* Reject captures even when the body is not dispatched yet (e.g. a
-     * lambda used as a call target without a signature context). */
-    LambdaCaptureChecker captureChecker(*ctx, node);
-    captureChecker.check(node->isExpressionBody
-                             ? static_cast<const ASTNode *>(node->exprBody)
-                             : static_cast<const ASTNode *>(node->body));
-    for (const auto *v : captureChecker.violations) {
-      ctx->reportError(
-          v->line, v->column, v->length,
-          "Lambda captures local variable '" + std::string(v->name) +
-              "'; lambdas are function pointers and cannot capture enclosing "
-              "function variables.");
-    }
+    /* Collect captures even when the body is not dispatched yet (e.g. a
+     * lambda used as a call target without a signature context); the full
+     * visit below merges them into the closure. */
+    collectLambdaCaptures(node);
 
     return node->exprType;
   }
@@ -10297,20 +10451,10 @@ SemaResult TypeCheckPass::visit(const LambdaNode *node) {
     finalBody = block;
   }
 
-  /* Lambdas lower to function pointers, so captures of the enclosing
-   * function's stack are rejected. */
-  LambdaCaptureChecker captureChecker(*ctx, node);
-  captureChecker.check(finalBody);
-  for (const auto *v : captureChecker.violations) {
-    ctx->reportError(
-        v->line, v->column, v->length,
-        "Lambda captures local variable '" + std::string(v->name) +
-            "'; lambdas are function pointers and cannot capture enclosing "
-            "function variables.");
-  }
-  if (!captureChecker.violations.empty())
-    return std::unexpected(ErrorInfo{node->line, node->column, node->length,
-                                     "Lambda capture error"});
+  /* Enclosing locals/params referenced by the body become captures: each
+   * is copied by value into the closure environment at creation (the
+   * environment is reference-counted and owned by the closure value). */
+  collectLambdaCaptures(node);
 
   std::string nameStr =
       "__lambda_" + std::to_string(ctx->lambdaCounter++);  std::string_view name = ctx->astCtx.copyString(nameStr);
@@ -10324,6 +10468,26 @@ SemaResult TypeCheckPass::visit(const LambdaNode *node) {
   fnDecl->isAsync = node->isAsync;
   const_cast<LambdaNode *>(node)->synthesizedFunc = fnDecl;
   const_cast<LambdaNode *>(node)->mangledName = fnDecl->mangledName;
+
+  /* A capturing lambda lowers to a hidden environment parameter: the
+   * synthesized function takes 'env' first and each captured name is bound
+   * to its slot while the body is dispatched (see visit(FunctionDeclNode)),
+   * shadowing the enclosing declaration. */
+  if (!node->captures.empty()) {
+    fnDecl->hasCaptureEnv = true;
+    std::vector<VarDeclNode *> captureParams;
+    captureParams.reserve(node->captures.size());
+    for (const auto &cap : node->captures) {
+      auto *cv = ctx->astCtx.create<VarDeclNode>(cap.type, cap.name, nullptr,
+                                                 node->line, node->column,
+                                                 node->length);
+      cv->declFilePath = ctx->currentFile;
+      cv->isInitialized = true;
+      captureParams.push_back(cv);
+    }
+    fnDecl->captureParams =
+        ctx->astCtx.copyArray<VarDeclNode *>(captureParams);
+  }
 
   auto bodyRes = dispatch(fnDecl);
   if (!bodyRes) {

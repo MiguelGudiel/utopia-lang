@@ -311,6 +311,16 @@ public:
                                const std::vector<ExprNode *> &resolvedArgs);
   SemaResult resolveLambdaArgs(const FunctionType *fTy,
                                const std::vector<ExprNode *> &resolvedArgs);
+  /* Merges the enclosing locals/params referenced by a lambda body into
+   * node->captures (see LambdaCaptureCollector). */
+  void collectLambdaCaptures(const LambdaNode *node);
+
+  /* Closure taint helpers: whether an expression produces a closure value
+   * (a capturing lambda or a variable known to hold one), or a plain
+   * function reference (a non-capturing lambda or a direct function name).
+   * Used to reject closures where a plain function pointer is expected. */
+  bool exprIsClosure(const ExprNode *expr) const;
+  bool exprIsPlainFunction(const ExprNode *expr) const;
   SemaResult visit(const NamespaceDeclNode *node);
   SemaResult visit(const UsingNode *node);
 
