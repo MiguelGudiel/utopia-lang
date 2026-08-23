@@ -117,10 +117,24 @@ public:
    * demand, reset per function). */
   llvm::AllocaInst *getOrCreateEHExnSlot();
   llvm::AllocaInst *getOrCreateEHSelSlot();
+  /* Emits the per-function exception resume block: reconstructs the landing
+   * pad value from the exception slots and resumes unwinding. In async
+   * functions it is the implicit error boundary (see CodeGen.cpp). */
   llvm::BasicBlock *getOrCreateEHResumeBlock();
+
+  /* Function-scoped EH state: whether the current function's own scopes
+   * are inside a try, or hold pending destructor cleanups. The global
+   * cgCtx variants also see the enclosing function's scopes when a nested
+   * function (lambda/thunk) is emitted mid-body. */
+  bool funcScopeHasTry() const;
+  bool funcScopeHasCleanups() const;
   /* Runs every live scope's cleanups (innermost first) into the current
-   * block; used by landing pads. */
-  void emitScopeCleanupsInPad();
+   * block; used by landing pads. Only scopes from 'scopeStart' (inclusive)
+   * run: a try's pad must not destroy objects declared before the try
+   * (their destructor runs once on the normal path; destroying them in the
+   * pad would run it twice on the caught path), and a nested function's
+   * pad must not destroy the enclosing function's locals. */
+  void emitScopeCleanupsInPad(size_t scopeStart);
 
   /* Async support (shared with the Future intrinsics). */
 
@@ -179,6 +193,37 @@ public:
                                         bool cbTakesValue);
   llvm::Function *getOrCreateThreadThunk(const Type *valueType);
   llvm::Function *getOrCreateAsyncThreadThunk(const Type *valueType);
+
+  /* Resolves the record type of a class declared in the prelude by its
+   * simple name (used by the timeout helper to type its TimeoutException).
+   * Returns null when the class is not visible. */
+  const Type *getPreludeRecordType(std::string_view simpleName);
+
+  /* 'void errThunk(ptr errValuePtr, ptr cb, ptr resultState)': runs an
+   * error handler (Future.catchError, the onError parameter of then) and
+   * completes resultState with its result, or chains it when the handler
+   * is async. */
+  llvm::Function *getOrCreateErrorThunk(const Type *valueType, bool asyncCb);
+
+  /* 'void timeoutThunk(ptr cb, ptr resultState)': runs the onTimeout
+   * callback of Future.timeout (sync or async) and completes resultState
+   * with its result. */
+  llvm::Function *getOrCreateTimeoutThunk(const Type *valueType,
+                                          bool asyncCb);
+
+  /* 'void timeoutThunk(ptr cb, ptr resultState)': completes resultState
+   * with a freshly constructed TimeoutException (the no-onTimeout case of
+   * Future.timeout). */
+  llvm::Function *getOrCreateTimeoutExceptionThunk();
+
+  /* Invokes a user callback inside a compiler-generated helper thunk,
+   * routing an exception raised by the callback into a completed-with-
+   * error future instead of unwinding into the event loop. Returns the
+   * callback's result. */
+  llvm::Value *emitThunkCallbackCall(llvm::FunctionType *fty,
+                                     llvm::Value *callee,
+                                     llvm::ArrayRef<llvm::Value *> args,
+                                     llvm::Value *stateOnError);
 
   /* Creates a pending future state sized for 'valueType'. */
   llvm::Value *createFutureState(const Type *valueType);
@@ -245,6 +290,11 @@ private:
   /* Innermost try's catch dispatch + clauses, used by per-invoke pads. */
   std::vector<llvm::BasicBlock *> tryDispatchStack;
   std::vector<std::vector<llvm::Constant *>> tryTypeInfoStack;
+  /* Scope index of each enclosing try (parallel to tryDispatchStack): the
+   * try's landing pads destroy only the objects declared inside it, so the
+   * enclosing scope's destructors still run exactly once on the normal
+   * path. */
+  std::vector<size_t> tryScopeStack;
 
   llvm::Function *globalInitFunc = nullptr;
 

@@ -3978,12 +3978,21 @@ llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
   currentFunc = node;
   auto prevCoroInfo = std::move(coroInfo);
 
-  /* Per-function exception-handling state. */
+  /* Per-function exception-handling state. Functions generated in the
+   * middle of another function (synthesized lambdas, thunks) must not leak
+   * their pads' slots into the enclosing function's landing pads. */
+  auto prevEhExnSlot = ehExnSlot;
+  auto prevEhSelSlot = ehSelSlot;
+  auto prevEhResumeBlock = ehResumeBlock;
+  auto prevTryDispatch = std::move(tryDispatchStack);
+  auto prevTryTypeInfos = std::move(tryTypeInfoStack);
+  auto prevTryScopes = std::move(tryScopeStack);
   ehExnSlot = nullptr;
   ehSelSlot = nullptr;
   ehResumeBlock = nullptr;
   tryDispatchStack.clear();
   tryTypeInfoStack.clear();
+  tryScopeStack.clear();
 
   funcScopeStarts.push_back(cgCtx.getAllScopes().size());
 
@@ -4342,6 +4351,12 @@ llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
   currentFunc = prevFunc;
   funcScopeStarts.pop_back();
   coroInfo = std::move(prevCoroInfo);
+  ehExnSlot = prevEhExnSlot;
+  ehSelSlot = prevEhSelSlot;
+  ehResumeBlock = prevEhResumeBlock;
+  tryDispatchStack = std::move(prevTryDispatch);
+  tryTypeInfoStack = std::move(prevTryTypeInfos);
+  tryScopeStack = std::move(prevTryScopes);
 
   diEmitter.emitFunctionEnd();
 
@@ -5021,6 +5036,7 @@ llvm::Value *CodeGen::visit(const TryStmtNode *node) {
   cgCtx.bind("$catch_exn", getOrCreateEHExnSlot());
   tryDispatchStack.push_back(dispatchBB);
   tryTypeInfoStack.push_back(typeInfos);
+  tryScopeStack.push_back(cgCtx.getAllScopes().size() - 1);
 
   dispatch(node->body);
 
@@ -5035,6 +5051,7 @@ llvm::Value *CodeGen::visit(const TryStmtNode *node) {
   cgCtx.clearCatchPad();
   tryDispatchStack.pop_back();
   tryTypeInfoStack.pop_back();
+  tryScopeStack.pop_back();
 
   if (dispatchBB->hasNPredecessorsOrMore(1)) {
     /* Dispatch on the selector: it equals llvm.eh.typeid.for(@T) when the
@@ -7190,6 +7207,24 @@ llvm::Constant *CodeGen::getOrCreateTypeInfo(const ClassType *classTy) {
                                   infoName);
 }
 
+/* Resolves the record type of a prelude class by its simple name: the
+ * prelude module prefixes are tried in order (e.g. 'Async.TimeoutException'
+ * and 'Future.TimeoutException'). Used by compiler-generated helpers that
+ * need a record's type without a user-written type expression. */
+const Type *CodeGen::getPreludeRecordType(std::string_view simpleName) {
+  const Type *rec = astCtx.getRecordType(simpleName);
+  if (rec)
+    return rec;
+  std::vector<std::string_view> prefixes = {"Async", "Future", "prelude.Async",
+                                            "prelude.Future"};
+  for (std::string_view p : prefixes) {
+    std::string full = std::string(p) + "." + std::string(simpleName);
+    if (const Type *t = astCtx.getRecordType(full))
+      return t;
+  }
+  return nullptr;
+}
+
 /* Descriptor for any throwable/catchable type. Class types reuse the
  * hierarchy descriptor (with the parent chain always linked); every other
  * type gets a single-null descriptor whose address identifies it, so exact
@@ -7671,7 +7706,14 @@ llvm::AllocaInst *CodeGen::getOrCreateEHSelSlot() {
 }
 
 /* Emits the per-function exception resume block: reconstructs the landing
- * pad value from the exception slots and resumes unwinding. */
+ * pad value from the exception slots and resumes unwinding.
+ *
+ * In async functions the block is the implicit error boundary: an exception
+ * that no catch clause handled completes the function's future with an
+ * error (Dart semantics) instead of unwinding into the event loop, which
+ * has no personality and would terminate the process. The coroutine is
+ * torn down like on a normal return (the frame's state reference is
+ * released by the destroy function). */
 llvm::BasicBlock *CodeGen::getOrCreateEHResumeBlock() {
   if (ehResumeBlock)
     return ehResumeBlock;
@@ -7680,6 +7722,43 @@ llvm::BasicBlock *CodeGen::getOrCreateEHResumeBlock() {
   ehResumeBlock = llvm::BasicBlock::Create(ctx, "eh.resume", fn);
   llvm::BasicBlock *saved = builder.GetInsertBlock();
   builder.SetInsertPoint(ehResumeBlock);
+
+  if (coroInfo && currentFunc && currentFunc->isAsync) {
+    llvm::Value *state = builder.CreateLoad(
+        builder.getPtrTy(), coroInfo->futureStateSlot, "future.state");
+    llvm::Value *exn = builder.CreateLoad(builder.getPtrTy(),
+                                          getOrCreateEHExnSlot(), "eh.b.exn");
+    emitRuntimeCall("utopia_future_complete_error_exn", builder.getVoidTy(),
+                    {state, exn});
+
+    if (coroInfo->isCoroutine) {
+      /* Teardown: the boundary runs in the ramp (eager throw before the
+       * first suspend) or in a resume part (throw after a resume);
+       * CoroSplit rewrites the return accordingly, and the destroy
+       * function releases the frame's state reference. */
+      llvm::Function *coroEndFn = llvm::Intrinsic::getDeclaration(
+          &mod, llvm::Intrinsic::coro_end);
+      llvm::Function *coroDestroyFn = llvm::Intrinsic::getDeclaration(
+          &mod, llvm::Intrinsic::coro_destroy);
+      llvm::Value *hdl = builder.CreateLoad(builder.getPtrTy(),
+                                            coroInfo->frameSlot,
+                                            "coro.frame");
+      builder.CreateCall(coroEndFn,
+                         {hdl, builder.getInt1(true), coroInfo->coroId});
+      builder.CreateCall(coroDestroyFn, {hdl});
+    } else {
+      /* Plain async function (no awaits): no frame to destroy, release the
+       * state reference held by the frame directly (mirrors
+       * emitAsyncReturn). */
+      emitRuntimeCall("utopia_future_release", builder.getVoidTy(), {state});
+    }
+    llvm::Value *fut = builder.CreateLoad(
+        builder.getPtrTy(), coroInfo->futureStateSlot, "future.obj");
+    builder.CreateRet(fut);
+    builder.SetInsertPoint(saved);
+    return ehResumeBlock;
+  }
+
   llvm::Value *exn = builder.CreateLoad(builder.getPtrTy(),
                                         getOrCreateEHExnSlot(), "eh.r.exn");
   llvm::Value *sel = builder.CreateLoad(builder.getInt32Ty(),
@@ -7693,13 +7772,43 @@ llvm::BasicBlock *CodeGen::getOrCreateEHResumeBlock() {
   return ehResumeBlock;
 }
 
+/* True when the current function's own scopes are inside a try body. The
+ * cgCtx-wide check would see the enclosing function's try marker when a
+ * synthesized lambda or thunk is emitted in the middle of a try. */
+bool CodeGen::funcScopeHasTry() const {
+  size_t scopeStart = funcScopeStarts.empty() ? 0 : funcScopeStarts.back();
+  const auto &allScopes = cgCtx.getAllScopes();
+  for (size_t si = allScopes.size(); si > scopeStart; --si) {
+    if (allScopes[si - 1].ehInfo.kind == EHPadInfo::Kind::Catch)
+      return true;
+  }
+  return false;
+}
+
+/* True when the current function's own scopes hold destructor cleanups
+ * (see funcScopeHasTry for why the cgCtx-wide check is not enough). */
+bool CodeGen::funcScopeHasCleanups() const {
+  size_t scopeStart = funcScopeStarts.empty() ? 0 : funcScopeStarts.back();
+  const auto &allScopes = cgCtx.getAllScopes();
+  for (size_t si = allScopes.size(); si > scopeStart; --si) {
+    if (!allScopes[si - 1].cleanups.empty())
+      return true;
+  }
+  return false;
+}
+
 /* Runs every pending scope cleanup (innermost first) into the current
  * block; used by landing pads to destroy the objects alive at an invoke
- * site before the exception continues. */
-void CodeGen::emitScopeCleanupsInPad() {
+ * site before the exception continues. Only scopes from 'scopeStart'
+ * (inclusive) run: the try pads stop at their own scope so objects
+ * declared before the try keep their single cleanup on the normal path,
+ * and nested functions never destroy the enclosing function's locals. */
+void CodeGen::emitScopeCleanupsInPad(size_t scopeStart) {
   auto allScopes = cgCtx.getAllScopes();
-  for (auto it = allScopes.rbegin(); it != allScopes.rend(); ++it) {
-    for (auto cIt = it->cleanups.rbegin(); cIt != it->cleanups.rend(); ++cIt) {
+  for (size_t si = allScopes.size(); si > scopeStart; --si) {
+    const auto &scope = allScopes[si - 1];
+    for (auto cIt = scope.cleanups.rbegin(); cIt != scope.cleanups.rend();
+         ++cIt) {
       emitCleanupCall(cIt->instancePtr, cIt->destructor, cIt->type,
                       cIt->guard, cIt->runtimeFn);
     }
@@ -7722,7 +7831,7 @@ llvm::Value *CodeGen::emitCallOrInvoke(llvm::FunctionType *fty,
    * try (innermost first), then falls into the innermost catch dispatch.
    * The dispatch chains outward, so an exception that matches an enclosing
    * try's clause is routed there without a second search. */
-  if (cgCtx.isTryActive()) {
+  if (funcScopeHasTry()) {
     llvm::BasicBlock *pad = llvm::BasicBlock::Create(ctx, name + ".pad", fn);
     llvm::BasicBlock *cont =
         llvm::BasicBlock::Create(ctx, name + ".cont", fn);
@@ -7735,7 +7844,7 @@ llvm::Value *CodeGen::emitCallOrInvoke(llvm::FunctionType *fty,
     builder.SetInsertPoint(pad);
     llvm::StructType *lpTy =
         llvm::StructType::get(ctx, {builder.getPtrTy(), builder.getInt32Ty()});
-    bool hasCleanups = cgCtx.hasActiveCleanups();
+    bool hasCleanups = funcScopeHasCleanups();
     llvm::LandingPadInst *lp = builder.CreateLandingPad(
         lpTy, (hasCleanups ? 1 : 0) + clauses.size(), name + ".lp");
     if (hasCleanups)
@@ -7747,8 +7856,50 @@ llvm::Value *CodeGen::emitCallOrInvoke(llvm::FunctionType *fty,
     builder.CreateStore(builder.CreateExtractValue(lp, 1, name + ".sel"),
                         getOrCreateEHSelSlot());
     if (hasCleanups)
-      emitScopeCleanupsInPad();
+      emitScopeCleanupsInPad(tryScopeStack.empty() ? 0 : tryScopeStack.back());
     builder.CreateBr(tryDispatchStack.back());
+    builder.SetInsertPoint(saved);
+
+    result = builder.CreateInvoke(fty, callee, cont, pad, args);
+    builder.SetInsertPoint(cont);
+    return result;
+  }
+
+  /* Async functions always route an unwindable call to the implicit error
+   * boundary: an exception escaping the body completes the function's
+   * future with an error (Dart semantics) instead of unwinding into the
+   * event loop, which has no personality. The await site rethrows the
+   * error of a failed future through the same path. */
+  if (currentFunc->isAsync) {
+    llvm::BasicBlock *pad = llvm::BasicBlock::Create(ctx, name + ".pad", fn);
+    llvm::BasicBlock *cont =
+        llvm::BasicBlock::Create(ctx, name + ".cont", fn);
+
+    llvm::BasicBlock *saved = builder.GetInsertBlock();
+    builder.SetInsertPoint(pad);
+    llvm::StructType *lpTy =
+        llvm::StructType::get(ctx, {builder.getPtrTy(), builder.getInt32Ty()});
+    bool hasCleanups = funcScopeHasCleanups();
+    llvm::LandingPadInst *lp =
+        builder.CreateLandingPad(lpTy, (hasCleanups ? 1 : 0) + 1,
+                                 name + ".lp");
+    /* The boundary is a catch-all: every exception reaching it is captured
+     * into the future, so the pad is both a cleanup and a handler. The
+     * catch clause is what lets the unwinder's search phase accept the
+     * frame: a cleanup-only pad can never be found by _Unwind_RaiseException
+     * (phase 2 only runs toward a matching handler), so without it an
+     * exception escaping an async body would abort the process instead of
+     * failing the future. */
+    lp->setCleanup(true);
+    lp->addClause(llvm::ConstantPointerNull::get(builder.getPtrTy()));
+    builder.CreateStore(builder.CreateExtractValue(lp, 0, name + ".exn"),
+                        getOrCreateEHExnSlot());
+    builder.CreateStore(builder.CreateExtractValue(lp, 1, name + ".sel"),
+                        getOrCreateEHSelSlot());
+    if (hasCleanups)
+      emitScopeCleanupsInPad(funcScopeStarts.empty() ? 0
+                                                     : funcScopeStarts.back());
+    builder.CreateBr(getOrCreateEHResumeBlock());
     builder.SetInsertPoint(saved);
 
     result = builder.CreateInvoke(fty, callee, cont, pad, args);
@@ -7758,7 +7909,7 @@ llvm::Value *CodeGen::emitCallOrInvoke(llvm::FunctionType *fty,
 
   /* Outside any try but with destructor-bearing objects live: the invoke
    * routes to a landing pad that runs them and resumes unwinding. */
-  if (cgCtx.hasActiveCleanups()) {
+  if (funcScopeHasCleanups()) {
     llvm::BasicBlock *pad = llvm::BasicBlock::Create(ctx, name + ".pad", fn);
     llvm::BasicBlock *cont =
         llvm::BasicBlock::Create(ctx, name + ".cont", fn);
@@ -7774,7 +7925,8 @@ llvm::Value *CodeGen::emitCallOrInvoke(llvm::FunctionType *fty,
                         getOrCreateEHExnSlot());
     builder.CreateStore(builder.CreateExtractValue(lp, 1, name + ".sel"),
                         getOrCreateEHSelSlot());
-    emitScopeCleanupsInPad();
+    emitScopeCleanupsInPad(funcScopeStarts.empty() ? 0
+                                                   : funcScopeStarts.back());
     builder.CreateBr(getOrCreateEHResumeBlock());
     builder.SetInsertPoint(saved);
 
@@ -8088,6 +8240,17 @@ llvm::Function *CodeGen::getOrCreateThenThunk(const Type *valueType,
 
   auto savedIP = builder.saveIP();
   auto savedLoc = builder.getCurrentDebugLocation();
+  auto savedExn = ehExnSlot;
+  auto savedSel = ehSelSlot;
+  auto savedResume = ehResumeBlock;
+  auto savedDispatch = std::move(tryDispatchStack);
+  auto savedTypeInfos = std::move(tryTypeInfoStack);
+  auto savedTryScopes = std::move(tryScopeStack);
+  ehExnSlot = nullptr;
+  ehSelSlot = nullptr;
+  ehResumeBlock = nullptr;
+  cgCtx.pushScope();
+
   llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", fn);
   builder.SetInsertPoint(entry);
 
@@ -8127,8 +8290,8 @@ llvm::Function *CodeGen::getOrCreateThenThunk(const Type *valueType,
 
   /* Call the callback through its pointer. */
   llvm::Type *cbRetTy = asyncCb
-                              ? static_cast<llvm::Type *>(builder.getPtrTy())
-                              : builder.getVoidTy();
+                            ? static_cast<llvm::Type *>(builder.getPtrTy())
+                            : builder.getVoidTy();
   llvm::FunctionType *cbFnTy =
       llvm::FunctionType::get(cbRetTy, cbParamTys, false);
   llvm::Value *cbPtr = builder.CreateBitCast(
@@ -8136,18 +8299,276 @@ llvm::Function *CodeGen::getOrCreateThenThunk(const Type *valueType,
 
   llvm::Value *ret = nullptr;
   if (cbParamTys.empty()) {
-    ret = builder.CreateCall(cbFnTy, cbPtr, {});
+    emitThunkCallbackCall(cbFnTy, cbPtr, {}, resultState);
+    ret = nullptr;
   } else {
-    ret = builder.CreateCall(cbFnTy, cbPtr, {val});
+    emitThunkCallbackCall(cbFnTy, cbPtr, {val}, resultState);
+    ret = nullptr;
   }
   if (asyncCb) {
-    emitRuntimeCall("utopia_future_chain", builder.getVoidTy(),
-                    {ret, resultState});
+    /* The callback's future is a state pointer; forward its completion
+     * (value or error) into resultState. */
+    emitRuntimeCall("utopia_future_forward", builder.getVoidTy(),
+                    {resultState, ret});
   } else {
     emitRuntimeCall("utopia_future_complete", builder.getVoidTy(),
                     {resultState});
   }
+  emitScopeCleanups();
   builder.CreateRetVoid();
+
+  cgCtx.popScope();
+  ehExnSlot = savedExn;
+  ehSelSlot = savedSel;
+  ehResumeBlock = savedResume;
+  tryDispatchStack = std::move(savedDispatch);
+  tryTypeInfoStack = std::move(savedTypeInfos);
+  tryScopeStack = std::move(savedTryScopes);
+  builder.restoreIP(savedIP);
+  builder.SetCurrentDebugLocation(savedLoc);
+
+  asyncHelpers[key] = fn;
+  return fn;
+}
+
+/* Invokes a user callback inside a compiler-generated helper thunk. The
+ * call is an invoke whose landing pad completes 'stateOnError' with the
+ * raised exception and returns, so a throwing callback fails the future
+ * it was driving (Dart semantics) instead of unwinding into the event
+ * loop, which has no personality routine. The thunk's own EH state is
+ * isolated from the enclosing function's. Returns the invoke result, which
+ * the caller uses as the callback's return value. */
+llvm::Value *CodeGen::emitThunkCallbackCall(llvm::FunctionType *fty,
+                                            llvm::Value *callee,
+                                            llvm::ArrayRef<llvm::Value *> args,
+                                            llvm::Value *stateOnError) {
+  llvm::Function *fn = builder.GetInsertBlock()->getParent();
+  fn->setPersonalityFn(getOrCreatePersonalityFunction());
+
+  auto savedExn = ehExnSlot;
+  auto savedSel = ehSelSlot;
+  auto savedResume = ehResumeBlock;
+  auto savedDispatch = std::move(tryDispatchStack);
+  auto savedTypeInfos = std::move(tryTypeInfoStack);
+  auto savedTryScopes = std::move(tryScopeStack);
+  ehExnSlot = nullptr;
+  ehSelSlot = nullptr;
+  ehResumeBlock = nullptr;
+
+  llvm::BasicBlock *pad =
+      llvm::BasicBlock::Create(ctx, "thunk.cb.pad", fn);
+  llvm::BasicBlock *cont =
+      llvm::BasicBlock::Create(ctx, "thunk.cb.cont", fn);
+  llvm::BasicBlock *handler =
+      llvm::BasicBlock::Create(ctx, "thunk.cb.handler", fn);
+
+  llvm::BasicBlock *saved = builder.GetInsertBlock();
+  builder.SetInsertPoint(pad);
+  llvm::StructType *lpTy =
+      llvm::StructType::get(ctx, {builder.getPtrTy(), builder.getInt32Ty()});
+  llvm::LandingPadInst *lp = builder.CreateLandingPad(lpTy, 1, "thunk.lp");
+  /* The catch-all clause makes the unwinder's search phase accept this
+   * frame (see the async boundary pads in emitCallOrInvoke). */
+  lp->setCleanup(true);
+  lp->addClause(llvm::ConstantPointerNull::get(builder.getPtrTy()));
+  builder.CreateStore(builder.CreateExtractValue(lp, 0, "thunk.exn"),
+                      getOrCreateEHExnSlot());
+  builder.CreateBr(handler);
+
+  builder.SetInsertPoint(handler);
+  llvm::Value *exnVal = builder.CreateLoad(builder.getPtrTy(),
+                                           getOrCreateEHExnSlot(),
+                                           "thunk.handler.exn");
+  emitRuntimeCall("utopia_future_complete_error_exn", builder.getVoidTy(),
+                  {stateOnError, exnVal});
+  emitScopeCleanups();
+  builder.CreateRetVoid();
+
+  builder.SetInsertPoint(saved);
+  llvm::Value *ret = builder.CreateInvoke(fty, callee, cont, pad, args);
+  builder.SetInsertPoint(cont);
+
+  ehExnSlot = savedExn;
+  ehSelSlot = savedSel;
+  ehResumeBlock = savedResume;
+  tryDispatchStack = std::move(savedDispatch);
+  tryTypeInfoStack = std::move(savedTypeInfos);
+  tryScopeStack = std::move(savedTryScopes);
+  return ret;
+}
+
+/* 'void errThunk(ptr errValuePtr, ptr cb, ptr resultState)': runs the
+ * error handler with no arguments (the handler signature has no
+ * parameters) and completes resultState with its result. The async variant
+ * chains the handler's future into resultState. A throwing handler fails
+ * resultState. */
+llvm::Function *CodeGen::getOrCreateErrorThunk(const Type *valueType,
+                                               bool asyncCb) {
+  std::string key = std::string("error_thunk_") + (asyncCb ? "a_" : "s_") +
+                    std::string(valueType ? valueType->toString() : "void");
+  auto it = asyncHelpers.find(key);
+  if (it != asyncHelpers.end())
+    return it->second;
+
+  llvm::FunctionType *ty = llvm::FunctionType::get(
+      builder.getVoidTy(),
+      {builder.getPtrTy(), builder.getPtrTy(), builder.getPtrTy()}, false);
+  auto *fn = llvm::Function::Create(ty, llvm::Function::InternalLinkage, key,
+                                    &mod);
+
+  auto savedIP = builder.saveIP();
+  auto savedLoc = builder.getCurrentDebugLocation();
+  cgCtx.pushScope();
+
+  llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", fn);
+  builder.SetInsertPoint(entry);
+
+  llvm::Value *cb = fn->getArg(1);
+  llvm::Value *resultState = fn->getArg(2);
+
+  bool isVoidValue = !valueType || valueType->isVoid();
+  llvm::Type *cbRetTy = asyncCb
+                            ? static_cast<llvm::Type *>(builder.getPtrTy())
+                            : (isVoidValue
+                                   ? static_cast<llvm::Type *>(
+                                         builder.getVoidTy())
+                                   : getLLVMType(valueType));
+  llvm::FunctionType *cbFnTy = llvm::FunctionType::get(cbRetTy, {}, false);
+  llvm::Value *cbPtr =
+      builder.CreateBitCast(cb, llvm::PointerType::getUnqual(cbFnTy));
+
+  llvm::Value *ret = emitThunkCallbackCall(cbFnTy, cbPtr, {}, resultState);
+  if (asyncCb) {
+    emitRuntimeCall("utopia_future_forward", builder.getVoidTy(),
+                    {resultState, ret});
+  } else if (!isVoidValue) {
+    writeFutureValueInto(resultState, ret, valueType, false);
+    emitRuntimeCall("utopia_future_complete", builder.getVoidTy(),
+                    {resultState});
+  } else {
+    emitRuntimeCall("utopia_future_complete", builder.getVoidTy(),
+                    {resultState});
+  }
+  emitScopeCleanups();
+  builder.CreateRetVoid();
+
+  cgCtx.popScope();
+  builder.restoreIP(savedIP);
+  builder.SetCurrentDebugLocation(savedLoc);
+
+  asyncHelpers[key] = fn;
+  return fn;
+}
+
+/* 'void timeoutThunk(ptr cb, ptr resultState)': runs the onTimeout
+ * callback of Future.timeout and completes resultState with its result
+ * (or forwards the callback's future in the async variant). */
+llvm::Function *CodeGen::getOrCreateTimeoutThunk(const Type *valueType,
+                                                 bool asyncCb) {
+  std::string key = std::string("timeout_thunk_") + (asyncCb ? "a_" : "s_") +
+                    std::string(valueType ? valueType->toString() : "void");
+  auto it = asyncHelpers.find(key);
+  if (it != asyncHelpers.end())
+    return it->second;
+
+  llvm::FunctionType *ty = llvm::FunctionType::get(
+      builder.getVoidTy(), {builder.getPtrTy(), builder.getPtrTy()}, false);
+  auto *fn = llvm::Function::Create(ty, llvm::Function::InternalLinkage, key,
+                                    &mod);
+
+  auto savedIP = builder.saveIP();
+  auto savedLoc = builder.getCurrentDebugLocation();
+  cgCtx.pushScope();
+
+  llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", fn);
+  builder.SetInsertPoint(entry);
+
+  llvm::Value *cb = fn->getArg(0);
+  llvm::Value *resultState = fn->getArg(1);
+
+  bool isVoidValue = !valueType || valueType->isVoid();
+  llvm::Type *cbRetTy = asyncCb
+                            ? static_cast<llvm::Type *>(builder.getPtrTy())
+                            : (isVoidValue
+                                   ? static_cast<llvm::Type *>(
+                                         builder.getVoidTy())
+                                   : getLLVMType(valueType));
+  llvm::FunctionType *cbFnTy = llvm::FunctionType::get(cbRetTy, {}, false);
+  llvm::Value *cbPtr =
+      builder.CreateBitCast(cb, llvm::PointerType::getUnqual(cbFnTy));
+
+  llvm::Value *ret = emitThunkCallbackCall(cbFnTy, cbPtr, {}, resultState);
+  if (asyncCb) {
+    emitRuntimeCall("utopia_future_forward", builder.getVoidTy(),
+                    {resultState, ret});
+  } else if (!isVoidValue) {
+    writeFutureValueInto(resultState, ret, valueType, false);
+    emitRuntimeCall("utopia_future_complete", builder.getVoidTy(),
+                    {resultState});
+  } else {
+    emitRuntimeCall("utopia_future_complete", builder.getVoidTy(),
+                    {resultState});
+  }
+  emitScopeCleanups();
+  builder.CreateRetVoid();
+
+  cgCtx.popScope();
+  builder.restoreIP(savedIP);
+  builder.SetCurrentDebugLocation(savedLoc);
+
+  asyncHelpers[key] = fn;
+  return fn;
+}
+
+/* 'void timeoutThunk(ptr cb, ptr resultState)': completes resultState with
+ * a freshly allocated TimeoutException (the no-onTimeout case of
+ * Future.timeout). The empty record needs no value copy or destructor; the
+ * type descriptor alone identifies the error. */
+llvm::Function *CodeGen::getOrCreateTimeoutExceptionThunk() {
+  std::string key = "timeout_exception_thunk";
+  auto it = asyncHelpers.find(key);
+  if (it != asyncHelpers.end())
+    return it->second;
+
+  llvm::FunctionType *ty = llvm::FunctionType::get(
+      builder.getVoidTy(), {builder.getPtrTy(), builder.getPtrTy()}, false);
+  auto *fn = llvm::Function::Create(ty, llvm::Function::InternalLinkage, key,
+                                    &mod);
+
+  auto savedIP = builder.saveIP();
+  auto savedLoc = builder.getCurrentDebugLocation();
+
+  llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", fn);
+  builder.SetInsertPoint(entry);
+
+  llvm::Value *resultState = fn->getArg(1);
+
+  const Type *timeoutTy = getPreludeRecordType("TimeoutException");
+  if (!timeoutTy) {
+    /* The prelude failed to load: complete with nothing rather than crash
+     * the compiler. */
+    builder.CreateRetVoid();
+  } else {
+    llvm::Type *llTy = getLLVMType(timeoutTy);
+    uint64_t size = mod.getDataLayout().getTypeAllocSize(llTy);
+    llvm::Function *allocFn = getOrCreateRuntimeFunction(
+        "utopia_allocate_exception",
+        llvm::FunctionType::get(builder.getPtrTy(), {builder.getInt64Ty()},
+                                false));
+    llvm::Value *slot = builder.CreateCall(
+        allocFn, {builder.getInt64(size)}, "timeout.slot");
+    llvm::Constant *typeInfo = getOrCreateTypeInfoForType(timeoutTy);
+    emitRuntimeCall("utopia_future_complete_error", builder.getVoidTy(),
+                    {resultState, typeInfo, slot, builder.getInt64(size),
+                     builder.getInt32(1),
+                     llvm::ConstantPointerNull::get(builder.getPtrTy())});
+    llvm::Function *disposeFn = getOrCreateRuntimeFunction(
+        "utopia_exception_dispose",
+        llvm::FunctionType::get(builder.getVoidTy(), {builder.getPtrTy()},
+                                false));
+    builder.CreateCall(disposeFn, {slot});
+    builder.CreateRetVoid();
+  }
 
   builder.restoreIP(savedIP);
   builder.SetCurrentDebugLocation(savedLoc);
@@ -8158,7 +8579,8 @@ llvm::Function *CodeGen::getOrCreateThenThunk(const Type *valueType,
 
 /* 'void thunk(ptr state, ptr fn)', the worker-thread entry used by
  * Future.runOnThread: calls fn, stores the result into the state and
- * completes it. */
+ * completes it. A fn that throws completes the state with the raised
+ * exception instead of terminating the worker thread. */
 llvm::Function *CodeGen::getOrCreateThreadThunk(const Type *valueType) {
   std::string key =
       "thread_thunk_" +
@@ -8174,6 +8596,8 @@ llvm::Function *CodeGen::getOrCreateThreadThunk(const Type *valueType) {
 
   auto savedIP = builder.saveIP();
   auto savedLoc = builder.getCurrentDebugLocation();
+  cgCtx.pushScope();
+
   llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", fn);
   builder.SetInsertPoint(entry);
 
@@ -8187,19 +8611,21 @@ llvm::Function *CodeGen::getOrCreateThreadThunk(const Type *valueType) {
     llvm::FunctionType *fnTy = llvm::FunctionType::get(retTy, {}, false);
     llvm::Value *callee = builder.CreateBitCast(
         fnPtr, llvm::PointerType::getUnqual(fnTy));
-    retVal = builder.CreateCall(fnTy, callee, {});
+    retVal = emitThunkCallbackCall(fnTy, callee, {}, state);
     writeFutureValueInto(state, retVal, valueType, false);
   } else {
     llvm::FunctionType *fnTy =
         llvm::FunctionType::get(builder.getVoidTy(), {}, false);
     llvm::Value *callee = builder.CreateBitCast(
         fnPtr, llvm::PointerType::getUnqual(fnTy));
-    builder.CreateCall(fnTy, callee, {});
+    emitThunkCallbackCall(fnTy, callee, {}, state);
   }
 
   emitRuntimeCall("utopia_future_complete", builder.getVoidTy(), {state});
+  emitScopeCleanups();
   builder.CreateRetVoid();
 
+  cgCtx.popScope();
   builder.restoreIP(savedIP);
   builder.SetCurrentDebugLocation(savedLoc);
 
@@ -8228,6 +8654,8 @@ llvm::Function *CodeGen::getOrCreateAsyncThreadThunk(const Type *valueType) {
 
   auto savedIP = builder.saveIP();
   auto savedLoc = builder.getCurrentDebugLocation();
+  cgCtx.pushScope();
+
   llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", fn);
   builder.SetInsertPoint(entry);
 
@@ -8241,13 +8669,87 @@ llvm::Function *CodeGen::getOrCreateAsyncThreadThunk(const Type *valueType) {
   llvm::FunctionType *fnTy = llvm::FunctionType::get(llFutTy, {}, false);
   llvm::Value *callee = builder.CreateBitCast(
       fnPtr, llvm::PointerType::getUnqual(fnTy));
-  llvm::Value *fut = builder.CreateCall(fnTy, callee, {});
+  llvm::Value *fut = emitThunkCallbackCall(fnTy, callee, {}, state);
   llvm::Value *innerState =
       builder.CreateExtractValue(fut, 0, "async.fn.state");
 
   /* Pump this thread's loop until the async function completes. */
   emitRuntimeCall("utopia_loop_run", builder.getInt32Ty(), {innerState});
 
+  /* An async fn that completed with an error must fail the outer state
+   * with the same error (the await-equivalent of the worker's future). */
+  llvm::Function *fn2 = builder.GetInsertBlock()->getParent();
+  llvm::BasicBlock *okBB = llvm::BasicBlock::Create(ctx, "worker.ok", fn2);
+  llvm::BasicBlock *errBB = llvm::BasicBlock::Create(ctx, "worker.err", fn2);
+  llvm::Value *err32 = emitRuntimeCall("utopia_future_has_error",
+                                       builder.getInt32Ty(), {innerState});
+  llvm::Value *hasErr =
+      builder.CreateICmpNE(err32, builder.getInt32(0), "worker.err");
+  builder.CreateCondBr(hasErr, errBB, okBB);
+
+  /* The rethrow unwinds into a landing pad that completes the outer state
+   * with the exception (a plain call would unwind past this frame into the
+   * worker's C++ caller, which has no personality). */
+  builder.SetInsertPoint(errBB);
+  {
+    auto savedExn = ehExnSlot;
+    auto savedSel = ehSelSlot;
+    auto savedResume = ehResumeBlock;
+    auto savedDispatch = std::move(tryDispatchStack);
+    auto savedTypeInfos = std::move(tryTypeInfoStack);
+    auto savedTryScopes = std::move(tryScopeStack);
+    ehExnSlot = nullptr;
+    ehSelSlot = nullptr;
+    ehResumeBlock = nullptr;
+    fn2->setPersonalityFn(getOrCreatePersonalityFunction());
+
+    llvm::BasicBlock *pad =
+        llvm::BasicBlock::Create(ctx, "worker.err.pad", fn2);
+    llvm::BasicBlock *handler =
+        llvm::BasicBlock::Create(ctx, "worker.err.handler", fn2);
+    llvm::StructType *lpTy = llvm::StructType::get(
+        ctx, {builder.getPtrTy(), builder.getInt32Ty()});
+    builder.SetInsertPoint(pad);
+    llvm::LandingPadInst *lp = builder.CreateLandingPad(lpTy, 1, "w.lp");
+    lp->setCleanup(true);
+    lp->addClause(llvm::ConstantPointerNull::get(builder.getPtrTy()));
+    builder.CreateStore(builder.CreateExtractValue(lp, 0, "w.exn"),
+                        getOrCreateEHExnSlot());
+    builder.CreateBr(handler);
+    builder.SetInsertPoint(handler);
+    llvm::Value *exnVal = builder.CreateLoad(builder.getPtrTy(),
+                                             getOrCreateEHExnSlot(),
+                                             "w.handler.exn");
+    emitRuntimeCall("utopia_future_complete_error_exn", builder.getVoidTy(),
+                    {state, exnVal});
+    /* The worker's future state reference: released on the success path
+     * below, so the failed path must drop it too. */
+    emitRuntimeCall("utopia_future_release", builder.getVoidTy(),
+                    {innerState});
+    emitScopeCleanups();
+    builder.CreateRetVoid();
+
+    llvm::Function *rethrowFn = getOrCreateRuntimeFunction(
+        "utopia_future_rethrow",
+        llvm::FunctionType::get(builder.getVoidTy(), {builder.getPtrTy()},
+                                false));
+    llvm::BasicBlock *unreachable =
+        llvm::BasicBlock::Create(ctx, "worker.err.unreachable", fn2);
+    builder.SetInsertPoint(errBB);
+    builder.CreateInvoke(rethrowFn->getFunctionType(), rethrowFn,
+                         unreachable, pad, {innerState});
+    builder.SetInsertPoint(unreachable);
+    builder.CreateUnreachable();
+
+    ehExnSlot = savedExn;
+    ehSelSlot = savedSel;
+    ehResumeBlock = savedResume;
+    tryDispatchStack = std::move(savedDispatch);
+    tryTypeInfoStack = std::move(savedTypeInfos);
+    tryScopeStack = std::move(savedTryScopes);
+  }
+
+  builder.SetInsertPoint(okBB);
   bool isVoidValue = !valueType || valueType->isVoid();
   if (!isVoidValue) {
     llvm::Value *retVal = readFutureValue(innerState, valueType);
@@ -8260,8 +8762,10 @@ llvm::Function *CodeGen::getOrCreateAsyncThreadThunk(const Type *valueType) {
    * release the reference it carried now that the value was copied out. */
   emitRuntimeCall("utopia_future_release", builder.getVoidTy(), {innerState});
 
+  emitScopeCleanups();
   builder.CreateRetVoid();
 
+  cgCtx.popScope();
   builder.restoreIP(savedIP);
   builder.SetCurrentDebugLocation(savedLoc);
 
@@ -8736,6 +9240,8 @@ llvm::Value *CodeGen::visit(const AwaitExprNode *node) {
       llvm::BasicBlock::Create(ctx, "await.resumed", func);
   llvm::BasicBlock *afterBB =
       llvm::BasicBlock::Create(ctx, "await.after", func);
+  llvm::BasicBlock *okBB = llvm::BasicBlock::Create(ctx, "await.ok", func);
+  llvm::BasicBlock *errBB = llvm::BasicBlock::Create(ctx, "await.error", func);
 
   /* The runtime returns an int (C ABI): normalize to i1. */
   llvm::Value *done32 = emitRuntimeCall("utopia_future_is_completed",
@@ -8770,8 +9276,28 @@ llvm::Value *CodeGen::visit(const AwaitExprNode *node) {
   builder.SetInsertPoint(resumedBB);
   builder.CreateBr(afterBB);
 
-  /* The value is read once, after either path converges. */
+  /* A future that completed with an error rethrows it here (Dart
+   * semantics): the dynamic type is preserved and the enclosing try/catch
+   * of the awaiting function handles it, or the function's own boundary
+   * captures it into its future. The rethrow is an invoke so landing pads
+   * route it; it never returns, so the normal continuation is unreachable. */
   builder.SetInsertPoint(afterBB);
+  llvm::Value *err32 = emitRuntimeCall("utopia_future_has_error",
+                                       builder.getInt32Ty(), {state});
+  llvm::Value *hasErr =
+      builder.CreateICmpNE(err32, builder.getInt32(0), "await.err");
+  builder.CreateCondBr(hasErr, errBB, okBB);
+
+  builder.SetInsertPoint(errBB);
+  llvm::Function *rethrowFn = getOrCreateRuntimeFunction(
+      "utopia_future_rethrow",
+      llvm::FunctionType::get(builder.getVoidTy(), {builder.getPtrTy()},
+                              false));
+  emitCallOrInvoke(rethrowFn->getFunctionType(), rethrowFn, {state});
+  builder.CreateUnreachable();
+
+  /* The value is read once, after either completion path converges. */
+  builder.SetInsertPoint(okBB);
   llvm::Value *val = readFutureValue(state, valueTy);
   node->exprType = valueTy;
   return val;

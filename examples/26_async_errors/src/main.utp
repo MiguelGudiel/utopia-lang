@@ -1,0 +1,102 @@
+/*
+ * Async error handling.
+ *
+ * - 'try'/'catch'/'throw' work inside async functions: an exception that no
+ *   clause catches is captured into the function's future, and 'await' on
+ *   the failed future rethrows it at the await site (Dart semantics).
+ * - 'Future.catchError' recovers from a failed future with the handler's
+ *   result; 'then' accepts an 'onError' handler and forwards errors through
+ *   chains; 'timeout' fails with a TimeoutException (or the onTimeout
+ *   callback's result) when the deadline passes first.
+ */
+
+class ApiError {
+  int32 code;
+  ApiError(this.code) {}
+}
+
+Future<int> fetchOk() async {
+  await Future.delayed<void>(10, () {});
+  return 42;
+}
+
+Future<int> fetchFail() async {
+  await Future.delayed<void>(10, () {});
+  throw ApiError(404);
+}
+
+Future<int> failOnThread() {
+  throw ApiError(9);
+}
+
+int main() async {
+  /* try/catch inside an async function catches the error of an awaited
+   * future; the caught value is bound to its typed variable. */
+  try {
+    int v = await fetchFail();
+    print("unreachable %d\n", v);
+  } catch (ApiError e) {
+    print("caught in async: %d\n", e.code);
+  }
+
+  /* catchError: the handler's result completes the returned future. */
+  int r = await fetchFail().catchError(() => -1);
+  print("catchError: %d\n", r);
+
+  /* The handler may be async: the returned future waits for it. */
+  int r2 = await fetchFail().catchError(() async {
+    await Future.delayed<void>(5, () {});
+    return -2;
+  });
+  print("async catchError: %d\n", r2);
+
+  /* A successful source passes its value through catchError untouched. */
+  int g = await fetchOk().catchError(() => -1);
+  print("passthrough: %d\n", g);
+
+  /* Errors propagate through 'then' chains: the result future fails. */
+  try {
+    await fetchFail().then((v) { print("then value %d\n", v); });
+  } catch (ApiError e) {
+    print("then propagated: %d\n", e.code);
+  }
+
+  /* then with an onError handler: it runs instead of the value callback. */
+  await fetchFail().then((v) { print("then value %d\n", v); },
+                         () { print("onError ran\n"); });
+
+  /* timeout: the deadline wins and completes with a TimeoutException. */
+  try {
+    await Future.delayed<int>(200, () => 1).timeout(Duration(milliseconds: 10));
+    print("timeout unreachable\n");
+  } catch (TimeoutException e) {
+    print("timeout fired\n");
+  }
+
+  /* timeout with onTimeout: its result completes the future. */
+  int t = await Future.delayed<int>(200, () => 1).timeout(
+      Duration(milliseconds: 10), () => 777);
+  print("timeout callback: %d\n", t);
+
+  /* A future that settles before the deadline wins the race. */
+  int s = await fetchOk().timeout(Duration(seconds: 1), () => -1);
+  print("no timeout: %d\n", s);
+
+  /* A failed future rethrows on every await, preserving the type. */
+  Future<int> f = fetchFail();
+  try {
+    await f;
+  } catch (ApiError e) {
+    print("second await rethrows: %d\n", e.code);
+  }
+
+  /* runOnThread: a throwing function fails the future like any async work. */
+  try {
+    await Future.runOnThread<int>(failOnThread);
+    print("thread unreachable\n");
+  } catch (ApiError e) {
+    print("thread error: %d\n", e.code);
+  }
+
+  return 0;
+}

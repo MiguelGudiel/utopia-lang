@@ -11,6 +11,11 @@ private void _utopia_future_retain(void* state);
 @extern("utopia_future_is_completed")
 private int32 _utopia_future_is_completed(void* state);
 
+/* The error a Future.timeout deadline produces when no onTimeout callback
+ * handles it (Dart semantics). The class is deliberately empty: the type
+ * identity is what catch clauses and error handlers match on. */
+class TimeoutException {}
+
 /* Future<T>: a future backed by a reference-counted runtime
  * state. An 'async' function of declared type T returns a Future<T>; the
  * compiler lowers 'await' to continuation registration + coroutine
@@ -69,7 +74,8 @@ class Future<T> {
 
   /* Runs 'cb' with the future's value once it completes. The returned
    * Future<void> completes after the callback ran, so 'then' calls chain:
-   * f.then(cb1).then(cb2). */
+   * f.then(cb1).then(cb2). An error completing f is forwarded to the
+   * returned future: the value callback never runs on the error path. */
   @intrinsic("future_then")
   Future<void> then(void Function(T) cb);
 
@@ -85,6 +91,46 @@ class Future<T> {
 
   @intrinsic("future_then")
   Future<void> then(Future<void> Function() cb);
+
+  /* Error-handling forms: 'onError' runs instead of 'cb' when the future
+   * completes with an error; the returned future then completes normally. */
+  @intrinsic("future_then")
+  Future<void> then(void Function(T) cb, void Function() onError);
+
+  @intrinsic("future_then")
+  Future<void> then(void Function() cb, void Function() onError);
+
+  /* Runs 'onError' when this future completes with an error and returns a
+   * future that completes with the handler's result. A successful source
+   * passes its value through unchanged. The handler takes no parameters:
+   * async code should use try/catch, which binds the caught value to a
+   * typed variable. */
+  @intrinsic("future_catchError")
+  Future<T> catchError(T Function() onError);
+
+  @intrinsic("future_catchError")
+  Future<T> catchError(Future<T> Function() onError);
+
+  /* Completes with this future's value, or with a TimeoutException when
+   * the deadline passes first. With an 'onTimeout' callback the deadline
+   * instead completes with the callback's result (Dart semantics). */
+  @intrinsic("future_timeout")
+  Future<T> timeout(Duration timeLimit);
+
+  @intrinsic("future_timeout")
+  Future<T> timeout(Duration timeLimit, T Function() onTimeout);
+
+  @intrinsic("future_timeout")
+  Future<T> timeout(Duration timeLimit, Future<T> Function() onTimeout);
+
+  @intrinsic("future_timeout")
+  Future<T> timeout(int64 timeLimitMs);
+
+  @intrinsic("future_timeout")
+  Future<T> timeout(int64 timeLimitMs, T Function() onTimeout);
+
+  @intrinsic("future_timeout")
+  Future<T> timeout(int64 timeLimitMs, Future<T> Function() onTimeout);
 
   /* Runs 'cb' when this future completes (value or not). */
   Future<void> whenComplete(void Function() cb) async {

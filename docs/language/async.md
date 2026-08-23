@@ -185,6 +185,71 @@ int u = await Future.runOnThread<int>(() async {
 });
 ```
 
+## Error handling
+
+Async functions support `try`/`catch`/`throw` like synchronous ones. An
+exception that no catch clause inside the coroutine handles is captured into
+the function's future (Dart semantics): awaiting that future rethrows the
+error at the await site, with its dynamic type preserved, so a surrounding
+`try`/`catch` in the awaiting coroutine can catch it:
+
+```utp
+class NetworkError {
+  int32 code;
+  NetworkError(this.code) {}
+}
+
+Future<int> fetch() async {
+  await Future.delayed<void>(10, () {});
+  throw NetworkError(404);
+}
+
+int main() async {
+  try {
+    int v = await fetch();
+    print("value %d\n", v);
+  } catch (NetworkError e) {
+    print("failed with %d\n", e.code);
+  }
+  return 0;
+}
+```
+
+Awaiting a failed future rethrows even outside a `try`; if nothing handles
+the error, the future carries it until it is released, and the runtime then
+reports it (`Unhandled async error: ...`) and terminates the process.
+
+Callback-style error handling is available on `Future<T>`:
+
+```utp
+/* catchError: the handler runs on error and its result completes the
+ * returned future. A successful source passes its value through. */
+int v = await fetch().catchError(() => -1);
+
+/* The handler may be async. */
+int v = await fetch().catchError(() async {
+  await Future.delayed<void>(5, () {});
+  return -1;
+});
+
+/* then with an onError handler: it runs instead of the value callback. */
+await fetch().then((v) => print("value %d\n", v),
+                   () => print("failed\n"));
+
+/* timeout: the deadline wins and completes with a TimeoutException, or
+ * with the onTimeout callback's result when one is given. */
+try {
+  await slowFetch().timeout(Duration(seconds: 1));
+} catch (TimeoutException e) {
+  print("timed out\n");
+}
+int v = await slowFetch().timeout(Duration(seconds: 1), () => -1);
+```
+
+Errors flow through `then` chains: a failed source completes the chain's
+result future with the same error, so one `catchError` at the end of a chain
+(or one `try` around the final `await`) handles errors from any link.
+
 ## The standard library
 
 - `Future.value<T>(v)`: a future already completed with `v`
@@ -193,6 +258,10 @@ int u = await Future.runOnThread<int>(() async {
 - `Future.runOnThread<T>(fn)`: runs `fn` on a worker thread
 - `Future.wait<T>(List<Future<T>>)`: completes with the values, in order
 - `f.then(cb)`: runs `cb` when the future completes (sync or async callbacks)
+- `f.then(cb, onError)`: runs `onError` instead of `cb` when the future failed
+- `f.catchError(onError)`: recovers from an error with the handler's result
+- `f.timeout(limit, [onTimeout])`: fails with `TimeoutException` when the
+  deadline passes first, or completes with `onTimeout()`'s result
 - `f.whenComplete(cb)`: runs `cb` when the future completes
 - `f.isCompleted()`: true once the future has settled
 

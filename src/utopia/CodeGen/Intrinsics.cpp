@@ -446,13 +446,17 @@ public:
 };
 
 /* Future.then(cb): registers the callback to run when the future completes
- * and returns a Future<void> that completes after the callback ran. */
+ * and returns a Future<void> that completes after the callback ran. The
+ * two-argument form also registers an error handler ('onError'), which
+ * runs when the source completes with an error instead of the value
+ * callback; without it the error is forwarded to the result future. */
 class FutureThenIntrinsic : public Intrinsic {
 public:
   llvm::Value *evaluateRuntime(CodeGen &cg,
                                const FunctionCallNode *node) const override {
     auto *ma = llvm::dyn_cast<MemberAccessNode>(node->target);
-    if (!ma || node->args.size() != 1 || !node->resolvedFunc)
+    if (!ma || (node->args.size() != 1 && node->args.size() != 2) ||
+        !node->resolvedFunc)
       return nullptr;
 
     const Type *valueTy = nullptr;
@@ -492,8 +496,190 @@ public:
     llvm::Value *resultState = cg.createFutureState(nullptr);
     llvm::Function *thunk =
         cg.getOrCreateThenThunk(valueTy, asyncCb, cbTakesValue);
-    cg.emitRuntimeCall("utopia_future_then_cb", getBuilder(cg).getVoidTy(),
-                       {state, cb, thunk, resultState});
+
+    if (node->args.size() == 2) {
+      llvm::Value *errCb = cg.dispatch(node->args[1]);
+      if (!errCb)
+        return nullptr;
+      llvm::Function *errThunk = cg.getOrCreateErrorThunk(nullptr, false);
+      cg.emitRuntimeCall("utopia_future_then_cb_err", getBuilder(cg).getVoidTy(),
+                         {state, cb, thunk, errCb, errThunk, resultState});
+    } else {
+      cg.emitRuntimeCall("utopia_future_then_cb", getBuilder(cg).getVoidTy(),
+                         {state, cb, thunk, resultState});
+    }
+
+    const Type *resultTy = node->resolvedFunc->returnType;
+    llvm::Value *obj = cg.createFutureObject(resultTy, resultState);
+    return cg.materializeFutureValue(resultTy, obj);
+  }
+
+  llvm::Constant *
+  evaluateConstant(CodeGen &cg, const FunctionCallNode *node) const override {
+    return nullptr;
+  }
+};
+
+/* Future.catchError(onError): registers an error handler; when the source
+ * completes with an error the handler runs and its result completes the
+ * returned future. A successful source forwards its value. The handler
+ * takes no parameters: async code should use try/catch, which gives typed
+ * access to the caught value. */
+class FutureCatchErrorIntrinsic : public Intrinsic {
+public:
+  llvm::Value *evaluateRuntime(CodeGen &cg,
+                               const FunctionCallNode *node) const override {
+    auto *ma = llvm::dyn_cast<MemberAccessNode>(node->target);
+    if (!ma || node->args.size() != 1 || !node->resolvedFunc)
+      return nullptr;
+
+    const Type *valueTy = nullptr;
+    if (!CodeGen::unwrapFutureType(ma->object->exprType, &valueTy))
+      return nullptr;
+
+    /* The handler returns the future's value type, or a Future of it when
+     * declared async. */
+    bool asyncCb = false;
+    const Type *cbType = node->args[0]->exprType;
+    if (cbType) {
+      const Type *u = cbType->getUnqualifiedType();
+      if (u->isPointerType()) {
+        const Type *pointee = static_cast<const PointerType *>(u)
+                                  ->getPointeeType()
+                                  ->getUnqualifiedType();
+        if (auto *fnTy = llvm::dyn_cast<FunctionType>(pointee)) {
+          const Type *inner = nullptr;
+          asyncCb = CodeGen::unwrapFutureType(fnTy->getReturnType(), &inner);
+        }
+      }
+    }
+
+    llvm::Value *cb = cg.dispatch(node->args[0]);
+    if (!cb)
+      return nullptr;
+
+    llvm::Value *futObj = cg.getFutureObjectPointer(ma->object);
+    if (!futObj)
+      return nullptr;
+    llvm::Value *state = cg.getFutureState(futObj, ma->object->exprType);
+    if (!state)
+      return nullptr;
+
+    llvm::Value *resultState = cg.createFutureState(valueTy);
+    llvm::Function *errThunk = cg.getOrCreateErrorThunk(valueTy, asyncCb);
+    cg.emitRuntimeCall("utopia_future_then_cb_err", getBuilder(cg).getVoidTy(),
+                       {state, llvm::ConstantPointerNull::get(
+                                  getBuilder(cg).getPtrTy()),
+                        llvm::ConstantPointerNull::get(
+                            getBuilder(cg).getPtrTy()),
+                        cb, errThunk, resultState});
+
+    const Type *resultTy = node->resolvedFunc->returnType;
+    llvm::Value *obj = cg.createFutureObject(resultTy, resultState);
+    return cg.materializeFutureValue(resultTy, obj);
+  }
+
+  llvm::Constant *
+  evaluateConstant(CodeGen &cg, const FunctionCallNode *node) const override {
+    return nullptr;
+  }
+};
+
+/* Future.timeout(timeLimit, onTimeout): races the source future against a
+ * deadline. Whichever completes first wins; on a timeout the onTimeout
+ * callback's result completes the returned future, or a TimeoutException
+ * error when no callback is given. The first argument is a Duration (its
+ * microseconds are read from the record) or an int64 count of
+ * milliseconds. */
+class FutureTimeoutIntrinsic : public Intrinsic {
+public:
+  llvm::Value *evaluateRuntime(CodeGen &cg,
+                               const FunctionCallNode *node) const override {
+    auto *ma = llvm::dyn_cast<MemberAccessNode>(node->target);
+    if (!ma || (node->args.size() != 1 && node->args.size() != 2) ||
+        !node->resolvedFunc)
+      return nullptr;
+
+    const Type *valueTy = nullptr;
+    if (!CodeGen::unwrapFutureType(ma->object->exprType, &valueTy))
+      return nullptr;
+
+    llvm::Value *futObj = cg.getFutureObjectPointer(ma->object);
+    if (!futObj)
+      return nullptr;
+    llvm::Value *state = cg.getFutureState(futObj, ma->object->exprType);
+    if (!state)
+      return nullptr;
+
+    llvm::Value *resultState = cg.createFutureState(valueTy);
+    cg.emitRuntimeCall("utopia_future_forward", getBuilder(cg).getVoidTy(),
+                       {resultState, state});
+
+    /* Deadline: Duration._us (microseconds) or an int64 in milliseconds. */
+    const Type *limitTy =
+        node->args[0]->exprType->getUnqualifiedType();
+    llvm::Value *deadlineUs = nullptr;
+    if (limitTy->getKind() == TypeKind::Class) {
+      llvm::Value *durVal = cg.dispatch(node->args[0]);
+      if (!durVal)
+        return nullptr;
+      const Type *unqual = node->args[0]->exprType->getUnqualifiedType();
+      const FieldInfo *usField = nullptr;
+      if (auto *rec = llvm::dyn_cast<RecordType>(unqual)) {
+        usField = rec->getField("_us");
+      }
+      llvm::Type *llDurTy = getLLVMType(cg, unqual);
+      llvm::AllocaInst *tmp =
+          createEntryBlockAlloca(cg, llDurTy, "timeout.dur.tmp");
+      getBuilder(cg).CreateStore(durVal, tmp);
+      llvm::Value *gep = getBuilder(cg).CreateStructGEP(
+          llDurTy, tmp, usField ? usField->index : 0, "dur.us");
+      deadlineUs = getBuilder(cg).CreateLoad(getBuilder(cg).getInt64Ty(),
+                                             gep, "dur.us.val");
+    } else {
+      llvm::Value *ms = cg.dispatch(node->args[0]);
+      if (!ms)
+        return nullptr;
+      deadlineUs = getBuilder(cg).CreateMul(
+          cg.createImplicitCast(ms, getBuilder(cg).getInt64Ty()),
+          getBuilder(cg).getInt64(1000), "timeout.us");
+    }
+
+    /* Without an onTimeout the deadline completes the future with a
+     * TimeoutException (Dart semantics); with one, its result completes
+     * the future. */
+    bool asyncCb = false;
+    llvm::Value *onTimeout = nullptr;
+    if (node->args.size() == 2) {
+      onTimeout = cg.dispatch(node->args[1]);
+      if (!onTimeout)
+        return nullptr;
+      const Type *cbType = node->args[1]->exprType;
+      if (cbType) {
+        const Type *u = cbType->getUnqualifiedType();
+        if (u->isPointerType()) {
+          const Type *pointee = static_cast<const PointerType *>(u)
+                                    ->getPointeeType()
+                                    ->getUnqualifiedType();
+          if (auto *fnTy = llvm::dyn_cast<FunctionType>(pointee)) {
+            const Type *inner = nullptr;
+            asyncCb =
+                CodeGen::unwrapFutureType(fnTy->getReturnType(), &inner);
+          }
+        }
+      }
+    }
+
+    llvm::Function *thunk = onTimeout
+                                ? cg.getOrCreateTimeoutThunk(valueTy, asyncCb)
+                                : cg.getOrCreateTimeoutExceptionThunk();
+    cg.emitRuntimeCall("utopia_future_timer_cb", getBuilder(cg).getVoidTy(),
+                       {deadlineUs,
+                        onTimeout
+                            ? onTimeout
+                            : llvm::ConstantPointerNull::get(
+                                  getBuilder(cg).getPtrTy()),
+                        thunk, resultState});
 
     const Type *resultTy = node->resolvedFunc->returnType;
     llvm::Value *obj = cg.createFutureObject(resultTy, resultState);
@@ -826,6 +1012,10 @@ IntrinsicRegistry::IntrinsicRegistry() {
   registerIntrinsic("hash_expr", std::make_unique<HashExprIntrinsic>());
   registerIntrinsic("future_value", std::make_unique<FutureValueIntrinsic>());
   registerIntrinsic("future_then", std::make_unique<FutureThenIntrinsic>());
+  registerIntrinsic("future_catchError",
+                    std::make_unique<FutureCatchErrorIntrinsic>());
+  registerIntrinsic("future_timeout",
+                    std::make_unique<FutureTimeoutIntrinsic>());
   registerIntrinsic("future_runOnThread",
                     std::make_unique<FutureRunOnThreadIntrinsic>());
   registerIntrinsic("future_sync", std::make_unique<FutureSyncIntrinsic>());

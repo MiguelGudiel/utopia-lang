@@ -69,6 +69,10 @@ struct alignas(std::max_align_t) UtopiaException {
   _Unwind_Exception unwindHeader;
   void *typeInfo = nullptr;
   void (*valueDtor)(void *) = nullptr;
+  /* Size of the thrown value in bytes, recorded at allocation time. The
+   * async runtime uses it to copy the value out of the record (see
+   * utopia_exception_info). */
+  uint64_t valueSize = 0;
   intptr_t handlerCount = 0;
   /* Phase-1 bookkeeping, restored in phase 2. */
   intptr_t matchedSelector = -1;
@@ -390,12 +394,42 @@ extern "C" {
 void utopia_end_catch(void *exnPtr);
 
 /* Allocates a fresh exception record sized for a value of 'size' bytes and
- * returns the pointer to the value storage. Never returns null. */
+ * returns the pointer to the value storage. Never returns null. The header
+ * is zero-initialized so disposal paths that never raise (e.g. the async
+ * timeout) never read a garbage destructor or type descriptor. */
 void *utopia_allocate_exception(uint64_t size) {
-  void *block = std::malloc(sizeof(UtopiaException) + size);
+  void *block = std::calloc(1, sizeof(UtopiaException) + size);
   if (!block)
     std::abort();
+  static_cast<UtopiaException *>(block)->valueSize = size;
   return valueFromException(static_cast<UtopiaException *>(block));
+}
+
+/* Exposes the thrown value stored in the exception record: the type
+ * descriptor, the value pointer, its size and its destructor (null when
+ * trivially destructible). The async runtime copies the value out of the
+ * record with these fields; the record itself remains owned by the
+ * current catch handler. */
+void utopia_exception_info(void *exnPtr, void **outTypeInfo,
+                           void **outValuePtr, uint64_t *outValueSize,
+                           void (**outDtor)(void *)) {
+  UtopiaException *exn = static_cast<UtopiaException *>(exnPtr);
+  *outTypeInfo = exn->typeInfo;
+  *outValuePtr = valueFromException(exn);
+  *outValueSize = exn->valueSize;
+  *outDtor = exn->valueDtor;
+}
+
+/* Destroys the value and frees the record of an exception that was never
+ * raised (e.g. one whose value was copied into a Future's error slot by
+ * the async runtime). Takes the value pointer returned by
+ * utopia_allocate_exception, like utopia_throw does. The record must not
+ * be referenced by any active handler. */
+void utopia_exception_dispose(void *valuePtr) {
+  UtopiaException *exn = exceptionFromValue(valuePtr);
+  if (exn->valueDtor)
+    exn->valueDtor(valuePtr);
+  std::free(exn);
 }
 
 /* Raises the exception stored at 'valuePtr'. The value was already copied

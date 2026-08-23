@@ -286,6 +286,12 @@ static bool statementMayUnwind(const ASTNode *node) {
   switch (node->kind) {
   case NodeKind::Throw:
     return true;
+  case NodeKind::Await:
+    /* Awaiting a future that completed with an error rethrows it at the
+     * await site (Dart semantics), so the containing async function can
+     * unwind. This also installs the personality + landing pads that route
+     * the rethrow into the future's implicit error boundary. */
+    return true;
   case NodeKind::Lambda:
     return false;
   case NodeKind::FunctionCall: {
@@ -2854,14 +2860,12 @@ SemaResult TypeCheckPass::visit(const WhileNode *node) {
  * other block; each catch clause introduces a scope holding the optional
  * binding variable, typed with the caught type. Catch matching happens at
  * runtime (see CodeGen), so no static compatibility check is required
- * beyond the caught type itself being valid. */
+ * beyond the caught type itself being valid.
+ *
+ * Async functions allow try/catch too: an exception that no catch clause
+ * handles is captured into the function's Future (Dart semantics), so the
+ * awaiting side can catch it or handle it with Future.catchError. */
 SemaResult TypeCheckPass::visit(const TryStmtNode *node) {
-  if (ctx->getCurrentFunction() && ctx->getCurrentFunction()->isAsync) {
-    return ctx->reportError(
-        node->line, node->column, node->length,
-        "'try' is not supported inside async functions.");
-  }
-
   if (const FunctionDeclNode *fn = ctx->getCurrentFunction())
     const_cast<FunctionDeclNode *>(fn)->hasEH = true;
 
@@ -2998,14 +3002,10 @@ SemaResult TypeCheckPass::visit(const TryStmtNode *node) {
 
 /* 'throw expr;' raises a copy of the expression's value; a bare 'throw;'
  * rethrows the exception currently being handled. Any type can be thrown
- * (C++ rules); records with a custom destructor must be copyable. */
+ * (C++ rules); records with a custom destructor must be copyable. In
+ * async functions the raise is allowed and is captured into the function's
+ * Future when no clause catches it (see visit(TryStmtNode)). */
 SemaResult TypeCheckPass::visit(const ThrowStmtNode *node) {
-  if (ctx->getCurrentFunction() && ctx->getCurrentFunction()->isAsync) {
-    return ctx->reportError(
-        node->line, node->column, node->length,
-        "'throw' is not supported inside async functions.");
-  }
-
   const FunctionDeclNode *fn = ctx->getCurrentFunction();
   if (fn && fn->isMethod && fn->name == "~") {
     return ctx->reportError(node->line, node->column, node->length,
