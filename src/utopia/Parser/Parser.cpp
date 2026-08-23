@@ -3060,7 +3060,7 @@ DeclNode *Parser::parseRecordDecl(TypeKind kind, bool isAbstract,
     std::vector<std::string_view> methodTParams;
     std::vector<TemplateConstraint> methodTConstraints;
     if (match(TokenType::LT)) {
-      astCtx.registerTemplateName(memName);
+      astCtx.registerMemberTemplateName(memName);
       if (currentToken().type != TokenType::GT) {
         do {
           for (auto tp : methodTParams) {
@@ -4025,7 +4025,8 @@ ExprNode *Parser::parsePostfix() {
 
       bool isTemplateCall = false;
       if (currentToken().type == TokenType::LT &&
-          astCtx.isTemplateName(memberName)) {
+          (astCtx.isTemplateName(memberName) ||
+           astCtx.isMemberTemplateName(memberName))) {
         isTemplateCall = true;
       }
 

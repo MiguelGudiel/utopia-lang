@@ -73,6 +73,19 @@ public:
     return registeredTemplates.contains(name);
   }
 
+  /* Method templates ('static Future<R> value<R>(...)' inside a class) are
+   * kept apart from the general registry: they are only reachable through
+   * member access, and letting their names leak into the expression-level
+   * template-call check would misparse a later module's 'value < x'
+   * comparison as the template instantiation 'value<x>'. */
+  void registerMemberTemplateName(std::string_view name) {
+    registeredMemberTemplates.insert(name);
+  }
+
+  bool isMemberTemplateName(std::string_view name) const {
+    return registeredMemberTemplates.contains(name);
+  }
+
   /* Arity of the primary record templates declared so far (used to tell
    * the primary 'class List<T>' from a specialization such as
    * 'class List<int>': a specialization is only valid for an
@@ -472,6 +485,7 @@ private:
   std::unordered_map<std::string_view, const EnumType *> enumTypes;
 
   std::unordered_set<std::string_view> registeredTemplates;
+  std::unordered_set<std::string_view> registeredMemberTemplates;
   std::unordered_map<std::string_view, uint8_t> registeredTemplateArity;
 
   std::unordered_map<std::string_view, NamespaceDeclNode *> namespaces;
