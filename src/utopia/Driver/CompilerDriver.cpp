@@ -480,8 +480,11 @@ bool CompilerDriver::run() {
       return false;
     }
 
-    int (*mainFn)() = mainSym->toPtr<int (*)()>();
-    jitExitCode = mainFn();
+    /* The compiler-emitted main wrapper always has the C signature
+     * (int argc, char** argv). JIT execution has no program arguments, so
+     * pass zero; Env.args then reports an empty list. */
+    int (*mainFn)(int, char **) = mainSym->toPtr<int (*)(int, char **)>();
+    jitExitCode = mainFn(0, nullptr);
 
     /* Deinitialize globals */
     if (auto deinitErr = jit->deinitialize(jit->getMainJITDylib())) {

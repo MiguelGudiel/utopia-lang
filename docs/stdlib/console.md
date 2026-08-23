@@ -17,6 +17,8 @@ print("%d %s %.2f\n", 42, "text", 3.14159);
 | --- | --- | --- |
 | `print` | `static void print(const String& text)` | Print text without a newline |
 | `printLine` | `static void printLine(const String& text)` | Print text with a newline |
+| `error` | `static void error(const String& text)` | Print text to stderr without a newline |
+| `errorLine` | `static void errorLine(const String& text)` | Print text and a newline to stderr |
 | `readLine` | `static String readLine()` | Read a line from stdin (strips `\r\n`) |
 | `clear` | `static void clear()` | Clear the terminal (ANSI escape) |
 

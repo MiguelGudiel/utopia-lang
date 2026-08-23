@@ -1,5 +1,5 @@
-/* Process control and environment access (Env). String comes from the
- * prelude, which is injected into every module. */
+/* Process control and environment access (Env). String and List come from
+ * the prelude, which is injected into every module. */
 
 @extern
 uint32 sleep(uint32 seconds);
@@ -7,10 +7,37 @@ uint32 sleep(uint32 seconds);
 @extern
 int32 system(const uint8* command);
 
+/* Terminates the process immediately with the given exit status. */
+@extern("exit")
+void exit(int32 status);
+
+/* Aborts the process abnormally (raises SIGABRT, core dump on POSIX). */
+@extern("abort")
+void abort();
+
 #if _WIN32
 
 @extern("_putenv")
 int32 _os_putenv(const uint8* string);
+
+/* Process handles and pids are pointer-sized on Windows. */
+@extern("_spawnvp")
+int64 _os_spawnvp(int32 mode, const uint8* cmdname, uint8** argv);
+
+@extern("_cwait")
+int64 _os_cwait(int32* termstat, int64 procHandle, int32 action);
+
+@extern("OpenProcess")
+void* _os_openprocess(uint32 access, int32 inherit, uint32 pid);
+
+@extern("TerminateProcess")
+int32 _os_terminateprocess(void* hProcess, uint32 exitCode);
+
+@extern("CloseHandle")
+int32 _os_closehandle(void* handle);
+
+@extern("GetComputerNameA")
+int32 _os_getcomputername(uint8* buf, uint32* size);
 
 #else
 
@@ -20,11 +47,30 @@ int32 _os_setenv(const uint8* name, const uint8* value, int32 overwrite);
 @extern("unsetenv")
 int32 _os_unsetenv(const uint8* name);
 
+@extern("fork")
+int32 _os_fork();
+
+@extern("execvp")
+int32 _os_execvp(const uint8* file, uint8** argv);
+
+@extern("waitpid")
+int32 _os_waitpid(int32 pid, int32* status, int32 options);
+
+@extern("kill")
+int32 _os_kill(int32 pid, int32 sig);
+
+@extern("gethostname")
+int32 _os_gethostname(uint8* name, usize len);
+
+/* The POSIX child calls _exit(127) when execvp fails; the C library's
+ * _exit does not flush stdio. */
+@extern("_exit")
+void _os_exit(int32 status);
+
 #endif
 
 @extern("getenv")
 uint8* _os_getenv(const uint8* name);
-
 
 /*
  * Environment variable access, mirroring std::getenv / std::setenv.
@@ -71,5 +117,163 @@ class Env {
   static bool unset(String name) {
     return Env.unset(name.c_str());
   }
+
+  @extern("utopia_get_argc")
+  private static int32 _utopia_get_argc();
+
+  @extern("utopia_get_argv")
+  private static uint8** _utopia_get_argv();
+
+  /* The program's command-line arguments. The compiler-emitted main
+   * wrapper stores the C runtime's argc/argv before calling the user's
+   * main, so this works even for a main that declares no parameters.
+   * Under JIT execution there are no arguments and the list is empty.
+   * The first element is the program name. */
+  static List<String> args() {
+    List<String> result;
+    int32 argc = Env._utopia_get_argc();
+    if (argc <= 0) return result;
+    uint8** argv = Env._utopia_get_argv();
+    if (argv == null) return result;
+    for (int32 i = 0; i < argc; i++) {
+      if (argv[i] == null) break;
+      result.push(String(argv[i]));
+    }
+    return result;
+  }
+
+  /* The machine's network host name (gethostname / GetComputerNameA). */
+  static String hostname() {
+    #if _WIN32
+    uint8[256] buf;
+    uint32 size = 256;
+    if (_os_getcomputername(&buf[0], &size) == 0) return "";
+    return &buf[0];
+    #else
+    uint8[256] buf;
+    if (_os_gethostname(&buf[0], 256) != 0) return "";
+    return &buf[0];
+    #endif
+  }
 }
 
+/*
+ * Process: a child process spawned with Process.spawn. wait() reaps the
+ * process and returns its exit code; kill() sends a signal (POSIX) or
+ * terminates it (Windows).
+ *
+ * POSIX implementation: fork + execvp + waitpid + kill. Windows
+ * implementation: _spawnvp + _cwait + OpenProcess/TerminateProcess.
+ */
+class Process {
+  int32 _pid;
+  bool _running;
+
+  Process() {
+    this._pid = -1;
+    this._running = false;
+  }
+
+  /* Standard signal numbers, for use with kill(). On Windows any signal
+   * maps to TerminateProcess. */
+  static const int32 SIGINT = 2;
+  static const int32 SIGTERM = 15;
+  static const int32 SIGKILL = 9;
+
+  @inline
+  int32 pid() {
+    return this._pid;
+  }
+
+  @inline
+  bool isRunning() {
+    return this._running;
+  }
+
+  /* Builds the null-terminated argv array that execvp/_spawnvp expect.
+   * The pointers alias the String buffers of the caller-owned strings,
+   * which must stay alive until the exec/spawn call completes (they do:
+   * spawn() only releases its copies when it returns). */
+  static uint8** _buildArgv(String& executable, List<String>& args) {
+    uint8** argv = new uint8*[args.length() + 2];
+    argv[0] = &executable[0];
+    for (usize i = 0; i < args.length(); i++) {
+      argv[i + 1] = &args[i][0];
+    }
+    argv[args.length() + 1] = null;
+    return argv;
+  }
+
+  /* Spawns 'executable' with the given arguments (not including the
+   * program name) in a new child process. On failure the returned
+   * Process has pid() == -1. */
+  static Process spawn(String executable, List<String> args) {
+    Process p;
+    #if _WIN32
+    uint8** argv = Process._buildArgv(executable, args);
+    /* _P_NOWAIT = 1: return immediately with the child's pid. */
+    int64 pid = _os_spawnvp(1, executable.c_str(), argv);
+    delete[] argv;
+    if (pid == -1) return p;
+    p._pid = pid as int32;
+    p._running = true;
+    return p;
+    #else
+    int32 pid = _os_fork();
+    if (pid < 0) return p;
+    if (pid == 0) {
+      /* Child: replace the image. The heap is a fork copy, so building
+       * argv after the fork is safe. */
+      uint8** argv = Process._buildArgv(executable, args);
+      _os_execvp(executable.c_str(), argv);
+      /* execvp only returns on failure. */
+      _os_exit(127);
+    }
+    p._pid = pid;
+    p._running = true;
+    return p;
+    #endif
+  }
+
+  /* Blocks until the child exits and returns its exit code. A process
+   * terminated by a signal is reported as 128 + signal number. Returns -1
+   * when the wait fails. */
+  int32 wait() {
+    if (!this._running) return -1;
+    #if _WIN32
+    int32 status = 0;
+    int64 r = _os_cwait(&status, this._pid as int64, 0 /* _WAIT_CHILD */);
+    this._running = false;
+    if (r == -1) return -1;
+    return (status >> 8) & 0xFF;
+    #else
+    int32 status = 0;
+    int32 r = _os_waitpid(this._pid, &status, 0);
+    this._running = false;
+    if (r < 0) return -1;
+    /* Decode wait(2) status: the low 7 bits hold the signal (0 = exited
+     * normally), bits 8-15 the exit code. */
+    if ((status & 0x7F) == 0) {
+      return (status >> 8) & 0xFF;
+    }
+    return 128 + (status & 0x7F);
+    #endif
+  }
+
+  /* Sends a signal to the child (Process.SIGTERM, ...). On Windows the
+   * process is terminated instead. Returns whether the signal was
+   * delivered. */
+  bool kill(int32 signal) {
+    #if _WIN32
+    void* handle = _os_openprocess(0x0001 /* PROCESS_TERMINATE */, 0,
+                                   this._pid as uint32);
+    if (handle == null) return false;
+    int32 ok = _os_terminateprocess(handle, signal as uint32);
+    _os_closehandle(handle);
+    this._running = false;
+    return ok != 0;
+    #else
+    return _os_kill(this._pid, signal) == 0;
+    #endif
+  }
+}

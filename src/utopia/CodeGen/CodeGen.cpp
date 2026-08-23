@@ -424,10 +424,12 @@ llvm::Function *CodeGen::getOrCreateFunction(const FunctionDeclNode *node) {
   if (node->isTemplate)
     return nullptr;
 
+  /* The user's C entry point is always emitted under an internal name; a
+   * wrapper 'main' (see emitMainWrapper) captures argc/argv for Env.args,
+   * drives the async loop and forwards the declared parameters. */
   std::string irName =
-      (node->name == "main" && !node->isMethod)
-          ? (asyncEnabled ? "utopia_user_main" : "main")
-          : node->mangledName;
+      (node->name == "main" && !node->isMethod) ? "utopia_user_main"
+                                                : node->mangledName;
   llvm::Function *func = mod.getFunction(irName);
 
   if (func)
@@ -4543,9 +4545,10 @@ llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
     }
   }
 
-  /* The real C entry point: wraps the user's main so the async runtime can
-   * drive the event loop after the user's code runs. */
-  if (node->name == "main" && !node->isMethod && asyncEnabled) {
+  /* The real C entry point: wraps the user's main so the runtime can
+   * capture argc/argv for Env.args and (in async builds) drive the event
+   * loop after the user's code runs. */
+  if (node->name == "main" && !node->isMethod) {
     emitMainWrapper(func, node);
   }
 
@@ -9467,29 +9470,30 @@ void CodeGen::emitMainWrapper(llvm::Function *userMain,
   if (mod.getFunction("main"))
     return;
 
-  std::vector<llvm::Type *> paramTys;
-  for (const auto *p : node->params) {
-    if (llvm::isa<ArrayType>(p->type)) {
-      paramTys.push_back(builder.getPtrTy());
-    } else {
-      paramTys.push_back(getLLVMType(p->type));
-    }
-  }
-  llvm::FunctionType *ft =
-      llvm::FunctionType::get(builder.getInt32Ty(), paramTys, false);
+  /* The C entry point always receives (int argc, char** argv) from the C
+   * runtime; the wrapper stores them for Env.args (stdlib system module)
+   * and forwards them to the user's main when it declares them. */
+  llvm::FunctionType *ft = llvm::FunctionType::get(
+      builder.getInt32Ty(),
+      {builder.getInt32Ty(), builder.getPtrTy()}, false);
   auto *mainFn = llvm::Function::Create(ft, llvm::Function::ExternalLinkage,
                                         "main", &mod);
   llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", mainFn);
   builder.SetInsertPoint(entry);
 
+  auto argIt = mainFn->args().begin();
+  emitRuntimeCall("utopia_set_args", builder.getVoidTy(),
+                  {&*argIt, &*(argIt + 1)});
+
   std::vector<llvm::Value *> callArgs;
-  for (auto &arg : mainFn->args()) {
-    callArgs.push_back(&arg);
+  if (node->params.size() == 2) {
+    callArgs.push_back(&*argIt);
+    callArgs.push_back(&*(argIt + 1));
   }
-  llvm::Value *fut = builder.CreateCall(userMain, callArgs);
+  llvm::Value *res = builder.CreateCall(userMain, callArgs);
 
   if (node->isAsync) {
-    emitRuntimeCall("utopia_loop_run", builder.getInt32Ty(), {fut});
+    emitRuntimeCall("utopia_loop_run", builder.getInt32Ty(), {res});
     /* Like Dart, stay alive while fire-and-forget work (timers, worker
      * threads) is still pending after main completed. */
     emitRuntimeCall("utopia_loop_run_all", builder.getVoidTy(), {});
@@ -9500,8 +9504,8 @@ void CodeGen::emitMainWrapper(llvm::Function *userMain,
      * The user's exit code must reach the OS: scripts and CI depend on it,
      * and 'utopia run' forwards it as the command's own exit code. */
     emitRuntimeCall("utopia_loop_run_all", builder.getVoidTy(), {});
-    if (fut->getType()->isIntegerTy(32)) {
-      builder.CreateRet(fut);
+    if (res->getType()->isIntegerTy(32)) {
+      builder.CreateRet(res);
     } else {
       builder.CreateRet(
           llvm::ConstantInt::get(builder.getInt32Ty(), 0));

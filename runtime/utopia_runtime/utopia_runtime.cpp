@@ -650,4 +650,23 @@ void utopia_assert_failed(const char *file, int line, const char *message) {
   std::abort();
 }
 
+/* ------------------------------------------------------------------ */
+/* Command-line arguments for Env.args (stdlib system module).         */
+/* ------------------------------------------------------------------ */
+
+/* The compiler-emitted main wrapper stores the C runtime's argc/argv here
+ * before calling the user's main, so Env.args() works even for a main that
+ * declares no parameters. */
+static int32_t utopia_args_count = 0;
+static char **utopia_args_vector = nullptr;
+
+void utopia_set_args(int32_t argc, char **argv) {
+  utopia_args_count = argc;
+  utopia_args_vector = argv;
+}
+
+int32_t utopia_get_argc() { return utopia_args_count; }
+
+char **utopia_get_argv() { return utopia_args_vector; }
+
 } // extern "C"

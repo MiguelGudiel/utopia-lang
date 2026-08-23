@@ -1,8 +1,15 @@
 import "../String.utp";
 
+/* The C library's standard error stream, used by Console.error/errorLine. */
+@extern("stderr")
+void* _c_stderr;
+
 class Console {
   @extern("printf")
   private static int32 c_printf(const uint8* format, ...);
+
+  @extern("fprintf")
+  private static int32 c_fprintf(void* stream, const uint8* format, ...);
 
   @extern("getchar")
   private static int32 c_getchar();
@@ -13,6 +20,16 @@ class Console {
 
   static void printLine(const String& text) {
     Console.c_printf("%s\n", text.c_str());
+  }
+
+  /* Writes 'text' to standard error without a newline. */
+  static void error(const String& text) {
+    Console.c_fprintf(_c_stderr, "%s", text.c_str());
+  }
+
+  /* Writes 'text' followed by a newline to standard error. */
+  static void errorLine(const String& text) {
+    Console.c_fprintf(_c_stderr, "%s\n", text.c_str());
   }
 
   static String readLine() {
