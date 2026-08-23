@@ -3,6 +3,9 @@
 #include "utopia/CodeGen/SimdIntrinsics.hpp"
 #include "utopia/Common/Types.hpp"
 
+#include <limits>
+#include <string_view>
+
 namespace utopia {
 
 /* Proxy implementations to access CodeGen's private members */
@@ -1204,6 +1207,48 @@ public:
   }
 };
 
+/* Produces the IEEE-754 special values backing the numeric-limits
+ * constants: 'nan', 'inf', '-inf'. The selector is a string literal; the
+ * intrinsic lowers to the constant directly, so it also works in const
+ * initializers (it is registered as const-evaluable). */
+class FloatSpecialIntrinsic : public Intrinsic {
+public:
+  bool isConstEvaluable() const override { return true; }
+
+  llvm::Value *evaluateRuntime(CodeGen &cg,
+                               const FunctionCallNode *node) const override {
+    return evaluateConstant(cg, node);
+  }
+
+  llvm::Constant *
+  evaluateConstant(CodeGen &cg, const FunctionCallNode *node) const override {
+    if (node->args.size() != 1 ||
+        node->args[0]->kind != NodeKind::String) {
+      reportError(cg, node->line, node->column, node->length,
+                  "float_special requires one string literal argument.");
+      return nullptr;
+    }
+    std::string_view which =
+        static_cast<const StringNode *>(node->args[0])->value;
+    double value;
+    if (which == "nan") {
+      value = std::numeric_limits<double>::quiet_NaN();
+    } else if (which == "inf") {
+      value = std::numeric_limits<double>::infinity();
+    } else if (which == "-inf") {
+      value = -std::numeric_limits<double>::infinity();
+    } else {
+      reportError(cg, node->line, node->column, node->length,
+                  "float_special expects 'nan', 'inf' or '-inf'.");
+      return nullptr;
+    }
+    llvm::Type *ty = getLLVMType(cg, node->exprType);
+    if (ty && ty->isFloatingPointTy())
+      return llvm::ConstantFP::get(ty, value);
+    return llvm::ConstantFP::get(getBuilder(cg).getDoubleTy(), value);
+  }
+};
+
 IntrinsicRegistry::IntrinsicRegistry() {
   registerIntrinsic("sizeof_type", std::make_unique<SizeofTypeIntrinsic>());
   registerIntrinsic("sizeof_expr", std::make_unique<SizeofExprIntrinsic>());
@@ -1236,6 +1281,8 @@ IntrinsicRegistry::IntrinsicRegistry() {
                     std::make_unique<FutureDelayedIntrinsic>());
   registerIntrinsic("future_microtask",
                     std::make_unique<FutureMicrotaskIntrinsic>());
+  registerIntrinsic("float_special",
+                    std::make_unique<FloatSpecialIntrinsic>());
   registerSimdIntrinsics(*this);
 }
 

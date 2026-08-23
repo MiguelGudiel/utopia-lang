@@ -76,6 +76,27 @@ float64 _c_hypot(float64 x, float64 y);
 @extern("fabs")
 float64 _c_fabs(float64 x);
 
+@extern("expm1")
+float64 _c_expm1(float64 x);
+
+@extern("log1p")
+float64 _c_log1p(float64 x);
+
+@extern("cbrt")
+float64 _c_cbrt(float64 x);
+
+@extern("erf")
+float64 _c_erf(float64 x);
+
+@extern("tgamma")
+float64 _c_tgamma(float64 x);
+
+@extern("copysign")
+float64 _c_copysign(float64 x, float64 y);
+
+@extern("frexp")
+float64 _c_frexp(float64 x, int32* exp);
+
 
 class Math {
   static const float64 PI = 3.14159265358979323846;
@@ -218,6 +239,97 @@ class Math {
   @forceInline
   static float64 max(float64 a, float64 b) {
     return a > b ? a : b;
+  }
+
+  /* exp(x) - 1, accurate for x near zero (avoids the cancellation of
+   * exp(x) - 1). */
+  @forceInline
+  static float64 expm1(float64 x) {
+    return _c_expm1(x);
+  }
+
+  /* ln(1 + x), accurate for x near zero. */
+  @forceInline
+  static float64 log1p(float64 x) {
+    return _c_log1p(x);
+  }
+
+  @forceInline
+  static float64 cbrt(float64 x) {
+    return _c_cbrt(x);
+  }
+
+  /* The Gauss error function. */
+  @forceInline
+  static float64 erf(float64 x) {
+    return _c_erf(x);
+  }
+
+  /* The gamma function (factorial extended to the reals; poles at the
+   * non-positive integers). */
+  @forceInline
+  static float64 tgamma(float64 x) {
+    return _c_tgamma(x);
+  }
+
+  /* A float with the magnitude of 'x' and the sign of 'y'. */
+  @forceInline
+  static float64 copysign(float64 x, float64 y) {
+    return _c_copysign(x, y);
+  }
+
+  /* Splits 'x' into a mantissa in [0.5, 1) and an integer exponent such
+   * that x == mantissa * 2^exponent; 'exp' receives the exponent. */
+  @forceInline
+  static float64 frexp(float64 x, int32& exp) {
+    return _c_frexp(x, &exp);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Statistics over numeric lists (population semantics).              */
+  /* ------------------------------------------------------------------ */
+
+  /* Arithmetic mean of the elements; 0.0 for an empty list. */
+  static float64 mean<T>(List<T> data) {
+    if (data.length() == 0) return 0.0;
+    float64 sum = 0.0;
+    for (usize i = 0; i < data.length(); i++) {
+      sum += data[i] as float64;
+    }
+    return sum / (data.length() as float64);
+  }
+
+  /* Population variance: the mean of the squared deviations from the
+   * mean (divides by n). 0.0 for an empty list. */
+  static float64 variance<T>(List<T> data) {
+    if (data.length() == 0) return 0.0;
+    float64 m = Math.mean(data);
+    float64 sum = 0.0;
+    for (usize i = 0; i < data.length(); i++) {
+      float64 d = (data[i] as float64) - m;
+      sum += d * d;
+    }
+    return sum / (data.length() as float64);
+  }
+
+  /* Population standard deviation: sqrt(variance). */
+  static float64 stddev<T>(List<T> data) {
+    return Math.sqrt(Math.variance(data));
+  }
+
+  /* The middle value of a sorted copy of the data: the element at n / 2
+   * for odd lengths, the mean of the two middle elements for even ones.
+   * 0.0 for an empty list. Requires operator< on T (numbers, String, ...). */
+  static float64 median<T>(List<T> data) {
+    if (data.length() == 0) return 0.0;
+    List<T> sorted;
+    sorted.addAll(data);
+    sorted.sort();
+    usize n = sorted.length();
+    if (n % 2 == 1) {
+      return sorted[n / 2] as float64;
+    }
+    return ((sorted[n / 2 - 1] as float64) + (sorted[n / 2] as float64)) / 2.0;
   }
 }
 

@@ -1,4 +1,5 @@
 #include "utopia/AST/ASTCloner.hpp"
+#include "utopia/CodeGen/Intrinsics.hpp"
 #include "utopia/CodeGen/Mangler.hpp"
 #include "utopia/Common/Logger.hpp"
 #include "utopia/Sema/EffectAnalyzer.hpp"
@@ -7704,6 +7705,12 @@ SemaResult TypeCheckPass::visit(const CastNode *node) {
   const Type *srcUnqual = (*srcType)->getUnqualifiedType();
   const Type *destUnqual = destType->getUnqualifiedType();
 
+  /* Casting a reference-typed expression (e.g. list[i] from a 'T&
+   * operator[]') operates on the referenced value. */
+  if (srcUnqual->getKind() == TypeKind::Reference) {
+    srcUnqual = static_cast<const ReferenceType *>(srcUnqual)->getPointeeType();
+  }
+
   bool isSrcNumeric = srcUnqual->isNumeric();
   bool isDestNumeric = destUnqual->isNumeric();
   bool isSrcBool = srcUnqual->getKind() == TypeKind::Builtin &&
@@ -9225,6 +9232,32 @@ bool TypeCheckPass::constEvaluate(const ExprNode *expr, bool inConstContext,
     const_cast<ExprNode *>(expr)->isConstExpr = true;
     const_cast<ExprNode *>(expr)->constKey = out;
     return true;
+  }
+
+  /* Intrinsic calls that are pure functions of their constant arguments
+   * are constant expressions (sizeof/typeof style). The value is rebuilt
+   * by CodeGen through the intrinsic's evaluateConstant, so the key only
+   * identifies the call; the 'I:' prefix has no CodeGen handler and lets
+   * evaluation fall through to the intrinsic path. */
+  if (auto *call = llvm::dyn_cast<FunctionCallNode>(expr)) {
+    const FunctionDeclNode *callee = call->resolvedFunc;
+    if (callee && callee->isIntrinsic && !callee->intrinsicName.empty()) {
+      const Intrinsic *intrinsic = IntrinsicRegistry::instance().get(
+          callee->intrinsicName);
+      if (intrinsic && intrinsic->isConstEvaluable()) {
+        std::string key = "I:" + std::string(callee->intrinsicName);
+        for (const auto *arg : call->args) {
+          std::string argKey;
+          if (!this->constEvaluate(arg, true, argKey))
+            return false;
+          key += "," + argKey;
+        }
+        const_cast<ExprNode *>(expr)->isConstExpr = true;
+        const_cast<ExprNode *>(expr)->constKey = key;
+        out = key;
+        return true;
+      }
+    }
   }
 
   /* A const variable (const-qualified declaration) with a constant

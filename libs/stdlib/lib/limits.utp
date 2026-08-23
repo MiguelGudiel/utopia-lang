@@ -1,3 +1,8 @@
+/* Numeric limits, imported together with the math module or directly via
+ * "utopia:limits". NAN/INFINITY/NEG_INFINITY are built by the
+ * const-evaluable float_special intrinsic so they stay compile-time
+ * constants. */
+
 const int8 INT8_MAX = 127;
 const int8 INT8_MIN = -128;
 
@@ -18,7 +23,23 @@ const int64 INT64_MIN = -9223372036854775808;
 
 const uint64 UINT64_MAX = 18446744073709551615;
 
+/* Largest value of the pointer-sized unsigned type (all ones). */
+const usize SIZE_MAX = 18446744073709551615;
+
 const float32 FLOAT32_MAX = 3.40282347e+38;
 const float32 FLOAT32_MIN = 1.17549435e-38;
 const float64 FLOAT64_MAX = 1.7976931348623157e+308;
 const float64 FLOAT64_MIN = 2.2250738585072014e-308;
+
+/* Smallest x such that 1.0 + x != 1.0 (machine epsilon). */
+const float32 FLOAT32_EPSILON = 1.1920928955078125e-07;
+const float64 FLOAT64_EPSILON = 2.2204460492503131e-16;
+
+/* IEEE-754 special values as compile-time constants. */
+@intrinsic("float_special")
+float64 _float_special(const uint8* which);
+
+const float64 EPSILON = 2.2204460492503131e-16;
+const float64 NAN = _float_special("nan");
+const float64 INFINITY = _float_special("inf");
+const float64 NEG_INFINITY = _float_special("-inf");

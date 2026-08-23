@@ -44,6 +44,13 @@ public:
    */
   virtual llvm::Constant *
   evaluateConstant(CodeGen &cg, const FunctionCallNode *node) const = 0;
+
+  /**
+   * Whether the intrinsic is a pure function of its (constant) arguments
+   * and may therefore appear inside constant expressions, such as const
+   * globals. CodeGen re-evaluates it with evaluateConstant.
+   */
+  virtual bool isConstEvaluable() const { return false; }
 };
 
 /**
