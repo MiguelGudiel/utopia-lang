@@ -24,6 +24,82 @@ class String {
     dest[length] = 0;
   }
 
+  /* Bytes of the UTF-8 sequence starting with leading byte 'b' (1 for
+   * ASCII and for invalid leading bytes). */
+  private static usize utf8CharLen(uint8 b) {
+    if (b < 0x80) return 1;
+    if ((b & 0xE0) == 0xC0) return 2;
+    if ((b & 0xF0) == 0xE0) return 3;
+    if ((b & 0xF8) == 0xF0) return 4;
+    return 1;
+  }
+
+  /* Decodes the UTF-8 codepoint starting at byte 'pos' and stores the
+   * position of the next codepoint in 'next'. Invalid sequences decode
+   * byte-by-byte (each byte yields itself), so malformed input never
+   * crashes and round-trips losslessly. */
+  private static int32 utf8Decode(const uint8* data, usize pos, usize end,
+                                  usize& next) {
+    uint8 b0 = data[pos];
+    usize clen = String.utf8CharLen(b0);
+    if (pos + clen > end) clen = 1;
+    if (clen == 1) {
+      next = pos + 1;
+      return b0;
+    }
+    int32 cp = (b0 & (0x7F >> clen)) as int32;
+    for (usize i = 1; i < clen; i++) {
+      uint8 b = data[pos + i];
+      if ((b & 0xC0) != 0x80) {
+        next = pos + 1;
+        return b0;
+      }
+      cp = (cp << 6) | (b & 0x3F);
+    }
+    next = pos + clen;
+    return cp;
+  }
+
+  /* Encodes 'cp' as UTF-8 into 'buf' (which must hold at least 4 bytes)
+   * and returns the number of bytes written. */
+  private static usize utf8Encode(uint8* buf, int32 cp) {
+    if (cp < 0x80) {
+      buf[0] = cp as uint8;
+      return 1;
+    }
+    if (cp < 0x800) {
+      buf[0] = (0xC0 | (cp >> 6)) as uint8;
+      buf[1] = (0x80 | (cp & 0x3F)) as uint8;
+      return 2;
+    }
+    if (cp < 0x10000) {
+      buf[0] = (0xE0 | (cp >> 12)) as uint8;
+      buf[1] = (0x80 | ((cp >> 6) & 0x3F)) as uint8;
+      buf[2] = (0x80 | (cp & 0x3F)) as uint8;
+      return 3;
+    }
+    buf[0] = (0xF0 | (cp >> 18)) as uint8;
+    buf[1] = (0x80 | ((cp >> 12) & 0x3F)) as uint8;
+    buf[2] = (0x80 | ((cp >> 6) & 0x3F)) as uint8;
+    buf[3] = (0x80 | (cp & 0x3F)) as uint8;
+    return 4;
+  }
+
+  /* Unicode whitespace: the ASCII set plus NEL, NBSP, OGHAM SPACE MARK,
+   * the U+2000..U+200A range, line/paragraph separators, narrow NBSP,
+   * medium math space and ideographic space. */
+  private static bool isWhitespaceCp(int32 c) {
+    return c == 32 || c == 9 || c == 10 || c == 11 || c == 12 || c == 13 ||
+           c == 0x85 || c == 0xA0 || c == 0x1680 ||
+           (c >= 0x2000 && c <= 0x200A) || c == 0x2028 || c == 0x2029 ||
+           c == 0x202F || c == 0x205F || c == 0x3000;
+  }
+
+  /* strtoll: parses a prefix of the string; 'end' receives the position
+   * after the parsed digits. base 0 auto-detects 0x/0o/0b prefixes. */
+  @extern("strtoll")
+  private static int64 c_strtoll(const uint8* nptr, uint8** end, int32 base);
+
   @extern("atoi")
   private static int32 c_atoi(const uint8* str);
 
@@ -482,61 +558,147 @@ class String {
     return result;
   }
 
-  /* ASCII-only case conversion, like the C tolower/toupper helpers. */
+  /* Encodes one UTF-8 codepoint into 'out' (at least 8 bytes), applying
+   * the multi-character case mappings (sharp s and the Latin ligatures
+   * expand to multiple letters). Returns the number of bytes written. */
+  private static usize appendUpper(uint8* out, int32 cp) {
+    if (cp == 0xDF) {
+      out[0] = 0x53;
+      out[1] = 0x53;
+      return 2;
+    }
+    if (cp == 0xFB00 || cp == 0xFB03) {
+      out[0] = 0x46;
+      out[1] = 0x46;
+      if (cp == 0xFB03) {
+        out[2] = 0x49;
+        return 3;
+      }
+      return 2;
+    }
+    if (cp == 0xFB01) {
+      out[0] = 0x46;
+      out[1] = 0x49;
+      return 2;
+    }
+    if (cp == 0xFB02 || cp == 0xFB04) {
+      out[0] = 0x46;
+      out[1] = 0x4C;
+      if (cp == 0xFB04) {
+        out[2] = 0x4C;
+        return 3;
+      }
+      return 2;
+    }
+    if (cp == 0xFB05 || cp == 0xFB06) {
+      out[0] = 0x53;
+      out[1] = 0x54;
+      return 2;
+    }
+    int32 u = String._toUpperCp(cp);
+    if (u == 0) {
+      return String.utf8Encode(out, cp);
+    }
+    return String.utf8Encode(out, u);
+  }
+
+  /* Unicode-aware uppercase: Latin-1/Extended, Greek and Cyrillic are
+   * mapped by the generated tables; the sharp s and the Latin ligatures
+   * expand (ß -> SS). Codepoints outside those scripts are kept as-is. */
   String toUpperCase() {
     String result;
     for (usize i = 0; i < this.len; i++) {
-      uint8 c = this.data[i];
-      if (c >= 97 && c <= 122) {
-        c = (c - 32) as uint8;
+      usize next;
+      int32 c = String.utf8Decode(this.data, i, this.len, next);
+      uint8[8] buf;
+      usize n = String.appendUpper(&buf[0], c);
+      for (usize j = 0; j < n; j++) {
+        result.push_back(buf[j]);
       }
-      result.push_back(c);
+      i = next - 1;
     }
     return result;
   }
 
+  /* Encodes one codepoint in lowercase into 'out' (at least 8 bytes),
+   * handling the dotted capital I (I -> i + combining dot above). Returns
+   * the number of bytes written. */
+  private static usize appendLower(uint8* out, int32 cp) {
+    if (cp == 0x130) {
+      out[0] = 0x69;
+      out[1] = 0xCC;
+      out[2] = 0x87;
+      return 3;
+    }
+    int32 l = String._toLowerCp(cp);
+    if (l == 0) {
+      return String.utf8Encode(out, cp);
+    }
+    return String.utf8Encode(out, l);
+  }
+
+  /* Unicode-aware lowercase, mirroring toUpperCase(). */
   String toLowerCase() {
     String result;
     for (usize i = 0; i < this.len; i++) {
-      uint8 c = this.data[i];
-      if (c >= 65 && c <= 90) {
-        c = (c + 32) as uint8;
+      usize next;
+      int32 c = String.utf8Decode(this.data, i, this.len, next);
+      uint8[8] buf;
+      usize n = String.appendLower(&buf[0], c);
+      for (usize j = 0; j < n; j++) {
+        result.push_back(buf[j]);
       }
-      result.push_back(c);
+      i = next - 1;
     }
     return result;
-  }
-
-  private static bool isWhitespace(uint8 c) {
-    return c == 32 || c == 9 || c == 10 || c == 13 || c == 11 || c == 12;
   }
 
   String trim() {
     usize start = 0;
-    while (start < this.len && String.isWhitespace(this.data[start])) {
-      start++;
+    while (start < this.len) {
+      usize next;
+      int32 c = String.utf8Decode(this.data, start, this.len, next);
+      if (!String.isWhitespaceCp(c)) break;
+      start = next;
     }
-    usize end = this.len;
-    while (end > start && String.isWhitespace(this.data[end - 1])) {
-      end--;
+    /* Track the end of the last non-whitespace codepoint: the run after
+     * it (possibly empty) is the trailing whitespace to cut. */
+    usize lastEnd = start;
+    usize i = start;
+    while (i < this.len) {
+      usize next;
+      int32 c = String.utf8Decode(this.data, i, this.len, next);
+      if (!String.isWhitespaceCp(c)) {
+        lastEnd = next;
+      }
+      i = next;
     }
-    return this.substring(start, end);
+    return this.substring(start, lastEnd);
   }
 
   String trimStart() {
     usize start = 0;
-    while (start < this.len && String.isWhitespace(this.data[start])) {
-      start++;
+    while (start < this.len) {
+      usize next;
+      int32 c = String.utf8Decode(this.data, start, this.len, next);
+      if (!String.isWhitespaceCp(c)) break;
+      start = next;
     }
     return this.substring(start, this.len);
   }
 
   String trimEnd() {
-    usize end = this.len;
-    while (end > 0 && String.isWhitespace(this.data[end - 1])) {
-      end--;
+    usize lastEnd = 0;
+    usize i = 0;
+    while (i < this.len) {
+      usize next;
+      int32 c = String.utf8Decode(this.data, i, this.len, next);
+      if (!String.isWhitespaceCp(c)) {
+        lastEnd = next;
+      }
+      i = next;
     }
-    return this.substring(0, end);
+    return this.substring(0, lastEnd);
   }
 
   /* Splits this string on every occurrence of the delimiter. */
@@ -591,6 +753,956 @@ class String {
     result.push(current);
     return result;
   }
+
+  /* printf-style formatting (String.format("%d and %s", x, s)). The
+   * variadic arguments go straight to the runtime helper, which formats
+   * into a last-result buffer reused by the next format call; assign the
+   * result to a String (implicit copy) to take an owning copy, e.g.
+   * 'String s = String.format("%d", x);'. */
+  @extern("utopia_string_format")
+  static const uint8* format(const uint8* fmt, ...);
+
+  /* -- UTF-8 aware operations ---------------------------------------- */
+
+  /* The codepoint starting at byte 'index' (0-based byte offset). */
+  int32 codePointAt(usize index) {
+    if (index >= this.len) return -1;
+    usize next;
+    return String.utf8Decode(this.data, index, this.len, next);
+  }
+
+  /* The number of UTF-8 codepoints (bytes when the string is pure ASCII). */
+  usize runeCount() {
+    usize count = 0;
+    usize i = 0;
+    while (i < this.len) {
+      usize next;
+      String.utf8Decode(this.data, i, this.len, next);
+      count++;
+      i = next;
+    }
+    return count;
+  }
+
+  /* All codepoints, in order. */
+  List<int32> runes() {
+    List<int32> result;
+    usize i = 0;
+    while (i < this.len) {
+      usize next;
+      int32 cp = String.utf8Decode(this.data, i, this.len, next);
+      result.push(cp);
+      i = next;
+    }
+    return result;
+  }
+
+  /* A string holding the single codepoint 'codePoint' as UTF-8. */
+  static String fromCharCode(int32 codePoint) {
+    uint8[4] buf;
+    usize n = String.utf8Encode(&buf[0], codePoint);
+    String result;
+    for (usize i = 0; i < n; i++) {
+      result.push_back(buf[i]);
+    }
+    return result;
+  }
+
+  /* -- padding, repetition, reversal ---------------------------------- */
+
+  /* Pads this string on the left with 'padding' (repeated as needed) to
+   * reach 'width' bytes; returns a copy when already wide enough. */
+  String padLeft(usize width, const uint8* padding) {
+    return this._pad(width, padding, true);
+  }
+
+  String padRight(usize width, const uint8* padding) {
+    return this._pad(width, padding, false);
+  }
+
+  private String _pad(usize width, const uint8* padding, bool onLeft) {
+    usize padLen = String.c_strlen(padding);
+    if (this.len >= width || padLen == 0) return *this;
+    usize need = width - this.len;
+    String result;
+    if (!onLeft) {
+      for (usize i = 0; i < this.len; i++) {
+        result.push_back(this.data[i]);
+      }
+    }
+    usize done = 0;
+    while (done < need) {
+      for (usize i = 0; i < padLen && done < need; i++) {
+        result.push_back(padding[i]);
+        done++;
+      }
+    }
+    if (onLeft) {
+      for (usize i = 0; i < this.len; i++) {
+        result.push_back(this.data[i]);
+      }
+    }
+    return result;
+  }
+
+  /* This string concatenated with itself 'times' times (0 yields ""). */
+  String repeat(usize times) {
+    String result;
+    result.len = this.len * times;
+    result.cap = result.len + 15;
+    delete[] result.data;
+    result.data = new uint8[result.cap + 1];
+    for (usize t = 0; t < times; t++) {
+      for (usize i = 0; i < this.len; i++) {
+        result.data[t * this.len + i] = this.data[i];
+      }
+    }
+    result.data[result.len] = 0;
+    return result;
+  }
+
+  /* The string with the codepoints in reverse order (UTF-8 safe). */
+  String reversed() {
+    List<int32> r = this.runes();
+    String result;
+    uint8[4] buf;
+    for (int64 i = (r.length() - 1) as int64; i >= 0; i--) {
+      usize n = String.utf8Encode(&buf[0], r[i as usize]);
+      for (usize j = 0; j < n; j++) {
+        result.push_back(buf[j]);
+      }
+    }
+    return result;
+  }
+
+  /* -- parsing -------------------------------------------------------- */
+
+  /* Parses this string as an integer in 'radix' (2..36; 0 auto-detects
+   * the 0x/0o/0b prefixes and leading-0 octal). Returns 0 when no digits
+   * parse. */
+  int64 parse(int32 radix = 0) {
+    if (radix == 0 && this.len >= 2 && this.data[0] == 48) {
+      uint8 p = this.data[1];
+      if (p == 0x78 || p == 0x58) { /* 0x */
+        return String.c_strtoll(this.data + 2, null, 16);
+      }
+      if (p == 0x6F || p == 0x4F) { /* 0o */
+        return String.c_strtoll(this.data + 2, null, 8);
+      }
+      if (p == 0x62 || p == 0x42) { /* 0b */
+        return String.c_strtoll(this.data + 2, null, 2);
+      }
+    }
+    return String.c_strtoll(this.data, null, radix);
+  }
+
+  /* Parses this string in the given radix; 'out' receives the value and
+   * the method returns whether a valid integer was parsed (at least one
+   * digit after an optional sign). Radix 0 auto-detects 0x/0o/0b. */
+  bool tryParse(int32 radix, int64& out) {
+    uint8* start = this.data;
+    int32 effective = radix;
+    if (radix == 0 && this.len >= 2 && this.data[0] == 48) {
+      uint8 p = this.data[1];
+      if (p == 0x78 || p == 0x58) { /* 0x */
+        start = this.data + 2;
+        effective = 16;
+      } else if (p == 0x6F || p == 0x4F) { /* 0o */
+        start = this.data + 2;
+        effective = 8;
+      } else if (p == 0x62 || p == 0x42) { /* 0b */
+        start = this.data + 2;
+        effective = 2;
+      }
+    }
+    uint8* end = null;
+    int64 value = String.c_strtoll(start, &end, effective);
+    if (end == start) return false;
+    out = value;
+    return true;
+  }
+  /* __UNICODE_CASE_GENERATED_BEGIN__ */
+  /* Generated by scripts/gen_unicode_case.py. Maps a
+   * codepoint to its upper-case form, or 0 when unchanged.
+   * Covers Latin-1/Extended, Greek and Cyrillic. */
+  private static int32 _toUpperCp(int32 cp) {
+    if (cp >= 0x61 && cp <= 0x7A) return cp -32;
+    if (cp == 0xB5) return cp +743;
+    if (cp >= 0xE0 && cp <= 0xF6) return cp -32;
+    if (cp >= 0xF8 && cp <= 0xFE) return cp -32;
+    if (cp == 0xFF) return cp +121;
+    if (cp == 0x101) return cp -1;
+    if (cp == 0x103) return cp -1;
+    if (cp == 0x105) return cp -1;
+    if (cp == 0x107) return cp -1;
+    if (cp == 0x109) return cp -1;
+    if (cp == 0x10B) return cp -1;
+    if (cp == 0x10D) return cp -1;
+    if (cp == 0x10F) return cp -1;
+    if (cp == 0x111) return cp -1;
+    if (cp == 0x113) return cp -1;
+    if (cp == 0x115) return cp -1;
+    if (cp == 0x117) return cp -1;
+    if (cp == 0x119) return cp -1;
+    if (cp == 0x11B) return cp -1;
+    if (cp == 0x11D) return cp -1;
+    if (cp == 0x11F) return cp -1;
+    if (cp == 0x121) return cp -1;
+    if (cp == 0x123) return cp -1;
+    if (cp == 0x125) return cp -1;
+    if (cp == 0x127) return cp -1;
+    if (cp == 0x129) return cp -1;
+    if (cp == 0x12B) return cp -1;
+    if (cp == 0x12D) return cp -1;
+    if (cp == 0x12F) return cp -1;
+    if (cp == 0x131) return cp -232;
+    if (cp == 0x133) return cp -1;
+    if (cp == 0x135) return cp -1;
+    if (cp == 0x137) return cp -1;
+    if (cp == 0x13A) return cp -1;
+    if (cp == 0x13C) return cp -1;
+    if (cp == 0x13E) return cp -1;
+    if (cp == 0x140) return cp -1;
+    if (cp == 0x142) return cp -1;
+    if (cp == 0x144) return cp -1;
+    if (cp == 0x146) return cp -1;
+    if (cp == 0x148) return cp -1;
+    if (cp == 0x14B) return cp -1;
+    if (cp == 0x14D) return cp -1;
+    if (cp == 0x14F) return cp -1;
+    if (cp == 0x151) return cp -1;
+    if (cp == 0x153) return cp -1;
+    if (cp == 0x155) return cp -1;
+    if (cp == 0x157) return cp -1;
+    if (cp == 0x159) return cp -1;
+    if (cp == 0x15B) return cp -1;
+    if (cp == 0x15D) return cp -1;
+    if (cp == 0x15F) return cp -1;
+    if (cp == 0x161) return cp -1;
+    if (cp == 0x163) return cp -1;
+    if (cp == 0x165) return cp -1;
+    if (cp == 0x167) return cp -1;
+    if (cp == 0x169) return cp -1;
+    if (cp == 0x16B) return cp -1;
+    if (cp == 0x16D) return cp -1;
+    if (cp == 0x16F) return cp -1;
+    if (cp == 0x171) return cp -1;
+    if (cp == 0x173) return cp -1;
+    if (cp == 0x175) return cp -1;
+    if (cp == 0x177) return cp -1;
+    if (cp == 0x17A) return cp -1;
+    if (cp == 0x17C) return cp -1;
+    if (cp == 0x17E) return cp -1;
+    if (cp == 0x17F) return cp -300;
+    if (cp == 0x180) return cp +195;
+    if (cp == 0x183) return cp -1;
+    if (cp == 0x185) return cp -1;
+    if (cp == 0x188) return cp -1;
+    if (cp == 0x18C) return cp -1;
+    if (cp == 0x192) return cp -1;
+    if (cp == 0x195) return cp +97;
+    if (cp == 0x199) return cp -1;
+    if (cp == 0x19A) return cp +163;
+    if (cp == 0x19E) return cp +130;
+    if (cp == 0x1A1) return cp -1;
+    if (cp == 0x1A3) return cp -1;
+    if (cp == 0x1A5) return cp -1;
+    if (cp == 0x1A8) return cp -1;
+    if (cp == 0x1AD) return cp -1;
+    if (cp == 0x1B0) return cp -1;
+    if (cp == 0x1B4) return cp -1;
+    if (cp == 0x1B6) return cp -1;
+    if (cp == 0x1B9) return cp -1;
+    if (cp == 0x1BD) return cp -1;
+    if (cp == 0x1BF) return cp +56;
+    if (cp == 0x1C5) return cp -1;
+    if (cp == 0x1C6) return cp -2;
+    if (cp == 0x1C8) return cp -1;
+    if (cp == 0x1C9) return cp -2;
+    if (cp == 0x1CB) return cp -1;
+    if (cp == 0x1CC) return cp -2;
+    if (cp == 0x1CE) return cp -1;
+    if (cp == 0x1D0) return cp -1;
+    if (cp == 0x1D2) return cp -1;
+    if (cp == 0x1D4) return cp -1;
+    if (cp == 0x1D6) return cp -1;
+    if (cp == 0x1D8) return cp -1;
+    if (cp == 0x1DA) return cp -1;
+    if (cp == 0x1DC) return cp -1;
+    if (cp == 0x1DD) return cp -79;
+    if (cp == 0x1DF) return cp -1;
+    if (cp == 0x1E1) return cp -1;
+    if (cp == 0x1E3) return cp -1;
+    if (cp == 0x1E5) return cp -1;
+    if (cp == 0x1E7) return cp -1;
+    if (cp == 0x1E9) return cp -1;
+    if (cp == 0x1EB) return cp -1;
+    if (cp == 0x1ED) return cp -1;
+    if (cp == 0x1EF) return cp -1;
+    if (cp == 0x1F2) return cp -1;
+    if (cp == 0x1F3) return cp -2;
+    if (cp == 0x1F5) return cp -1;
+    if (cp == 0x1F9) return cp -1;
+    if (cp == 0x1FB) return cp -1;
+    if (cp == 0x1FD) return cp -1;
+    if (cp == 0x1FF) return cp -1;
+    if (cp == 0x201) return cp -1;
+    if (cp == 0x203) return cp -1;
+    if (cp == 0x205) return cp -1;
+    if (cp == 0x207) return cp -1;
+    if (cp == 0x209) return cp -1;
+    if (cp == 0x20B) return cp -1;
+    if (cp == 0x20D) return cp -1;
+    if (cp == 0x20F) return cp -1;
+    if (cp == 0x211) return cp -1;
+    if (cp == 0x213) return cp -1;
+    if (cp == 0x215) return cp -1;
+    if (cp == 0x217) return cp -1;
+    if (cp == 0x219) return cp -1;
+    if (cp == 0x21B) return cp -1;
+    if (cp == 0x21D) return cp -1;
+    if (cp == 0x21F) return cp -1;
+    if (cp == 0x223) return cp -1;
+    if (cp == 0x225) return cp -1;
+    if (cp == 0x227) return cp -1;
+    if (cp == 0x229) return cp -1;
+    if (cp == 0x22B) return cp -1;
+    if (cp == 0x22D) return cp -1;
+    if (cp == 0x22F) return cp -1;
+    if (cp == 0x231) return cp -1;
+    if (cp == 0x233) return cp -1;
+    if (cp == 0x23C) return cp -1;
+    if (cp == 0x242) return cp -1;
+    if (cp == 0x247) return cp -1;
+    if (cp == 0x249) return cp -1;
+    if (cp == 0x24B) return cp -1;
+    if (cp == 0x24D) return cp -1;
+    if (cp == 0x24F) return cp -1;
+    if (cp == 0x371) return cp -1;
+    if (cp == 0x373) return cp -1;
+    if (cp == 0x377) return cp -1;
+    if (cp >= 0x37B && cp <= 0x37D) return cp +130;
+    if (cp == 0x3AC) return cp -38;
+    if (cp >= 0x3AD && cp <= 0x3AF) return cp -37;
+    if (cp >= 0x3B1 && cp <= 0x3C1) return cp -32;
+    if (cp == 0x3C2) return cp -31;
+    if (cp >= 0x3C3 && cp <= 0x3CB) return cp -32;
+    if (cp == 0x3CC) return cp -64;
+    if (cp >= 0x3CD && cp <= 0x3CE) return cp -63;
+    if (cp == 0x3D0) return cp -62;
+    if (cp == 0x3D1) return cp -57;
+    if (cp == 0x3D5) return cp -47;
+    if (cp == 0x3D6) return cp -54;
+    if (cp == 0x3D7) return cp -8;
+    if (cp == 0x3D9) return cp -1;
+    if (cp == 0x3DB) return cp -1;
+    if (cp == 0x3DD) return cp -1;
+    if (cp == 0x3DF) return cp -1;
+    if (cp == 0x3E1) return cp -1;
+    if (cp == 0x3E3) return cp -1;
+    if (cp == 0x3E5) return cp -1;
+    if (cp == 0x3E7) return cp -1;
+    if (cp == 0x3E9) return cp -1;
+    if (cp == 0x3EB) return cp -1;
+    if (cp == 0x3ED) return cp -1;
+    if (cp == 0x3EF) return cp -1;
+    if (cp == 0x3F0) return cp -86;
+    if (cp == 0x3F1) return cp -80;
+    if (cp == 0x3F2) return cp +7;
+    if (cp == 0x3F3) return cp -116;
+    if (cp == 0x3F5) return cp -96;
+    if (cp == 0x3F8) return cp -1;
+    if (cp == 0x3FB) return cp -1;
+    if (cp >= 0x430 && cp <= 0x44F) return cp -32;
+    if (cp >= 0x450 && cp <= 0x45F) return cp -80;
+    if (cp == 0x461) return cp -1;
+    if (cp == 0x463) return cp -1;
+    if (cp == 0x465) return cp -1;
+    if (cp == 0x467) return cp -1;
+    if (cp == 0x469) return cp -1;
+    if (cp == 0x46B) return cp -1;
+    if (cp == 0x46D) return cp -1;
+    if (cp == 0x46F) return cp -1;
+    if (cp == 0x471) return cp -1;
+    if (cp == 0x473) return cp -1;
+    if (cp == 0x475) return cp -1;
+    if (cp == 0x477) return cp -1;
+    if (cp == 0x479) return cp -1;
+    if (cp == 0x47B) return cp -1;
+    if (cp == 0x47D) return cp -1;
+    if (cp == 0x47F) return cp -1;
+    if (cp == 0x481) return cp -1;
+    if (cp == 0x48B) return cp -1;
+    if (cp == 0x48D) return cp -1;
+    if (cp == 0x48F) return cp -1;
+    if (cp == 0x491) return cp -1;
+    if (cp == 0x493) return cp -1;
+    if (cp == 0x495) return cp -1;
+    if (cp == 0x497) return cp -1;
+    if (cp == 0x499) return cp -1;
+    if (cp == 0x49B) return cp -1;
+    if (cp == 0x49D) return cp -1;
+    if (cp == 0x49F) return cp -1;
+    if (cp == 0x4A1) return cp -1;
+    if (cp == 0x4A3) return cp -1;
+    if (cp == 0x4A5) return cp -1;
+    if (cp == 0x4A7) return cp -1;
+    if (cp == 0x4A9) return cp -1;
+    if (cp == 0x4AB) return cp -1;
+    if (cp == 0x4AD) return cp -1;
+    if (cp == 0x4AF) return cp -1;
+    if (cp == 0x4B1) return cp -1;
+    if (cp == 0x4B3) return cp -1;
+    if (cp == 0x4B5) return cp -1;
+    if (cp == 0x4B7) return cp -1;
+    if (cp == 0x4B9) return cp -1;
+    if (cp == 0x4BB) return cp -1;
+    if (cp == 0x4BD) return cp -1;
+    if (cp == 0x4BF) return cp -1;
+    if (cp == 0x4C2) return cp -1;
+    if (cp == 0x4C4) return cp -1;
+    if (cp == 0x4C6) return cp -1;
+    if (cp == 0x4C8) return cp -1;
+    if (cp == 0x4CA) return cp -1;
+    if (cp == 0x4CC) return cp -1;
+    if (cp == 0x4CE) return cp -1;
+    if (cp == 0x4CF) return cp -15;
+    if (cp == 0x4D1) return cp -1;
+    if (cp == 0x4D3) return cp -1;
+    if (cp == 0x4D5) return cp -1;
+    if (cp == 0x4D7) return cp -1;
+    if (cp == 0x4D9) return cp -1;
+    if (cp == 0x4DB) return cp -1;
+    if (cp == 0x4DD) return cp -1;
+    if (cp == 0x4DF) return cp -1;
+    if (cp == 0x4E1) return cp -1;
+    if (cp == 0x4E3) return cp -1;
+    if (cp == 0x4E5) return cp -1;
+    if (cp == 0x4E7) return cp -1;
+    if (cp == 0x4E9) return cp -1;
+    if (cp == 0x4EB) return cp -1;
+    if (cp == 0x4ED) return cp -1;
+    if (cp == 0x4EF) return cp -1;
+    if (cp == 0x4F1) return cp -1;
+    if (cp == 0x4F3) return cp -1;
+    if (cp == 0x4F5) return cp -1;
+    if (cp == 0x4F7) return cp -1;
+    if (cp == 0x4F9) return cp -1;
+    if (cp == 0x4FB) return cp -1;
+    if (cp == 0x4FD) return cp -1;
+    if (cp == 0x4FF) return cp -1;
+    if (cp == 0x1E01) return cp -1;
+    if (cp == 0x1E03) return cp -1;
+    if (cp == 0x1E05) return cp -1;
+    if (cp == 0x1E07) return cp -1;
+    if (cp == 0x1E09) return cp -1;
+    if (cp == 0x1E0B) return cp -1;
+    if (cp == 0x1E0D) return cp -1;
+    if (cp == 0x1E0F) return cp -1;
+    if (cp == 0x1E11) return cp -1;
+    if (cp == 0x1E13) return cp -1;
+    if (cp == 0x1E15) return cp -1;
+    if (cp == 0x1E17) return cp -1;
+    if (cp == 0x1E19) return cp -1;
+    if (cp == 0x1E1B) return cp -1;
+    if (cp == 0x1E1D) return cp -1;
+    if (cp == 0x1E1F) return cp -1;
+    if (cp == 0x1E21) return cp -1;
+    if (cp == 0x1E23) return cp -1;
+    if (cp == 0x1E25) return cp -1;
+    if (cp == 0x1E27) return cp -1;
+    if (cp == 0x1E29) return cp -1;
+    if (cp == 0x1E2B) return cp -1;
+    if (cp == 0x1E2D) return cp -1;
+    if (cp == 0x1E2F) return cp -1;
+    if (cp == 0x1E31) return cp -1;
+    if (cp == 0x1E33) return cp -1;
+    if (cp == 0x1E35) return cp -1;
+    if (cp == 0x1E37) return cp -1;
+    if (cp == 0x1E39) return cp -1;
+    if (cp == 0x1E3B) return cp -1;
+    if (cp == 0x1E3D) return cp -1;
+    if (cp == 0x1E3F) return cp -1;
+    if (cp == 0x1E41) return cp -1;
+    if (cp == 0x1E43) return cp -1;
+    if (cp == 0x1E45) return cp -1;
+    if (cp == 0x1E47) return cp -1;
+    if (cp == 0x1E49) return cp -1;
+    if (cp == 0x1E4B) return cp -1;
+    if (cp == 0x1E4D) return cp -1;
+    if (cp == 0x1E4F) return cp -1;
+    if (cp == 0x1E51) return cp -1;
+    if (cp == 0x1E53) return cp -1;
+    if (cp == 0x1E55) return cp -1;
+    if (cp == 0x1E57) return cp -1;
+    if (cp == 0x1E59) return cp -1;
+    if (cp == 0x1E5B) return cp -1;
+    if (cp == 0x1E5D) return cp -1;
+    if (cp == 0x1E5F) return cp -1;
+    if (cp == 0x1E61) return cp -1;
+    if (cp == 0x1E63) return cp -1;
+    if (cp == 0x1E65) return cp -1;
+    if (cp == 0x1E67) return cp -1;
+    if (cp == 0x1E69) return cp -1;
+    if (cp == 0x1E6B) return cp -1;
+    if (cp == 0x1E6D) return cp -1;
+    if (cp == 0x1E6F) return cp -1;
+    if (cp == 0x1E71) return cp -1;
+    if (cp == 0x1E73) return cp -1;
+    if (cp == 0x1E75) return cp -1;
+    if (cp == 0x1E77) return cp -1;
+    if (cp == 0x1E79) return cp -1;
+    if (cp == 0x1E7B) return cp -1;
+    if (cp == 0x1E7D) return cp -1;
+    if (cp == 0x1E7F) return cp -1;
+    if (cp == 0x1E81) return cp -1;
+    if (cp == 0x1E83) return cp -1;
+    if (cp == 0x1E85) return cp -1;
+    if (cp == 0x1E87) return cp -1;
+    if (cp == 0x1E89) return cp -1;
+    if (cp == 0x1E8B) return cp -1;
+    if (cp == 0x1E8D) return cp -1;
+    if (cp == 0x1E8F) return cp -1;
+    if (cp == 0x1E91) return cp -1;
+    if (cp == 0x1E93) return cp -1;
+    if (cp == 0x1E95) return cp -1;
+    if (cp == 0x1E9B) return cp -59;
+    if (cp == 0x1EA1) return cp -1;
+    if (cp == 0x1EA3) return cp -1;
+    if (cp == 0x1EA5) return cp -1;
+    if (cp == 0x1EA7) return cp -1;
+    if (cp == 0x1EA9) return cp -1;
+    if (cp == 0x1EAB) return cp -1;
+    if (cp == 0x1EAD) return cp -1;
+    if (cp == 0x1EAF) return cp -1;
+    if (cp == 0x1EB1) return cp -1;
+    if (cp == 0x1EB3) return cp -1;
+    if (cp == 0x1EB5) return cp -1;
+    if (cp == 0x1EB7) return cp -1;
+    if (cp == 0x1EB9) return cp -1;
+    if (cp == 0x1EBB) return cp -1;
+    if (cp == 0x1EBD) return cp -1;
+    if (cp == 0x1EBF) return cp -1;
+    if (cp == 0x1EC1) return cp -1;
+    if (cp == 0x1EC3) return cp -1;
+    if (cp == 0x1EC5) return cp -1;
+    if (cp == 0x1EC7) return cp -1;
+    if (cp == 0x1EC9) return cp -1;
+    if (cp == 0x1ECB) return cp -1;
+    if (cp == 0x1ECD) return cp -1;
+    if (cp == 0x1ECF) return cp -1;
+    if (cp == 0x1ED1) return cp -1;
+    if (cp == 0x1ED3) return cp -1;
+    if (cp == 0x1ED5) return cp -1;
+    if (cp == 0x1ED7) return cp -1;
+    if (cp == 0x1ED9) return cp -1;
+    if (cp == 0x1EDB) return cp -1;
+    if (cp == 0x1EDD) return cp -1;
+    if (cp == 0x1EDF) return cp -1;
+    if (cp == 0x1EE1) return cp -1;
+    if (cp == 0x1EE3) return cp -1;
+    if (cp == 0x1EE5) return cp -1;
+    if (cp == 0x1EE7) return cp -1;
+    if (cp == 0x1EE9) return cp -1;
+    if (cp == 0x1EEB) return cp -1;
+    if (cp == 0x1EED) return cp -1;
+    if (cp == 0x1EEF) return cp -1;
+    if (cp == 0x1EF1) return cp -1;
+    if (cp == 0x1EF3) return cp -1;
+    if (cp == 0x1EF5) return cp -1;
+    if (cp == 0x1EF7) return cp -1;
+    if (cp == 0x1EF9) return cp -1;
+    if (cp == 0x1EFB) return cp -1;
+    if (cp == 0x1EFD) return cp -1;
+    if (cp == 0x1EFF) return cp -1;
+    return 0;
+  }
+
+  /* Generated by scripts/gen_unicode_case.py. Maps a
+   * codepoint to its lower-case form, or 0 when unchanged. */
+  private static int32 _toLowerCp(int32 cp) {
+    if (cp >= 0x41 && cp <= 0x5A) return cp +32;
+    if (cp >= 0xC0 && cp <= 0xD6) return cp +32;
+    if (cp >= 0xD8 && cp <= 0xDE) return cp +32;
+    if (cp == 0x100) return cp +1;
+    if (cp == 0x102) return cp +1;
+    if (cp == 0x104) return cp +1;
+    if (cp == 0x106) return cp +1;
+    if (cp == 0x108) return cp +1;
+    if (cp == 0x10A) return cp +1;
+    if (cp == 0x10C) return cp +1;
+    if (cp == 0x10E) return cp +1;
+    if (cp == 0x110) return cp +1;
+    if (cp == 0x112) return cp +1;
+    if (cp == 0x114) return cp +1;
+    if (cp == 0x116) return cp +1;
+    if (cp == 0x118) return cp +1;
+    if (cp == 0x11A) return cp +1;
+    if (cp == 0x11C) return cp +1;
+    if (cp == 0x11E) return cp +1;
+    if (cp == 0x120) return cp +1;
+    if (cp == 0x122) return cp +1;
+    if (cp == 0x124) return cp +1;
+    if (cp == 0x126) return cp +1;
+    if (cp == 0x128) return cp +1;
+    if (cp == 0x12A) return cp +1;
+    if (cp == 0x12C) return cp +1;
+    if (cp == 0x12E) return cp +1;
+    if (cp == 0x132) return cp +1;
+    if (cp == 0x134) return cp +1;
+    if (cp == 0x136) return cp +1;
+    if (cp == 0x139) return cp +1;
+    if (cp == 0x13B) return cp +1;
+    if (cp == 0x13D) return cp +1;
+    if (cp == 0x13F) return cp +1;
+    if (cp == 0x141) return cp +1;
+    if (cp == 0x143) return cp +1;
+    if (cp == 0x145) return cp +1;
+    if (cp == 0x147) return cp +1;
+    if (cp == 0x14A) return cp +1;
+    if (cp == 0x14C) return cp +1;
+    if (cp == 0x14E) return cp +1;
+    if (cp == 0x150) return cp +1;
+    if (cp == 0x152) return cp +1;
+    if (cp == 0x154) return cp +1;
+    if (cp == 0x156) return cp +1;
+    if (cp == 0x158) return cp +1;
+    if (cp == 0x15A) return cp +1;
+    if (cp == 0x15C) return cp +1;
+    if (cp == 0x15E) return cp +1;
+    if (cp == 0x160) return cp +1;
+    if (cp == 0x162) return cp +1;
+    if (cp == 0x164) return cp +1;
+    if (cp == 0x166) return cp +1;
+    if (cp == 0x168) return cp +1;
+    if (cp == 0x16A) return cp +1;
+    if (cp == 0x16C) return cp +1;
+    if (cp == 0x16E) return cp +1;
+    if (cp == 0x170) return cp +1;
+    if (cp == 0x172) return cp +1;
+    if (cp == 0x174) return cp +1;
+    if (cp == 0x176) return cp +1;
+    if (cp == 0x178) return cp -121;
+    if (cp == 0x179) return cp +1;
+    if (cp == 0x17B) return cp +1;
+    if (cp == 0x17D) return cp +1;
+    if (cp == 0x182) return cp +1;
+    if (cp == 0x184) return cp +1;
+    if (cp == 0x187) return cp +1;
+    if (cp == 0x18B) return cp +1;
+    if (cp == 0x18E) return cp +79;
+    if (cp == 0x191) return cp +1;
+    if (cp == 0x198) return cp +1;
+    if (cp == 0x1A0) return cp +1;
+    if (cp == 0x1A2) return cp +1;
+    if (cp == 0x1A4) return cp +1;
+    if (cp == 0x1A7) return cp +1;
+    if (cp == 0x1AC) return cp +1;
+    if (cp == 0x1AF) return cp +1;
+    if (cp == 0x1B3) return cp +1;
+    if (cp == 0x1B5) return cp +1;
+    if (cp == 0x1B8) return cp +1;
+    if (cp == 0x1BC) return cp +1;
+    if (cp == 0x1C4) return cp +2;
+    if (cp == 0x1C5) return cp +1;
+    if (cp == 0x1C7) return cp +2;
+    if (cp == 0x1C8) return cp +1;
+    if (cp == 0x1CA) return cp +2;
+    if (cp == 0x1CB) return cp +1;
+    if (cp == 0x1CD) return cp +1;
+    if (cp == 0x1CF) return cp +1;
+    if (cp == 0x1D1) return cp +1;
+    if (cp == 0x1D3) return cp +1;
+    if (cp == 0x1D5) return cp +1;
+    if (cp == 0x1D7) return cp +1;
+    if (cp == 0x1D9) return cp +1;
+    if (cp == 0x1DB) return cp +1;
+    if (cp == 0x1DE) return cp +1;
+    if (cp == 0x1E0) return cp +1;
+    if (cp == 0x1E2) return cp +1;
+    if (cp == 0x1E4) return cp +1;
+    if (cp == 0x1E6) return cp +1;
+    if (cp == 0x1E8) return cp +1;
+    if (cp == 0x1EA) return cp +1;
+    if (cp == 0x1EC) return cp +1;
+    if (cp == 0x1EE) return cp +1;
+    if (cp == 0x1F1) return cp +2;
+    if (cp == 0x1F2) return cp +1;
+    if (cp == 0x1F4) return cp +1;
+    if (cp == 0x1F6) return cp -97;
+    if (cp == 0x1F7) return cp -56;
+    if (cp == 0x1F8) return cp +1;
+    if (cp == 0x1FA) return cp +1;
+    if (cp == 0x1FC) return cp +1;
+    if (cp == 0x1FE) return cp +1;
+    if (cp == 0x200) return cp +1;
+    if (cp == 0x202) return cp +1;
+    if (cp == 0x204) return cp +1;
+    if (cp == 0x206) return cp +1;
+    if (cp == 0x208) return cp +1;
+    if (cp == 0x20A) return cp +1;
+    if (cp == 0x20C) return cp +1;
+    if (cp == 0x20E) return cp +1;
+    if (cp == 0x210) return cp +1;
+    if (cp == 0x212) return cp +1;
+    if (cp == 0x214) return cp +1;
+    if (cp == 0x216) return cp +1;
+    if (cp == 0x218) return cp +1;
+    if (cp == 0x21A) return cp +1;
+    if (cp == 0x21C) return cp +1;
+    if (cp == 0x21E) return cp +1;
+    if (cp == 0x220) return cp -130;
+    if (cp == 0x222) return cp +1;
+    if (cp == 0x224) return cp +1;
+    if (cp == 0x226) return cp +1;
+    if (cp == 0x228) return cp +1;
+    if (cp == 0x22A) return cp +1;
+    if (cp == 0x22C) return cp +1;
+    if (cp == 0x22E) return cp +1;
+    if (cp == 0x230) return cp +1;
+    if (cp == 0x232) return cp +1;
+    if (cp == 0x23B) return cp +1;
+    if (cp == 0x23D) return cp -163;
+    if (cp == 0x241) return cp +1;
+    if (cp == 0x243) return cp -195;
+    if (cp == 0x246) return cp +1;
+    if (cp == 0x248) return cp +1;
+    if (cp == 0x24A) return cp +1;
+    if (cp == 0x24C) return cp +1;
+    if (cp == 0x24E) return cp +1;
+    if (cp == 0x370) return cp +1;
+    if (cp == 0x372) return cp +1;
+    if (cp == 0x376) return cp +1;
+    if (cp == 0x37F) return cp +116;
+    if (cp == 0x386) return cp +38;
+    if (cp >= 0x388 && cp <= 0x38A) return cp +37;
+    if (cp == 0x38C) return cp +64;
+    if (cp >= 0x38E && cp <= 0x38F) return cp +63;
+    if (cp >= 0x391 && cp <= 0x3A1) return cp +32;
+    if (cp >= 0x3A3 && cp <= 0x3AB) return cp +32;
+    if (cp == 0x3CF) return cp +8;
+    if (cp == 0x3D8) return cp +1;
+    if (cp == 0x3DA) return cp +1;
+    if (cp == 0x3DC) return cp +1;
+    if (cp == 0x3DE) return cp +1;
+    if (cp == 0x3E0) return cp +1;
+    if (cp == 0x3E2) return cp +1;
+    if (cp == 0x3E4) return cp +1;
+    if (cp == 0x3E6) return cp +1;
+    if (cp == 0x3E8) return cp +1;
+    if (cp == 0x3EA) return cp +1;
+    if (cp == 0x3EC) return cp +1;
+    if (cp == 0x3EE) return cp +1;
+    if (cp == 0x3F4) return cp -60;
+    if (cp == 0x3F7) return cp +1;
+    if (cp == 0x3F9) return cp -7;
+    if (cp == 0x3FA) return cp +1;
+    if (cp >= 0x3FD && cp <= 0x3FF) return cp -130;
+    if (cp >= 0x400 && cp <= 0x40F) return cp +80;
+    if (cp >= 0x410 && cp <= 0x42F) return cp +32;
+    if (cp == 0x460) return cp +1;
+    if (cp == 0x462) return cp +1;
+    if (cp == 0x464) return cp +1;
+    if (cp == 0x466) return cp +1;
+    if (cp == 0x468) return cp +1;
+    if (cp == 0x46A) return cp +1;
+    if (cp == 0x46C) return cp +1;
+    if (cp == 0x46E) return cp +1;
+    if (cp == 0x470) return cp +1;
+    if (cp == 0x472) return cp +1;
+    if (cp == 0x474) return cp +1;
+    if (cp == 0x476) return cp +1;
+    if (cp == 0x478) return cp +1;
+    if (cp == 0x47A) return cp +1;
+    if (cp == 0x47C) return cp +1;
+    if (cp == 0x47E) return cp +1;
+    if (cp == 0x480) return cp +1;
+    if (cp == 0x48A) return cp +1;
+    if (cp == 0x48C) return cp +1;
+    if (cp == 0x48E) return cp +1;
+    if (cp == 0x490) return cp +1;
+    if (cp == 0x492) return cp +1;
+    if (cp == 0x494) return cp +1;
+    if (cp == 0x496) return cp +1;
+    if (cp == 0x498) return cp +1;
+    if (cp == 0x49A) return cp +1;
+    if (cp == 0x49C) return cp +1;
+    if (cp == 0x49E) return cp +1;
+    if (cp == 0x4A0) return cp +1;
+    if (cp == 0x4A2) return cp +1;
+    if (cp == 0x4A4) return cp +1;
+    if (cp == 0x4A6) return cp +1;
+    if (cp == 0x4A8) return cp +1;
+    if (cp == 0x4AA) return cp +1;
+    if (cp == 0x4AC) return cp +1;
+    if (cp == 0x4AE) return cp +1;
+    if (cp == 0x4B0) return cp +1;
+    if (cp == 0x4B2) return cp +1;
+    if (cp == 0x4B4) return cp +1;
+    if (cp == 0x4B6) return cp +1;
+    if (cp == 0x4B8) return cp +1;
+    if (cp == 0x4BA) return cp +1;
+    if (cp == 0x4BC) return cp +1;
+    if (cp == 0x4BE) return cp +1;
+    if (cp == 0x4C0) return cp +15;
+    if (cp == 0x4C1) return cp +1;
+    if (cp == 0x4C3) return cp +1;
+    if (cp == 0x4C5) return cp +1;
+    if (cp == 0x4C7) return cp +1;
+    if (cp == 0x4C9) return cp +1;
+    if (cp == 0x4CB) return cp +1;
+    if (cp == 0x4CD) return cp +1;
+    if (cp == 0x4D0) return cp +1;
+    if (cp == 0x4D2) return cp +1;
+    if (cp == 0x4D4) return cp +1;
+    if (cp == 0x4D6) return cp +1;
+    if (cp == 0x4D8) return cp +1;
+    if (cp == 0x4DA) return cp +1;
+    if (cp == 0x4DC) return cp +1;
+    if (cp == 0x4DE) return cp +1;
+    if (cp == 0x4E0) return cp +1;
+    if (cp == 0x4E2) return cp +1;
+    if (cp == 0x4E4) return cp +1;
+    if (cp == 0x4E6) return cp +1;
+    if (cp == 0x4E8) return cp +1;
+    if (cp == 0x4EA) return cp +1;
+    if (cp == 0x4EC) return cp +1;
+    if (cp == 0x4EE) return cp +1;
+    if (cp == 0x4F0) return cp +1;
+    if (cp == 0x4F2) return cp +1;
+    if (cp == 0x4F4) return cp +1;
+    if (cp == 0x4F6) return cp +1;
+    if (cp == 0x4F8) return cp +1;
+    if (cp == 0x4FA) return cp +1;
+    if (cp == 0x4FC) return cp +1;
+    if (cp == 0x4FE) return cp +1;
+    if (cp == 0x1E00) return cp +1;
+    if (cp == 0x1E02) return cp +1;
+    if (cp == 0x1E04) return cp +1;
+    if (cp == 0x1E06) return cp +1;
+    if (cp == 0x1E08) return cp +1;
+    if (cp == 0x1E0A) return cp +1;
+    if (cp == 0x1E0C) return cp +1;
+    if (cp == 0x1E0E) return cp +1;
+    if (cp == 0x1E10) return cp +1;
+    if (cp == 0x1E12) return cp +1;
+    if (cp == 0x1E14) return cp +1;
+    if (cp == 0x1E16) return cp +1;
+    if (cp == 0x1E18) return cp +1;
+    if (cp == 0x1E1A) return cp +1;
+    if (cp == 0x1E1C) return cp +1;
+    if (cp == 0x1E1E) return cp +1;
+    if (cp == 0x1E20) return cp +1;
+    if (cp == 0x1E22) return cp +1;
+    if (cp == 0x1E24) return cp +1;
+    if (cp == 0x1E26) return cp +1;
+    if (cp == 0x1E28) return cp +1;
+    if (cp == 0x1E2A) return cp +1;
+    if (cp == 0x1E2C) return cp +1;
+    if (cp == 0x1E2E) return cp +1;
+    if (cp == 0x1E30) return cp +1;
+    if (cp == 0x1E32) return cp +1;
+    if (cp == 0x1E34) return cp +1;
+    if (cp == 0x1E36) return cp +1;
+    if (cp == 0x1E38) return cp +1;
+    if (cp == 0x1E3A) return cp +1;
+    if (cp == 0x1E3C) return cp +1;
+    if (cp == 0x1E3E) return cp +1;
+    if (cp == 0x1E40) return cp +1;
+    if (cp == 0x1E42) return cp +1;
+    if (cp == 0x1E44) return cp +1;
+    if (cp == 0x1E46) return cp +1;
+    if (cp == 0x1E48) return cp +1;
+    if (cp == 0x1E4A) return cp +1;
+    if (cp == 0x1E4C) return cp +1;
+    if (cp == 0x1E4E) return cp +1;
+    if (cp == 0x1E50) return cp +1;
+    if (cp == 0x1E52) return cp +1;
+    if (cp == 0x1E54) return cp +1;
+    if (cp == 0x1E56) return cp +1;
+    if (cp == 0x1E58) return cp +1;
+    if (cp == 0x1E5A) return cp +1;
+    if (cp == 0x1E5C) return cp +1;
+    if (cp == 0x1E5E) return cp +1;
+    if (cp == 0x1E60) return cp +1;
+    if (cp == 0x1E62) return cp +1;
+    if (cp == 0x1E64) return cp +1;
+    if (cp == 0x1E66) return cp +1;
+    if (cp == 0x1E68) return cp +1;
+    if (cp == 0x1E6A) return cp +1;
+    if (cp == 0x1E6C) return cp +1;
+    if (cp == 0x1E6E) return cp +1;
+    if (cp == 0x1E70) return cp +1;
+    if (cp == 0x1E72) return cp +1;
+    if (cp == 0x1E74) return cp +1;
+    if (cp == 0x1E76) return cp +1;
+    if (cp == 0x1E78) return cp +1;
+    if (cp == 0x1E7A) return cp +1;
+    if (cp == 0x1E7C) return cp +1;
+    if (cp == 0x1E7E) return cp +1;
+    if (cp == 0x1E80) return cp +1;
+    if (cp == 0x1E82) return cp +1;
+    if (cp == 0x1E84) return cp +1;
+    if (cp == 0x1E86) return cp +1;
+    if (cp == 0x1E88) return cp +1;
+    if (cp == 0x1E8A) return cp +1;
+    if (cp == 0x1E8C) return cp +1;
+    if (cp == 0x1E8E) return cp +1;
+    if (cp == 0x1E90) return cp +1;
+    if (cp == 0x1E92) return cp +1;
+    if (cp == 0x1E94) return cp +1;
+    if (cp == 0x1E9E) return cp -7615;
+    if (cp == 0x1EA0) return cp +1;
+    if (cp == 0x1EA2) return cp +1;
+    if (cp == 0x1EA4) return cp +1;
+    if (cp == 0x1EA6) return cp +1;
+    if (cp == 0x1EA8) return cp +1;
+    if (cp == 0x1EAA) return cp +1;
+    if (cp == 0x1EAC) return cp +1;
+    if (cp == 0x1EAE) return cp +1;
+    if (cp == 0x1EB0) return cp +1;
+    if (cp == 0x1EB2) return cp +1;
+    if (cp == 0x1EB4) return cp +1;
+    if (cp == 0x1EB6) return cp +1;
+    if (cp == 0x1EB8) return cp +1;
+    if (cp == 0x1EBA) return cp +1;
+    if (cp == 0x1EBC) return cp +1;
+    if (cp == 0x1EBE) return cp +1;
+    if (cp == 0x1EC0) return cp +1;
+    if (cp == 0x1EC2) return cp +1;
+    if (cp == 0x1EC4) return cp +1;
+    if (cp == 0x1EC6) return cp +1;
+    if (cp == 0x1EC8) return cp +1;
+    if (cp == 0x1ECA) return cp +1;
+    if (cp == 0x1ECC) return cp +1;
+    if (cp == 0x1ECE) return cp +1;
+    if (cp == 0x1ED0) return cp +1;
+    if (cp == 0x1ED2) return cp +1;
+    if (cp == 0x1ED4) return cp +1;
+    if (cp == 0x1ED6) return cp +1;
+    if (cp == 0x1ED8) return cp +1;
+    if (cp == 0x1EDA) return cp +1;
+    if (cp == 0x1EDC) return cp +1;
+    if (cp == 0x1EDE) return cp +1;
+    if (cp == 0x1EE0) return cp +1;
+    if (cp == 0x1EE2) return cp +1;
+    if (cp == 0x1EE4) return cp +1;
+    if (cp == 0x1EE6) return cp +1;
+    if (cp == 0x1EE8) return cp +1;
+    if (cp == 0x1EEA) return cp +1;
+    if (cp == 0x1EEC) return cp +1;
+    if (cp == 0x1EEE) return cp +1;
+    if (cp == 0x1EF0) return cp +1;
+    if (cp == 0x1EF2) return cp +1;
+    if (cp == 0x1EF4) return cp +1;
+    if (cp == 0x1EF6) return cp +1;
+    if (cp == 0x1EF8) return cp +1;
+    if (cp == 0x1EFA) return cp +1;
+    if (cp == 0x1EFC) return cp +1;
+    if (cp == 0x1EFE) return cp +1;
+    return 0;
+  }
+  /* __UNICODE_CASE_GENERATED_END__ */
 }
 
 /* Global operator overloads to support commutativity when primitives 
@@ -616,4 +1728,144 @@ bool operator==(const uint8* lhs, const String& rhs) {
 @inline
 bool operator!=(const uint8* lhs, const String& rhs) {
   return rhs != lhs;
+}
+
+/*
+ * StringBuilder: an efficiently growing byte buffer for assembling
+ * strings. String concatenation (operator+) allocates a fresh buffer on
+ * every operation; StringBuilder appends into one buffer that grows
+ * geometrically, so building a string from many pieces is O(n) total
+ * (versus O(n^2) for repeated concatenation).
+ */
+class StringBuilder {
+  uint8* _data;
+  usize _len;
+  usize _cap;
+
+  StringBuilder() {
+    this._data = null;
+    this._len = 0;
+    this._cap = 0;
+  }
+
+  /* Preallocates 'capacity' bytes so the first appends do not reallocate. */
+  StringBuilder(usize capacity) {
+    this._data = null;
+    this._len = 0;
+    this._cap = 0;
+    this._reserve(capacity);
+  }
+
+  StringBuilder(const StringBuilder& other) {
+    this._data = null;
+    this._len = 0;
+    this._cap = 0;
+    this._reserve(other._len);
+    for (usize i = 0; i < other._len; i++) {
+      this._data[i] = other._data[i];
+    }
+    this._len = other._len;
+    this._data[this._len] = 0;
+  }
+
+  ~StringBuilder() {
+    if (this._data != null) {
+      delete[] this._data;
+    }
+  }
+
+  void operator=(const StringBuilder& other) {
+    if (this == &other) return;
+    this._reserve(other._len);
+    for (usize i = 0; i < other._len; i++) {
+      this._data[i] = other._data[i];
+    }
+    this._len = other._len;
+    this._data[this._len] = 0;
+  }
+
+  @inline
+  usize length() {
+    return this._len;
+  }
+
+  @inline
+  bool isEmpty() {
+    return this._len == 0;
+  }
+
+  @inline
+  bool isNotEmpty() {
+    return this._len != 0;
+  }
+
+  void _reserve(usize needed) {
+    if (needed <= this._cap) return;
+    usize newCap = this._cap == 0 ? (16 as usize) : this._cap * 2;
+    while (newCap < needed) {
+      newCap *= 2;
+    }
+    uint8* newData = new uint8[newCap + 1];
+    for (usize i = 0; i < this._len; i++) {
+      newData[i] = this._data[i];
+    }
+    if (this._data != null) {
+      delete[] this._data;
+    }
+    this._data = newData;
+    this._cap = newCap;
+  }
+
+  void _appendBytes(const uint8* src, usize n) {
+    this._reserve(this._len + n);
+    for (usize i = 0; i < n; i++) {
+      this._data[this._len + i] = src[i];
+    }
+    this._len += n;
+    this._data[this._len] = 0;
+  }
+
+  void append(const String& s) {
+    this._appendBytes(s.c_str(), s.length());
+  }
+
+  void append(const uint8* str) {
+    this._appendBytes(str, String.c_strlen(str));
+  }
+
+  void append(uint8 c) {
+    this._reserve(this._len + 1);
+    this._data[this._len] = c;
+    this._len++;
+    this._data[this._len] = 0;
+  }
+
+  void append(int32 v) {
+    this.append(String(v));
+  }
+
+  void append(int64 v) {
+    this.append(String(v));
+  }
+
+  void append(float64 v) {
+    this.append(String(v));
+  }
+
+  void append(bool v) {
+    this.append(String(v));
+  }
+
+  /* The accumulated text as an owning String. The builder keeps its
+   * buffer and can be reused after clear(). */
+  String toString() {
+    return String(this._data);
+  }
+
+  void clear() {
+    this._len = 0;
+    if (this._data != null) {
+      this._data[0] = 0;
+    }
+  }
 }

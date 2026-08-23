@@ -28,6 +28,7 @@
  *   process (like std::terminate in C++).
  */
 
+#include <cstdarg>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -668,5 +669,45 @@ void utopia_set_args(int32_t argc, char **argv) {
 int32_t utopia_get_argc() { return utopia_args_count; }
 
 char **utopia_get_argv() { return utopia_args_vector; }
+
+/* ------------------------------------------------------------------ */
+/* String.format (prelude String module).                             */
+/* ------------------------------------------------------------------ */
+
+/* printf-style formatting for String.format(fmt, ...). Formats into a
+ * persistent last-result buffer that is reused (and grown) by the next
+ * call, like asctime. The prelude's String(const uint8*) conversion copies
+ * the bytes at the call site, so the buffer only needs to stay valid until
+ * the next format call. Returning the pointer (instead of a String struct)
+ * keeps the ABI to a single register: the compiler returns aggregates of
+ * String's size in registers, which clang's SysV sret lowering would not
+ * match. */
+static char *utopia_format_buffer = nullptr;
+
+const char *utopia_string_format(const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  va_list probe;
+  va_copy(probe, ap);
+  int len = std::vsnprintf(nullptr, 0, fmt, probe);
+  va_end(probe);
+
+  if (len < 0) {
+    va_end(ap);
+    return "";
+  }
+
+  size_t size = static_cast<size_t>(len);
+  char *buf =
+      static_cast<char *>(std::realloc(utopia_format_buffer, size + 1));
+  if (!buf) {
+    va_end(ap);
+    return "";
+  }
+  utopia_format_buffer = buf;
+  std::vsnprintf(buf, size + 1, fmt, ap);
+  va_end(ap);
+  return buf;
+}
 
 } // extern "C"

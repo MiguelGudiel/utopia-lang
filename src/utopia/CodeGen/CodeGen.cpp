@@ -2857,10 +2857,13 @@ llvm::Value *CodeGen::visit(const BinaryOpNode *node) {
 
   if (node->promotedType) {
     llvm::Type *promotedLLVMTy = getLLVMType(node->promotedType);
+    /* Pass the operand's Utopia type so integer widening keeps the source
+     * signedness (uint8 zero-extends, int8 sign-extends); without it every
+     * value would sign-extend and 'uint8(195) < 128' would compare -61. */
     if (L->getType() != promotedLLVMTy)
-      L = createImplicitCast(L, promotedLLVMTy);
+      L = createImplicitCast(L, promotedLLVMTy, node->left->exprType);
     if (R->getType() != promotedLLVMTy)
-      R = createImplicitCast(R, promotedLLVMTy);
+      R = createImplicitCast(R, promotedLLVMTy, node->right->exprType);
   } else if (L->getType() != R->getType()) {
     if (L->getType()->isPointerTy())
       R = builder.CreateBitCast(R, L->getType());
