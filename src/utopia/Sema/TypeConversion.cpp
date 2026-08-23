@@ -1,4 +1,6 @@
 #include "utopia/Sema/Sema.hpp"
+#include <algorithm>
+#include <cstdlib>
 #include <string>
 
 namespace utopia {
@@ -55,6 +57,51 @@ static int conversionCtorScore(const Type *src, const Type *param) {
   if (s->isFloat() && p->isInteger())
     return 50;
   return 0;
+}
+
+/* Scores a numeric conversion for overload ranking. Same-width targets beat
+ * widening ones, which beat narrowing ones; a signedness match breaks ties
+ * within a width class. The score never reaches the exact-match score (+10)
+ * used by overload resolution, so a true exact overload always wins. Without
+ * this, every numeric conversion scored identically and a tie resolved to the
+ * first declared candidate — e.g. String(uint64) picked String(int8), the
+ * narrowest ctor, truncating every wide value. */
+int numericConversionScore(const Type *from, const Type *to) {
+  const Type *s = from->getUnqualifiedType();
+  const Type *t = to->getUnqualifiedType();
+  if (!s->isNumeric() || !t->isNumeric())
+    return 0;
+
+  auto width = [](const Type *ty) {
+    auto k = static_cast<const BuiltinType *>(ty->getUnqualifiedType())
+                 ->getBuiltinKind();
+    switch (k) {
+    case BuiltinKind::Int8:
+    case BuiltinKind::UInt8:
+      return 1;
+    case BuiltinKind::Int16:
+    case BuiltinKind::UInt16:
+      return 2;
+    case BuiltinKind::Int32:
+    case BuiltinKind::UInt32:
+    case BuiltinKind::Float32:
+      return 4;
+    default:
+      return 8;
+    }
+  };
+  auto isSigned = [](const Type *ty) {
+    auto k = static_cast<const BuiltinType *>(ty->getUnqualifiedType())
+                 ->getBuiltinKind();
+    return k >= BuiltinKind::Int8 && k <= BuiltinKind::Int64;
+  };
+
+  int wFrom = width(s);
+  int wTo = width(t);
+  int score = 10 - std::abs(wFrom - wTo) * 3;
+  if (s->isInteger() && t->isInteger() && isSigned(s) == isSigned(t))
+    score += 1;
+  return std::min(score, 9);
 }
 
 const FunctionDeclNode *findBestConversionCtor(const Type *from,

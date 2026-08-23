@@ -17,6 +17,14 @@ bool hasPendingChange = false;
 bool isProcessing = false;
 bool forceProcess = false;
 std::atomic<bool> isRunning{true};
+/* When the last change was announced; the worker only starts an analysis
+ * once the document has been quiet for kQuietAnalysisMs. A full analysis
+ * re-parses and re-checks the whole dependency graph (prelude + imports),
+ * which takes seconds, so without this gate continuous typing would chain
+ * one analysis into the next and pin a core for the whole session. */
+std::chrono::steady_clock::time_point lastChangeTime =
+    std::chrono::steady_clock::now();
+constexpr auto kQuietAnalysisMs = std::chrono::milliseconds(300);
 
 void workerThread() {
   while (isRunning) {
@@ -37,13 +45,18 @@ void workerThread() {
         /* Idle tick: look for build.yaml changes. */
         pollManifests = true;
       } else {
-        bool interrupted = true;
-        /* Only wait the 200ms debounce interval if processing isn't forced. */
-        while (interrupted && !forceProcess) {
-          auto status = workerCV.wait_for(lock, std::chrono::milliseconds(200));
-          if (status == std::cv_status::timeout) {
-            interrupted = false;
-          }
+        /* Wait until the document has been quiet for the debounce window.
+         * wait_until is used instead of a notified-reset wait_for: the
+         * notifications that announce each keystroke would otherwise keep
+         * resetting the timer, so a fast typist could starve the worker
+         * forever — and with 'hasPendingChange' never cleared, every
+         * syncWorker() call (completion, hover, semantic tokens, ...)
+         * would block indefinitely. */
+        while (!forceProcess) {
+          auto quietUntil = lastChangeTime + kQuietAnalysisMs;
+          if (std::chrono::steady_clock::now() >= quietUntil)
+            break;
+          workerCV.wait_until(lock, quietUntil);
         }
 
         forceProcess = false;
@@ -190,6 +203,7 @@ void requestBackgroundAnalysis(const std::string &uri, std::string text) {
     std::lock_guard<std::mutex> lock(workerMutex);
     pendingUri = uri;
     pendingText = std::move(text);
+    lastChangeTime = std::chrono::steady_clock::now();
     hasPendingChange = true;
   }
   workerCV.notify_one();

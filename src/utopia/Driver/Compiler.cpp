@@ -23,8 +23,7 @@ llvm::Module *Compiler::compileToIR(ModuleNode *root,
 
   if (const char *dbg = std::getenv("UTOPIA_DUMP_IR")) {
     std::string dbgPath = std::string(dbg) + "/" + std::string(moduleName);
-    for (char &ch : dbgPath)
-      if (ch == '/') ch = '_';
+    std::replace(dbgPath.begin(), dbgPath.end(), '/', '_');
     std::error_code ec;
     llvm::raw_fd_ostream out(dbgPath, ec);
     if (!ec)

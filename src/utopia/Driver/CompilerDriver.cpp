@@ -555,6 +555,24 @@ bool CompilerDriver::run() {
     auto findRuntimeLib = [&](std::string_view libName,
                               std::string_view installDir) -> fs::path {
       std::vector<fs::path> libDirs;
+      /* Cross-compilation (Android, ...) cannot link the host-built runtime
+       * archives into the target binary, so a per-target build directory is
+       * preferred when present, e.g.
+       * <repo>/build/runtime-aarch64_linux_android35/utopia_async. */
+      if (!options.preludeRoot.empty()) {
+        std::string flavor = options.targetTriple.empty()
+                                 ? llvm::sys::getDefaultTargetTriple()
+                                 : options.targetTriple;
+        for (char &c : flavor) {
+          if (!std::isalnum(static_cast<unsigned char>(c)))
+            c = '_';
+        }
+        libDirs.push_back(fs::path(options.preludeRoot)
+                              .parent_path()
+                              .parent_path()
+                              .parent_path() /
+                          "build" / ("runtime-" + flavor) / libName);
+      }
       /* Install layout: <prefix>/lib/utopia/<installDir> */
       if (!options.preludeRoot.empty()) {
         libDirs.push_back(fs::path(options.preludeRoot).parent_path()

@@ -4189,8 +4189,11 @@ llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
     /* 'Class(this.x)' parameters: each parameter is copied into its field
      * after the declaration initializers, matching Dart where initializing
      * formals override field initializers. Scalar and aggregate stores
-     * follow the same deep-copy rules as regular assignment. */
-    {
+     * follow the same deep-copy rules as regular assignment. This block is
+     * constructor-only: running it for other functions (lambdas, free
+     * functions) would pick up a stale 'this' binding from an enclosing
+     * method and emit a cross-function reference. */
+    if (isCtor) {
       SymbolInfo thisSym = cgCtx.lookupDetailed("this");
       if (thisSym.value) {
         llvm::Value *thisPtr =
@@ -4253,13 +4256,15 @@ llvm::Value *CodeGen::visit(const FunctionDeclNode *node) {
 
     /* Constructor initializer-list entries (': this.x = expr') run after
      * the this-parameters, in source order, still before the body. */
-    for (const auto *init : node->fieldInitializers) {
-      dispatch(init);
+    if (isCtor) {
+      for (const auto *init : node->fieldInitializers) {
+        dispatch(init);
+      }
     }
   }
 
   /* Automatically invoke destructors for aggregate fields inside destructors */
-  if (node->name == "~" && node->parentRecord) {
+  if (node->name == "~" && node->isMethod && node->parentRecord) {
     /* Explicitly exclude Unions from auto-destruction logic as their active
      * state cannot be definitively resolved by the compiler. */
     if (node->parentRecord->getKind() != TypeKind::Union) {

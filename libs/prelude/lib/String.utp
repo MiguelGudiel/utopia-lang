@@ -105,6 +105,12 @@ class String {
     this.len = String.c_snprintf(this.data, 32, "%lld", v) as usize;
   }
 
+  String(uint64 v) {
+    this.cap = 31;
+    this.data = new uint8[32];
+    this.len = String.c_snprintf(this.data, 32, "%llu", v) as usize;
+  }
+
   String(usize v) {
     this.cap = 31;
     this.data = new uint8[32];

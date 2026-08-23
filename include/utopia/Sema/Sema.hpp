@@ -27,6 +27,14 @@ const FunctionDeclNode *findBestConversionCtor(const Type *from,
                                                const RecordType *recTy);
 
 /*
+ * Scores a numeric conversion for overload ranking: same-width targets beat
+ * widening ones, which beat narrowing ones; a signedness match breaks ties
+ * within a width class. The score is capped below the exact-match score so
+ * an exact overload always wins.
+ */
+int numericConversionScore(const Type *from, const Type *to);
+
+/*
  * True when the two types are identical after stripping references and
  * qualifiers. Overload scoring uses this instead of a plain
  * canImplicitlyCast(..., false): that check still accepts narrowing

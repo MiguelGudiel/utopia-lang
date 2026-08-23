@@ -18,17 +18,40 @@
  *   always resumed on the loop that registered them, which makes the
  *   runtime safe to use from multiple threads: completing a future from
  *   any thread posts the continuations to their owner loops.
- * - The program is driven by utopia_loop_run (async main) or
- *   utopia_loop_drain (sync main), which run ready tasks until the target
- *   future completes or there is no pending work left.
+ *
+ * Thread affinity
+ * ---------------
+ * - A loop's queue is only ever drained by its owning thread. There is no
+ *   background scheduler and no thread-stealing: work that arrives at a
+ *   loop sits in its queue until the owner drains it. This is the Dart
+ *   isolate model -- strict single-threadedness per loop -- which makes
+ *   the runtime safe for hosts that render continuously (a UI engine): no
+ *   secondary thread can mutate async state that belongs to the render
+ *   thread.
+ * - Host-driven programs (a game/UI engine, an embedded loop) call
+ *   __loop_drain__() once per frame: it swaps the shared queue into a
+ *   local deque in O(1) under the lock and runs the continuations without
+ *   holding it. The call never blocks and returns as soon as no microtask
+ *   is pending, so the host keeps full control of the frame budget.
+ * - The blocking drivers (utopia_loop_run / utopia_loop_run_all /
+ *   utopia_future_wait) are built on top of the same drain primitive; they
+ *   only exist for plain executables whose process entry is async main.
+ *   They sleep on the loop's condition variable (woken by every post) and
+ *   never touch another loop's queue.
  *
  * Threads
  * -------
  * - Future.runOnThread spawns a worker thread (utopia_thread_spawn). The
  *   worker runs a compiler-generated thunk that calls the user function
  *   and completes the future state; the completion is posted back to the
- *   owner loop, so `await` on it blocks the loop until the thread finishes.
- * - A global timer thread powers Future.delayed.
+ *   owner loop, so `await` on it blocks the loop until the thread
+ *   finishes. An async lambda passed to runOnThread runs on the worker
+ *   with its own event loop copy (its own drain).
+ * - Timers (Future.delayed) are deadline entries in the loop that created
+ *   them. There is no global timer thread: the loop's owner expires the
+ *   timers when it drains, and the blocking drivers (and the host, via
+ *   __loop_next_deadline_us__) sleep exactly until the next deadline, so
+ *   the runtime never spawns helper threads for timers.
  *
  * Memory
  * ------
@@ -48,6 +71,7 @@
 #include <deque>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 struct UtopiaContinuation {
   UtopiaContinuation *next;
@@ -56,19 +80,30 @@ struct UtopiaContinuation {
   void *frame;
 };
 
+struct UtopiaFutureState;
+
+struct UtopiaTimer {
+  int64_t dueUs;
+  UtopiaFutureState *state;
+  UtopiaTimer *next;
+};
+
 struct UtopiaEventLoop {
-  std::mutex mtx;
+  std::mutex mtx; /* guards queue + timers */
+  /* Notified on every post to this loop and on every timer insertion; the
+   * owner's blocking drivers wait on it (with waitMtx as the wait lock)
+   * and wake up immediately when a continuation lands or a deadline
+   * changes. */
   std::condition_variable cv;
+  /* Dedicated lock for driver waits: drivers sleep on cv without holding
+   * mtx, so posters are never delayed by an idle driver. */
+  std::mutex waitMtx;
   std::deque<UtopiaContinuation *> queue;
+  /* Deadline-sorted timer list (earliest first). Expired by the owner
+   * when it drains; there is no global timer thread. */
+  UtopiaTimer *timers = nullptr;
   std::atomic<int32_t> activeThreads{0};
   std::atomic<int32_t> pendingTimers{0};
-  /* Monotonic timestamp of the last time the loop's owner pumped it. The
-   * background scheduler takes over a loop whose owner has not pumped for
-   * kSchedulerTakeoverMs: this keeps resumptions on the owning thread while
-   * it is actively driving (Dart-like single-thread behavior) yet lets
-   * fire-and-forget work proceed when the owner is blocked in user code
-   * (e.g. a game loop) or inside a coroutine ramp. */
-  std::atomic<int64_t> lastPumpMs{0};
   /* Global registry link (guarded by gLoopRegistryMtx). */
   UtopiaEventLoop *next = nullptr;
 };
@@ -93,48 +128,24 @@ enum : uint32_t { kUtopiaFutureCompleted = 1u };
 
 static thread_local UtopiaEventLoop *tlsLoop = nullptr;
 
+extern "C" void utopia_future_complete(void *state);
+
 /* ------------------------------------------------------------------ */
-/* Background scheduler                                                */
+/* Loop registry                                                       */
 /*                                                                     */
-/* A detached thread that pumps every event loop whose owner has not   */
-/* pumped it recently (kSchedulerTakeoverMs). This gives Dart/Flutter  */
-/* semantics to fire-and-forget futures when the main thread is        */
-/* blocked in user code (e.g. a game loop): timers and thread          */
-/* completions still run their continuations in the background instead */
-/* of waiting for the program to exit.                                 */
+/* Kept so the blocking drivers can tell whether any loop still has    */
+/* work that could complete a future (queued continuations, worker     */
+/* threads, scheduled timers). It is only ever *read* here: no thread  */
+/* pumps another thread's queue.                                       */
 /* ------------------------------------------------------------------ */
 
 static std::mutex gLoopRegistryMtx;
 static UtopiaEventLoop *gLoops = nullptr;
 
-/* Serializes runPending across all threads (owner pumps + scheduler). */
-static std::mutex gPumpMtx;
-
-static std::mutex gSchedMtx;
-static std::condition_variable gSchedCv;
-static std::atomic<bool> gSchedStarted{false};
-static std::thread *gSchedThread = nullptr;
-
-static constexpr int64_t kSchedulerTakeoverMs = 10;
-
-static void schedulerMain();
-static void runPending(UtopiaEventLoop *loop);
-
-static void startScheduler() {
-  if (gSchedStarted.load())
-    return;
-  bool expected = false;
-  if (gSchedStarted.compare_exchange_strong(expected, true)) {
-    gSchedThread = new std::thread(schedulerMain);
-    gSchedThread->detach();
-  }
-}
-
 static void registerLoop(UtopiaEventLoop *loop) {
   std::lock_guard<std::mutex> lock(gLoopRegistryMtx);
   loop->next = gLoops;
   gLoops = loop;
-  startScheduler();
 }
 
 static UtopiaEventLoop *getLoop() {
@@ -145,52 +156,10 @@ static UtopiaEventLoop *getLoop() {
   return tlsLoop;
 }
 
-static int64_t nowMs() {
-  using namespace std::chrono;
-  return duration_cast<milliseconds>(steady_clock::now().time_since_epoch())
-      .count();
-}
-
 static int64_t nowUs() {
   using namespace std::chrono;
   return duration_cast<microseconds>(steady_clock::now().time_since_epoch())
       .count();
-}
-
-static void schedulerMain() {
-  for (;;) {
-    bool didWork = false;
-    UtopiaEventLoop *it;
-    {
-      std::lock_guard<std::mutex> lock(gLoopRegistryMtx);
-      it = gLoops;
-    }
-    while (it) {
-      /* Take over loops whose owner has not pumped them recently. */
-      if (nowMs() - it->lastPumpMs.load() > kSchedulerTakeoverMs) {
-        bool hasWork = false;
-        {
-          std::lock_guard<std::mutex> lock(it->mtx);
-          hasWork = !it->queue.empty();
-        }
-        if (hasWork) {
-          runPending(it);
-          /* Wake loop drivers sleeping on the global cv so they can
-           * re-check their target future. */
-          {
-            std::lock_guard<std::mutex> lock(gSchedMtx);
-            gSchedCv.notify_all();
-          }
-          didWork = true;
-        }
-      }
-      it = it->next;
-    }
-    if (!didWork) {
-      std::unique_lock<std::mutex> lock(gSchedMtx);
-      gSchedCv.wait_for(lock, std::chrono::milliseconds(5));
-    }
-  }
 }
 
 static void *futureValuePtr(UtopiaFutureState *s) {
@@ -215,35 +184,6 @@ static void postContinuation(UtopiaContinuation *c) {
     loop->queue.push_back(c);
   }
   loop->cv.notify_one();
-  /* The background scheduler may need to pick this up when the owner is
-   * blocked. */
-  {
-    std::lock_guard<std::mutex> lock(gSchedMtx);
-    gSchedCv.notify_all();
-  }
-}
-
-/* Runs every ready task on 'loop'. The queue pop is serialized globally so
- * the owner thread and the background scheduler never pop the same
- * continuation, but the continuation itself runs without any lock: a
- * blocking continuation (e.g. a game loop) must not stall the other
- * pumpers. */
-static void runPending(UtopiaEventLoop *loop) {
-  for (;;) {
-    UtopiaContinuation *c = nullptr;
-    {
-      std::lock_guard<std::mutex> pump(gPumpMtx);
-      std::lock_guard<std::mutex> lock(loop->mtx);
-      if (!loop->queue.empty()) {
-        c = loop->queue.front();
-        loop->queue.pop_front();
-      }
-    }
-    if (!c)
-      break;
-    c->resumeFn(c->frame);
-    delete c;
-  }
 }
 
 /* True when any loop still has work that could complete futures (queued
@@ -267,7 +207,160 @@ static bool hasAnyPendingWork() {
   return false;
 }
 
+/* True when the loop's earliest timer is due at 'now'. Caller holds mtx. */
+static bool loopHasDueTimer(UtopiaEventLoop *loop, int64_t now) {
+  return loop->timers && loop->timers->dueUs <= now;
+}
+
+/* Completes the state of every timer that is due at 'now'. Safe to call
+ * from the loop's owner only (timers belong to the loop that created
+ * them). The states are completed outside the loop lock: completing can
+ * post continuations to other loops. */
+static void expireTimers(UtopiaEventLoop *loop, int64_t now) {
+  std::vector<UtopiaFutureState *> due;
+  {
+    std::lock_guard<std::mutex> lock(loop->mtx);
+    while (loop->timers && loop->timers->dueUs <= now) {
+      UtopiaTimer *t = loop->timers;
+      loop->timers = t->next;
+      due.push_back(t->state);
+      loop->pendingTimers.fetch_sub(1);
+      delete t;
+    }
+  }
+  for (UtopiaFutureState *s : due)
+    utopia_future_complete(s);
+}
+
+/* Earliest pending deadline of 'loop' in microseconds, or -1 when no
+ * timer is scheduled. Caller holds mtx. */
+static int64_t loopDeadlineUs(UtopiaEventLoop *loop) {
+  return loop->timers ? loop->timers->dueUs : -1;
+}
+
+/* Sleeps until a post lands on 'loop' or until the loop's next timer
+ * deadline, whichever comes first (a missed-wakeup timeout covers races).
+ * The owner driver never holds loop->mtx here, so producers are never
+ * blocked by an idle driver. */
+static void driverIdle(UtopiaEventLoop *loop) {
+  int64_t due = 0;
+  {
+    std::lock_guard<std::mutex> lock(loop->mtx);
+    due = loopDeadlineUs(loop);
+  }
+  std::unique_lock<std::mutex> lock(loop->waitMtx);
+  if (due > 0) {
+    int64_t now = nowUs();
+    if (due <= now)
+      return;
+    loop->cv.wait_for(lock, std::chrono::microseconds(due - now));
+  } else {
+    loop->cv.wait_for(lock, std::chrono::milliseconds(5));
+  }
+}
+
 extern "C" {
+
+/* ------------------------------------------------------------------ */
+/* Event loop drain (inversion of control)                             */
+/* ------------------------------------------------------------------ */
+
+/* Drains the calling thread's event loop: expires due timers and swaps
+ * the shared queue into a local deque under the lock (O(1), lock held for
+ * an instant), running the continuations without holding it. Tasks posted
+ * while draining are picked up by the next swap, so microtasks behave
+ * like Dart's: a chain of await completions settles within a single call.
+ * Never blocks.
+ *
+ * When 'budgetUs' > 0 the drain stops once that many microseconds elapsed
+ * (measured between batch boundaries), so a host can protect its frame
+ * budget from microtask storms. Returns 1 when work is still pending
+ * (microtasks or due timers), 0 when the loop is quiescent.
+ *
+ * This is the host-facing primitive: a UI/game engine calls it once per
+ * frame instead of letting the runtime block the main thread. It is
+ * exported without name mangling so it can be reached from Utopia (via
+ * @extern), from a Utopia library, and from plain C/C++ hosts. */
+static int drainLoop(UtopiaEventLoop *loop, int64_t budgetUs) {
+  int64_t start = budgetUs > 0 ? nowUs() : 0;
+  for (;;) {
+    expireTimers(loop, nowUs());
+    std::deque<UtopiaContinuation *> local;
+    {
+      std::lock_guard<std::mutex> lock(loop->mtx);
+      if (loop->queue.empty() && !loopHasDueTimer(loop, nowUs()))
+        return 0;
+      local.swap(loop->queue);
+    }
+    for (UtopiaContinuation *c : local) {
+      c->resumeFn(c->frame);
+      delete c;
+    }
+    if (budgetUs > 0 && nowUs() - start >= budgetUs) {
+      std::lock_guard<std::mutex> lock(loop->mtx);
+      if (loop->queue.empty() && !loopHasDueTimer(loop, nowUs()))
+        return 0;
+      return 1;
+    }
+  }
+}
+
+void __loop_drain__() { drainLoop(getLoop(), 0); }
+
+/* Time-boxed drain: processes at most 'maxUs' of microtask work and
+ * returns 1 when the loop still has pending work (microtasks or due
+ * timers), 0 when it is quiescent. A non-positive budget performs a pure
+ * poll: no microtask is processed, the answer reflects the state at that
+ * instant. */
+int __loop_drain_budget__(int64_t maxUs) {
+  UtopiaEventLoop *loop = getLoop();
+  if (maxUs <= 0) {
+    std::lock_guard<std::mutex> lock(loop->mtx);
+    return (!loop->queue.empty() || loopHasDueTimer(loop, nowUs())) ? 1 : 0;
+  }
+  return drainLoop(loop, maxUs);
+}
+
+/* Earliest pending timer deadline of the calling thread's loop, in
+ * microseconds (steady clock), or -1 when no timer is scheduled. A host
+ * engine sleeps until min(vsync, deadline) and then drains, exactly like
+ * a native event loop sleeping on epoll with a timeout. */
+int64_t __loop_next_deadline_us__() {
+  UtopiaEventLoop *loop = getLoop();
+  std::lock_guard<std::mutex> lock(loop->mtx);
+  return loopDeadlineUs(loop);
+}
+
+/* Frame-capping sleep for host engines: sleeps on the calling thread until
+ * the loop's next timer deadline or until 'maxSleepMs' milliseconds elapse,
+ * whichever comes first. Returns 1 when a timer deadline was the reason (it
+ * was already due or was reached during the sleep), 0 when the timeout
+ * elapsed first. The deadline is evaluated on the runtime's own steady
+ * clock, so a host never has to reconcile two clocks. Sleeping until the
+ * deadline lets a 'Future.delayed' timer settle in the next frame's drain
+ * exactly on time instead of up to a frame late. */
+int __loop_sleep_until_deadline__(int64_t maxSleepMs) {
+  UtopiaEventLoop *loop = getLoop();
+  int64_t due = 0;
+  {
+    std::lock_guard<std::mutex> lock(loop->mtx);
+    due = loopDeadlineUs(loop);
+  }
+  if (due < 0)
+    return 0;
+  int64_t now = nowUs();
+  if (due <= now)
+    return 1;
+  int64_t maxUs = maxSleepMs > 0 ? maxSleepMs * 1000 : 0;
+  int64_t sleepUs = due - now;
+  if (maxUs > 0 && sleepUs > maxUs)
+    sleepUs = maxUs;
+  std::this_thread::sleep_for(std::chrono::microseconds(sleepUs));
+  return nowUs() >= due ? 1 : 0;
+}
+
+/* Compatibility alias for the previous drain API name. */
+void utopia_loop_drain() { __loop_drain__(); }
 
 /* ------------------------------------------------------------------ */
 /* Future state creation / refcounting                                 */
@@ -461,86 +554,47 @@ void utopia_future_chain(void *src, void *dst) {
 /* Timers                                                              */
 /* ------------------------------------------------------------------ */
 
-struct UtopiaTimer {
-  int64_t dueUs;
-  UtopiaFutureState *state;
-  UtopiaTimer *next;
-};
-
-/* The timer globals are intentionally heap-allocated and never destroyed:
- * the detached timer thread may still be using them when the process exits,
- * and destroying a condition_variable that a thread is waiting on hangs. */
-static std::mutex &gTimerMtx() {
-  static auto *m = new std::mutex();
-  return *m;
-}
-static UtopiaTimer *&gTimers() {
-  static auto *t = new UtopiaTimer *();
-  return *t;
-}
-static std::condition_variable &gTimerCv() {
-  static auto *cv = new std::condition_variable();
-  return *cv;
-}
-static std::thread &gTimerThread() {
-  static auto *th = new std::thread();
-  return *th;
-}
-static std::atomic<bool> gTimerStarted{false};
-
-static void timerThreadMain() {
-  std::unique_lock<std::mutex> lock(gTimerMtx());
-  for (;;) {
-    if (!gTimers()) {
-      gTimerCv().wait(lock);
-      continue;
-    }
-    int64_t now = nowUs();
-    if (gTimers()->dueUs > now) {
-      gTimerCv().wait_for(lock,
-                          std::chrono::microseconds(gTimers()->dueUs - now));
-      continue;
-    }
-    UtopiaTimer *due = gTimers();
-    gTimers() = due->next;
-    UtopiaFutureState *s = due->state;
-    UtopiaEventLoop *owner = s->ownerLoop;
-    delete due;
-    lock.unlock();
-    utopia_future_complete(s);
-    if (owner) {
-      std::lock_guard<std::mutex> lock2(owner->mtx);
-      owner->pendingTimers.fetch_sub(1);
-    }
-    owner->cv.notify_all();
-    {
-      std::lock_guard<std::mutex> lockSched(gSchedMtx);
-      gSchedCv.notify_all();
-    }
-    lock.lock();
+/* Creates a future state that completes after 'us' microseconds on the
+ * calling thread's event loop. A non-positive delay completes as soon as
+ * the loop's owner next drains: the future is never completed
+ * synchronously, so 'await' always suspends and resumes on the event
+ * loop (Dart semantics for Future.delayed(Duration.zero, ...)).
+ *
+ * Timers are deadline entries owned by the calling loop: only its owner
+ * expires them (when draining), and there is no global timer thread. */
+void *utopia_future_delay_us(int64_t us) {
+  void *state = utopia_future_create(0, 1, nullptr);
+  UtopiaEventLoop *loop = getLoop();
+  auto *t = new UtopiaTimer();
+  t->dueUs = nowUs() + (us > 0 ? us : 0);
+  t->state = static_cast<UtopiaFutureState *>(state);
+  t->next = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(loop->mtx);
+    loop->pendingTimers.fetch_add(1);
+    UtopiaTimer **walk = &loop->timers;
+    while (*walk && (*walk)->dueUs <= t->dueUs)
+      walk = &(*walk)->next;
+    t->next = *walk;
+    *walk = t;
   }
+  /* Wake an idle driver: the deadline may be earlier than the one it is
+   * currently sleeping toward. */
+  loop->cv.notify_all();
+  return state;
 }
+
+/* Creates a future state that completes after 'ms' milliseconds. */
+void *utopia_future_delay(int64_t ms) { return utopia_future_delay_us(ms * 1000); }
 
 /* ------------------------------------------------------------------ */
 /* Event loop drivers                                                  */
 /* ------------------------------------------------------------------ */
 
-/* Drives the loop until 'state' completes. Returns 1 when the future
- * completed, 0 when no pending work exists that could complete it. The
- * owner pumps its own loop so resumptions stay on the calling thread
- * whenever possible; the background scheduler takes over automatically
- * whenever the owner stalls (e.g. a blocking game loop). */
-/* Drives the loop until 'state' completes. Returns 1 when the future
- * completed, 0 when no pending work exists that could complete it. The
- * owner pumps its own loop so resumptions stay on the calling thread
- * whenever possible; the background scheduler takes over automatically
- * whenever the owner stalls (e.g. a blocking game loop).
- *
- * The keep-alive semantics (stay alive while fire-and-forget work is still
- * pending after the target completed) are handled by utopia_loop_run_all,
- * which the async-main wrapper calls afterwards: a driver must return as
- * soon as its own target completes, otherwise a worker driving its own
- * future would wait forever on its own 'activeThreads' contribution. */
+/* Drives the calling thread's loop until 'state' completes. Returns 1 when
+ * the future completed, 0 when no pending work exists that could complete
+ * it. All resumptions run on the calling thread (strict affinity); the
+ * driver merely sleeps when there is nothing to drain yet. */
 int utopia_loop_run(void *state) {
   auto *s = static_cast<UtopiaFutureState *>(state);
   UtopiaEventLoop *loop = getLoop();
@@ -549,36 +603,27 @@ int utopia_loop_run(void *state) {
       return 1;
     if (!hasAnyPendingWork())
       return 0;
-    loop->lastPumpMs.store(nowMs());
-    runPending(loop);
-    if (loop->queue.empty()) {
-      std::unique_lock<std::mutex> lock(gSchedMtx);
-      if (loop->queue.empty() && hasAnyPendingWork()) {
-        gSchedCv.wait_for(lock, std::chrono::milliseconds(5));
-      }
+    __loop_drain__();
+    if (utopia_future_is_completed(s))
+      return 1;
+    if (loop->queue.empty() && !utopia_future_is_completed(s)) {
+      driverIdle(loop);
     }
   }
 }
 
-/* Runs all ready tasks on the current thread's loop. Used after a
- * synchronous main returns so futures completed during main get to run
- * their continuations. */
-void utopia_loop_drain() { runPending(getLoop()); }
-
-/* Drives the calling thread's event loop until no pending work exists
- * (queue empty, no scheduled timers, no running worker threads), mirroring
- * the Dart event loop: a synchronous main that schedules futures keeps the
- * process alive until they all settle. */
+/* Runs all ready tasks on the current thread's loop until no pending work
+ * exists (queue empty, no scheduled timers, no running worker threads),
+ * mirroring the Dart event loop: a synchronous main that schedules futures
+ * keeps the process alive until they all settle. */
 void utopia_loop_run_all() {
   UtopiaEventLoop *loop = getLoop();
   for (;;) {
-    loop->lastPumpMs.store(nowMs());
-    runPending(loop);
+    __loop_drain__();
     if (!hasAnyPendingWork())
       return;
-    std::unique_lock<std::mutex> lock(gSchedMtx);
-    if (loop->queue.empty() && hasAnyPendingWork()) {
-      gSchedCv.wait_for(lock, std::chrono::milliseconds(5));
+    if (loop->queue.empty()) {
+      driverIdle(loop);
     }
   }
 }
@@ -591,59 +636,16 @@ void utopia_future_wait(void *state) {
   for (;;) {
     if (utopia_future_is_completed(s))
       return;
-    loop->lastPumpMs.store(nowMs());
-    runPending(loop);
+    if (!hasAnyPendingWork())
+      return;
+    __loop_drain__();
     if (utopia_future_is_completed(s))
       return;
-    if (loop->queue.empty()) {
-      std::unique_lock<std::mutex> lock(gSchedMtx);
-      if (loop->queue.empty() && !utopia_future_is_completed(s)) {
-        if (hasAnyPendingWork()) {
-          gSchedCv.wait_for(lock, std::chrono::milliseconds(5));
-        } else {
-          return;
-        }
-      }
+    if (loop->queue.empty() && !utopia_future_is_completed(s)) {
+      driverIdle(loop);
     }
   }
 }
-
-/* Creates a future state that completes after 'us' microseconds on the
- * calling thread's event loop. A non-positive delay completes as soon as
- * the timer thread gets to it: the future is never completed synchronously,
- * so 'await' always suspends and resumes on the event loop (Dart
- * semantics for Future.delayed(Duration.zero, ...)). */
-void *utopia_future_delay_us(int64_t us) {
-  void *state = utopia_future_create(0, 1, nullptr);
-  auto *s = static_cast<UtopiaFutureState *>(state);
-  s->ownerLoop = getLoop();
-  s->ownerLoop->pendingTimers.fetch_add(1);
-
-  if (!gTimerStarted.load()) {
-    bool expected = false;
-    if (gTimerStarted.compare_exchange_strong(expected, true)) {
-      gTimerThread() = std::thread(timerThreadMain);
-      gTimerThread().detach();
-    }
-  }
-  auto *t = new UtopiaTimer();
-  t->dueUs = nowUs() + (us > 0 ? us : 0);
-  t->state = s;
-  t->next = nullptr;
-  {
-    std::lock_guard<std::mutex> lock(gTimerMtx());
-    UtopiaTimer **walk = &gTimers();
-    while (*walk && (*walk)->dueUs <= t->dueUs)
-      walk = &(*walk)->next;
-    t->next = *walk;
-    *walk = t;
-  }
-  gTimerCv().notify_one();
-  return state;
-}
-
-/* Creates a future state that completes after 'ms' milliseconds. */
-void *utopia_future_delay(int64_t ms) { return utopia_future_delay_us(ms * 1000); }
 
 /* ------------------------------------------------------------------ */
 /* Threads                                                             */

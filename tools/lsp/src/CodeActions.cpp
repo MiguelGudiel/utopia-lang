@@ -3,9 +3,11 @@
 #include <algorithm>
 #include <cctype>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <set>
 #include <sstream>
+#include <unordered_set>
 
 namespace utopia::lsp {
 
@@ -82,147 +84,156 @@ std::string diagCode(const Diagnostic &d) {
 /* AST lookups */
 
 /* Recursively collects every declaration and using directive in the module
- * tree with their source spans. */
+ * tree with their source spans. The module graph may legitimately contain
+ * cycles (the loader returns already-cached modules for mutual imports), so
+ * visited modules are tracked: walking an unguarded cycle would grow the
+ * result vector forever (observed at ~9M entries, pinning one core). */
 void collectDecls(const ASTNode *node, std::vector<const DeclNode *> &decls,
                   std::vector<const UsingNode *> &usings) {
-  if (!node)
-    return;
-  if (auto *decl = llvm::dyn_cast<DeclNode>(node))
-    decls.push_back(decl);
-  if (auto *u = llvm::dyn_cast<UsingNode>(node))
-    usings.push_back(u);
+  std::unordered_set<const ModuleNode *> visitedMods;
+  std::function<void(const ASTNode *)> walk = [&](const ASTNode *n) {
+    if (!n)
+      return;
+    if (auto *decl = llvm::dyn_cast<DeclNode>(n))
+      decls.push_back(decl);
+    if (auto *u = llvm::dyn_cast<UsingNode>(n))
+      usings.push_back(u);
 
-  switch (node->kind) {
-  case NodeKind::Module: {
-    auto *m = static_cast<const ModuleNode *>(node);
-    for (const auto *stmt : m->statements)
-      collectDecls(stmt, decls, usings);
-    for (const auto *imp : m->importedModules)
-      collectDecls(imp, decls, usings);
-    for (const auto *exp : m->exportedModules)
-      collectDecls(exp, decls, usings);
-    break;
-  }
-  case NodeKind::NamespaceDecl: {
-    auto *ns = static_cast<const NamespaceDeclNode *>(node);
-    for (const auto *stmt : ns->statements)
-      collectDecls(stmt, decls, usings);
-    break;
-  }
-  case NodeKind::FunctionDecl: {
-    auto *fn = static_cast<const FunctionDeclNode *>(node);
-    for (const auto *p : fn->params)
-      collectDecls(p, decls, usings);
-    collectDecls(fn->body, decls, usings);
-    for (const auto *init : fn->fieldInitializers)
-      collectDecls(init, decls, usings);
-    if (fn->superCall)
-      collectDecls(fn->superCall, decls, usings);
-    break;
-  }
-  case NodeKind::StructDecl: {
-    auto *s = static_cast<const StructDeclNode *>(node);
-    for (const auto *f : s->fields)
-      collectDecls(f, decls, usings);
-    for (const auto *m : s->methods)
-      collectDecls(m, decls, usings);
-    break;
-  }
-  case NodeKind::ClassDecl: {
-    auto *c = static_cast<const ClassDeclNode *>(node);
-    for (const auto *f : c->fields)
-      collectDecls(f, decls, usings);
-    for (const auto *m : c->methods)
-      collectDecls(m, decls, usings);
-    break;
-  }
-  case NodeKind::UnionDecl: {
-    auto *u = static_cast<const UnionDeclNode *>(node);
-    for (const auto *f : u->fields)
-      collectDecls(f, decls, usings);
-    for (const auto *m : u->methods)
-      collectDecls(m, decls, usings);
-    break;
-  }
-  case NodeKind::AnnotationDecl: {
-    auto *a = static_cast<const AnnotationDeclNode *>(node);
-    for (const auto *f : a->fields)
-      collectDecls(f, decls, usings);
-    if (a->constructor)
-      collectDecls(a->constructor, decls, usings);
-    break;
-  }
-  case NodeKind::Lambda: {
-    auto *l = static_cast<const LambdaNode *>(node);
-    for (const auto *p : l->params)
-      collectDecls(p, decls, usings);
-    collectDecls(l->body, decls, usings);
-    collectDecls(l->exprBody, decls, usings);
-    break;
-  }
-  case NodeKind::Block: {
-    auto *b = static_cast<const BlockNode *>(node);
-    for (const auto *stmt : b->statements)
-      collectDecls(stmt, decls, usings);
-    break;
-  }
-  case NodeKind::If: {
-    auto *i = static_cast<const IfNode *>(node);
-    collectDecls(i->condition, decls, usings);
-    collectDecls(i->thenBlock, decls, usings);
-    collectDecls(i->elseBlock, decls, usings);
-    break;
-  }
-  case NodeKind::For: {
-    auto *f = static_cast<const ForNode *>(node);
-    collectDecls(f->initStatement, decls, usings);
-    collectDecls(f->condition, decls, usings);
-    collectDecls(f->increment, decls, usings);
-    collectDecls(f->body, decls, usings);
-    break;
-  }
-  case NodeKind::ForIn: {
-    auto *f = static_cast<const ForInNode *>(node);
-    collectDecls(f->loopVar, decls, usings);
-    collectDecls(f->iterable, decls, usings);
-    collectDecls(f->body, decls, usings);
-    break;
-  }
-  case NodeKind::While: {
-    auto *w = static_cast<const WhileNode *>(node);
-    collectDecls(w->condition, decls, usings);
-    collectDecls(w->body, decls, usings);
-    break;
-  }
-  case NodeKind::Switch: {
-    auto *s = static_cast<const SwitchNode *>(node);
-    collectDecls(s->condition, decls, usings);
-    for (const auto *c : s->cases)
-      collectDecls(c, decls, usings);
-    break;
-  }
-  case NodeKind::Case: {
-    auto *c = static_cast<const CaseNode *>(node);
-    collectDecls(c->value, decls, usings);
-    for (const auto *stmt : c->statements)
-      collectDecls(stmt, decls, usings);
-    break;
-  }
-  case NodeKind::Try: {
-    auto *t = static_cast<const TryStmtNode *>(node);
-    collectDecls(t->body, decls, usings);
-    for (const auto *clause : t->clauses)
-      collectDecls(clause->body, decls, usings);
-    break;
-  }
-  case NodeKind::VarDecl: {
-    auto *v = static_cast<const VarDeclNode *>(node);
-    collectDecls(v->initializer, decls, usings);
-    break;
-  }
-  default:
-    break;
-  }
+    switch (n->kind) {
+    case NodeKind::Module: {
+      auto *m = static_cast<const ModuleNode *>(n);
+      if (!visitedMods.insert(m).second)
+        return;
+      for (const auto *stmt : m->statements)
+        walk(stmt);
+      for (const auto *imp : m->importedModules)
+        walk(imp);
+      for (const auto *exp : m->exportedModules)
+        walk(exp);
+      break;
+    }
+    case NodeKind::NamespaceDecl: {
+      auto *ns = static_cast<const NamespaceDeclNode *>(n);
+      for (const auto *stmt : ns->statements)
+        walk(stmt);
+      break;
+    }
+    case NodeKind::FunctionDecl: {
+      auto *fn = static_cast<const FunctionDeclNode *>(n);
+      for (const auto *p : fn->params)
+        walk(p);
+      walk(fn->body);
+      for (const auto *init : fn->fieldInitializers)
+        walk(init);
+      if (fn->superCall)
+        walk(fn->superCall);
+      break;
+    }
+    case NodeKind::StructDecl: {
+      auto *s = static_cast<const StructDeclNode *>(n);
+      for (const auto *f : s->fields)
+        walk(f);
+      for (const auto *m : s->methods)
+        walk(m);
+      break;
+    }
+    case NodeKind::ClassDecl: {
+      auto *c = static_cast<const ClassDeclNode *>(n);
+      for (const auto *f : c->fields)
+        walk(f);
+      for (const auto *m : c->methods)
+        walk(m);
+      break;
+    }
+    case NodeKind::UnionDecl: {
+      auto *u = static_cast<const UnionDeclNode *>(n);
+      for (const auto *f : u->fields)
+        walk(f);
+      for (const auto *m : u->methods)
+        walk(m);
+      break;
+    }
+    case NodeKind::AnnotationDecl: {
+      auto *a = static_cast<const AnnotationDeclNode *>(n);
+      for (const auto *f : a->fields)
+        walk(f);
+      if (a->constructor)
+        walk(a->constructor);
+      break;
+    }
+    case NodeKind::Lambda: {
+      auto *l = static_cast<const LambdaNode *>(n);
+      for (const auto *p : l->params)
+        walk(p);
+      walk(l->body);
+      walk(l->exprBody);
+      break;
+    }
+    case NodeKind::Block: {
+      auto *b = static_cast<const BlockNode *>(n);
+      for (const auto *stmt : b->statements)
+        walk(stmt);
+      break;
+    }
+    case NodeKind::If: {
+      auto *i = static_cast<const IfNode *>(n);
+      walk(i->condition);
+      walk(i->thenBlock);
+      walk(i->elseBlock);
+      break;
+    }
+    case NodeKind::For: {
+      auto *f = static_cast<const ForNode *>(n);
+      walk(f->initStatement);
+      walk(f->condition);
+      walk(f->increment);
+      walk(f->body);
+      break;
+    }
+    case NodeKind::ForIn: {
+      auto *f = static_cast<const ForInNode *>(n);
+      walk(f->loopVar);
+      walk(f->iterable);
+      walk(f->body);
+      break;
+    }
+    case NodeKind::While: {
+      auto *w = static_cast<const WhileNode *>(n);
+      walk(w->condition);
+      walk(w->body);
+      break;
+    }
+    case NodeKind::Switch: {
+      auto *s = static_cast<const SwitchNode *>(n);
+      walk(s->condition);
+      for (const auto *c : s->cases)
+        walk(c);
+      break;
+    }
+    case NodeKind::Case: {
+      auto *c = static_cast<const CaseNode *>(n);
+      walk(c->value);
+      for (const auto *stmt : c->statements)
+        walk(stmt);
+      break;
+    }
+    case NodeKind::Try: {
+      auto *t = static_cast<const TryStmtNode *>(n);
+      walk(t->body);
+      for (const auto *clause : t->clauses)
+        walk(clause->body);
+      break;
+    }
+    case NodeKind::VarDecl: {
+      auto *v = static_cast<const VarDeclNode *>(n);
+      walk(v->initializer);
+      break;
+    }
+    default:
+      break;
+    }
+  };
+  walk(node);
 }
 
 const DeclNode *declAt(const DocumentState &doc, int line, int col,

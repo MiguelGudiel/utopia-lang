@@ -6109,6 +6109,30 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
         }
       };
 
+  /* Narrowing/signedness warnings are only meaningful for the conversion the
+   * SELECTED overload applies: reporting them during candidate evaluation
+   * would emit one warning per candidate at the same position (e.g.
+   * 'String(tick)' with an int32 argument warned against String(int8),
+   * String(uint8), String(uint16), ... at once). The chosen overload's
+   * exact match produces no warning at all, so the game's
+   * 'String(frameCount)' (uint64) stays clean. */
+  auto emitImplicitCastWarnings =
+      [&](const FunctionDeclNode *func,
+          const std::vector<ExprNode *> &resolvedArgs) {
+        for (size_t p = 0; p < func->params.size() && p < resolvedArgs.size();
+             ++p) {
+          if (!resolvedArgs[p])
+            continue;
+          const Type *paramType = func->params[p]->type;
+          if (paramType->getKind() == TypeKind::Array) {
+            paramType = ctx->astCtx.getPointerType(
+                static_cast<const ArrayType *>(paramType)->getElementType());
+          }
+          checkImplicitCastWarning(resolvedArgs[p]->exprType, paramType,
+                                   resolvedArgs[p]);
+        }
+      };
+
   auto checkMatch = [&](const FunctionDeclNode *fDecl, int &outScore,
                         std::vector<ExprNode *> &outResolvedArgs)
       -> std::vector<std::string> {
@@ -6313,7 +6337,12 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
           if (uArg == uParam) {
             outScore += 10;
           } else if (canImplicitlyCast(argTypeForCast, paramType, false)) {
-            outScore += 5;
+            /* Lossless (same-width / widening) numeric conversions outrank
+             * narrowing ones, so overload sets like String(int8)..String(int64)
+             * resolve to the argument's own width instead of the first
+             * (narrowest) declared candidate, which would truncate wide
+             * values (e.g. a uint64 frame counter picked String(int8)). */
+            outScore += numericConversionScore(argTypeForCast, paramType);
           }
         }
 
@@ -6360,7 +6389,9 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
         paramType = ctx->astCtx.getPointerType(
             static_cast<const ArrayType *>(paramType)->getElementType());
       }
-      checkImplicitCastWarning(resolvedTypes[p], paramType, resolvedArgs[p]);
+      /* Implicit-cast warnings are deferred to the selected overload (see
+       * emitImplicitCastWarnings): every candidate's parameter conversion
+       * would otherwise warn at the same position. */
       resolvedArgs[p] = performImplicitConversion(resolvedArgs[p], paramType);
     }
 
@@ -6492,6 +6523,7 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
         ctx->astCtx.copyArray<ExprNode *>(bestResolvedArgs);
     const_cast<FunctionCallNode *>(node)->argNames = {};
     emitRValueRefWarnings(bestMatch, bestResolvedArgs);
+    emitImplicitCastWarnings(bestMatch, bestResolvedArgs);
 
     const_cast<FunctionCallNode *>(node)->isSuperCall = true;
     node->exprType = resolveIfTemplate(bestMatch->effectiveReturnType
@@ -6993,6 +7025,7 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
 
           checkDeprecated(bestMatch, node);
           emitRValueRefWarnings(bestMatch, bestResolvedArgs);
+          emitImplicitCastWarnings(bestMatch, bestResolvedArgs);
 
           return node->exprType;
         }
@@ -7374,6 +7407,7 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
 
           checkDeprecated(bestMatch, node);
           emitRValueRefWarnings(bestMatch, bestResolvedArgs);
+          emitImplicitCastWarnings(bestMatch, bestResolvedArgs);
 
           return node->exprType;
         }
@@ -7475,6 +7509,7 @@ SemaResult TypeCheckPass::visit(const FunctionCallNode *node) {
         node->isLValue = false;
         checkDeprecated(bestMatch, node);
         emitRValueRefWarnings(bestMatch, bestResolvedArgs);
+        emitImplicitCastWarnings(bestMatch, bestResolvedArgs);
 
         return node->exprType;
       }
