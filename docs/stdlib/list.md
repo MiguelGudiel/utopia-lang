@@ -11,15 +11,6 @@ List<int> fromLiteral = [1, 2, 3];     // from an array literal (via ListLiteral
 List<int> copy = numbers;              // copy constructor
 ```
 
-## Methods
-
-| Member | Signature | Description |
-| --- | --- | --- |
-| `length()` | `usize length()` | Number of elements |
-| `capacity()` | `usize capacity()` | Current capacity |
-| `push()` | `void push(T item)` | Append an element (doubles capacity when full) |
-| `operator[]` | `T& operator[](usize index)` | Index access (read/write) |
-
 ## Example
 
 ```utp
@@ -38,6 +29,38 @@ int main() {
   print("\n");
   return 0;
 }
+```
+
+## Methods
+
+| Member | Signature | Description |
+| --- | --- | --- |
+| `length()` | `usize length()` | Number of elements |
+| `capacity()` | `usize capacity()` | Current capacity |
+| `push()` | `void push(T item)` | Append an element (doubles capacity when full) |
+| `operator[]` | `T& operator[](usize index)` | Index access (read/write) |
+| `sort()` / `sort(less)` | `void` | Stable bottom-up merge sort, O(n log n); optional comparator |
+| `binarySearch()` | `int64 binarySearch(T value)` | Index of `value` in a sorted list, or -1 |
+| `any()` / `every()` | `bool` | Whether any / every element satisfies a predicate |
+| `fold()` | `T fold(T init, T Function(T, T))` | Left fold |
+| `expand()` | `List<R> expand(List<R> Function(T))` | Flatten the per-element lists |
+| `take()` / `skip()` | `List<T>` | Prefix / suffix views (copies) |
+| `firstWhere()` | `bool firstWhere(bool Function(T), T& out)` | First match (false when none) |
+| `removeWhere()` | `usize removeWhere(bool Function(T))` | Remove matching elements |
+| `shuffle()` | `void shuffle()` | Fisher-Yates with an internal xorshift PRNG |
+| `distinct()` | `List<T> distinct()` | First occurrence of each element (operator==) |
+| `List.generate()` | `static List<E> generate<E>(usize n, E Function(usize))` | Build from an index function |
+| `List.filled()` | `static List<E> filled<E>(usize n, E value)` | `n` copies of `value` |
+| `List.of()` | `static List<E> of<E>(ListLiteralView<E>)` | From a list literal |
+
+```utp
+List<int> scores = [5, 3, 8, 1];
+scores.sort();                              // [1, 3, 5, 8]
+int64 pos = scores.binarySearch(5);         // 2
+int total = scores.fold(0, (int a, int b) => a + b);
+bool hasBig = scores.any((int v) => v > 7);
+List<int> evens = [1, 2, 3, 4].where((int v) => v % 2 == 0);
+List<int> gen = List<int>.generate<int>(3, (usize i) => (i as int) * 10);
 ```
 
 ## How it works

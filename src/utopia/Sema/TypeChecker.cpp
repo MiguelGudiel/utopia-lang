@@ -4691,6 +4691,20 @@ SemaResult TypeCheckPass::visit(const MemberAccessNode *node) {
             classArgs = node->templateArgs;
           }
         }
+        if (classArgs.empty() && objDecl->isTemplate) {
+          /* A bare template-class name used for static access ('L._helper'
+           * inside an L<T> body) denotes the current instantiation. The raw
+           * template's methods are never mangled, so resolving against them
+           * would emit calls to empty symbols at codegen. */
+          const RecordType *curRec = ctx->getCurrentRecordContext();
+          if (curRec && curRec->isTemplateInstantiation() &&
+              curRec->getTemplateBaseName() == objDecl->fqName) {
+            recordTy = curRec;
+            staticAccessDecl = curRec->getDeclaration();
+            const_cast<VariableNode *>(varNode)->resolvedDecl =
+                staticAccessDecl;
+          }
+        }
         if (!classArgs.empty() && objDecl->isTemplate) {
           std::vector<const Type *> resolvedArgs;
           for (const auto *arg : classArgs) {

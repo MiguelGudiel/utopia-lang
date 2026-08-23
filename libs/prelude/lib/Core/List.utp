@@ -352,38 +352,317 @@ class List<T> {
     return acc;
   }
 
-  /* Sorts in place using operator< on T (stable insertion sort). Shifts
-   * are moves: the element is move-constructed into its new slot and the
-   * old slot is destructed, so types with move constructors avoid
-   * reallocation entirely. */
+  /* Sorts in place using operator< on T. Stable bottom-up merge sort,
+   * O(n log n): the elements are moved into a temporary buffer of the
+   * list's size and merged back, so move-constructible T (e.g. String)
+   * never copies. The temp buffer is allocated per call.
+   *
+   * The comparison lives in _mergeRunsCmp (not in a lambda here) so the
+   * operator< requirement only surfaces when this overload is actually
+   * called: sorting with an explicit comparator must work for types
+   * without operator<. */
   void sort<T2>() {
-    for (usize i = 1; i < this._length; i++) {
-      T key = this._elem(i)[0] as T&&;
-      int64 j = (i - 1) as int64;
-      while (j >= 0 && key < this._elem(j as usize)[0]) {
-        _construct<T>(this._elem((j + 1) as usize),
-                     this._elem(j as usize)[0] as T&&);
-        destruct(this._elem(j as usize));
-        j--;
+    this._mergeSortCmp(this._length);
+  }
+
+  /* Sorts in place with an explicit comparator ('less' must return true
+   * when its first argument should come before the second). Stable
+   * bottom-up merge sort, O(n log n). */
+  void sort<T2>(bool Function(T, T) less) {
+    this._mergeSortLess(this._length, less);
+  }
+
+  void _mergeSortCmp<T2>(usize n) {
+    usize width = 1;
+    while (width < n) {
+      for (usize lo = 0; lo < n; lo += width * 2) {
+        usize mid = lo + width;
+        if (mid >= n) break;
+        usize hi = lo + width * 2;
+        if (hi > n) hi = n;
+        this._mergeRunsCmp(lo, mid, hi);
       }
-      _construct<T>(this._elem((j + 1) as usize), key as T&&);
+      width *= 2;
     }
   }
 
-  /* Sorts in place with an explicit comparator ('less' must return true when
-   * its first argument should come before the second). */
-  void sort<T2>(bool Function(T, T) less) {
-    for (usize i = 1; i < this._length; i++) {
-      T key = this._elem(i)[0] as T&&;
-      int64 j = (i - 1) as int64;
-      while (j >= 0 && less(key, this._elem(j as usize)[0])) {
-        _construct<T>(this._elem((j + 1) as usize),
-                     this._elem(j as usize)[0] as T&&);
-        destruct(this._elem(j as usize));
-        j--;
-      }
-      _construct<T>(this._elem((j + 1) as usize), key as T&&);
+  /* Merges two adjacent runs, ordering with operator< on T. The dummy
+   * template parameter defers the body check until sort() actually runs,
+   * so instantiating List<T> for a type without operator< (e.g. a nested
+   * List<List<int>>) does not fail. */
+  void _mergeRunsCmp<T2>(usize lo, usize mid, usize hi) {
+    RawMemory tmp = alloc((hi - lo) * sizeof(T), alignof(T));
+    for (usize i = lo; i < hi; i++) {
+      _construct<T>(tmp.ptr + (i - lo) * sizeof(T), this._elem(i)[0] as T&&);
+      destruct(this._elem(i));
     }
+    usize i = 0;
+    usize j = mid - lo;
+    usize end = hi - lo;
+    usize n1 = mid - lo;
+    usize k = lo;
+    while (i < n1 && j < end) {
+      T* a = (tmp.ptr + i * sizeof(T)) as T*;
+      T* b = (tmp.ptr + j * sizeof(T)) as T*;
+      if (b[0] < a[0]) {
+        _construct<T>(this._elem(k), b[0] as T&&);
+        destruct(b);
+        j++;
+      } else {
+        _construct<T>(this._elem(k), a[0] as T&&);
+        destruct(a);
+        i++;
+      }
+      k++;
+    }
+    while (i < n1) {
+      T* a = (tmp.ptr + i * sizeof(T)) as T*;
+      _construct<T>(this._elem(k), a[0] as T&&);
+      destruct(a);
+      i++;
+      k++;
+    }
+    while (j < end) {
+      T* b = (tmp.ptr + j * sizeof(T)) as T*;
+      _construct<T>(this._elem(k), b[0] as T&&);
+      destruct(b);
+      j++;
+      k++;
+    }
+    free(tmp);
+  }
+
+  /* Iterative bottom-up merge sort over [0, n): doubles the run length
+   * each pass, merging adjacent runs. */
+  void _mergeSortLess(usize n, bool Function(T, T) less) {
+    usize width = 1;
+    while (width < n) {
+      for (usize lo = 0; lo < n; lo += width * 2) {
+        usize mid = lo + width;
+        if (mid >= n) break;
+        usize hi = lo + width * 2;
+        if (hi > n) hi = n;
+        this._mergeRuns(lo, mid, hi, less);
+      }
+      width *= 2;
+    }
+  }
+
+  /* Merges the two adjacent runs [lo, mid) and [mid, hi) into a
+   * temporary buffer and back. */
+  void _mergeRuns(usize lo, usize mid, usize hi,
+                  bool Function(T, T) less) {
+    RawMemory tmp = alloc((hi - lo) * sizeof(T), alignof(T));
+    for (usize i = lo; i < hi; i++) {
+      _construct<T>(tmp.ptr + (i - lo) * sizeof(T), this._elem(i)[0] as T&&);
+      destruct(this._elem(i));
+    }
+    usize i = 0;
+    usize j = mid - lo;
+    usize end = hi - lo;
+    usize n1 = mid - lo;
+    usize k = lo;
+    while (i < n1 && j < end) {
+      T* a = (tmp.ptr + i * sizeof(T)) as T*;
+      T* b = (tmp.ptr + j * sizeof(T)) as T*;
+      if (less(b[0], a[0])) {
+        _construct<T>(this._elem(k), b[0] as T&&);
+        destruct(b);
+        j++;
+      } else {
+        _construct<T>(this._elem(k), a[0] as T&&);
+        destruct(a);
+        i++;
+      }
+      k++;
+    }
+    while (i < n1) {
+      T* a = (tmp.ptr + i * sizeof(T)) as T*;
+      _construct<T>(this._elem(k), a[0] as T&&);
+      destruct(a);
+      i++;
+      k++;
+    }
+    while (j < end) {
+      T* b = (tmp.ptr + j * sizeof(T)) as T*;
+      _construct<T>(this._elem(k), b[0] as T&&);
+      destruct(b);
+      j++;
+      k++;
+    }
+    free(tmp);
+  }
+
+  /* Index of 'value' in a list sorted with sort() (operator< ordering),
+   * or -1 when absent. O(log n) comparisons. */
+  int64 binarySearch<T2>(T value) {
+    usize lo = 0;
+    usize hi = this._length;
+    while (lo < hi) {
+      usize mid = lo + (hi - lo) / 2;
+      if (this._elem(mid)[0] < value) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+    if (lo < this._length && !(value < this._elem(lo)[0]) &&
+        !(this._elem(lo)[0] < value)) {
+      return lo as int64;
+    }
+    return -1;
+  }
+
+  /* True when 'fn' returns true for at least one element. */
+  bool any<T2>(bool Function(T) fn) {
+    for (usize i = 0; i < this._length; i++) {
+      if (fn(this._elem(i)[0])) return true;
+    }
+    return false;
+  }
+
+  /* True when 'fn' returns true for every element. */
+  bool every<T2>(bool Function(T) fn) {
+    for (usize i = 0; i < this._length; i++) {
+      if (!fn(this._elem(i)[0])) return false;
+    }
+    return true;
+  }
+
+  /* Combines the elements with 'combine' starting from 'initialValue'
+   * (left fold). */
+  T fold<T2>(T initialValue, T Function(T, T) combine) {
+    T acc = initialValue;
+    for (usize i = 0; i < this._length; i++) {
+      acc = combine(acc, this._elem(i)[0]);
+    }
+    return acc;
+  }
+
+  /* A new list with the elements of the lists returned by 'fn', in
+   * order. */
+  List<R> expand<R>(List<R> Function(T) fn) {
+    List<R> result;
+    for (usize i = 0; i < this._length; i++) {
+      List<R> part = fn(this._elem(i)[0]);
+      for (usize j = 0; j < part.length(); j++) {
+        result.push(part[j]);
+      }
+    }
+    return result;
+  }
+
+  /* The first 'count' elements (fewer when the list is shorter). */
+  List<T> take<T2>(usize count) {
+    if (count > this._length) count = this._length;
+    return this.sublist(0, count);
+  }
+
+  /* Everything after the first 'count' elements. */
+  List<T> skip<T2>(usize count) {
+    if (count > this._length) count = this._length;
+    return this.sublist(count, this._length);
+  }
+
+  /* Finds the first element for which 'fn' is true; 'out' receives it and
+   * the method returns true, or false when none matches. */
+  bool firstWhere<T2>(bool Function(T) fn, T& out) {
+    for (usize i = 0; i < this._length; i++) {
+      if (fn(this._elem(i)[0])) {
+        out = this._elem(i)[0];
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /* Removes every element for which 'fn' returns true; returns the number
+   * of elements removed. */
+  usize removeWhere<T2>(bool Function(T) fn) {
+    usize removed = 0;
+    usize i = 0;
+    while (i < this._length) {
+      if (fn(this._elem(i)[0])) {
+        this.removeAt(i);
+        removed++;
+      } else {
+        i++;
+      }
+    }
+    return removed;
+  }
+
+  /* Reorders the elements uniformly at random (Fisher-Yates with an
+   * internal xorshift64* generator seeded from the clock, so no stdlib
+   * dependency). */
+  void shuffle<T2>() {
+    uint64 state = List._randomSeed();
+    for (int64 i = (this._length - 1) as int64; i > 0; i--) {
+      state = List._nextRandom(state);
+      usize j = (state % ((i + 1) as uint64)) as usize;
+      T tmp = this._elem(i as usize)[0];
+      this._elem(i as usize)[0] = this._elem(j)[0];
+      this._elem(j)[0] = tmp;
+    }
+  }
+
+  /* C's time(time_t*) writes through its pointer argument; the declaration
+   * must carry the parameter or the leftover register value (e.g. 'this')
+   * is used as the destination and clobbered. */
+  @extern("time")
+  private static int64 _clock(int64* t);
+
+  private static uint64 _randomSeed() {
+    uint64 t = List._clock(null) as uint64;
+    return t * 0x9E3779B97F4A7C15 + 0x9E3779B97F4A7C15;
+  }
+
+  private static uint64 _nextRandom(uint64 state) {
+    state = state * 0x2545F4914F6CDD1D;
+    return state ^ (state >> 33);
+  }
+
+  /* A new list keeping only the first occurrence of each element
+   * (operator== on T; O(n^2) scan). */
+  List<T> distinct<T2>() {
+    List<T> result;
+    for (usize i = 0; i < this._length; i++) {
+      T v = this._elem(i)[0];
+      if (!result.contains(v)) {
+        result.push(v);
+      }
+    }
+    return result;
+  }
+
+  /* A list of 'count' elements built by calling 'fn' with each index. */
+  static List<E> generate<E>(usize count, E Function(usize) fn) {
+    List<E> result;
+    result._reserve(count);
+    for (usize i = 0; i < count; i++) {
+      result.push(fn(i));
+    }
+    return result;
+  }
+
+  /* A list of 'count' copies of 'value'. */
+  static List<E> filled<E>(usize count, E value) {
+    List<E> result;
+    result._reserve(count);
+    for (usize i = 0; i < count; i++) {
+      result.push(value);
+    }
+    return result;
+  }
+
+  /* A list holding the elements of 'view' (a list literal). */
+  static List<E> of<E>(ListLiteralView<E> view) {
+    List<E> result;
+    result._reserve(view.length);
+    for (usize i = 0; i < view.length; i++) {
+      result.push(view.data[i]);
+    }
+    return result;
   }
 
   /* for-in support ('for (var x in list)'): a zero-cost cursor over the raw
