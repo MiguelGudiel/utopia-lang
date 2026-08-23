@@ -1,3 +1,7 @@
+/* Directory.copy/deleteRecursive shell out to 'system', which lives in the
+ * stdlib system module (utopia:system). */
+import "system.utp";
+
 #if _WIN32
 
 @extern("_access")

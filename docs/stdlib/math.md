@@ -1,6 +1,8 @@
 # Math
 
-The prelude's `Math/Limits.utp` module provides numeric limits as compile-time constants.
+The stdlib's `math.utp` module (imported with `import "utopia:math";`)
+provides the `Math` class and re-exports the numeric limits constants from
+`limits.utp`.
 
 ## Integer limits
 
@@ -25,6 +27,8 @@ The prelude's `Math/Limits.utp` module provides numeric limits as compile-time c
 ## Usage
 
 ```utp
+import "utopia:math";
+
 int main() {
   print("INT32_MAX = %d\n", INT32_MAX);
   print("UINT64_MAX = %lu\n", UINT64_MAX);

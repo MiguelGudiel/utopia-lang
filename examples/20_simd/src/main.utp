@@ -1,6 +1,9 @@
 /*
  * SIMD smoke test: portable layer + x86 (SSE/AVX/AVX-512) + NEON layers.
+ * The operations come from the stdlib 'utopia:simd' module.
  */
+import "utopia:simd";
+
 int failed = 0;
 
 void check(bool ok, String what) {

@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
-"""Generates the SIMD prelude files for Utopia.
+"""Generates the SIMD stdlib files for Utopia.
 
 Outputs:
-  libs/prelude/lib/Simd/Core.utp   - portable layer: ops for every fixed
-                                     vector type, mapped to LLVM vector IR.
-  libs/prelude/lib/Simd/X86.utp    - x86 layer: _mm/_mm256/_mm512 names
-                                     (SSE/AVX/AVX-512) over the same ops.
-  libs/prelude/lib/Simd/Neon.utp   - AArch64 NEON layer: v*_q names.
+  libs/stdlib/lib/simd/core.utp - portable layer: ops for every fixed
+                                  vector type, mapped to LLVM vector IR.
+  libs/stdlib/lib/simd/x86.utp  - x86 layer: _mm/_mm256/_mm512 names
+                                  (SSE/AVX/AVX-512) over the same ops.
+  libs/stdlib/lib/simd/neon.utp - AArch64 NEON layer: v*_q names.
 
-The C++ side (SimdIntrinsics.cpp) implements each op once, driven by the
-vector types at the call site, so these files only declare signatures.
+The simd.utp entry point (also in libs/stdlib/lib) re-exports the three
+files; consumers import "utopia:simd". The C++ side (SimdIntrinsics.cpp)
+implements each op once, driven by the vector types at the call site, so
+these files only declare signatures.
 """
 
 import os
 
-ROOT = os.path.join(os.path.dirname(__file__), "..", "libs", "prelude", "lib")
-OUT_DIR = os.path.join(ROOT, "Simd")
+ROOT = os.path.join(os.path.dirname(__file__), "..", "libs", "stdlib", "lib")
+OUT_DIR = os.path.join(ROOT, "simd")
 
 # ---------------------------------------------------------------------------
 # Type universe
@@ -842,9 +844,9 @@ def gen_neon():
 
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)
-    for name, fn in (("Core.utp", gen_core),
-                     ("X86.utp", gen_x86),
-                     ("Neon.utp", gen_neon)):
+    for name, fn in (("core.utp", gen_core),
+                     ("x86.utp", gen_x86),
+                     ("neon.utp", gen_neon)):
         path = os.path.join(OUT_DIR, name)
         with open(path, "w") as f:
             f.write(fn())

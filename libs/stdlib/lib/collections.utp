@@ -1,7 +1,462 @@
-import "../Memory/Core.utp";
-import "List.utp";
-import "Map.utp";
-export "MapLiteralView.utp";
+/*
+ * Specialized and auxiliary collections: HashMap<K, V> (unordered hash
+ * table), SplayTreeMap<K, V> (sorted by key) and, further down, the
+ * functional data structures (Set, Queue, Stack, PriorityQueue). The
+ * fundamental List/Map types stay in the prelude.
+ *
+ * These classes rely on prelude services that are always injected:
+ * Memory/Core (alloc/free/destruct/_construct<T>), List, Map (MapEntry)
+ * and the hash<T> intrinsic from MapLiteralView.
+ */
+
+/* Internal: inline bucket with a 1-byte state (0 empty, 1 occupied,
+ * 2 tombstone). */
+struct _HashMapBucket<K, V> {
+  K key;
+  V value;
+  int8 state;
+}
+
+
+/*
+ * HashMap<K, V>: an unordered hash table with open addressing and linear
+ * probing (like Dart's HashMap). No iteration order is guaranteed.
+ *
+ * Complexity (n = entries, load factor kept at 3/4):
+ *   - get/set/put/containsKey/remove: O(1) average, O(n) worst case
+ *   - iteration (forEach/keys/values): O(n), in table order (unspecified)
+ *   - copy/assignment: O(n) deep copy
+ *
+ * Storage: a single flat power-of-two array of buckets; each bucket stores
+ * the key/value inline (state: 0 empty, 1 occupied, 2 tombstone). Removed
+ * entries leave tombstones that later inserts reuse; growth rehashes every
+ * live entry into a doubled table. There are no per-entry allocations and
+ * lookups probe a contiguous run, so it is the fastest of the three maps.
+ *
+ * Keys are compared with '==' and hashed with the prelude's hash<T>, so a
+ * key type must provide an overloaded operator==. Like C++'s
+ * std::unordered_map, references into the map are invalidated by inserts
+ * that grow the table.
+ */
+/*
+ * HashMapKeyIterator<K, V>: the for-in cursor of HashMap<K, V>, scanning
+ * the bucket table for occupied slots (state == 1).
+ */
+class HashMapKeyIterator<K, V> {
+  HashMap<K, V>* _map;
+  int64 _next; /* next bucket index to inspect; past _mask = exhausted */
+
+  HashMapKeyIterator() {
+    this._map = null;
+    this._next = 0;
+  }
+
+  HashMapKeyIterator(HashMap<K, V>* map) {
+    this._map = map;
+    this._next = 0;
+  }
+
+  @inline
+  bool moveNext() {
+    if (this._map == null) return false;
+    while (this._next <= this._map._mask) {
+      if (this._map._bucketPtr(this._next)[0].state == 1) {
+        this._next++;
+        return true;
+      }
+      this._next++;
+    }
+    return false;
+  }
+
+  /* The current key, valid after a successful moveNext(). */
+  @inline
+  K& current() {
+    return this._map._bucketPtr(this._next - 1)[0].key;
+  }
+}
+
+/* A non-owning view over a HashMap's entries. */
+class HashMapEntryIterator<K, V> {
+  HashMap<K, V>* _map;
+  int64 _next;
+
+  HashMapEntryIterator() {
+    this._map = null;
+    this._next = 0;
+  }
+
+  HashMapEntryIterator(HashMap<K, V>* map) {
+    this._map = map;
+    this._next = 0;
+  }
+
+  @inline
+  bool moveNext() {
+    if (this._map == null) return false;
+    while (this._next <= this._map._mask) {
+      if (this._map._bucketPtr(this._next)[0].state == 1) {
+        this._next++;
+        return true;
+      }
+      this._next++;
+    }
+    return false;
+  }
+
+  /* The current pair, copied from the live bucket. */
+  @inline
+  MapEntry<K, V> current() {
+    return MapEntry<K, V>(this._map._bucketPtr(this._next - 1)[0].key,
+                          this._map._bucketPtr(this._next - 1)[0].value);
+  }
+}
+
+class HashMapEntryView<K, V> {
+  HashMap<K, V>* _map;
+
+  HashMapEntryView() {
+    this._map = null;
+  }
+
+  HashMapEntryView(HashMap<K, V>* map) {
+    this._map = map;
+  }
+
+  @inline
+  HashMapEntryIterator<K, V> iterator() {
+    return HashMapEntryIterator<K, V>(this._map);
+  }
+}
+
+/* The for-in cursor of HashMapEntryView, scanning the bucket table. */
+
+
+
+class HashMap<K, V> {
+  RawMemory _buckets; /* _HashMapBucket<K,V>[] */
+  int64 _count;       /* live entries */
+  int64 _mask;        /* bucket count - 1 (power of two) */
+  int64 _tombstones;  /* reused by growth; kept so probes never stall */
+
+  HashMap() {
+    this._init();
+  }
+
+  HashMap(MapLiteralView<K, V> view) {
+    this._init();
+    for (usize i = 0; i < view.length; i++) {
+      this.put(view.keys[i], view.values[i]);
+    }
+  }
+
+  HashMap(const HashMap<K, V>& other) {
+    this._init();
+    this._copyFrom(other);
+  }
+
+  ~HashMap() {
+    if (this._buckets.ptr != null) {
+      for (int64 i = 0; i <= this._mask; i++) {
+        if (this._bucketPtr(i)[0].state == 1) {
+          destruct(&(this._bucketPtr(i)[0].key));
+          destruct(&(this._bucketPtr(i)[0].value));
+        }
+      }
+      free(this._buckets);
+    }
+  }
+
+  void operator=(const HashMap<K, V>& other) {
+    if (this == &other) return;
+    if (this._buckets.ptr != null) {
+      for (int64 i = 0; i <= this._mask; i++) {
+        if (this._bucketPtr(i)[0].state == 1) {
+          destruct(&(this._bucketPtr(i)[0].key));
+          destruct(&(this._bucketPtr(i)[0].value));
+        }
+      }
+      free(this._buckets);
+    }
+    this._buckets.ptr = null;
+    this._count = 0;
+    this._mask = 0;
+    this._tombstones = 0;
+    this._copyFrom(other);
+  }
+
+  /* INTERNAL HELPERS */
+
+  void _init() {
+    this._mask = 3;
+    this._count = 0;
+    this._tombstones = 0;
+    this._buckets = alloc(4 * sizeof(_HashMapBucket<K, V>),
+                          alignof(_HashMapBucket<K, V>));
+    for (usize i = 0; i < 4; i++) {
+      this._bucketPtr(i as int64)[0].state = 0;
+    }
+  }
+
+  @inline
+  _HashMapBucket<K, V>* _bucketPtr(int64 i) {
+    return (this._buckets.ptr + (i as usize) * sizeof(_HashMapBucket<K, V>))
+        as _HashMapBucket<K, V>*;
+  }
+
+  @inline
+  int64 _hashIdx(K key) {
+    return (hash<K>(key) as int64) & this._mask;
+  }
+
+  /* Index of the bucket holding 'key', or -1 when absent. */
+  int64 _find(K key) {
+    int64 h = this._hashIdx(key);
+    for (int64 i = 0; i <= this._mask; i++) {
+      int64 idx = (h + i) & this._mask;
+      int8 st = this._bucketPtr(idx)[0].state;
+      if (st == 0) {
+        return -1;
+      }
+      if (st == 1 && this._bucketPtr(idx)[0].key == key) {
+        return idx;
+      }
+    }
+    return -1;
+  }
+
+  /* Doubles the table and rehashes every live entry (tombstones are
+   * dropped). */
+  void _grow() {
+    int64 newMask = this._mask * 2 + 1;
+    RawMemory newRaw = alloc(((newMask + 1) as usize) * sizeof(_HashMapBucket<K, V>),
+                             alignof(_HashMapBucket<K, V>));
+    for (int64 i = 0; i <= newMask; i++) {
+      ((newRaw.ptr + (i as usize) * sizeof(_HashMapBucket<K, V>))
+           as _HashMapBucket<K, V>*)[0]
+          .state = 0;
+    }
+    for (int64 i = 0; i <= this._mask; i++) {
+      if (this._bucketPtr(i)[0].state != 1) {
+        continue;
+      }
+      int64 h = (hash<K>(this._bucketPtr(i)[0].key) as int64) & newMask;
+      int64 j = h;
+      while (((newRaw.ptr + (j as usize) * sizeof(_HashMapBucket<K, V>))
+                  as _HashMapBucket<K, V>*)[0]
+                 .state != 0) {
+        j = (j + 1) & newMask;
+      }
+      _HashMapBucket<K, V>* d =
+          (newRaw.ptr + (j as usize) * sizeof(_HashMapBucket<K, V>))
+              as _HashMapBucket<K, V>*;
+      _HashMapBucket<K, V>* s = this._bucketPtr(i);
+      _construct<K>(&(d[0].key), s[0].key as K&&);
+      _construct<V>(&(d[0].value), s[0].value as V&&);
+      d[0].state = 1;
+      destruct(&(s[0].key));
+      destruct(&(s[0].value));
+    }
+    free(this._buckets);
+    this._buckets = newRaw;
+    this._mask = newMask;
+    this._tombstones = 0;
+  }
+
+  /* Inserts the key (or finds the existing slot) and returns the bucket
+   * index with the key constructed; the caller fills the value. */
+  int64 _insertSlot(K key) {
+    int64 idx = this._find(key);
+    if (idx != -1) {
+      return idx;
+    }
+    if ((this._count + this._tombstones) * 4 >= (this._mask + 1) * 3) {
+      this._grow();
+    }
+    int64 h = this._hashIdx(key);
+    int64 ins = -1;
+    for (int64 i = 0; i <= this._mask; i++) {
+      int64 idx2 = (h + i) & this._mask;
+      int8 st = this._bucketPtr(idx2)[0].state;
+      if (st == 0) {
+        ins = idx2;
+        break;
+      }
+      if (st == 2 && ins == -1) {
+        ins = idx2;
+      }
+    }
+    if (ins == -1) {
+      this._grow();
+      ins = this._find(key);
+      if (ins == -1) {
+        ins = this._hashIdx(key);
+      }
+    }
+    if (this._bucketPtr(ins)[0].state == 2) {
+      this._tombstones--;
+    }
+    _construct<K>(&(this._bucketPtr(ins)[0].key), key);
+    this._bucketPtr(ins)[0].state = 1;
+    this._count++;
+    return ins;
+  }
+
+  /* Structural copy of 'other'. */
+  void _copyFrom(const HashMap<K, V>& other) {
+    this._mask = other._mask;
+    this._count = other._count;
+    this._tombstones = other._tombstones;
+    if (this._buckets.ptr != null) {
+      free(this._buckets);
+    }
+    this._buckets = alloc(((this._mask + 1) as usize) * sizeof(_HashMapBucket<K, V>),
+                          alignof(_HashMapBucket<K, V>));
+    for (int64 i = 0; i <= this._mask; i++) {
+      _HashMapBucket<K, V>* d = this._bucketPtr(i);
+      _HashMapBucket<K, V>* s = other._bucketPtr(i);
+      d[0].state = s[0].state;
+      if (s[0].state == 1) {
+        _construct<K>(&(d[0].key), s[0].key);
+        _construct<V>(&(d[0].value), s[0].value);
+      }
+    }
+  }
+
+  /* PUBLIC API */
+
+  @inline
+  usize length() {
+    return this._count as usize;
+  }
+
+  @inline
+  bool isEmpty() {
+    return this._count == 0;
+  }
+
+  @inline
+  bool isNotEmpty() {
+    return this._count != 0;
+  }
+
+  /* Indexes 'key', default-constructing and inserting a new entry when it
+   * is absent. */
+  V& operator[](K key) {
+    int64 idx = this._find(key);
+    if (idx == -1) {
+      idx = this._insertSlot(key);
+      _construct<V>(&(this._bucketPtr(idx)[0].value));
+    }
+    return this._bucketPtr(idx)[0].value;
+  }
+
+  /* Inserts 'value' for 'key', replacing any existing value. */
+  void put(K key, V value) {
+    int64 idx = this._find(key);
+    if (idx != -1) {
+      destruct(&(this._bucketPtr(idx)[0].value));
+      _construct<V>(&(this._bucketPtr(idx)[0].value), value);
+      return;
+    }
+    idx = this._insertSlot(key);
+    _construct<V>(&(this._bucketPtr(idx)[0].value), value);
+  }
+
+  /* True when 'key' is present. */
+  bool containsKey(K key) {
+    return this._find(key) != -1;
+  }
+
+  /* True when at least one entry holds a value equal to 'value'. */
+  bool containsValue<T2, T3>(V value) {
+    for (int64 i = 0; i <= this._mask; i++) {
+      if (this._bucketPtr(i)[0].state == 1 &&
+          this._bucketPtr(i)[0].value == value) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /* Removes 'key'; returns whether an entry was removed. */
+  bool remove(K key) {
+    int64 idx = this._find(key);
+    if (idx == -1) {
+      return false;
+    }
+    destruct(&(this._bucketPtr(idx)[0].key));
+    destruct(&(this._bucketPtr(idx)[0].value));
+    this._bucketPtr(idx)[0].state = 2;
+    this._tombstones++;
+    this._count--;
+    return true;
+  }
+
+  /* Removes every entry, keeping the allocated storage for reuse. */
+  void clear() {
+    if (this._buckets.ptr == null) {
+      return;
+    }
+    for (int64 i = 0; i <= this._mask; i++) {
+      if (this._bucketPtr(i)[0].state == 1) {
+        destruct(&(this._bucketPtr(i)[0].key));
+        destruct(&(this._bucketPtr(i)[0].value));
+        this._bucketPtr(i as int64)[0].state = 0;
+      }
+    }
+    this._count = 0;
+    this._tombstones = 0;
+  }
+
+  /* Runs 'fn' for every entry, in unspecified table order. */
+  void forEach(void Function(K, V) fn) {
+    for (int64 i = 0; i <= this._mask; i++) {
+      if (this._bucketPtr(i)[0].state == 1) {
+        fn(this._bucketPtr(i)[0].key, this._bucketPtr(i)[0].value);
+      }
+    }
+  }
+
+  /* All keys, in unspecified table order. */
+  List<K> keys() {
+    List<K> result;
+    for (int64 i = 0; i <= this._mask; i++) {
+      if (this._bucketPtr(i)[0].state == 1) {
+        result.push(this._bucketPtr(i)[0].key);
+      }
+    }
+    return result;
+  }
+
+  /* All values, in unspecified table order. */
+  List<V> values() {
+    List<V> result;
+    for (int64 i = 0; i <= this._mask; i++) {
+      if (this._bucketPtr(i)[0].state == 1) {
+        result.push(this._bucketPtr(i)[0].value);
+      }
+    }
+    return result;
+  }
+
+  /* for-in support: a zero-cost cursor over the KEYS, in table order
+   * (unspecified order, like Dart's HashMap). Use map.entries() for
+   * key/value pairs. The cursor is a tiny value type (map pointer + bucket
+   * index) with @inline moveNext()/current(); no Iterable hierarchy, no
+   * vtables, no allocation. */
+  @inline
+  HashMapKeyIterator<K, V> iterator() {
+    return HashMapKeyIterator<K, V>(this);
+  }
+
+  /* A lightweight, non-owning view over the map's entries (holds a pointer
+   * to the map, no copy). Iterating yields MapEntry<K, V> values. */
+  @inline
+  HashMapEntryView<K, V> entries() {
+    return HashMapEntryView<K, V>(this);
+  }
+}
 
 /* Internal: BST node with parent pointers for bottom-up splaying. */
 struct _SplayNode<K, V> {

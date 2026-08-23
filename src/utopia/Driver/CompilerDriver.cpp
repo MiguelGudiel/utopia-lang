@@ -541,12 +541,14 @@ bool CompilerDriver::run() {
       activeLinkerFlags.push_back(flag);
     }
 
-    /* The prelude is always compiled in, and its Math module references the
-     * C math functions (acos, sqrt, ...). On glibc/BSD they live in a
-     * separate libm that must be linked explicitly; without it every build
-     * fails at link time with an undefined symbol. macOS and Windows keep
-     * the math functions in the system libc, and Android resolves them
-     * through the NDK sysroot automatically. */
+    /* The stdlib's math module (utopia:math) references the C math
+     * functions (acos, sqrt, ...). On glibc/BSD they live in a separate
+     * libm that must be linked explicitly; without it every build that
+     * uses Math fails at link time with an undefined symbol. The flag is
+     * added unconditionally so projects do not need to remember it in
+     * their build.yaml. macOS and Windows keep the math functions in the
+     * system libc, and Android resolves them through the NDK sysroot
+     * automatically. */
     if (!isAndroidTarget && !triple.isOSWindows() && !triple.isMacOSX()) {
       activeLinkerFlags.push_back("-lm");
     }

@@ -35,10 +35,16 @@ The prelude is loaded automatically for every module (except itself) and re-expo
 
 - `String` (dynamic string)
 - `List<T>` (generic dynamic array)
+- `Map<K, V>` (LinkedHashMap, insertion order)
 - `Console` and the global `print`
-- `Math/Limits` constants
-- `Memory/Core` (`malloc`, `free`, `Type` reflection)
-- `System/OS` (`sleep`, `system`)
+- `Duration` (time spans)
+- `Memory/Core` (`malloc`, `free`, `Type` reflection, `sizeof`/`typeof`)
+- `Future<T>` and async support
+
+Everything else ships in the standard library and is imported explicitly:
+`utopia:math`, `utopia:system`, `utopia:time`, `utopia:random`,
+`utopia:utility`, `utopia:collections`, `utopia:io`, `utopia:ffi`,
+`utopia:memory`, `utopia:simd`, ...
 
 ## Namespaces
 

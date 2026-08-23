@@ -11,12 +11,15 @@ Utopia ships two layers of standard library:
 | `String.utp` | The `String` type |
 | `Core/List.utp` | `List<T>`, `ListLiteralView<T>` |
 | `Core/Map.utp` | `Map<K, V>` (LinkedHashMap), `MapLiteralView<K, V>`, `hash<T>` |
-| `Core/HashMap.utp` | `HashMap<K, V>` (unordered hash table) |
-| `Core/SplayTreeMap.utp` | `SplayTreeMap<K, V>` (sorted by key) |
 | `IO/Console.utp` | `Console` class and the global `print` |
-| `Math/Limits.utp` | Numeric limits constants |
 | `Memory/Core.utp` | `malloc`/`free`, `Type` reflection, `sizeof`/`typeof` intrinsics |
-| `System/OS.utp` | `sleep`, `system` |
+| `Core/Duration.utp` | `Duration` (time spans) |
+| `Async/Future.utp` | `Future<T>` and async support |
+
+Only universally needed types stay in the prelude: String, List, Map, the
+memory model and Console. Everything else (math, system, time, collections,
+SIMD, ...) lives in the standard library below, so programs that do not use
+those features do not pay the compile/link cost.
 
 ## The standard library
 
@@ -27,6 +30,14 @@ Utopia ships two layers of standard library:
 | `memory.utp` | `import "utopia:memory";` | `Memory` | `unique_ptr`, `shared_ptr`, `weak_ptr`, `make_unique`, `make_shared` |
 | `ffi.utp` | `import "utopia:ffi";` | `FFI` | `DynamicLibrary` (dlopen/dlsym) |
 | `io.utp` | `import "utopia:io";` | `IO` | `Path`, `File`, `Directory`, `FileHandle` |
+| `math.utp` | `import "utopia:math";` | (global) | `Math` class, limits constants (imports `limits.utp`) |
+| `limits.utp` | `import "utopia:limits";` | (global) | `INT32_MAX`, `FLOAT64_MAX`, ... constants |
+| `system.utp` | `import "utopia:system";` | (global) | `Env`, `sleep`, `system`, processes |
+| `time.utp` | `import "utopia:time";` | (global) | `Stopwatch`, `DateTime` |
+| `random.utp` | `import "utopia:random";` | (global) | `Random` (xorshift64*) |
+| `utility.utp` | `import "utopia:utility";` | (global) | `optional<T>`, `pair<T, U>`, `min`/`max`/`clamp`/`swap` |
+| `collections.utp` | `import "utopia:collections";` | (global) | `HashMap`, `SplayTreeMap`, `Set`, `Queue`/`Deque`, `Stack`, `PriorityQueue` |
+| `simd.utp` | `import "utopia:simd";` | (global) | portable SIMD ops plus the x86/NEON layers |
 
 ## The builder library
 

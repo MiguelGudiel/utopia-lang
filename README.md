@@ -74,7 +74,7 @@ Utopia combines a C/C++-style memory and execution model with a modern, Dart-ins
 
 ### Modules & tooling
 
-- **Module system** with `import`/`export`, an automatically loaded prelude, a standard library (`utopia:memory`, `utopia:ffi`, `utopia:io`, `utopia:test`), and the `utopia:builder` API for build scripts
+- **Module system** with `import`/`export`, an automatically loaded prelude, a standard library (`utopia:math`, `utopia:system`, `utopia:io`, `utopia:collections`, ...), and the `utopia:builder` API for build scripts
 - **Package manager (`yip`)**: `get`, `add`, `publish`, and `login` against a remote registry
 - **C-style preprocessor**: `#if`/`#elif`/`#else`/`#endif`, `#define`, `#undef`, `#error`, `#warning`, with automatic platform/architecture macros
 - **LLVM-based code generation** with TBAA metadata, LLVM attribute inference, and optional DWARF debug info
@@ -87,11 +87,10 @@ Utopia combines a C/C++-style memory and execution model with a modern, Dart-ins
 
 - **`String`**: construction from any primitive, `+`/`==`/`!=` operators, indexing, `length()`, `c_str()`, `toInt()`/`toFloat()`, `clear()`, `push_back()`
 - **`List<T>`**: dynamic generic list with `push()`, indexing, copy semantics, array-literal initialization, and Dart-style `for-in` iteration (`for (var x in list)`, `for (var& x in list)`)
-- **`Map<K, V>` / `HashMap<K, V>` / `SplayTreeMap<K, V>`**: Dart-style maps with map-literal initialization (`{"key": value}`); `Map` preserves insertion order (LinkedHashMap, O(1) average lookups), `HashMap` is an unordered open-addressing table, and `SplayTreeMap` keeps keys sorted (O(log n) amortized); all deep-copy on assignment and accept the same literal. All three support `for-in` over keys and `entries()` for key/value pairs
+- **`Map<K, V>`**: Dart-style map with map-literal initialization (`{"key": value}`), insertion order (LinkedHashMap), O(1) average lookups; deep-copies on assignment, supports `for-in` over keys and `entries()` for key/value pairs
 - **`Console`**: `print`, `printLine`, `readLine`, `clear`; global `print(format, ...)` with `printf`-style formatting
-- **`Math`**: numeric limits constants (`INT32_MAX`, `FLOAT64_MIN`, ...)
+- **`Duration`**: time spans (microsecond precision, arithmetic and comparison operators)
 - **`Memory`**: `malloc`/`free` bindings and type reflection (`Type`, `MethodInfo`)
-- **`System`**: `sleep`, `system` bindings
 - **`Path`/`File`/`Directory`/`FileHandle`**: filesystem and file I/O utilities (in the `IO` namespace)
 - **`DynamicLibrary`**: runtime `dlopen`/`dlsym`-style FFI (in the `FFI` namespace)
 - **Smart pointers** (`Memory.unique_ptr`, `Memory.shared_ptr`, `Memory.weak_ptr`, `Memory.make_unique`, `Memory.make_shared`) in the `Memory` namespace
@@ -145,7 +144,7 @@ The `examples/` directory contains small, self-contained programs demonstrating 
 - Dart-style lambdas with inferred signatures (`() => 5`, `(x) => x * 2`)
 - Dart-style async/await (`Future<T>`, `await`, fire-and-forget, `runOnThread`, `then`, `wait`)
 - C++-style exceptions: try/catch/throw, rethrow, catch-all, destructor unwinding, `assert`, `__FILE__`/`__LINE__`
-- The extended standard library (`Duration`, `Stopwatch`, `DateTime`, `Random`, `Math`)
+- The stdlib modules (`Duration`, `Stopwatch`, `DateTime`, `Random`, `Math`, `Env`/`System`, `optional`/`pair`, collections)
 - `List<T>` operations, copies, and the functional methods (`map`, `where`, `reduce`)
 - `Map<K, V>`, `HashMap`, and `SplayTreeMap` with `{key: value}` literals
 - Abstract classes and abstract methods
@@ -162,7 +161,7 @@ The `docs/` directory contains the full language documentation, organized like t
 
 - **Getting Started**: installation, your first program, and project layout
 - **Language Guide**: types, variables, functions, control flow, records, OOP, generics, operators, memory management and smart pointers, modules, preprocessor, and annotations
-- **Standard Library**: `String`, `List`, `Console`, `Math`, `Memory`, `System`, I/O, FFI, and smart pointers
+- **Standard Library**: the prelude (`String`, `List`, `Map`, `Console`, `Duration`, `Memory`) plus the explicitly imported stdlib modules (`utopia:math`, `utopia:system`, `utopia:time`, `utopia:random`, `utopia:utility`, `utopia:collections`, `utopia:io`, `utopia:ffi`, `utopia:simd`, smart pointers)
 - **Tooling**: compiler CLI, build system, JIT, LSP, formatter, and cross-compilation targets
 - **Advanced Topics**: LLVM code generation, TBAA, DWARF debug info, and intrinsics
 

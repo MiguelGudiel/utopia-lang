@@ -11,6 +11,9 @@
  * 'final& x' a const reference.
  */
 
+/* HashMap and SplayTreeMap come from the stdlib collections module. */
+import "utopia:collections";
+
 /* A user-defined iterable: the protocol is structural, so any type with
  * iterator()/moveNext()/current() can be used with for-in. */
 class Range {

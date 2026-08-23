@@ -6,7 +6,7 @@
  * native SIMD instructions.
  */
 
-/* float32 */
+/* ---------------- float32 ---------------- */
 @intrinsic("simd_add") public float32x4 simd_add(float32x4 a, float32x4 b);
 @intrinsic("simd_sub") public float32x4 simd_sub(float32x4 a, float32x4 b);
 @intrinsic("simd_mul") public float32x4 simd_mul(float32x4 a, float32x4 b);
@@ -197,7 +197,7 @@
 @intrinsic("simd_reduce_max") public float32 simd_reduce_max(float32x16 v);
 @intrinsic("simd_signmask") public int32 simd_signmask(float32x16 v);
 
-/* float64 */
+/* ---------------- float64 ---------------- */
 @intrinsic("simd_add") public float64x2 simd_add(float64x2 a, float64x2 b);
 @intrinsic("simd_sub") public float64x2 simd_sub(float64x2 a, float64x2 b);
 @intrinsic("simd_mul") public float64x2 simd_mul(float64x2 a, float64x2 b);
@@ -384,7 +384,7 @@
 @intrinsic("simd_reduce_max") public float64 simd_reduce_max(float64x8 v);
 @intrinsic("simd_signmask") public int32 simd_signmask(float64x8 v);
 
-/* int8 */
+/* ---------------- int8 ---------------- */
 @intrinsic("simd_add") public int8x16 simd_add(int8x16 a, int8x16 b);
 @intrinsic("simd_sub") public int8x16 simd_sub(int8x16 a, int8x16 b);
 @intrinsic("simd_mul") public int8x16 simd_mul(int8x16 a, int8x16 b);
@@ -579,7 +579,7 @@
 @intrinsic("simd_reduce_xor") public int8 simd_reduce_xor(int8x64 v);
 @intrinsic("simd_signmask") public int64 simd_signmask(int8x64 v);
 
-/* int16 */
+/* ---------------- int16 ---------------- */
 @intrinsic("simd_add") public int16x8 simd_add(int16x8 a, int16x8 b);
 @intrinsic("simd_sub") public int16x8 simd_sub(int16x8 a, int16x8 b);
 @intrinsic("simd_mul") public int16x8 simd_mul(int16x8 a, int16x8 b);
@@ -780,7 +780,7 @@
 @intrinsic("simd_reduce_xor") public int16 simd_reduce_xor(int16x32 v);
 @intrinsic("simd_signmask") public int32 simd_signmask(int16x32 v);
 
-/* int32 */
+/* ---------------- int32 ---------------- */
 @intrinsic("simd_add") public int32x4 simd_add(int32x4 a, int32x4 b);
 @intrinsic("simd_sub") public int32x4 simd_sub(int32x4 a, int32x4 b);
 @intrinsic("simd_mul") public int32x4 simd_mul(int32x4 a, int32x4 b);
@@ -983,7 +983,7 @@
 @intrinsic("simd_reduce_xor") public int32 simd_reduce_xor(int32x16 v);
 @intrinsic("simd_signmask") public int32 simd_signmask(int32x16 v);
 
-/* int64 */
+/* ---------------- int64 ---------------- */
 @intrinsic("simd_add") public int64x2 simd_add(int64x2 a, int64x2 b);
 @intrinsic("simd_sub") public int64x2 simd_sub(int64x2 a, int64x2 b);
 @intrinsic("simd_mul") public int64x2 simd_mul(int64x2 a, int64x2 b);
@@ -1182,7 +1182,7 @@
 @intrinsic("simd_reduce_xor") public int64 simd_reduce_xor(int64x8 v);
 @intrinsic("simd_signmask") public int32 simd_signmask(int64x8 v);
 
-/* uint8 */
+/* ---------------- uint8 ---------------- */
 @intrinsic("simd_add") public uint8x16 simd_add(uint8x16 a, uint8x16 b);
 @intrinsic("simd_sub") public uint8x16 simd_sub(uint8x16 a, uint8x16 b);
 @intrinsic("simd_mul") public uint8x16 simd_mul(uint8x16 a, uint8x16 b);
@@ -1371,7 +1371,7 @@
 @intrinsic("simd_reduce_xor") public uint8 simd_reduce_xor(uint8x64 v);
 @intrinsic("simd_signmask") public int64 simd_signmask(uint8x64 v);
 
-/* uint16 */
+/* ---------------- uint16 ---------------- */
 @intrinsic("simd_add") public uint16x8 simd_add(uint16x8 a, uint16x8 b);
 @intrinsic("simd_sub") public uint16x8 simd_sub(uint16x8 a, uint16x8 b);
 @intrinsic("simd_mul") public uint16x8 simd_mul(uint16x8 a, uint16x8 b);
@@ -1566,7 +1566,7 @@
 @intrinsic("simd_reduce_xor") public uint16 simd_reduce_xor(uint16x32 v);
 @intrinsic("simd_signmask") public int32 simd_signmask(uint16x32 v);
 
-/* uint32 */
+/* ---------------- uint32 ---------------- */
 @intrinsic("simd_add") public uint32x4 simd_add(uint32x4 a, uint32x4 b);
 @intrinsic("simd_sub") public uint32x4 simd_sub(uint32x4 a, uint32x4 b);
 @intrinsic("simd_mul") public uint32x4 simd_mul(uint32x4 a, uint32x4 b);
@@ -1763,7 +1763,7 @@
 @intrinsic("simd_reduce_xor") public uint32 simd_reduce_xor(uint32x16 v);
 @intrinsic("simd_signmask") public int32 simd_signmask(uint32x16 v);
 
-/* uint64 */
+/* ---------------- uint64 ---------------- */
 @intrinsic("simd_add") public uint64x2 simd_add(uint64x2 a, uint64x2 b);
 @intrinsic("simd_sub") public uint64x2 simd_sub(uint64x2 a, uint64x2 b);
 @intrinsic("simd_mul") public uint64x2 simd_mul(uint64x2 a, uint64x2 b);
@@ -1956,7 +1956,7 @@
 @intrinsic("simd_reduce_xor") public uint64 simd_reduce_xor(uint64x8 v);
 @intrinsic("simd_signmask") public int32 simd_signmask(uint64x8 v);
 
-/* boolxN mask vectors */
+/* ---------------- boolxN mask vectors ---------------- */
 @intrinsic("simd_and") public boolx2 simd_and(boolx2 a, boolx2 b);
 @intrinsic("simd_or") public boolx2 simd_or(boolx2 a, boolx2 b);
 @intrinsic("simd_xor") public boolx2 simd_xor(boolx2 a, boolx2 b);

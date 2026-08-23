@@ -1,10 +1,14 @@
 /*
- * The extended standard library: Duration, Stopwatch, DateTime, Random,
- * Math, optional/pair, algorithms, and the Dart-style String/List methods.
- *
- * Everything lives in the prelude without a namespace, so it is available
- * globally (except Console and C externals).
+ * The extended standard library: Duration (prelude) plus the stdlib
+ * modules Stopwatch/DateTime (time), Random, Math, optional/pair
+ * (utility), Env (system) and the Dart-style String/List methods.
  */
+
+import "utopia:math";
+import "utopia:random";
+import "utopia:time";
+import "utopia:utility";
+import "utopia:system";
 
 void durationDemo() {
   /* Constructor parts default to zero, exactly like Dart. */

@@ -1,8 +1,11 @@
 /*
  * Map literals and the three map types: Map (LinkedHashMap, insertion
- * order), HashMap (unordered, fastest lookups) and SplayTreeMap (sorted by
- * key). All of them accept the same '{key: value}' literal.
+ * order, prelude), HashMap (unordered, fastest lookups) and SplayTreeMap
+ * (sorted by key, both from the stdlib collections module). All of them
+ * accept the same '{key: value}' literal.
  */
+import "utopia:collections";
+
 int main() {
   /* Map: insertion order is preserved (Dart's LinkedHashMap semantics). */
   Map<String, int> scores = {"miguel": 9001, "ada": 42, "grace": 1337};

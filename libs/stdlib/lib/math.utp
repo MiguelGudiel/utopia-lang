@@ -3,6 +3,10 @@
  * of dart:math and <cmath>.
  */
 
+/* The numeric limits constants (INT32_MAX, FLOAT64_MAX, ...) travel with
+ * the math module: importing "utopia:math" makes both available. */
+export "limits.utp";
+
 @extern("sqrt")
 float64 _c_sqrt(float64 x);
 

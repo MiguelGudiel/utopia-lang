@@ -1,22 +1,19 @@
 /* Memory/Core.utp must be parsed before Core/List.utp (and the String
  * module that imports it): its template intrinsics (construct<T>) are
- * registered at parse time, and List's body uses them. */
+ * registered at parse time, and List's body uses them.
+ *
+ * The prelude only keeps what virtually every program needs: dynamic
+ * strings and the List/Map core, the memory model, the Console/print
+ * bindings, Duration (Stopwatch/DateTime use it and live in the stdlib
+ * 'time' module) and the async Future. Everything else (Math, System,
+ * Random, collections, SIMD, ...) lives in the stdlib and is imported
+ * explicitly with 'utopia:name'. */
 export "Memory/Core.utp";
-export "Simd/Core.utp";
-export "Simd/X86.utp";
-export "Simd/Neon.utp";
+export "Core/List.utp";
+export "Core/ListLiteralView.utp";
+export "Core/MapLiteralView.utp";
 export "String.utp";
 export "Core/Duration.utp";
-export "Core/Stopwatch.utp";
-export "Core/DateTime.utp";
-export "Core/Random.utp";
-export "Core/Utility.utp";
-export "Core/List.utp";
 export "Core/Map.utp";
-export "Core/HashMap.utp";
-export "Core/SplayTreeMap.utp";
-export "Math/Limits.utp";
-export "Math/Math.utp";
-export "System/OS.utp";
 export "IO/Console.utp";
 export "Async/Future.utp";

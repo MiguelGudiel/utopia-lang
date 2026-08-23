@@ -1,6 +1,8 @@
 # System
 
-The prelude's `System/OS.utp` module binds basic operating-system functions.
+The stdlib's `system.utp` module (imported with `import "utopia:system";`)
+binds basic operating-system functions: the `Env` class, process control
+and environment access.
 
 ## Functions
 
@@ -12,6 +14,8 @@ The prelude's `System/OS.utp` module binds basic operating-system functions.
 ## Usage
 
 ```utp
+import "utopia:system";
+
 int main() {
   print("Waiting 500ms...\n");
   sleep(500);
