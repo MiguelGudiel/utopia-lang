@@ -1,8 +1,10 @@
 # Map
 
-Utopia ships three map types in the prelude, mirroring Dart's collection
-library. All of them accept the same map literal syntax and deep-copy on
-copy/assignment (like `List`):
+Utopia ships three map types mirroring Dart's collection library. `Map`
+lives in the prelude; `HashMap` and `SplayTreeMap` come from the stdlib
+collections module (`import "utopia:collections";`). All of them accept
+the same map literal syntax and deep-copy on copy/assignment (like
+`List`):
 
 | Type | Order | Lookup | Storage |
 | --- | --- | --- | --- |

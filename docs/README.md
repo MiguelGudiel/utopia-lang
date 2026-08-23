@@ -43,10 +43,11 @@ This book is organized like the documentation of other systems languages, so you
 | [String](stdlib/string.md) | Dynamic string type |
 | [List](stdlib/list.md) | Generic dynamic array |
 | [Map](stdlib/map.md) | `Map`, `HashMap` and `SplayTreeMap` with map literals |
+| [Collections](stdlib/collections.md) | `Set`, `Stack`, `Queue`/`Deque`, `PriorityQueue` |
 | [Console](stdlib/console.md) | Terminal I/O and formatted printing |
 | [Math](stdlib/math.md) | Numeric limits |
 | [Memory & Reflection](stdlib/memory.md) | `malloc`/`free` and `sizeof`/`typeof` |
-| [System](stdlib/system.md) | OS bindings (`sleep`, `system`) |
+| [System](stdlib/system.md) | OS bindings (`sleep`, `system`, `Process`, `Env`) |
 | [I/O](stdlib/io.md) | `Path`, `File`, `Directory`, `FileHandle` |
 | [FFI](stdlib/ffi.md) | Dynamic library loading and symbol resolution |
 | [Smart Pointers](stdlib/smart-pointers.md) | `unique_ptr`, `shared_ptr`, `weak_ptr`, `make_unique`, `make_shared` |

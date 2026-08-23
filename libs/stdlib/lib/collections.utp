@@ -1,8 +1,8 @@
 /*
  * Specialized and auxiliary collections: HashMap<K, V> (unordered hash
- * table), SplayTreeMap<K, V> (sorted by key) and, further down, the
- * functional data structures (Set, Queue, Stack, PriorityQueue). The
- * fundamental List/Map types stay in the prelude.
+ * table), SplayTreeMap<K, V> (sorted by key) and the functional data
+ * structures (Set, Stack, Queue/Deque, PriorityQueue). The fundamental
+ * List/Map types stay in the prelude.
  *
  * These classes rely on prelude services that are always injected:
  * Memory/Core (alloc/free/destruct/_construct<T>), List, Map (MapEntry)
@@ -1045,3 +1045,453 @@ class SplayTreeMap<K, V> {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* Stack, Queue/Deque, PriorityQueue, Set                              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Stack<T>: a LIFO container over List's storage (push/pop at the end are
+ * O(1) with no extra allocation). top() is only valid while non-empty.
+ */
+class Stack<T> {
+  List<T> _items;
+
+  Stack() {
+    this._items = List<T>();
+  }
+
+  @inline
+  usize length() {
+    return this._items.length();
+  }
+
+  @inline
+  bool isEmpty() {
+    return this._items.isEmpty();
+  }
+
+  @inline
+  bool isNotEmpty() {
+    return this._items.isNotEmpty();
+  }
+
+  void push(T value) {
+    this._items.push(value);
+  }
+
+  /* Removes and returns the top element. */
+  T pop() {
+    return this._items.removeAt(this._items.length() - 1);
+  }
+
+  /* The top element without removing it. */
+  @inline
+  T& top() {
+    return this._items.last();
+  }
+
+  void clear() {
+    this._items.clear();
+  }
+
+  @inline
+  ListIterator<T> iterator() {
+    return this._items.iterator();
+  }
+}
+
+/* The for-in cursor of Deque<T>, walking the circular buffer in logical
+ * order (front to back). */
+class DequeIterator<T> {
+  Deque<T>* _dq;
+  usize _offset;
+  usize _len;
+
+  DequeIterator() {
+    this._dq = null;
+    this._offset = 0;
+    this._len = 0;
+  }
+
+  DequeIterator(Deque<T>* dq) {
+    this._dq = dq;
+    this._offset = 0;
+    this._len = dq.length();
+  }
+
+  @inline
+  bool moveNext() {
+    if (this._offset >= this._len) return false;
+    this._offset++;
+    return true;
+  }
+
+  /* The current element, valid after a successful moveNext(). */
+  @inline
+  T& current() {
+    return this._dq._at(this._offset - 1)[0];
+  }
+}
+
+/*
+ * Deque<T>: a double-ended queue over a circular buffer. pushBack/popBack
+ * and pushFront/popFront are O(1) amortized; the buffer doubles when full
+ * and moves the elements once, like List.
+ *
+ * Layout: a power-of-two raw buffer; the elements live in a contiguous
+ * logical range starting at _head (mod _cap), so indexing is
+ * buf[(head + i) % cap]. Only the moved-from slots are destructed on
+ * growth; _clear runs the destructor of every live element.
+ */
+class Deque<T> {
+  RawMemory _buf;
+  usize _cap;
+  usize _head;
+  usize _len;
+
+  Deque() {
+    this._buf.ptr = null;
+    this._cap = 0;
+    this._head = 0;
+    this._len = 0;
+  }
+
+  Deque(const Deque<T>& other) {
+    this._buf.ptr = null;
+    this._cap = 0;
+    this._head = 0;
+    this._len = 0;
+    for (usize i = 0; i < other._len; i++) {
+      this.pushBack(other._at(i)[0]);
+    }
+  }
+
+  ~Deque() {
+    this._clear();
+  }
+
+  void operator=(const Deque<T>& other) {
+    if (this == &other) return;
+    this._clear();
+    for (usize i = 0; i < other._len; i++) {
+      this.pushBack(other._at(i)[0]);
+    }
+  }
+
+  /* Element 'i' in logical order (0 = front). */
+  @inline
+  T* _at(usize i) {
+    return (this._buf.ptr + ((this._head + i) % this._cap) * sizeof(T)) as T*;
+  }
+
+  void _reserve(usize minCap) {
+    if (minCap <= this._cap) return;
+    usize newCap = this._cap == 0 ? (4 as usize) : this._cap * 2;
+    while (newCap < minCap) {
+      newCap *= 2;
+    }
+    /* The 2x multiplier above never overflows in practice; guard anyway
+     * so the capacity can never wrap and corrupt the buffer indexing. */
+    if (newCap < this._cap) newCap = minCap;
+    RawMemory newBuf = alloc(newCap * sizeof(T), alignof(T));
+    for (usize i = 0; i < this._len; i++) {
+      _construct<T>(newBuf.ptr + i * sizeof(T), this._at(i)[0] as T&&);
+      destruct(this._at(i));
+    }
+    if (this._buf.ptr != null) free(this._buf);
+    this._buf = newBuf;
+    this._cap = newCap;
+    this._head = 0;
+  }
+
+  void _clear() {
+    for (usize i = 0; i < this._len; i++) {
+      destruct(this._at(i));
+    }
+    this._len = 0;
+    this._head = 0;
+  }
+
+  /* PUBLIC API */
+
+  @inline
+  usize length() {
+    return this._len;
+  }
+
+  @inline
+  bool isEmpty() {
+    return this._len == 0;
+  }
+
+  @inline
+  bool isNotEmpty() {
+    return this._len != 0;
+  }
+
+  /* Appends to the back. */
+  void pushBack(T value) {
+    this._reserve(this._len + 1);
+    _construct<T>(this._at(this._len), value as T&&);
+    this._len++;
+  }
+
+  /* Prepends to the front. */
+  void pushFront(T value) {
+    this._reserve(this._len + 1);
+    this._head = (this._head + this._cap - 1) % this._cap;
+    _construct<T>(this._at(0), value as T&&);
+    this._len++;
+  }
+
+  /* Removes and returns the front element. */
+  T popFront() {
+    T removed = this._at(0)[0] as T&&;
+    destruct(this._at(0));
+    this._head = (this._head + 1) % this._cap;
+    this._len--;
+    return removed;
+  }
+
+  /* Removes and returns the back element. */
+  T popBack() {
+    T removed = this._at(this._len - 1)[0] as T&&;
+    destruct(this._at(this._len - 1));
+    this._len--;
+    return removed;
+  }
+
+  /* The front element, without removing it. Valid while non-empty. */
+  @inline
+  T& first() {
+    return this._at(0)[0];
+  }
+
+  /* The back element, without removing it. Valid while non-empty. */
+  @inline
+  T& last() {
+    return this._at(this._len - 1)[0];
+  }
+
+  @inline
+  T& operator[](usize index) {
+    return this._at(index)[0];
+  }
+
+  void clear() {
+    this._clear();
+  }
+
+  @inline
+  DequeIterator<T> iterator() {
+    return DequeIterator<T>(this);
+  }
+}
+
+/*
+ * Queue<T>: a FIFO queue over a Deque. push() appends to the back and
+ * pop() removes from the front; both are O(1) amortized.
+ */
+class Queue<T> {
+  Deque<T> _d;
+
+  Queue() {
+    this._d = Deque<T>();
+  }
+
+  @inline
+  usize length() {
+    return this._d.length();
+  }
+
+  @inline
+  bool isEmpty() {
+    return this._d.isEmpty();
+  }
+
+  @inline
+  bool isNotEmpty() {
+    return this._d.isNotEmpty();
+  }
+
+  void push(T value) {
+    this._d.pushBack(value);
+  }
+
+  /* Removes and returns the front element. */
+  T pop() {
+    return this._d.popFront();
+  }
+
+  /* The front element, without removing it. */
+  @inline
+  T& first() {
+    return this._d.first();
+  }
+
+  /* The back element, without removing it. */
+  @inline
+  T& last() {
+    return this._d.last();
+  }
+
+  void clear() {
+    this._d.clear();
+  }
+
+  @inline
+  DequeIterator<T> iterator() {
+    return this._d.iterator();
+  }
+}
+
+/*
+ * PriorityQueue<T>: a min-heap over List storage (the smallest element is
+ * first, by operator< on T, like SplayTreeMap orders keys). push() bubbles
+ * the new element up, pop() replaces the root with the last element and
+ * sifts it down: O(log n) both.
+ */
+class PriorityQueue<T> {
+  List<T> _items;
+
+  PriorityQueue() {
+    this._items = List<T>();
+  }
+
+  @inline
+  usize length() {
+    return this._items.length();
+  }
+
+  @inline
+  bool isEmpty() {
+    return this._items.isEmpty();
+  }
+
+  @inline
+  bool isNotEmpty() {
+    return this._items.isNotEmpty();
+  }
+
+  void push(T value) {
+    this._items.push(value);
+    usize i = this._items.length() - 1;
+    while (i > 0) {
+      usize parent = (i - 1) / 2;
+      if (!(this._items[i] < this._items[parent])) break;
+      T tmp = this._items[i];
+      this._items[i] = this._items[parent];
+      this._items[parent] = tmp;
+      i = parent;
+    }
+  }
+
+  /* The smallest element, without removing it. Valid while non-empty. */
+  @inline
+  T& first() {
+    return this._items[0];
+  }
+
+  /* Removes and returns the smallest element. */
+  T pop() {
+    T top = this._items[0];
+    if (this._items.length() == 1) {
+      this._items.clear();
+      return top;
+    }
+    T last = this._items.removeAt(this._items.length() - 1);
+    this._items[0] = last;
+    usize n = this._items.length();
+    usize i = 0;
+    while (true) {
+      usize smallest = i;
+      usize left = i * 2 + 1;
+      usize right = i * 2 + 2;
+      if (left < n && this._items[left] < this._items[smallest]) {
+        smallest = left;
+      }
+      if (right < n && this._items[right] < this._items[smallest]) {
+        smallest = right;
+      }
+      if (smallest == i) break;
+      T tmp = this._items[i];
+      this._items[i] = this._items[smallest];
+      this._items[smallest] = tmp;
+      i = smallest;
+    }
+    return top;
+  }
+
+  void clear() {
+    this._items.clear();
+  }
+
+  @inline
+  ListIterator<T> iterator() {
+    return this._items.iterator();
+  }
+}
+
+/*
+ * Set<T>: a hash set over HashMap's open-addressing table. Elements must
+ * provide operator== and hash consistently (String, numbers, user types
+ * with operator==), like HashMap keys. Iteration order is unspecified.
+ */
+class Set<T> {
+  HashMap<T, bool> _map;
+
+  Set() {
+    this._map = HashMap<T, bool>();
+  }
+
+  @inline
+  usize length() {
+    return this._map.length();
+  }
+
+  @inline
+  bool isEmpty() {
+    return this._map.isEmpty();
+  }
+
+  @inline
+  bool isNotEmpty() {
+    return this._map.isNotEmpty();
+  }
+
+  /* Inserts 'value'; duplicates are ignored. */
+  void add(T value) {
+    this._map.put(value, true);
+  }
+
+  bool contains(T value) {
+    return this._map.containsKey(value);
+  }
+
+  /* Removes 'value'; returns whether it was present. */
+  bool remove(T value) {
+    return this._map.remove(value);
+  }
+
+  void clear() {
+    this._map.clear();
+  }
+
+  /* All elements, in unspecified order. */
+  List<T> toList() {
+    return this._map.keys();
+  }
+
+  /* Runs 'fn' for every element, in unspecified order. */
+  void forEach(void Function(T) fn) {
+    List<T> keys = this._map.keys();
+    for (usize i = 0; i < keys.length(); i++) {
+      fn(keys[i]);
+    }
+  }
+
+  @inline
+  HashMapKeyIterator<T, bool> iterator() {
+    return this._map.iterator();
+  }
+}
