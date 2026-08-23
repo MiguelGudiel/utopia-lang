@@ -330,6 +330,30 @@ class File {
   }
 }
 
+#if _WIN32
+
+@extern("FindFirstFileA")
+void* _os_findfirst(const uint8* path, void* data);
+
+@extern("FindNextFileA")
+int32 _os_findnext(void* handle, void* data);
+
+@extern("FindClose")
+int32 _os_findclose(void* handle);
+
+#else
+
+@extern("opendir")
+void* _os_opendir(const uint8* path);
+
+@extern("readdir")
+void* _os_readdir(void* dirp);
+
+@extern("closedir")
+int32 _os_closedir(void* dirp);
+
+#endif
+
 /*
  * High-level API for Directory manipulations.
  */
@@ -346,6 +370,61 @@ class Directory {
   @inline
   bool exists() {
     return _access(this._path.c_str(), 0) == 0;
+  }
+
+  /*
+   * Returns the names of the entries in this directory (files and
+   * subdirectories), excluding '.' and '..'. The order is unspecified:
+   * readdir order on POSIX, creation order on Windows.
+   *
+   * The entry name is reached through the C dirent header: on Linux
+   * (glibc/musl) d_name starts 19 bytes in ({ino_t, off_t, ushort,
+   * uchar}); macOS interposes d_seekoff/d_namlen, shifting it to 21. On
+   * Windows the name sits at byte 44 of _WIN32_FIND_DATAA (the file
+   * attribute/time/size fields precede cFileName).
+   */
+  List<String> list() {
+    List<String> result;
+    #if _WIN32
+    /* FindFirstFileA needs a wildcard pattern; match every entry. */
+    String pattern = this._path;
+    if (pattern.length() > 0 && pattern[pattern.length() - 1] != 92) {
+      pattern = pattern + "\\*";
+    } else {
+      pattern = pattern + "*";
+    }
+    uint8[320] data;
+    void* handle = _os_findfirst(pattern.c_str(), &data[0] as void*);
+    uint64 h = handle as uint64;
+    if (h == 0 || h == 0xFFFFFFFFFFFFFFFF) return result;
+    uint8* namePtr = &data[0] + 44;
+    String name = namePtr;
+    if (name != "." && name != "..") result.push(name);
+    while (true) {
+      int32 more = _os_findnext(handle, &data[0] as void*);
+      if (more == 0) break;
+      String next = namePtr;
+      if (next != "." && next != "..") result.push(next);
+    }
+    _os_findclose(handle);
+    return result;
+    #else
+    void* dir = _os_opendir(this._path.c_str());
+    if (dir == null) return result;
+    while (true) {
+      void* entry = _os_readdir(dir);
+      if (entry == null) break;
+      #if __APPLE__
+      uint8* namePtr = (entry as uint8*) + 21;
+      #else
+      uint8* namePtr = (entry as uint8*) + 19;
+      #endif
+      String name = namePtr;
+      if (name != "." && name != "..") result.push(name);
+    }
+    _os_closedir(dir);
+    return result;
+    #endif
   }
 
   bool create() {

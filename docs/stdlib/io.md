@@ -94,6 +94,7 @@ d.deleteRecursive();          // rm -rf / rmdir /s /q
 | `rename(String)` / `move(String)` | Rename / move |
 | `deleteRecursive()` | Recursive delete (shell-assisted) |
 | `copy(String)` | Recursive copy (shell-assisted) |
+| `list()` | Entry names (excluding `.` and `..`), as `List<String>` |
 
 ## Example: reading a config file
 
