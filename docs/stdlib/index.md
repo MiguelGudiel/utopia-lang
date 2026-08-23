@@ -33,7 +33,7 @@ those features do not pay the compile/link cost.
 | `math.utp` | `import "utopia:math";` | (global) | `Math` class, limits constants (imports `limits.utp`) |
 | `limits.utp` | `import "utopia:limits";` | (global) | `INT32_MAX`, `FLOAT64_MAX`, ... constants |
 | `system.utp` | `import "utopia:system";` | (global) | `Env` (variables, `args()`, `hostname`), `sleep`, `system`, `exit`, `abort`, `Process` |
-| `time.utp` | `import "utopia:time";` | (global) | `Stopwatch`, `DateTime` |
+| `time.utp` | `import "utopia:time";` | (global) | `Stopwatch`, `DateTime` (ISO 8601 parse, IANA zones) |
 | `random.utp` | `import "utopia:random";` | (global) | `Random` (xorshift64*) |
 | `utility.utp` | `import "utopia:utility";` | (global) | `optional<T>`, `pair<T, U>`, `min`/`max`/`clamp`/`swap` |
 | `collections.utp` | `import "utopia:collections";` | (global) | `HashMap`, `SplayTreeMap`, `Set`, `Queue`/`Deque`, `Stack`, `PriorityQueue` |

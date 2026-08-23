@@ -49,6 +49,7 @@ This book is organized like the documentation of other systems languages, so you
 | [Math](stdlib/math.md) | Numeric limits |
 | [Memory & Reflection](stdlib/memory.md) | `malloc`/`free` and `sizeof`/`typeof` |
 | [System](stdlib/system.md) | OS bindings (`sleep`, `system`, `Process`, `Env`) |
+| [Time](stdlib/time.md) | `Stopwatch`, `DateTime` (parse, IANA zones) |
 | [I/O](stdlib/io.md) | `Path`, `File`, `Directory`, `FileHandle` |
 | [FFI](stdlib/ffi.md) | Dynamic library loading and symbol resolution |
 | [Smart Pointers](stdlib/smart-pointers.md) | `unique_ptr`, `shared_ptr`, `weak_ptr`, `make_unique`, `make_shared` |

@@ -28,6 +28,8 @@ private int32 _os_clock_gettime(int32 clockid, _Timespec* tp);
 
 #endif
 
+/* Thrown by DateTime.parse on malformed input. */
+class FormatException {}
 
 class Stopwatch {
   private int64 _startUs;
@@ -122,8 +124,9 @@ class Stopwatch {
  * conversion are supported through the platform C library.
  */
 
-/* Mirrors the C struct tm. On glibc/bionic the trailing gmtoff/zone fields
- * are written by localtime_r/gmtime_r, so they are included there. */
+/* Mirrors the C struct tm. The trailing gmtoff/zone fields are written by
+ * localtime_r on glibc/bionic and Darwin (macOS), so they are included
+ * there; they back DateTime's timezone support. */
 struct _Tm {
   int32 tm_sec;
   int32 tm_min;
@@ -134,7 +137,7 @@ struct _Tm {
   int32 tm_wday;
   int32 tm_yday;
   int32 tm_isdst;
-  #if !_WIN32 && !__APPLE__
+  #if !_WIN32
   int64 tm_gmtoff;
   uint8* tm_zone;
   #endif
@@ -168,12 +171,35 @@ _Tm* _os_gmtime_r(int64* time, _Tm* tm);
 @extern("timegm")
 int64 _os_timegm(_Tm* tm);
 
+/* IANA-zone lookup for DateTime.inZone: the TZ environment variable is
+ * switched to the zone for the duration of one localtime_r call (glibc
+ * re-reads /usr/share/zoneinfo after tzset), so the zone's real DST rules
+ * apply. The process-wide TZ is restored afterwards; this is not
+ * thread-safe, so concurrent inZone calls must be serialized. */
+@extern("getenv")
+uint8* _tz_getenv(const uint8* name);
+
+@extern("setenv")
+int32 _tz_setenv(const uint8* name, const uint8* value, int32 overwrite);
+
+@extern("unsetenv")
+int32 _tz_unsetenv(const uint8* name);
+
+@extern("tzset")
+void _tz_tzset();
+
 #endif
 
 
 class DateTime {
   int64 _us;
   bool _utc;
+  /* UTC offset in seconds east of UTC: 0 for 'Z' times, the parsed or
+   * zoned offset when known, and INT32_MIN when the value is a plain
+   * local time (the offset is then derived from the local zone). */
+  int32 _offset;
+
+  static const int32 OFFSET_UNSET = -2147483648;
 
   /* Constructs a local DateTime from calendar parts (Dart's DateTime
    * constructor). 'month' is 1-based; the remaining parts default like in
@@ -201,13 +227,15 @@ class DateTime {
     int64 secs = _os_mktime(&tm);
     this._us = secs * 1000000 + millisecond * 1000 + microsecond;
     this._utc = false;
+    this._offset = DateTime.OFFSET_UNSET;
   }
 
   /* Internal: builds a DateTime directly from an epoch timestamp. */
-  static DateTime _fromUs(int64 microseconds, bool isUtc) {
+  static DateTime _fromUs(int64 microseconds, bool isUtc, int32 offset) {
     DateTime d = DateTime(0);
     d._us = microseconds;
     d._utc = isUtc;
+    d._offset = offset;
     return d;
   }
 
@@ -240,6 +268,7 @@ class DateTime {
     return DateTime._fromUs(
       secs * 1000000 + millisecond * 1000 + microsecond,
       true,
+      0,
     );
   }
 
@@ -255,7 +284,11 @@ class DateTime {
     int64 microseconds,
     {bool isUtc = false},
   ) {
-    return DateTime._fromUs(microseconds, isUtc);
+    return DateTime._fromUs(
+      microseconds,
+      isUtc,
+      isUtc ? 0 : DateTime.OFFSET_UNSET,
+    );
   }
 
   @inline
@@ -273,6 +306,12 @@ class DateTime {
   _Tm _toTm() {
     _Tm tm;
     int64 secs = this._us / 1000000;
+    /* A UTC value carrying a recorded offset (parsed or zoned) renders
+     * the zone's wall time: UTC shifted by the offset. */
+    if (this._utc && this._offset != DateTime.OFFSET_UNSET &&
+        this._offset != 0) {
+      secs = secs + this._offset;
+    }
     #if _WIN32
     if (this._utc) {
       _os_gmtime_s(&tm, &secs);
@@ -338,6 +377,208 @@ class DateTime {
     return this._utc;
   }
 
+  /* The UTC offset in seconds east of UTC for this DateTime: 0 for UTC
+   * values, the recorded offset for parsed/zoned ones, and the local
+   * zone's offset at this instant otherwise. */
+  int32 utcOffset() {
+    if (this._utc) {
+      return this._offset == DateTime.OFFSET_UNSET ? 0 : this._offset;
+    }
+    if (this._offset != DateTime.OFFSET_UNSET) {
+      return this._offset;
+    }
+    #if _WIN32
+    return 0;
+    #else
+    _Tm tm;
+    int64 t = this._us / 1000000;
+    _os_localtime_r(&t, &tm);
+    return tm.tm_gmtoff as int32;
+    #endif
+  }
+
+  /* This DateTime converted to the IANA zone 'zone' (e.g. "Europe/Madrid"),
+   * keeping the same instant. The result is a UTC-based value carrying
+   * the zone's UTC offset, so it renders with the zone's wall time and a
+   * "+HH:MM" suffix (the system's zoneinfo database is consulted through
+   * the TZ environment variable; see the _tz_* bindings above). On
+   * Windows the value is returned unchanged. */
+  DateTime inZone(String zone) {
+    #if _WIN32
+    return *this;
+    #else
+    int64 off = DateTime._offsetForZone(zone, this._us / 1000000);
+    return DateTime._fromUs(this._us, true, off as int32);
+    #endif
+  }
+
+  /* The UTC offset of 'zone' at the instant 'secs' (POSIX only). */
+  static int64 _offsetForZone(String zone, int64 secs) {
+    #if _WIN32
+    return 0;
+    #else
+    uint8* saved = _tz_getenv("TZ");
+    String savedStr = saved == null ? "" : String(saved);
+    _tz_setenv("TZ", zone.c_str(), 1);
+    _tz_tzset();
+    _Tm tm;
+    int64 t = secs;
+    _os_localtime_r(&t, &tm);
+    int64 off = tm.tm_gmtoff;
+    if (savedStr.isEmpty()) {
+      _tz_unsetenv("TZ");
+    } else {
+      _tz_setenv("TZ", savedStr.c_str(), 1);
+    }
+    _tz_tzset();
+    return off;
+    #endif
+  }
+
+  /* -- parsing -------------------------------------------------------- */
+
+  /* Parses an ISO 8601 string and throws FormatException on malformed
+   * input. Accepted forms: "YYYY-MM-DD", with optional "THH:MM",
+   * "THH:MM:SS" and ".ffffff" fractional seconds (the separator may also
+   * be a space), plus an optional trailing 'Z' or "+HH:MM"/"-HH:MM"
+   * offset. With an explicit offset the result is a UTC DateTime whose
+   * instant is shifted accordingly (like Dart). */
+  static DateTime parse(String s) {
+    DateTime d;
+    if (!DateTime._tryParse(s, d)) {
+      throw FormatException();
+    }
+    return d;
+  }
+
+  /* Non-throwing parse; false when 's' is not a valid ISO 8601 string. */
+  static bool tryParse(String s, DateTime& out) {
+    return DateTime._tryParse(s, out);
+  }
+
+  /* Reads up to 'maxDigits' digits at 'pos', advancing 'next'. Returns -1
+   * when no digit is present. */
+  static int64 _parseInt(const String& s, usize pos, usize maxDigits,
+                         usize& next) {
+    if (pos >= s.length()) return -1;
+    int64 v = 0;
+    usize n = 0;
+    while (pos < s.length() && n < maxDigits) {
+      uint8 c = s[pos];
+      if (c < 48 || c > 57) break;
+      v = v * 10 + (c - 48);
+      pos++;
+      n++;
+    }
+    next = pos;
+    return n == 0 ? -1 : v;
+  }
+
+  static bool _tryParse(const String& s, DateTime& out) {
+    usize i = 0;
+    int64 year = DateTime._parseInt(s, 0, 4, i);
+    if (year < 0 || i >= s.length() || s[i] != 0x2D) return false;
+    i++;
+    int64 month = DateTime._parseInt(s, i, 2, i);
+    if (month < 1 || month > 12 || i >= s.length() || s[i] != 0x2D) {
+      return false;
+    }
+    i++;
+    int64 day = DateTime._parseInt(s, i, 2, i);
+    if (day < 1 || day > 31) return false;
+    int64 hour = 0;
+    int64 minute = 0;
+    int64 second = 0;
+    int64 micro = 0;
+    if (i < s.length()) {
+      uint8 sep = s[i];
+      if (sep != 0x54 && sep != 0x20) return false; /* 'T' or ' ' */
+      i++;
+      hour = DateTime._parseInt(s, i, 2, i);
+      if (hour < 0 || hour > 23 || i >= s.length() || s[i] != 0x3A) {
+        return false;
+      }
+      i++;
+      minute = DateTime._parseInt(s, i, 2, i);
+      if (minute < 0 || minute > 59) return false;
+      if (i < s.length() && s[i] == 0x3A) {
+        i++;
+        second = DateTime._parseInt(s, i, 2, i);
+        if (second < 0 || second > 59) return false;
+        if (i < s.length() && s[i] == 0x2E) { /* '.' */
+          i++;
+          int64 frac = 0;
+          int32 digits = 0;
+          while (i < s.length() && digits < 6 && s[i] >= 48 && s[i] <= 57) {
+            frac = frac * 10 + (s[i] - 48);
+            digits++;
+            i++;
+          }
+          if (digits == 0) return false;
+          if (i < s.length() && s[i] >= 48 && s[i] <= 57) return false;
+          while (digits < 6) {
+            frac *= 10;
+            digits++;
+          }
+          micro = frac;
+        }
+      }
+    }
+    int32 offsetSecs = 0;
+    bool isUtc = false;
+    if (i < s.length()) {
+      uint8 c = s[i];
+      if (c == 0x5A || c == 0x7A) { /* Z */
+        isUtc = true;
+        i++;
+      } else if (c == 0x2B || c == 0x2D) { /* +/-HH:MM */
+        bool neg = c == 0x2D;
+        i++;
+        int64 oh = DateTime._parseInt(s, i, 2, i);
+        if (oh < 0 || oh > 23 || i >= s.length() || s[i] != 0x3A) {
+          return false;
+        }
+        i++;
+        int64 om = DateTime._parseInt(s, i, 2, i);
+        if (om < 0 || om > 59) return false;
+        int32 total = ((oh * 60 + om) * 60) as int32;
+        offsetSecs = neg ? -total : total;
+        isUtc = true;
+      } else {
+        return false;
+      }
+    }
+    if (i != s.length()) return false;
+
+    _Tm tm;
+    tm.tm_sec = second as int32;
+    tm.tm_min = minute as int32;
+    tm.tm_hour = hour as int32;
+    tm.tm_mday = day as int32;
+    tm.tm_mon = (month - 1) as int32;
+    tm.tm_year = (year - 1900) as int32;
+    tm.tm_wday = 0;
+    tm.tm_yday = 0;
+    tm.tm_isdst = -1;
+    int64 secs;
+    if (isUtc) {
+      #if _WIN32
+      secs = _os_mkgmtime(&tm);
+      #else
+      secs = _os_timegm(&tm);
+      #endif
+      secs = secs - offsetSecs;
+    } else {
+      secs = _os_mktime(&tm);
+    }
+    out = DateTime._fromUs(
+      secs * 1000000 + micro,
+      isUtc,
+      isUtc ? offsetSecs : DateTime.OFFSET_UNSET,
+    );
+    return true;
+  }
+
   @inline
   int64 microsecondsSinceEpoch() {
     return this._us;
@@ -395,75 +636,87 @@ class DateTime {
   @extern("snprintf")
   static int32 c_snprintf(uint8* str, usize size, const uint8* format, ...);
 
-  /* Local: "2024-01-15 10:30:00.000000"; UTC appends "Z". */
+  static usize _strlen(const uint8* s) {
+    usize n = 0;
+    while (s[n] != 0) {
+      n++;
+    }
+    return n;
+  }
+
+  /* Appends the zone suffix: "Z" for UTC, "+HH:MM"/"-HH:MM" for a known
+   * offset, nothing for a plain local time. Returns the new length. */
+  static usize _appendOffsetSuffix(uint8* buf, usize len, int32 offset) {
+    if (offset == DateTime.OFFSET_UNSET) return len;
+    if (offset == 0) {
+      buf[len] = 0x5A; /* Z */
+      return len + 1;
+    }
+    int32 abs = offset < 0 ? -offset : offset;
+    buf[len] = offset < 0 ? 0x2D : 0x2B;
+    len++;
+    int32 hh = abs / 3600;
+    int32 mm = (abs % 3600) / 60;
+    buf[len] = (48 + hh / 10) as uint8;
+    len++;
+    buf[len] = (48 + hh % 10) as uint8;
+    len++;
+    buf[len] = 0x3A;
+    len++;
+    buf[len] = (48 + mm / 10) as uint8;
+    len++;
+    buf[len] = (48 + mm % 10) as uint8;
+    len++;
+    return len;
+  }
+
+  /* Local: "2024-01-15 10:30:00.000000"; UTC appends "Z", zoned values
+   * append their "+HH:MM" offset. */
   String toString() {
     _Tm tm = this._toTm();
-    uint8[64] buf;
-    if (this._utc) {
-      DateTime.c_snprintf(
-        &buf[0],
-        64,
-        "%04lld-%02lld-%02lld %02lld:%02lld:%02lld.%03lld%03lldZ",
-        (tm.tm_year + 1900) as int64,
-        (tm.tm_mon + 1) as int64,
-        tm.tm_mday as int64,
-        tm.tm_hour as int64,
-        tm.tm_min as int64,
-        tm.tm_sec as int64,
-        this.millisecond() as int64,
-        this.microsecond() as int64,
-      );
-    } else {
-      DateTime.c_snprintf(
-        &buf[0],
-        64,
-        "%04lld-%02lld-%02lld %02lld:%02lld:%02lld.%03lld%03lld",
-        (tm.tm_year + 1900) as int64,
-        (tm.tm_mon + 1) as int64,
-        tm.tm_mday as int64,
-        tm.tm_hour as int64,
-        tm.tm_min as int64,
-        tm.tm_sec as int64,
-        this.millisecond() as int64,
-        this.microsecond() as int64,
-      );
-    }
+    uint8[72] buf;
+    usize n = 0;
+    DateTime.c_snprintf(
+      &buf[0],
+      72,
+      "%04lld-%02lld-%02lld %02lld:%02lld:%02lld.%03lld%03lld",
+      (tm.tm_year + 1900) as int64,
+      (tm.tm_mon + 1) as int64,
+      tm.tm_mday as int64,
+      tm.tm_hour as int64,
+      tm.tm_min as int64,
+      tm.tm_sec as int64,
+      this.millisecond() as int64,
+      this.microsecond() as int64,
+    );
+    n = DateTime._strlen(&buf[0]);
+    n = DateTime._appendOffsetSuffix(&buf[0], n, this._offset);
+    buf[n] = 0;
     return &buf[0];
   }
 
-  /* ISO 8601: "2024-01-15T10:30:00.000000"; UTC appends "Z". */
+  /* ISO 8601: "2024-01-15T10:30:00.000000"; UTC appends "Z", zoned
+   * values append their "+HH:MM" offset. */
   String toIso8601String() {
     _Tm tm = this._toTm();
-    uint8[64] buf;
-    if (this._utc) {
-      DateTime.c_snprintf(
-        &buf[0],
-        64,
-        "%04lld-%02lld-%02lldT%02lld:%02lld:%02lld.%03lld%03lldZ",
-        (tm.tm_year + 1900) as int64,
-        (tm.tm_mon + 1) as int64,
-        tm.tm_mday as int64,
-        tm.tm_hour as int64,
-        tm.tm_min as int64,
-        tm.tm_sec as int64,
-        this.millisecond() as int64,
-        this.microsecond() as int64,
-      );
-    } else {
-      DateTime.c_snprintf(
-        &buf[0],
-        64,
-        "%04lld-%02lld-%02lldT%02lld:%02lld:%02lld.%03lld%03lld",
-        (tm.tm_year + 1900) as int64,
-        (tm.tm_mon + 1) as int64,
-        tm.tm_mday as int64,
-        tm.tm_hour as int64,
-        tm.tm_min as int64,
-        tm.tm_sec as int64,
-        this.millisecond() as int64,
-        this.microsecond() as int64,
-      );
-    }
+    uint8[72] buf;
+    usize n = 0;
+    DateTime.c_snprintf(
+      &buf[0],
+      72,
+      "%04lld-%02lld-%02lldT%02lld:%02lld:%02lld.%03lld%03lld",
+      (tm.tm_year + 1900) as int64,
+      (tm.tm_mon + 1) as int64,
+      tm.tm_mday as int64,
+      tm.tm_hour as int64,
+      tm.tm_min as int64,
+      tm.tm_sec as int64,
+      this.millisecond() as int64,
+      this.microsecond() as int64,
+    );
+    n = DateTime._strlen(&buf[0]);
+    n = DateTime._appendOffsetSuffix(&buf[0], n, this._offset);
+    buf[n] = 0;
     return &buf[0];
   }
 }
