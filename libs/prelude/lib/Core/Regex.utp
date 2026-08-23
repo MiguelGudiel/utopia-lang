@@ -1,0 +1,792 @@
+/*
+ * Regex: a backtracking regular expression engine with a PCRE-flavored
+ * syntax, kept in the prelude because String.split/replace accept it.
+ *
+ * Syntax:
+ *   literals        any codepoint, escaped with '\' when special
+ *   .               any codepoint except '\n'
+ *   [abc], [a-z], [^...]  character classes (ranges and \d\w\s escapes)
+ *   \d \D \w \W \s \S     ASCII digit/word/whitespace classes
+ *   \n \t \r \f \v \0     common escapes (any other '\x' matches 'x')
+ *   ^ $            start / end of the string (not line-based)
+ *   * + ? {n} {n,} {n,m}  greedy quantifiers; *? +? ?? are lazy
+ *   ( ... )        capturing group (group 1..N, group 0 = whole match)
+ *   a|b            alternation
+ *
+ * Matching is leftmost-first with full backtracking. '.' and character
+ * classes operate on UTF-8 codepoints, so multi-byte runes are never
+ * split.
+ *
+ * The pattern compiles to a flat program of nodes stored in parallel
+ * arrays on the Regex instance (the language has no pointer/array fields,
+ * so node references are indices):
+ *   _a  main payload (codepoint, group id, class offset, quant min, ...)
+ *   _b  quant max (-1 = unbounded) / class range count / next branch
+ *   _c  quant child / class negated flag
+ *   _d  quant lazy flag
+ *   _e  next node in the enclosing sequence (-1 = none)
+ */
+
+import "../String.utp";
+
+/* A single match: the byte range [start, end) plus the capture groups
+ * (group 0 is the whole match). A failed firstMatch returns start == -1. */
+class Match {
+  int32 start;
+  int32 end;
+  String _source;
+  List<int32> _groups;
+
+  Match() {
+    this.start = 0;
+    this.end = 0;
+    this._source = "";
+    this._groups = List<int32>();
+  }
+
+  Match(String source, int32 start, int32 end, List<int32> groups) {
+    this.start = start;
+    this.end = end;
+    this._source = source;
+    this._groups = groups;
+  }
+
+  Match(const Match& other) {
+    this.start = other.start;
+    this.end = other.end;
+    this._source = other._source;
+    this._groups = other._groups;
+  }
+
+  @inline
+  int32 groupCount() {
+    return (this._groups.length() / 2) - 1;
+  }
+
+  /* The substring captured by group 'i' (0 = the whole match). */
+  String group(int32 i) {
+    if (i < 0 || (i as usize) * 2 + 1 >= this._groups.length()) return "";
+    int32 gs = this._groups[(i as usize) * 2];
+    int32 ge = this._groups[(i as usize) * 2 + 1];
+    if (gs < 0 || ge < gs) return "";
+    return this._source.substring(gs as usize, ge as usize);
+  }
+
+  @inline
+  int32 groupStart(int32 i) {
+    if (i < 0 || (i as usize) * 2 >= this._groups.length()) return -1;
+    return this._groups[(i as usize) * 2];
+  }
+
+  @inline
+  int32 groupEnd(int32 i) {
+    if (i < 0 || (i as usize) * 2 + 1 >= this._groups.length()) return -1;
+    return this._groups[(i as usize) * 2 + 1];
+  }
+}
+
+/* Node type codes of the compiled program. */
+enum _RType {
+  CHAR = 1,
+  ANY = 2,
+  CLASS = 3,
+  GROUP = 4,
+  QUANT = 6,
+  ALT = 7,
+  SEQ_END = 8,
+  ANCHOR = 9,
+}
+
+class Regex {
+  String _pattern;
+  List<int8> _types;
+  List<int32> _a;
+  List<int32> _b;
+  List<int32> _c;
+  List<int32> _d;
+  List<int32> _e;
+  List<int32> _classRanges; /* flattened [start, end] pairs of classes */
+  int32 _root;
+  int32 _groupCount;
+  int32 _cursor;
+
+  Regex() {
+    this._pattern = "";
+    this._init();
+  }
+
+  Regex(String pattern) {
+    this._pattern = pattern;
+    this._init();
+    this._root = this._parseAlt();
+  }
+
+  void _init() {
+    this._types = List<int8>();
+    this._a = List<int32>();
+    this._b = List<int32>();
+    this._c = List<int32>();
+    this._d = List<int32>();
+    this._e = List<int32>();
+    this._classRanges = List<int32>();
+    this._root = -1;
+    this._groupCount = 0;
+    this._cursor = 0;
+  }
+
+  @inline
+  int32 groupCount() {
+    return this._groupCount;
+  }
+
+  @inline
+  String pattern() {
+    return this._pattern;
+  }
+
+  /* -- program construction ------------------------------------------ */
+
+  int32 _emit(int8 type, int32 a, int32 b, int32 c, int32 d) {
+    this._types.push(type);
+    this._a.push(a);
+    this._b.push(b);
+    this._c.push(c);
+    this._d.push(d);
+    this._e.push(-1);
+    return (this._types.length() - 1) as int32;
+  }
+
+  @inline
+  void _setNext(int32 node, int32 next) {
+    this._e[node] = next;
+  }
+
+  @inline
+  bool _atEnd() {
+    return this._cursor >= this._pattern.length();
+  }
+
+  /* The codepoint at the pattern cursor, advancing past it. */
+  int32 _nextChar() {
+    if (this._atEnd()) return -1;
+    usize next;
+    int32 cp = String.utf8Decode(this._pattern.c_str(), this._cursor as usize,
+                                 this._pattern.length(), next);
+    this._cursor = next as int32;
+    return cp;
+  }
+
+  int32 _peekChar() {
+    if (this._atEnd()) return -1;
+    usize next;
+    return String.utf8Decode(this._pattern.c_str(), this._cursor as usize,
+                             this._pattern.length(), next);
+  }
+
+  /* Alternation: seq ('|' seq)*. Every branch is a sequence terminated
+   * by a SEQ_END node whose _b links to the next branch (-1 = last). */
+  int32 _parseAlt() {
+    int32 head = -1;
+    int32 prevEnd = -1;
+    while (true) {
+      int32 branch = this._parseSeq();
+      int32 end = this._emit(8 as int8, 0, -1, 0, 0);
+      this._setNext(this._lastOf(branch), end);
+      if (head == -1) {
+        head = branch;
+      } else {
+        this._b[prevEnd] = branch;
+      }
+      prevEnd = end;
+      if (this._peekChar() != 0x7C /* '|' */) break;
+      this._nextChar();
+    }
+    return this._emit(7 as int8, head, 0, 0, 0);
+  }
+
+  /* The last node of the sequence starting at 'first' (walking _e). */
+  int32 _lastOf(int32 first) {
+    int32 n = first;
+    while (this._e[n] != -1) {
+      n = this._e[n];
+    }
+    return n;
+  }
+
+  /* Sequence: quant* until '|', ')' or end of pattern. */
+  int32 _parseSeq() {
+    int32 first = -1;
+    int32 last = -1;
+    while (true) {
+      if (this._atEnd()) break;
+      int32 p = this._peekChar();
+      if (p == 0x7C || p == 0x29) break; /* '|' or ')' */
+      int32 node = this._parseQuant();
+      if (first == -1) {
+        first = node;
+      } else {
+        this._setNext(last, node);
+      }
+      last = node;
+    }
+    if (first == -1) {
+      return this._emit(8 as int8, 0, -1, 0, 0);
+    }
+    return first;
+  }
+
+  /* Atom plus an optional quantifier. */
+  int32 _parseQuant() {
+    int32 atom = this._parseAtom();
+    if (this._atEnd()) return atom;
+    int32 q = this._peekChar();
+    int32 min = -1;
+    int32 max = -1;
+    if (q == 0x2A) { /* * */
+      min = 0;
+      max = -1;
+      this._nextChar();
+    } else if (q == 0x2B) { /* + */
+      min = 1;
+      max = -1;
+      this._nextChar();
+    } else if (q == 0x3F) { /* ? */
+      min = 0;
+      max = 1;
+      this._nextChar();
+    } else if (q == 0x7B) { /* {n} {n,} {n,m} */
+      int32 saved = this._cursor;
+      this._nextChar();
+      int32 n1 = this._parseNumber();
+      if (n1 >= 0) {
+        int32 p = this._peekChar();
+        if (p == 0x7D) {
+          min = n1;
+          max = n1;
+          this._nextChar();
+        } else if (p == 0x2C) {
+          this._nextChar();
+          int32 n2 = this._parseNumber();
+          if (this._peekChar() == 0x7D) {
+            min = n1;
+            max = n2 >= 0 ? n2 : -1;
+            this._nextChar();
+          }
+        }
+      }
+      if (min < 0) {
+        this._cursor = saved; /* not a brace quantifier: literal '{' */
+      }
+    }
+    if (min < 0) return atom;
+    bool lazy = false;
+    if (!this._atEnd() && this._peekChar() == 0x3F) {
+      this._nextChar();
+      lazy = true;
+    }
+    return this._emit(6 as int8, min, max, atom, lazy ? 1 : 0);
+  }
+
+  int32 _parseNumber() {
+    if (this._atEnd()) return -1;
+    int32 p = this._peekChar();
+    if (p < 0x30 || p > 0x39) return -1;
+    int32 v = 0;
+    while (!this._atEnd()) {
+      int32 c = this._peekChar();
+      if (c < 0x30 || c > 0x39) break;
+      this._nextChar();
+      v = v * 10 + (c - 0x30);
+    }
+    return v;
+  }
+
+  /* One atom: a literal, '.', a class, an anchor, or a group. */
+  int32 _parseAtom() {
+    if (this._atEnd()) {
+      return this._emit(8 as int8, 0, -1, 0, 0);
+    }
+    int32 c = this._nextChar();
+    if (c == 0x5E) { /* ^ */
+      return this._emit(9 as int8, 0, -1, 0, 0);
+    }
+    if (c == 0x24) { /* $ */
+      return this._emit(9 as int8, 1, -1, 0, 0);
+    }
+    if (c == 0x2E) { /* . */
+      return this._emit(2 as int8, 0, -1, 0, 0);
+    }
+    if (c == 0x5B) { /* [ */
+      return this._parseClass();
+    }
+    if (c == 0x28) { /* ( */
+      this._groupCount++;
+      int32 gid = this._groupCount;
+      int32 body = this._parseAlt();
+      if (this._peekChar() != 0x29) {
+        return this._emit(8 as int8, 0, -1, 0, 0);
+      }
+      this._nextChar();
+      return this._emit(4 as int8, gid, 0, body, 0);
+    }
+    if (c == 0x5C) { /* \ */
+      return this._parseEscape();
+    }
+    return this._emit(1 as int8, c, -1, 0, 0);
+  }
+
+  /* A character class [..], including negation and ranges. */
+  int32 _parseClass() {
+    bool negated = false;
+    if (this._peekChar() == 0x5E) {
+      negated = true;
+      this._nextChar();
+    }
+    int32 rangesOffset = this._classRanges.length() as int32;
+    int32 rangeCount = 0;
+    bool empty = true;
+    while (true) {
+      if (this._atEnd()) break;
+      int32 p = this._peekChar();
+      if (p == 0x5D && !empty) break;
+      int32 lo = this._classAtom();
+      if (lo < 0) break;
+      empty = false;
+      int32 hi = lo;
+      if (!this._atEnd() && this._peekChar() == 0x2D && lo != 0x5D) {
+        this._nextChar();
+        if (!this._atEnd() && this._peekChar() != 0x5D) {
+          hi = this._classAtom();
+          if (hi < lo) hi = lo;
+        } else {
+          hi = 0x2D;
+        }
+      }
+      this._classRanges.push(lo);
+      this._classRanges.push(hi);
+      rangeCount++;
+    }
+    if (!this._atEnd() && this._peekChar() == 0x5D) {
+      this._nextChar();
+    }
+    if (empty) {
+      /* An empty class never matches anything (a literal ']' is written
+       * as \] or placed first). */
+      this._classRanges.push(-1);
+      this._classRanges.push(-2);
+      rangeCount = 1;
+    }
+    return this._emit(3 as int8, rangesOffset, rangeCount, negated ? 1 : 0,
+                      0);
+  }
+
+  /* One codepoint or escape inside a class. */
+  int32 _classAtom() {
+    if (this._atEnd()) return -1;
+    int32 c = this._nextChar();
+    if (c == 0x5C) {
+      if (this._atEnd()) return 0x5C;
+      return Regex._escapeValue(this._nextChar());
+    }
+    return c;
+  }
+
+  /* \d \D \w \W \s \S and the common single-char escapes. */
+  static int32 _escapeValue(int32 e) {
+    if (e == 0x6E) return 10; /* \n */
+    if (e == 0x74) return 9;  /* \t */
+    if (e == 0x72) return 13; /* \r */
+    if (e == 0x66) return 12; /* \f */
+    if (e == 0x76) return 11; /* \v */
+    if (e == 0x30) return 0;  /* \0 */
+    return e;
+  }
+
+  int32 _parseEscape() {
+    if (this._atEnd()) {
+      return this._emit(1 as int8, 0x5C, -1, 0, 0);
+    }
+    int32 e = this._nextChar();
+    if (e == 0x64 || e == 0x44 || e == 0x77 || e == 0x57 || e == 0x73 ||
+        e == 0x53) {
+      int32 rangesOffset = this._classRanges.length() as int32;
+      int32 rangeCount = 0;
+      if (e == 0x64) { /* \d */
+        this._classRanges.push(0x30);
+        this._classRanges.push(0x39);
+        rangeCount = 1;
+      } else if (e == 0x77) { /* \w */
+        this._classRanges.push(0x30);
+        this._classRanges.push(0x39);
+        this._classRanges.push(0x41);
+        this._classRanges.push(0x5A);
+        this._classRanges.push(0x61);
+        this._classRanges.push(0x7A);
+        this._classRanges.push(0x5F);
+        this._classRanges.push(0x5F);
+        rangeCount = 4;
+      } else if (e == 0x73) { /* \s */
+        this._classRanges.push(9);
+        this._classRanges.push(13);
+        this._classRanges.push(0x20);
+        this._classRanges.push(0x20);
+        rangeCount = 2;
+      }
+      bool neg = (e == 0x44 || e == 0x57 || e == 0x53);
+      return this._emit(3 as int8, rangesOffset, rangeCount, neg ? 1 : 0, 0);
+    }
+    return this._emit(1 as int8, Regex._escapeValue(e), -1, 0, 0);
+  }
+
+  /* -- matching ------------------------------------------------------- */
+
+  bool _inClass(int32 node, int32 cp) {
+    int32 off = this._a[node];
+    int32 count = this._b[node];
+    bool neg = this._c[node] != 0;
+    bool in = false;
+    for (int32 i = 0; i < count * 2; i += 2) {
+      int32 lo = this._classRanges[(off + i) as usize];
+      int32 hi = this._classRanges[(off + i + 1) as usize];
+      if (cp >= lo && cp <= hi) {
+        in = true;
+        break;
+      }
+    }
+    return neg ? !in : in;
+  }
+
+  /* Matches the sequence starting at node 'n' from byte position 'pos'.
+   * 'groups' holds [start, end] pairs for groups 0..N; returns the end
+   * position in 'nextPos'. Backtracking nodes restore the group values
+   * they changed on failure. */
+  bool _matchAt(int32 n, const uint8* s, usize pos, usize end,
+                List<int32>& groups, usize& nextPos) {
+    if (n == -1) {
+      nextPos = pos;
+      return true;
+    }
+    int8 t = this._types[n];
+    if (t == 8 as int8) { /* SEQ_END: end of this sequence */
+      nextPos = pos;
+      return true;
+    }
+    if (t == 9 as int8) { /* anchor */
+      int32 kind = this._a[n];
+      if (kind == 0) { /* ^ */
+        if (pos != 0) return false;
+      } else { /* $ */
+        if (pos != end) return false;
+      }
+      return this._matchAt(this._e[n], s, pos, end, groups, nextPos);
+    }
+    if (t == 1 as int8) { /* char */
+      if (pos >= end) return false;
+      usize next;
+      int32 cp = String.utf8Decode(s, pos, end, next);
+      if (cp != this._a[n]) return false;
+      return this._matchAt(this._e[n], s, next, end, groups, nextPos);
+    }
+    if (t == 2 as int8) { /* any (not newline) */
+      if (pos >= end) return false;
+      usize next;
+      int32 cp = String.utf8Decode(s, pos, end, next);
+      if (cp == 10) return false;
+      return this._matchAt(this._e[n], s, next, end, groups, nextPos);
+    }
+    if (t == 3 as int8) { /* class */
+      if (pos >= end) return false;
+      usize next;
+      int32 cp = String.utf8Decode(s, pos, end, next);
+      if (!this._inClass(n, cp)) return false;
+      return this._matchAt(this._e[n], s, next, end, groups, nextPos);
+    }
+    if (t == 4 as int8) { /* group: record start/end around the body */
+      int32 gid = this._a[n];
+      int32 savedStart = groups[(gid as usize) * 2];
+      int32 savedEnd = groups[(gid as usize) * 2 + 1];
+      groups[(gid as usize) * 2] = pos as int32;
+      usize childEnd;
+      if (this._matchAt(this._c[n], s, pos, end, groups, childEnd)) {
+        groups[(gid as usize) * 2 + 1] = childEnd as int32;
+        if (this._matchAt(this._e[n], s, childEnd, end, groups, nextPos)) {
+          return true;
+        }
+        /* The continuation failed: keep the start, restore the end. */
+        groups[(gid as usize) * 2 + 1] = savedEnd;
+        return false;
+      }
+      groups[(gid as usize) * 2] = savedStart;
+      groups[(gid as usize) * 2 + 1] = savedEnd;
+      return false;
+    }
+    if (t == 7 as int8) { /* alternation */
+      int32 branch = this._a[n];
+      while (branch != -1) {
+        usize branchEnd;
+        if (this._matchAt(branch, s, pos, end, groups, branchEnd)) {
+          nextPos = branchEnd;
+          return true;
+        }
+        /* The branch's SEQ_END node links to the next branch. */
+        int32 scan = branch;
+        int32 link = -1;
+        while (scan != -1) {
+          if (this._types[scan] == 8 as int8) {
+            link = this._b[scan];
+            break;
+          }
+          scan = this._e[scan];
+        }
+        branch = link;
+      }
+      return false;
+    }
+    if (t == 6 as int8) { /* quantifier */
+      return this._matchQuant(n, s, pos, end, groups, nextPos);
+    }
+    nextPos = pos;
+    return false;
+  }
+
+  /* Matches the required minimum of the child, then greedy (or lazy)
+   * extra repetitions that backtrack through the continuation _e[n]. */
+  bool _matchQuant(int32 n, const uint8* s, usize pos, usize end,
+                   List<int32>& groups, usize& nextPos) {
+    int32 min = this._a[n];
+    int32 max = this._b[n];
+    int32 child = this._c[n];
+    bool lazy = this._d[n] != 0;
+    int32 cont = this._e[n];
+
+    usize p = pos;
+    for (int32 k = 0; k < min; k++) {
+      usize np;
+      if (!this._matchAt(child, s, p, end, groups, np)) return false;
+      p = np;
+    }
+    int32 remaining = max < 0 ? 0x7FFFFFFF : max - min;
+    if (lazy) {
+      return this._matchLazyExtra(child, s, p, end, groups, remaining, cont,
+                                  nextPos);
+    }
+    return this._matchGreedyExtra(child, s, p, end, groups, remaining, cont,
+                                  nextPos);
+  }
+
+  /* Greedy: take as many extra repetitions as the rest of the pattern
+   * accepts, backtracking (with group restore) when it cannot follow. */
+  bool _matchGreedyExtra(int32 child, const uint8* s, usize pos, usize end,
+                         List<int32>& groups, int32 remaining, int32 cont,
+                         usize& nextPos) {
+    if (remaining == 0) {
+      return this._matchAt(cont, s, pos, end, groups, nextPos);
+    }
+    List<int32> snapshot;
+    for (usize i = 0; i < groups.length(); i++) {
+      snapshot.push(groups[i]);
+    }
+    usize np;
+    if (this._matchAt(child, s, pos, end, groups, np) &&
+        this._matchGreedyExtra(child, s, np, end, groups, remaining - 1,
+                               cont, nextPos)) {
+      return true;
+    }
+    for (usize i = 0; i < groups.length(); i++) {
+      groups[i] = snapshot[i];
+    }
+    return this._matchAt(cont, s, pos, end, groups, nextPos);
+  }
+
+  /* Lazy: try the continuation first, then one more repetition. */
+  bool _matchLazyExtra(int32 child, const uint8* s, usize pos, usize end,
+                       List<int32>& groups, int32 remaining, int32 cont,
+                       usize& nextPos) {
+    if (remaining == 0) {
+      return this._matchAt(cont, s, pos, end, groups, nextPos);
+    }
+    if (this._matchAt(cont, s, pos, end, groups, nextPos)) {
+      return true;
+    }
+    List<int32> snapshot;
+    for (usize i = 0; i < groups.length(); i++) {
+      snapshot.push(groups[i]);
+    }
+    usize np;
+    if (this._matchAt(child, s, pos, end, groups, np) &&
+        this._matchLazyExtra(child, s, np, end, groups, remaining - 1, cont,
+                             nextPos)) {
+      return true;
+    }
+    for (usize i = 0; i < groups.length(); i++) {
+      groups[i] = snapshot[i];
+    }
+    return false;
+  }
+
+  /* -- public API ------------------------------------------------------ */
+
+  /* True when the pattern matches anywhere in 's'. */
+  bool hasMatch(const String& s) {
+    Match m = this.firstMatch(s);
+    return m.start != -1;
+  }
+
+  /* True when the pattern matches the whole string. */
+  bool matches(const String& s) {
+    Match m = this.firstMatch(s);
+    return m.start == 0 && m.end == s.length() as int32;
+  }
+
+  /* The leftmost match; start == -1 when none. */
+  Match firstMatch(const String& s) {
+    if (this._root == -1) {
+      return Match(s, -1, -1, List<int32>());
+    }
+    int8 anchorType = 9 as int8;
+    bool anchored = this._types[this._root] == anchorType &&
+                    this._a[this._root] == 0;
+    usize pos = 0;
+    while (pos <= s.length()) {
+      Match m;
+      if (this._tryMatchAt(s, pos, m)) {
+        return m;
+      }
+      if (anchored || pos >= s.length()) break;
+      usize next;
+      String.utf8Decode(s.c_str(), pos, s.length(), next);
+      pos = next;
+    }
+    return Match(s, -1, -1, List<int32>());
+  }
+
+  /* Every non-overlapping match, left to right. */
+  List<Match> allMatches(const String& s) {
+    List<Match> result;
+    int8 anchorType = 9 as int8;
+    bool anchored = this._root != -1 &&
+                    this._types[this._root] == anchorType &&
+                    this._a[this._root] == 0;
+    usize pos = 0;
+    while (pos <= s.length()) {
+      Match m;
+      if (!this._tryMatchAt(s, pos, m)) {
+        if (anchored || pos >= s.length()) break;
+        usize next;
+        String.utf8Decode(s.c_str(), pos, s.length(), next);
+        pos = next;
+        continue;
+      }
+      result.push(m);
+      if (m.end > m.start) {
+        pos = m.end as usize;
+      } else {
+        /* Zero-length match: advance one codepoint so the scan moves. */
+        if (pos >= s.length()) break;
+        usize next;
+        String.utf8Decode(s.c_str(), pos, s.length(), next);
+        pos = next;
+      }
+    }
+    return result;
+  }
+
+  bool _tryMatchAt(const String& s, usize pos, Match& out) {
+    List<int32> groups;
+    for (int32 i = 0; i <= this._groupCount; i++) {
+      groups.push(-1);
+      groups.push(-1);
+    }
+    usize nextPos;
+    if (!this._matchAt(this._root, s.c_str(), pos, s.length(), groups,
+                       nextPos)) {
+      return false;
+    }
+    groups[0] = pos as int32;
+    groups[1] = nextPos as int32;
+    out = Match(s, pos as int32, nextPos as int32, groups);
+    return true;
+  }
+
+  /* Splits 's' on every match of this regex. */
+  List<String> split(const String& s) {
+    List<String> result;
+    List<Match> matches = this.allMatches(s);
+    usize last = 0;
+    for (usize i = 0; i < matches.length(); i++) {
+      Match m = matches[i];
+      result.push(s.substring(last, m.start as usize));
+      last = m.end as usize;
+    }
+    result.push(s.substring(last, s.length()));
+    return result;
+  }
+
+  /* Replaces every match with 'replacement' ('$&' = whole match,
+   * '$1'..'$9' = capture groups, '$$' = literal '$'). */
+  String replaceAll(const String& s, const String& replacement) {
+    return this._replace(s, replacement, true);
+  }
+
+  String replaceFirst(const String& s, const String& replacement) {
+    return this._replace(s, replacement, false);
+  }
+
+  String _replace(const String& s, const String& replacement, bool all) {
+    List<Match> matches = this.allMatches(s);
+    String result;
+    usize last = 0;
+    usize limit = all ? matches.length() : (matches.length() > 0 ? 1 : 0);
+    for (usize i = 0; i < limit; i++) {
+      Match m = matches[i];
+      for (usize j = last; j < m.start as usize; j++) {
+        result.push_back(s[j]);
+      }
+      this._expandReplacement(replacement, m, result);
+      last = m.end as usize;
+    }
+    for (usize j = last; j < s.length(); j++) {
+      result.push_back(s[j]);
+    }
+    return result;
+  }
+
+  /* Appends 'replacement' with the '$' expansions into 'out'. */
+  void _expandReplacement(const String& replacement, Match& m, String& out) {
+    usize i = 0;
+    while (i < replacement.length()) {
+      uint8 c = replacement[i];
+      if (c == 0x24) { /* $ */
+        if (i + 1 < replacement.length()) {
+          uint8 n = replacement[i + 1];
+          if (n == 0x24) {
+            out.push_back(0x24);
+            i += 2;
+            continue;
+          }
+          if (n == 0x26) { /* $& */
+            String whole = m.group(0);
+            for (usize j = 0; j < whole.length(); j++) {
+              out.push_back(whole[j]);
+            }
+            i += 2;
+            continue;
+          }
+          if (n >= 0x31 && n <= 0x39) {
+            String g = m.group((n - 0x30) as int32);
+            for (usize j = 0; j < g.length(); j++) {
+              out.push_back(g[j]);
+            }
+            i += 2;
+            continue;
+          }
+        }
+        out.push_back(c);
+        i++;
+        continue;
+      }
+      out.push_back(c);
+      i++;
+    }
+  }
+}

@@ -13,6 +13,7 @@ export "Core/List.utp";
 export "Core/ListLiteralView.utp";
 export "Core/MapLiteralView.utp";
 export "String.utp";
+export "Core/Regex.utp";
 export "Core/Duration.utp";
 export "Core/Map.utp";
 export "IO/Console.utp";

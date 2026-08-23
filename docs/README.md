@@ -40,7 +40,8 @@ This book is organized like the documentation of other systems languages, so you
 | Chapter | Description |
 | --- | --- |
 | [Overview](stdlib/index.md) | The prelude and `utopia:` modules |
-| [String](stdlib/string.md) | Dynamic string type |
+| [String](stdlib/string.md) | Dynamic string type (format, Unicode, StringBuilder) |
+| [Regex](stdlib/regex.md) | Regular expressions (backtracking engine) |
 | [List](stdlib/list.md) | Generic dynamic array |
 | [Map](stdlib/map.md) | `Map`, `HashMap` and `SplayTreeMap` with map literals |
 | [Collections](stdlib/collections.md) | `Set`, `Stack`, `Queue`/`Deque`, `PriorityQueue` |

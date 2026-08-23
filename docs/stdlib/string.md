@@ -57,6 +57,8 @@ For formatted output without keeping the string, use the global `print`.
 | `toFloat()` | `float64 toFloat()` | Parse as float (`atof`) |
 | `fromCharCode` | `static String fromCharCode(int32 cp)` | One Unicode codepoint as UTF-8 |
 | `runes()` | `List<int32> runes()` | All codepoints |
+| `split(Regex)` | `List<String> split(const Regex&)` | Split on regex matches |
+| `replaceAll(Regex, String)` / `replaceFirst` | `String` | Regex replace with `$1` group refs |
 | `runeCount()` | `usize runeCount()` | Number of codepoints |
 | `codePointAt()` | `int32 codePointAt(usize index)` | Codepoint starting at a byte offset |
 | `toUpperCase()` | `String toUpperCase()` | Unicode-aware uppercase (Latin, Greek, Cyrillic; `ß` -> `SS`) |
